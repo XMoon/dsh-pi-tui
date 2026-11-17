@@ -346,7 +346,9 @@ test('the queue-recall state and the plain-submit write body live in app/submiss
   const controller = readFileSync(new URL('../../src/app/submission/controller.ts', import.meta.url), 'utf8')
   assert.equal((controller.match(/deps\.submissionRuntime\.submitPrompt\(/g) ?? []).length, 1,
     'the agent-facing write must delegate to the submission runtime through submitPrompt')
-  assert.ok(controller.includes('submitPrompt: (submission, options) => deps.submissionRuntime.submitPrompt(submission, options)'),
+  // PR2: the ONE delegation also carries the composer-acceptance hooks (the
+  // attempt settle), but it stays ONE call site — never a second write path.
+  assert.equal((controller.match(/submitPrompt: \(submission, options\) => deps\.submissionRuntime\.submitPrompt\(/g) ?? []).length, 1,
     'the delegation is the command-submission fallback hook (never a second write path)')
 })
 
@@ -840,16 +842,19 @@ test('a session/writer-held steer rejection is settled by the submission owner',
   deliverBusy(deps as unknown as SteerSubmissionDeps, { text: 'held draft' })
   assert.equal(await drainUntil(() => calls.some(call => call.startsWith('ack:'))), true,
     'the steer gesture must settle its ack')
-  assert.ok(calls.includes('merge:held draft'),
-    'the submission owner restores the draft')
+  // PR2/F3: the owner-aware restore is the ONE restore seam — the runtime asks
+  // it (which merges when no hold owns the editor) and never ALSO merges.
+  assert.deepEqual(calls.filter(call => call.startsWith('restore:')), ['restore:held draft'],
+    'the submission owner restores the draft exactly once')
+  assert.equal(calls.some(call => call.startsWith('merge:')), false,
+    'the helper never merges behind the owner (no double restore)')
   assert.ok(calls.some(call => call.includes(SESSION_WRITER_HELD_GUIDANCE)),
     'the writer-held guidance is surfaced')
   assert.ok(calls.some(call => call.startsWith('ack:steer rejected: session/writer-held')),
     'the owner reads the rejection code')
   assert.ok(calls.every(call => !call.includes('try again')),
     'a proven refusal never tells the user to try again')
-  assert.deepEqual(calls.filter(call => call.startsWith('restore:')), [],
-    'the helper never restores behind the owner (no double restore)')
+
 })
 
 test('a steer gone stale across a REPLACED owner does not reseed a switch-dropping renderer', async () => {
@@ -1225,4 +1230,28 @@ test('positive control: a current-scope settlement performs the normal visible b
   assert.ok(calls.includes('settleLocal') && calls.some(call => call.startsWith('ack:')),
     'a current-scope settlement settles its rows normally')
   assert.ok(calls.includes('consume'), 'a current-scope success consumes the draft attachments')
+})
+
+test('R6-1A: a stale exit behind ANOTHER attempt’s hold goes through the stale-policy authority', async () => {
+  const calls: string[] = []
+  const staleSubject = { owner: 'owner-a' }
+  const { surface } = recordingSurface({
+    isDisposed: () => false,
+    // The captured scope died BEFORE the write, while a DIFFERENT attempt owns
+    // the composer hold.
+    isScopeCurrent: () => false,
+    prepareMessage: async () => undefined,
+    composerHoldActive: () => true,
+    ownsComposerHold: () => false,
+    restoreSubmissionDraft: (_text, owner) => { calls.push(`plain:${String(owner)}`) },
+    restoreStaleDraftIntoEditor: (text, subject, owner) => {
+      calls.push(`stale:${text}:${JSON.stringify(subject)}:${String(owner)}`)
+      return 'merged-verbatim'
+    },
+  })
+  const runtime = bindSubmissionRuntime({ surface })
+  await runtime.submitPrompt({ ...SUBMISSION, staleSubject: staleSubject as never })
+  assert.deepEqual(calls, [
+    `stale:hello:${JSON.stringify(staleSubject)}:request-1`,
+  ], 'the foreign-hold stale exit carries the ORIGINATING subject and request through the stale policy — never the plain restore')
 })

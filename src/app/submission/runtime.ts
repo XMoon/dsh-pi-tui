@@ -76,6 +76,34 @@ export interface PromptSubmission {
   readonly staleSubject?: unknown
 }
 
+/**
+ * PR2: the composer-submission attempt hooks one plain-prompt write settles.
+ * Mutually exclusive and one-way: once one fires for an attempt, later fires
+ * are ignored. `onAccepted` proves the HOST accepted the message (the writer's
+ * acceptance callback — never the prompt Promise alone); `onRejected` is a
+ * proven PRE-acceptance refusal; `onUnknown` is an indeterminate outcome. A
+ * stale/disposed write settles nothing — the attempt owner retires it.
+ */
+/** The local settlement wrapper one `submitPrompt` call builds around the
+ *  caller's hooks: exactly-one terminal transition, never a second one. */
+export interface PromptAttemptSettlement {
+  hasSettled(): boolean
+  isAccepted(): boolean
+  accepted(): void
+  rejected(): void
+  unknown(): void
+}
+
+export interface PromptAttemptHooks {
+  /** The Host acceptance latch: fires exactly once, before the committed
+   *  draft/attachment consumption. */
+  onAccepted(): void
+  /** A proven pre-acceptance refusal: the draft stays editable. */
+  onRejected(): void
+  /** An indeterminate outcome: the draft stays, with an uncertainty notice. */
+  onUnknown(): void
+}
+
 /** The runner-supplied TUI operations the runtime drives. */
 export interface SubmissionRuntimeSurface {
   /** `SessionRuntime.withWriter`: the scope-bound writer admission. */
@@ -87,6 +115,24 @@ export interface SubmissionRuntimeSurface {
   isDisposed(): boolean
   /** The scope authority's synchronous currentness read (the ORIGINAL fence). */
   isScopeCurrent(scope: LiveSessionScope): boolean
+  /**
+   * PR2: whether the CURRENT composer is held by a sending submission
+   * attempt (the draft never left the editor). Every restore/merge site of a
+   * HELD submission's text must then be a no-op — the original draft is
+   * still the live document, and merging would duplicate it. Absent for
+   * compositions without the PR2 admission (no hold can exist there).
+   */
+  composerHoldActive?(): boolean
+  /**
+   * PR2/F3: restore one submission's draft through the owner-aware sink. A
+   * restore owned by the LIVE hold needs no write (the draft never left);
+   * a restore owned by ANOTHER attempt is deferred until that hold settles
+   * and never rewrites its frozen record.
+   */
+  restoreSubmissionDraft?(text: string, ownerRequestId?: string, originSubject?: unknown): void
+  /** PR2/F3: whether the live hold belongs to `requestId` (never a global
+   *  "a hold exists" fact). */
+  ownsComposerHold?(requestId: string): boolean
   /** Merge `text` into the editor, returning whether it came back VERBATIM. */
   mergeDraftIntoEditor(text: string): boolean
   /**
@@ -101,7 +147,7 @@ export interface SubmissionRuntimeSurface {
    * (a failed switch kept the owner; a same-session rollover; a retaining
    * renderer) merges exactly like the ordinary restore.
    */
-  restoreStaleDraftIntoEditor(text: string, capturedSubject?: unknown): 'merged-verbatim' | 'merged' | 'dropped'
+  restoreStaleDraftIntoEditor(text: string, capturedSubject?: unknown, ownerRequestId?: string): 'merged-verbatim' | 'merged' | 'dropped'
   /** Consume ONLY the image/file drafts referenced by one committed write. */
   consumeDraftAttachments(text: string): void
   /** Start the latency dispatch mark for one session. */
@@ -123,8 +169,13 @@ export interface SubmissionRuntimeSurface {
   refuseByTransitionFence(text: string): void
   /** Prepare the outgoing message (image/file admission + canonicalization). */
   prepareMessage(text: string, requestId: string): Promise<PreparedMessage>
-  /** The semantic session write. */
-  prompt(sessionId: string, message: PreparedMessage): Promise<WriteOutcome>
+  /** The semantic session write. PR2: the optional acceptance callback is
+   *  fired by the transport when the HOST accepted the message (Direct:
+   *  synchronously after the Inbox insertion; Remote: the official
+   *  `beginSubmission.onAccept`). The write RESULT is never acceptance
+   *  authority: a committed outcome that did not fire the callback leaves a
+   *  held attempt unaccepted (settled unknown with the draft retained). */
+  prompt(sessionId: string, message: PreparedMessage, options?: { readonly onAccepted?: () => void }): Promise<WriteOutcome>
 }
 
 export interface SubmissionRuntimeDeps {
@@ -153,10 +204,21 @@ export interface SubmissionRuntime {
    * Run one plain-prompt write through the writer barrier. The caller owns the
    * reserved-submit pin/release/restore wrapper; this method owns the ordered
    * write and its terminal ack/echo settlement.
+   *
+   * PR2 `attempt`: the composer submission attempt this write belongs to. The
+   * runtime settles it at the write's own boundaries: the writer's Host
+   * acceptance callback fires `onAccepted` (exactly once, before the committed
+   * consumption), a proven pre-acceptance rejection fires `onRejected`, an
+   * indeterminate outcome fires `onUnknown`, and a stale/disposed exit retires
+   * it without touching the renderer. The callbacks are idempotent; the
+   * attempt, not the runtime, owns the composer lock.
    */
   submitPrompt(
     submission: PromptSubmission,
-    options?: { readonly releaseReservation?: () => void },
+    options?: {
+      readonly releaseReservation?: () => void
+      readonly attempt?: PromptAttemptHooks
+    },
   ): Promise<void>
   /**
    * M4 PR4: open ONE accepted business-write lifetime and return its release.
@@ -221,23 +283,67 @@ export function bindSubmissionRuntime(deps: SubmissionRuntimeDeps): SubmissionRu
     surface.withWriter(scope, task)
 
   /** Restore the submission and settle its gesture as stale (the ORIGINAL branch). */
-  const settleStaleSubmission = (submission: PromptSubmission): void => {
+  const settleStaleSubmission = (submission: PromptSubmission, attempt?: PromptAttemptSettlement): void => {
     // PR3-B §7.3 (F2): a STALE restore may be suppressed — ONLY when the
     // owner the submission pinned was genuinely replaced AND the renderer
     // drops drafts at committed switches (the implementation decides). The
     // notice then reflects the REAL restore outcome, never a fabricated
     // "cleared by the switch" for a same-owner invalidation.
-    const restored = surface.restoreStaleDraftIntoEditor(submission.text, submission.staleSubject)
+    // PR2: a HELD submission's draft never left the live editor — the restore
+    // is a no-op (merging would duplicate the text), and the notice reflects
+    // that the original draft is still the editable document.
+    if (surface.ownsComposerHold?.(submission.requestId) === true) {
+      surface.settleLocalSubmission(submission.requestId)
+      surface.settleSubmitAck('submit stale', { token: submission.ackToken, terminal: true })
+      surface.notify('the session changed while sending — the draft was kept in the editor', 'error')
+      // F5: the stale attempt MUST reach an explicit terminal state — the
+      // exact owner/generation policy above decided the restore, never this
+      // settlement's release right.
+      attempt?.rejected()
+      return
+    }
+    if (surface.composerHoldActive?.() === true) {
+      // F3/R6-1A: ANOTHER attempt owns the editor. This IS the stale-restore
+      // class, so it goes through the SAME stale-policy authority with the
+      // ORIGINATING subject — never the plain restore (which would queue the
+      // receiver's current owner and could reseed a successor's document on a
+      // switch-dropping renderer).
+      const restored = surface.restoreStaleDraftIntoEditor(submission.text, submission.staleSubject, submission.requestId)
+      surface.settleLocalSubmission(submission.requestId)
+      surface.settleSubmitAck('submit stale', { token: submission.ackToken, terminal: true })
+      surface.notify(restored === 'dropped'
+        ? STALE_DROPPED_NOTICE
+        : 'the session changed while sending — the draft will be restored after the current send settles', 'error')
+      // F5: settle THIS attempt; the exact-hold hook cannot release another
+      // attempt's composer hold.
+      attempt?.rejected()
+      return
+    }
+    const restored = surface.restoreStaleDraftIntoEditor(submission.text, submission.staleSubject, submission.requestId)
     surface.settleLocalSubmission(submission.requestId)
     surface.settleSubmitAck('submit stale', { token: submission.ackToken, terminal: true })
     surface.notify(restored === 'merged-verbatim' ? STALE_NOTICE
       : restored === 'merged' ? STALE_MERGED_NOTICE
         : STALE_DROPPED_NOTICE, 'error')
+    // F5: explicit terminal state — the attempt must never stay 'sending'.
+    attempt?.rejected()
+  }
+
+  /** PR2/F3: the owner-aware restore used by every runtime site. */
+  const restoreDraft = (text: string, ownerRequestId?: string, originSubject?: unknown): void => {
+    if (surface.restoreSubmissionDraft !== undefined) {
+      surface.restoreSubmissionDraft(text, ownerRequestId, originSubject)
+    } else if (surface.composerHoldActive?.() !== true) {
+      surface.mergeDraftIntoEditor(text)
+    }
   }
 
   const submitPrompt = async (
     submission: PromptSubmission,
-    options?: { readonly releaseReservation?: () => void },
+    options?: {
+      readonly releaseReservation?: () => void
+      readonly attempt?: PromptAttemptHooks
+    },
   ): Promise<void> => {
     // M4 PR4: this entry can be reached without the submit FIFO (e.g. the
     // command fallback), so it holds its OWN write lifetime from this
@@ -247,6 +353,19 @@ export function bindSubmissionRuntime(deps: SubmissionRuntimeDeps): SubmissionRu
     const { text, scope, requestId, ackToken } = submission
     let echoInstalled = submission.echoInstalled
     const sessionId = scope.sessionId
+    // PR2: the attempt settle gate — exactly one of the three hooks fires.
+    const attempt = options?.attempt === undefined ? undefined : (() => {
+      const hooks = options.attempt
+      let settled = false
+      let accepted = false
+      return {
+        hasSettled: (): boolean => settled,
+        isAccepted: (): boolean => accepted,
+        accepted: (): void => { if (settled) return; settled = true; accepted = true; hooks.onAccepted() },
+        rejected: (): void => { if (settled) return; settled = true; hooks.onRejected() },
+        unknown: (): void => { if (settled) return; settled = true; hooks.onUnknown() },
+      }
+    })()
     try {
       // The WHOLE write (admission → capability → prepare → write → consume)
       // runs inside the operation barrier and, for an image-bearing draft,
@@ -265,23 +384,47 @@ export function bindSubmissionRuntime(deps: SubmissionRuntimeDeps): SubmissionRu
         // guard-window rule, AGENTS.md). This is the site's ORIGINAL fence
         // moment — it must not move to the writer admission.
         if (!surface.isScopeCurrent(scope)) {
-          settleStaleSubmission(submission)
+          settleStaleSubmission(submission, attempt)
           return
         }
         // T1 BEFORE the write call: a synchronously-emitted inbox/turn event
         // (Direct in-process) must never log ahead of dispatch.
         surface.markDispatch(sessionId)
-      const outcome = await surface.prompt(sessionId, message)
+      const outcome = await surface.prompt(sessionId, message, attempt === undefined ? undefined : { onAccepted: attempt.accepted })
         if (surface.isDisposed()) return
         if (outcome.kind !== 'committed') {
           if (outcome.kind === 'indeterminate') {
             if (surface.isDisposed()) return
+            // PR2: an ALREADY-ACCEPTED prompt never turns its late execution
+            // failure into a Composer problem (no restore, no "unsent" copy).
+            // Its delivered attachments still transfer exactly once here:
+            // the acceptance is the ownership handoff, the transport result
+            // only decides what the UI says.
+            if (attempt?.isAccepted() === true) {
+              options?.releaseReservation?.()
+              surface.consumeDraftAttachments(text)
+              return
+            }
             surface.settleLocalSubmission(requestId)
             surface.settleSubmitAck('session write result indeterminate', { token: ackToken, terminal: true })
             surface.notify('session write result is indeterminate — do not retry automatically', 'error')
+            attempt?.unknown()
             return
           }
-          if (outcome.kind === 'cancelled') throw cancellationError('session write cancelled')
+          if (outcome.kind === 'cancelled') {
+            // PR2: an accepted prompt's cancellation is execution-level: the
+            // committed draft stays gone and its attachments transfer exactly
+            // once here (returning avoids the reserved-submit restore and the
+            // catch path's second consume).
+            if (attempt?.isAccepted() === true) {
+              options?.releaseReservation?.()
+              surface.consumeDraftAttachments(text)
+              surface.settleLocalSubmission(requestId)
+              surface.settleSubmitAck('session write cancelled after acceptance', { token: ackToken, terminal: true })
+              return
+            }
+            throw cancellationError('session write cancelled')
+          }
           if (outcome.kind === 'rejected') {
             // A PROVEN pre-commit refusal (e.g. `session/writer-held`): the
             // submission owner settles it HERE as a normal terminal return, so
@@ -289,13 +432,43 @@ export function bindSubmissionRuntime(deps: SubmissionRuntimeDeps): SubmissionRu
             // restore and the structural code/details survive to the ack. The
             // refused outcome's own message is the user copy (the writer-held
             // guidance), never a generic "submission failed" wrapper.
-            surface.mergeDraftIntoEditor(text)
+            // PR2: an ALREADY-ACCEPTED prompt never turns its late execution
+            // failure into a Composer problem (no restore, no reopen); its
+            // delivered attachments still transfer exactly once.
+            if (attempt?.isAccepted() === true) {
+              options?.releaseReservation?.()
+              surface.consumeDraftAttachments(text)
+              return
+            }
+            // PR2/F3: the owner-aware restore — THIS attempt's held draft is
+            // the live document (no-op), while another attempt's hold defers
+            // this restore to that hold's settlement.
+            restoreDraft(text, requestId, submission.staleSubject)
             surface.settleLocalSubmission(requestId)
             surface.settleSubmitAck(`session write rejected: ${outcome.error.code}`, { token: ackToken, terminal: true })
             surface.notify(outcome.error.message, 'error')
+            // A pre-acceptance refusal is only a Composer rejection when the
+            // acceptance latch never fired; an already-accepted prompt keeps
+            // its accepted settlement (an early Remote acceptance wins over a
+            // late error).
+            attempt?.rejected()
             return
           }
           throw new Error(outcome.reason)
+        }
+        // PR2: a committed prompt with NO Host-acceptance callback is NOT an
+        // acceptance. The writer's own result is never acceptance authority
+        // (`submitted != accepted`), so the attempt settles as an unknown
+        // outcome: the composer unlocks with its draft intact and the write's
+        // terminal state stays the transport's business. Production writers
+        // always fire the callback (Direct synchronously; Remote from the
+        // official onAccept), so this only guards an adapter that ignored it.
+        if (attempt !== undefined && !attempt.isAccepted()) {
+          if (!attempt.hasSettled()) attempt.unknown()
+          surface.settleLocalSubmission(requestId)
+          surface.settleSubmitAck('session write committed without acceptance proof', { token: ackToken, terminal: true })
+          surface.notify('the session write committed without Host acceptance proof — review the draft before retrying', 'error')
+          return
         }
         // Consume ONLY the referenced drafts — a concurrent intake's newer
         // attachment survives. Release this gesture's reservation first so a
@@ -306,17 +479,45 @@ export function bindSubmissionRuntime(deps: SubmissionRuntimeDeps): SubmissionRu
       }))
     } catch (error) {
       if (surface.isDisposed()) return
+      // PR2: once the Host accepted the prompt, a late execution/transport
+      // error is NOT a submission failure — it must never reach the
+      // reserved-submit restore (which would put the committed text back or
+      // duplicate it). The accepted-terminal branches above already settled
+      // the ack/echo/attachments where they could; here only the throw path
+      // remains (e.g. a cancellation raised by the writer).
+      if (attempt?.isAccepted() === true) {
+        options?.releaseReservation?.()
+        surface.consumeDraftAttachments(text)
+        return
+      }
       if (error instanceof TransitionInProgressError) {
         surface.settleLocalSubmission(requestId)
         surface.settleSubmitAck('submit refused by transition fence', { token: ackToken, terminal: true })
-        surface.refuseByTransitionFence(text)
+        // PR2: THIS attempt's held draft is still the live editor document —
+        // the fence's restore would duplicate it; the hold settle unlocks the
+        // editor and the refusal keeps its own user-visible notice. A hold that
+        // belongs to ANOTHER attempt defers this restore to that settlement
+        // (F3: the global "a hold exists" fact is not an ownership proof).
+        if (surface.ownsComposerHold?.(requestId) === true) {
+          surface.notify('a session transition is in progress — try again in a moment', 'error')
+          attempt?.rejected()
+        } else if (surface.composerHoldActive?.() === true) {
+          // ANOTHER attempt owns the editor: defer this refusal's restore to
+          // that hold's settlement instead of writing into its document.
+          restoreDraft(text, requestId, submission.staleSubject)
+          surface.notify('a session transition is in progress — try again in a moment', 'error')
+          attempt?.rejected()
+        } else {
+          surface.refuseByTransitionFence(text)
+          attempt?.rejected()
+        }
         return
       }
       // A stale capture is refused at the writer admission (BEFORE the task
       // body); it takes the SAME user-visible stale path as the post-prepare
       // fence above — never the frozen-transition refusal.
       if (error instanceof SessionScopeSupersededError) {
-        settleStaleSubmission(submission)
+        settleStaleSubmission(submission, attempt)
         return
       }
       throw error
@@ -808,6 +1009,9 @@ export interface SteerSubmissionAgent extends SteerSubjectLike {
 /** The runner-supplied operations the steer sweep drives. */
 export interface SteerSubmissionDeps {
   readonly isDisposed: () => boolean
+  /** PR2: whether the live composer is held by a sending attempt (a held
+   *  draft is still the live document — restores must not duplicate it). */
+  readonly composerHeld?: () => boolean
   /** The subagent viewer is read-only: steering would target the parent. */
   readonly isViewing: () => boolean
   readonly currentAgent: () => SteerSubmissionAgent | undefined
@@ -824,7 +1028,11 @@ export interface SteerSubmissionDeps {
    * ownership SUBJECT (the owner-replacement discriminator; a same-owner
    * invalidation is not a replacement and still restores).
    */
-  readonly restoreStaleDraftIntoEditor: (text: string, capturedSubject?: unknown) => 'merged-verbatim' | 'merged' | 'dropped'
+  readonly restoreStaleDraftIntoEditor: (
+    text: string,
+    capturedSubject?: unknown,
+    ownerRequestId?: string,
+  ) => 'merged-verbatim' | 'merged' | 'dropped'
   readonly notify: (message: string, kind: 'info' | 'error') => void
   readonly acceptSubmitAck: () => number
   readonly settleLocalSubmission: (requestId: string) => void
@@ -852,7 +1060,7 @@ export interface SteerSubmissionDeps {
   ) => Promise<T>
   readonly prepareMessage: (text: string, requestId: string) => Promise<PreparedMessage>
   readonly markDispatch: (sessionId: string) => void
-  readonly restoreSubmissionDraft: (text: string) => void
+  readonly restoreSubmissionDraft: (text: string, ownerRequestId?: string, originSubject?: unknown) => void
   readonly notifySubmissionFailure: (error: unknown) => void
   readonly consumeDraftAttachments: (text: string) => void
   readonly writerSection: <T>(task: () => Promise<T>) => Promise<T>
@@ -867,6 +1075,17 @@ export interface SteerSubmissionInput {
   readonly text: string
   readonly onlyDraft: boolean
   readonly persistHistory?: (sessionId: string | undefined) => void
+  /** PR2: the composer submission attempt this draft-steer belongs to (the
+   *  ordinary-prompt attempt opened by the renderer admission). Absent keeps
+   *  the historical (pre-PR2) settlement. */
+  readonly attempt?: PromptAttemptHooks
+  /** PR2: registers an effect that must run at the Host ACCEPTANCE boundary
+   *  (the history row write). Only meaningful with {@link attempt}. */
+  readonly deferAccepted?: (effect: () => void) => void
+  /** PR2: hands the minted submission identity to the attempt owner (the
+   *  acceptance publishes THAT local echo). Only meaningful with
+   *  {@link attempt}. */
+  readonly onRequestIdentity?: (requestId: string) => void
 }
 
 /**
@@ -888,11 +1107,33 @@ function steerSubmission(deps: SteerSubmissionDeps, input: SteerSubmissionInput)
   const text = input.text
   const onlyDraft = input.onlyDraft
   const persistHistory = input.persistHistory
+  // PR2: one settle gate for this gesture's attempt (exactly-one hook).
+  let attemptSettled = false
+  let attemptWasAccepted = false
+  const attemptAccepted = (): void => {
+    if (attemptSettled || input.attempt === undefined) return
+    attemptSettled = true
+    attemptWasAccepted = true
+    input.attempt.onAccepted()
+  }
+  const attemptRejected = (): void => {
+    if (attemptSettled || input.attempt === undefined) return
+    attemptSettled = true
+    input.attempt.onRejected()
+  }
+  const attemptUnknown = (): void => {
+    if (attemptSettled || input.attempt === undefined) return
+    attemptSettled = true
+    input.attempt.onUnknown()
+  }
   // The subagent viewer is read-only: steering would send to the PARENT
   // session. Refuse with a notice and restore the draft.
   if (deps.isViewing()) {
-    if (text.trim() !== '') deps.mergeDraftIntoEditor(text)
+    // This gesture's own attempt owns the hold (if any): the unbound-hold
+    // same-text rule keeps its live document intact.
+    if (text.trim() !== '') deps.restoreSubmissionDraft(text)
     deps.notify('viewing a subagent — Esc returns before steering', 'info')
+    attemptRejected()
     return
   }
   // The payload verdict is computed ONCE here on the SERIALIZED wire form and
@@ -922,9 +1163,10 @@ function steerSubmission(deps: SteerSubmissionDeps, input: SteerSubmissionInput)
       // official contract leaves it in the inbox until the next wake — but an
       // empty Ctrl+S must not be a SILENT no-op: explain the official recovery.
       if (pendingForGate !== undefined && hasParkedSteering(pendingForGate)) {
-        if (text !== '') deps.mergeDraftIntoEditor(text)
+        if (text !== '') deps.restoreSubmissionDraft(text)
         deps.notify(PARKED_STEERING_NOTICE, 'info')
       }
+      attemptRejected()
       return
     }
   }
@@ -946,6 +1188,9 @@ function steerSubmission(deps: SteerSubmissionDeps, input: SteerSubmissionInput)
   // The steered draft's correlation identity, minted before the first
   // asynchronous preparation await.
   const steerRequestId = randomUUID()
+  // PR2: bind the gesture's echo identity to its attempt (the acceptance
+  // publishes exactly this record).
+  if (input.attempt !== undefined) input.onRequestIdentity?.(steerRequestId)
   // The delivery mode RESOLVED AT THE GESTURE for the draft prompt.
   let steerDelivery: 'queue' | 'steer' | undefined
   if ((draftHasPayload || onlyDraft) && submittedAgent !== undefined) {
@@ -998,7 +1243,14 @@ function steerSubmission(deps: SteerSubmissionDeps, input: SteerSubmissionInput)
         (sessionId) => {
           if (deps.isDisposed()) return
           if (submittedAgent !== undefined && !deps.isOwnerTokenCurrent(submittedSubject)) return
-          persistHistory?.(sessionId)
+          // PR2: the accepted-history row completes at the Host acceptance,
+          // never at the attempt's dispatch (a proven-unreceived prompt
+          // leaves no "sent" row).
+          if (input.attempt !== undefined && input.deferAccepted !== undefined) {
+            input.deferAccepted(() => { persistHistory?.(sessionId) })
+          } else {
+            persistHistory?.(sessionId)
+          }
         },
       )
       if (deps.isDisposed()) return
@@ -1007,12 +1259,13 @@ function steerSubmission(deps: SteerSubmissionDeps, input: SteerSubmissionInput)
         // the pinned owner was genuinely REPLACED and the renderer drops
         // drafts at committed switches (the implementation decides; a
         // same-owner invalidation still restores).
-        const restored = deps.restoreStaleDraftIntoEditor(text, submittedSubject)
+        const restored = deps.restoreStaleDraftIntoEditor(text, submittedSubject, steerRequestId)
         deps.settleLocalSubmission(steerRequestId)
         deps.settleSubmitAck('steer stale', { token: steerAckToken, terminal: true })
         deps.notify(restored === 'merged-verbatim' ? 'the session changed while sending — try again'
           : restored === 'merged' ? 'the draft changed while sending — review it before submitting again (the earlier text was preserved below)'
             : 'the session changed while sending — the draft was cleared by the switch', 'error')
+        attemptRejected()
         return
       }
       const steerAgent = deps.currentAgent()
@@ -1021,6 +1274,7 @@ function steerSubmission(deps: SteerSubmissionDeps, input: SteerSubmissionInput)
         // the ack row must not outlive the submission.
         deps.settleLocalSubmission(steerRequestId)
         deps.settleSubmitAck('steer resolved without an agent', { token: steerAckToken, terminal: true })
+        attemptRejected()
         return
       }
       const agentForSteer = submittedAgent ?? steerAgent
@@ -1058,17 +1312,20 @@ function steerSubmission(deps: SteerSubmissionDeps, input: SteerSubmissionInput)
             // PR3-B §7.3 (F2): the stale restore may be suppressed — only
             // when the pinned owner was genuinely REPLACED and the renderer
             // drops drafts at committed switches.
-            const restored = deps.restoreStaleDraftIntoEditor(text, steerSubject)
+            const restored = deps.restoreStaleDraftIntoEditor(text, steerSubject, steerRequestId)
             deps.settleLocalSubmission(steerRequestId)
             deps.settleSubmitAck('steer stale', { token: steerAckToken, terminal: true })
             deps.notify(restored === 'merged-verbatim' ? 'the session changed while sending — try again'
               : restored === 'merged' ? 'the draft changed while sending — review it before submitting again (the earlier text was preserved below)'
                 : 'the session changed while sending — the draft was cleared by the switch', 'error')
+            attemptRejected()
             return { kind: 'stale' }
           }
           // T1 BEFORE the dispatch.
           deps.markDispatch(agentForSteer.session.id)
-          const outcome = await steerAll({
+          let outcome: Awaited<ReturnType<typeof steerAll>>
+          try {
+          outcome = await steerAll({
             currentSubject: () => deps.isDisposed() ? undefined : agentForSteer,
             currentGeneration: () => generationForSteer,
             notify: (message, kind) => {
@@ -1086,7 +1343,7 @@ function steerSubmission(deps: SteerSubmissionDeps, input: SteerSubmissionInput)
               // the replaced-owner shape on a switch-dropping renderer (the
               // ownership authority's opaque-ref comparison — never a raw
               // session-id match, which A→B→A would defeat).
-              const restored = deps.restoreStaleDraftIntoEditor(draft, steerSubject)
+              const restored = deps.restoreStaleDraftIntoEditor(draft, steerSubject, steerRequestId)
               steerRestored = true
               return restored === 'merged-verbatim'
             },
@@ -1101,7 +1358,16 @@ function steerSubmission(deps: SteerSubmissionDeps, input: SteerSubmissionInput)
             // surfaces the refusal's OWN message/guidance — never "try again".
             onRejected: (error, steeredCount) => {
               if (deps.isDisposed()) return
-              deps.mergeDraftIntoEditor(text)
+              // PR2: an ALREADY-ACCEPTED draft must never come back into the
+              // editor (the Host took it; the late refusal is execution-level).
+              if (attemptWasAccepted) {
+                steerRestored = true
+                steerRejectionCode = error.code
+                return
+              }
+              // PR2: a HELD draft is still the live document — the merge
+              // would duplicate it; the attempt settle below unlocks it.
+              deps.restoreSubmissionDraft(text, steerRequestId, steerSubject)
               steerRestored = true
               steerRejectionCode = error.code
               const steered = steeredCount > 0
@@ -1114,12 +1380,20 @@ function steerSubmission(deps: SteerSubmissionDeps, input: SteerSubmissionInput)
             mergedNotice: () => 'the draft changed while sending — review it before submitting again (the earlier text was preserved below)',
             pendingInputReader: deps.pendingInputReader,
             writer: deps.writer,
+            ...(input.attempt === undefined ? {} : { onDraftAccepted: attemptAccepted }),
           },
           text,
           onlyDraft
             ? { onlyDraft: true, draftHasPayload, draftDelivery: steerDelivery }
             : { draftHasPayload, draftDelivery: steerDelivery },
           )
+          } catch (error) {
+            // PR2: an ACCEPTED steer's late throw (cancellation) must not reach
+            // the reserved-submit restore — the committed text is never put
+            // back. The outer terminal sinks transfer the attachments.
+            if (attemptWasAccepted) steerRestored = true
+            throw error
+          }
           return { kind: 'delivered', outcome }
         },
       )
@@ -1131,6 +1405,14 @@ function steerSubmission(deps: SteerSubmissionDeps, input: SteerSubmissionInput)
       // must not be retired under that sibling (its failure still needs the
       // editor line to resolve). `consume` is pin-aware.
       if (outcome === 'ok') {
+        // PR2: a committed steer with NO Host-acceptance callback is NOT an
+        // acceptance — it must not transfer the drafts. The attempt settles
+        // unknown and the draft/attachments stay live.
+        if (input.attempt !== undefined && !attemptSettled) {
+          attemptUnknown()
+          deps.notify('the session write committed without Host acceptance proof — review the draft before retrying', 'error')
+          return
+        }
         releaseReservation()
         deps.consumeDraftAttachments(text)
       }
@@ -1142,10 +1424,36 @@ function steerSubmission(deps: SteerSubmissionDeps, input: SteerSubmissionInput)
           steerRejectionCode === undefined ? `steer ${outcome}` : `steer rejected: ${steerRejectionCode}`,
           { token: steerAckToken, terminal: true },
         )
+        if (attemptWasAccepted) {
+          // PR2: the Host already accepted this draft (an early acceptance),
+          // so a late transport result only ends the presentation — the
+          // delivered attachments still transfer exactly once and nothing is
+          // restored or replayed.
+          releaseReservation()
+          deps.consumeDraftAttachments(text)
+          return
+        }
+        if (outcome === 'indeterminate') attemptUnknown()
+        else attemptRejected()
+      } else if (input.attempt !== undefined && !attemptSettled) {
+        // PR2: a committed steer with NO Host-acceptance callback is NOT an
+        // acceptance (the write result is never acceptance authority): the
+        // attempt settles unknown and the draft stays editable.
+        attemptUnknown()
+        deps.notify('the session write committed without Host acceptance proof — review the draft before retrying', 'error')
+        return
       }
     },
     restore: (t) => {
-      if (!steerRestored) deps.restoreSubmissionDraft(t)
+      // R6-1A/RFL018: this outer restore fires on a THROW after the flow's
+      // awaits (e.g. the pre-dispatch ensureSession), so the owner may have
+      // been replaced meanwhile. It is the STALE-restore class and goes
+      // through the same policy authority with the gesture's OWN captured
+      // subject — a plain origin-less restore would queue the receiver's
+      // current owner and could reseed a successor's composer.
+      if (!steerRestored) {
+        deps.restoreStaleDraftIntoEditor(t, submittedSubject, steerRequestId)
+      }
     },
   }, text), {
     diag: deps.diag,
@@ -1155,11 +1463,17 @@ function steerSubmission(deps: SteerSubmissionDeps, input: SteerSubmissionInput)
       deps.settleLocalSubmission(steerRequestId)
       deps.settleSubmitAck('failure', { token: steerAckToken, terminal: true })
       deps.notifySubmissionFailure(error)
+      // PR2: an accepted draft's late failure still transfers its attachments
+      // exactly once (the flow's reservation release already ran).
+      if (attemptWasAccepted) deps.consumeDraftAttachments(text)
+      attemptRejected()
     },
     onCancel: () => {
       if (deps.isDisposed()) return
       deps.settleLocalSubmission(steerRequestId)
       deps.settleSubmitAck('steer cancelled', { token: steerAckToken, terminal: true })
+      if (attemptWasAccepted) deps.consumeDraftAttachments(text)
+      attemptRejected()
     },
   })
 }
@@ -1179,7 +1493,7 @@ export interface HostCommandSubmissionDeps {
   readonly loggerError: (message: string) => void
   readonly readDraft: () => string
   readonly mergeDraftIntoEditor: (text: string) => boolean
-  readonly restoreSubmissionDraft: (text: string) => void
+  readonly restoreSubmissionDraft: (text: string, ownerRequestId?: string, originSubject?: unknown) => void
   readonly consumeDraftAttachments: (text: string) => void
   readonly pinDraftAttachments: (text: string) => () => void
   readonly settleLocalSubmission: (requestId: string) => void
@@ -1224,6 +1538,32 @@ export interface HostCommandSubmissionDeps {
     submission: PromptSubmission,
     options?: { readonly releaseReservation?: () => void },
   ) => Promise<void>
+  /**
+   * PR2: the composer hold settlement for THIS gesture's dispatch. Called
+   * with 'rejected' whenever the command route consumes the draft through its
+   * own contract (a real execution, an advertised-miss consumption) or fails
+   * before the ordinary write; the nested fallback prompt instead carries the
+   * attempt hooks through `submitPrompt`'s options.
+   */
+  readonly settleComposerHold?: (outcome: 'rejected' | 'unknown') => void
+  /**
+   * PR2: the INVOCATION-TIME genuine Host contract claim for this line (the
+   * same authority the routing used). A claimed line WILL run as a command, so
+   * the composer must be handed over BEFORE the handler runs — the handler's
+   * own restored-draft producer writes into the editor and must not hit the
+   * hold fence.
+   */
+  readonly invocationHostClaim?: () => { readonly claimed: boolean } | undefined
+  /** PR2: whether THIS plane invocation runs a TUI-owned command line (the
+   *  local/skill route), known before the handler executes. */
+  readonly commandPlaneLineWillExecute?: () => boolean
+  /**
+   * PR2: the line the FINAL catalog claims as a command takes over the
+   * composer through the legacy pre-clear (the command's restore-on-failure
+   * contract assumes an emptied editor); this is NOT a prompt acceptance —
+   * no prompt history row, no ledger publication, no attachment transfer.
+   */
+  readonly handComposerHoldToLegacyCommand?: () => void
   readonly commandSessionId: () => string
   readonly markTurnTransferred: () => void
   readonly diag: Diag
@@ -1271,10 +1611,13 @@ export function executeHostCommandSubmission(
     // complete submitted line is always restored here — the editor must be
     // able to show and re-resolve what was refused.
     fallbackPin()
-    deps.restoreSubmissionDraft(text)
+    deps.restoreSubmissionDraft(text, submitRequestId, input.staleSubject)
     deps.notify(lateRefusal, 'error')
     deps.settleLocalSubmission(submitRequestId)
     deps.settleSubmitAck('attachments refused by the command declaration', { token: submitAckToken, terminal: true })
+    // PR2: the gesture is refused (the draft stays editable for the retry) —
+    // a held composer must be unlocked or it would stay frozen forever.
+    deps.settleComposerHold?.('rejected')
     return
   }
   // The session-transition write fence is the WRITER ADMISSION itself
@@ -1299,6 +1642,16 @@ export function executeHostCommandSubmission(
     // of dispatch, and a non-invocation stages nothing at all.
     const hostAttachmentsDeclared = submittedClaim?.claimed === true && submittedClaim.attachments === true
     const commandPlaneLine = deps.commandPlaneOwnsLine()
+    // PR2: hand a HELD composer over to the legacy command contract BEFORE the
+    // handler runs when the line will certainly execute as a command (a TUI
+    // route, or a genuine Host contract claim). This is what lets the
+    // command's own restore-on-failure producer write its authoritative draft
+    // into the editor; a plane-owned line with NO claim (an unknown slash
+    // name) keeps its hold and falls back to the ordinary prompt.
+    if ((commandPlaneLine && deps.commandPlaneLineWillExecute?.() === true)
+      || (input.parsedName !== undefined && deps.invocationHostClaim?.()?.claimed === true)) {
+      deps.handComposerHoldToLegacyCommand?.()
+    }
     planeAdvertised = commandPlaneLine && input.wasAdvertisedAtSubmit
     const tuiOwnedCommand = deps.isTuiOwnedCommand()
     // The navigation intent starts HERE: after every early refusal window and
@@ -1347,15 +1700,17 @@ export function executeHostCommandSubmission(
       if (deps.isDisposed() || !scopeCurrent) {
         fallbackPin()
         submitTurn.release()
+        deps.settleComposerHold?.('rejected')
         return
       }
       if (outcome.kind !== 'committed') {
         // A known refusal did not settle a command: restore the complete
         // submitted line while the handoff pin is held. An indeterminate
         // result may have committed — never restore or retry automatically.
-        if (outcome.kind !== 'indeterminate') deps.restoreSubmissionDraft(text)
+        if (outcome.kind !== 'indeterminate') deps.restoreSubmissionDraft(text, submitRequestId, input.staleSubject)
         fallbackPin()
         submitTurn.release()
+        deps.settleComposerHold?.(outcome.kind === 'indeterminate' ? 'unknown' : 'rejected')
         if (outcome.kind === 'cancelled') {
           deps.settleLocalSubmission(submitRequestId)
           deps.settleSubmitAck('command execution cancelled', { token: submitAckToken, terminal: true })
@@ -1379,6 +1734,17 @@ export function executeHostCommandSubmission(
       const draftDisposition = execution === undefined
         ? undefined
         : deps.readCommandDraftDisposition(execution.commandId)
+      // PR2: a held ordinary admission whose line ACTUALLY ran as a command is
+      // handed over to the command's legacy pre-clear contract. The command's
+      // OWN draft disposition is authoritative: a `restored` disposition means
+      // the handler already wrote the authoritative retry text, so the hold is
+      // merely unlocked and that text is kept. A plane-owned line that matched
+      // NOTHING (an unknown slash name) is an ordinary prompt and keeps its
+      // hold for the acceptance handoff.
+      if (execution !== undefined) {
+        if (draftDisposition === 'restored') deps.settleComposerHold?.('rejected')
+        else deps.handComposerHoldToLegacyCommand?.()
+      }
       const resultKind = execution?.result.kind
       // The official settlement is exactly `success` or `error`. An illegal
       // kind must fail BEFORE any committed-success side effect (health clear,
@@ -1387,6 +1753,7 @@ export function executeHostCommandSubmission(
       if (execution !== undefined && resultKind !== 'success' && resultKind !== 'error') {
         fallbackPin()
         submitTurn.release()
+        deps.settleComposerHold?.('rejected')
         throw new Error(
           `command "${input.parsedName ?? '?'}" settled an unknown result kind "${String(resultKind)}"`,
         )
@@ -1412,10 +1779,11 @@ export function executeHostCommandSubmission(
       // submitted), and the handoff pin is still held here — it is released on
       // the way out.
       if (deps.shouldConsumeAdvertisedMiss(execution, planeAdvertised)) {
-        deps.restoreSubmissionDraft(text)
+        deps.restoreSubmissionDraft(text, submitRequestId, input.staleSubject)
         deps.notify(`/${input.parsedName ?? '?'} is not available in the created session`, 'error')
         deps.settleLocalSubmission(submitRequestId)
         deps.settleSubmitAck('submit consumed by an unadvertised command', { token: submitAckToken, terminal: true })
+        deps.settleComposerHold?.('rejected')
         fallbackPin()
         submitTurn.release()
         return
@@ -1436,7 +1804,7 @@ export function executeHostCommandSubmission(
                 echoInstalled: localEchoInstalled,
                 staleSubject: input.staleSubject,
               }, { releaseReservation }),
-              restore: (t) => deps.restoreSubmissionDraft(t),
+              restore: (t) => deps.restoreSubmissionDraft(t, submitRequestId, input.staleSubject),
             }, text)
             // This nested submission starts one callback later, so teardown
             // must reach it explicitly.
@@ -1451,11 +1819,13 @@ export function executeHostCommandSubmission(
               deps.settleLocalSubmission(submitRequestId)
               deps.settleSubmitAck('failure', { token: submitAckToken, terminal: true })
               deps.notifySubmissionFailure(error)
+              deps.settleComposerHold?.('rejected')
             },
             onCancel: () => {
               submitTurn.release()
               deps.settleLocalSubmission(submitRequestId)
               deps.settleSubmitAck('submit cancelled', { token: submitAckToken, terminal: true })
+              deps.settleComposerHold?.('rejected')
             },
           })
         } else {
@@ -1464,6 +1834,7 @@ export function executeHostCommandSubmission(
           const verbatim = deps.mergeDraftIntoEditor(text)
           deps.settleLocalSubmission(submitRequestId)
           deps.settleSubmitAck('submit stale', { token: submitAckToken, terminal: true })
+          deps.settleComposerHold?.('rejected')
           deps.notify(verbatim
             ? 'the session changed while sending — try again'
             : 'the draft changed while sending — review it before submitting again (the earlier text was preserved below)', 'error')
@@ -1485,7 +1856,7 @@ export function executeHostCommandSubmission(
           if (commandName === 'export' || commandName === 'transcript') deps.startArtifactSave(commandName)
         } else {
           if (draftDisposition !== 'restored' && draftDisposition !== 'suppressed') {
-            deps.restoreSubmissionDraft(text)
+            deps.restoreSubmissionDraft(text, submitRequestId, input.staleSubject)
           }
           fallbackPin()
           submitTurn.release()
@@ -1507,18 +1878,20 @@ export function executeHostCommandSubmission(
         deps.refuseByTransitionFence(text)
         deps.settleLocalSubmission(submitRequestId)
         deps.settleSubmitAck('submit refused by transition fence', { token: submitAckToken, terminal: true })
+        deps.settleComposerHold?.('rejected')
         return
       }
       const indeterminateSkill = deps.isIndeterminateSkillWrite(error)
       const draftDisposition = deps.readCommandDraftDisposition()
       if (!indeterminateSkill && draftDisposition !== 'restored' && draftDisposition !== 'suppressed') {
-        deps.restoreSubmissionDraft(text)
+        deps.restoreSubmissionDraft(text, submitRequestId, input.staleSubject)
       }
       deps.settleLocalSubmission(submitRequestId)
       deps.settleSubmitAck(
         indeterminateSkill ? 'skill write result indeterminate' : 'command execution failed',
         { token: submitAckToken, terminal: true },
       )
+      deps.settleComposerHold?.(indeterminateSkill ? 'unknown' : 'rejected')
       if (indeterminateSkill) {
         deps.notify('skill write result is indeterminate — do not retry automatically', 'error')
         return
@@ -1541,10 +1914,11 @@ export function executeHostCommandSubmission(
       if (deps.isDisposed() || !deps.isScopeCurrent(scope)) return
       const draftDisposition = deps.readCommandDraftDisposition()
       if (draftDisposition !== 'restored' && draftDisposition !== 'suppressed') {
-        deps.restoreSubmissionDraft(text)
+        deps.restoreSubmissionDraft(text, submitRequestId, input.staleSubject)
       }
       deps.settleLocalSubmission(submitRequestId)
       deps.settleSubmitAck('command execution cancelled', { token: submitAckToken, terminal: true })
+      deps.settleComposerHold?.('rejected')
     },
   })
 }

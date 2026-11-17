@@ -31,7 +31,7 @@
  */
 
 import { safeErrorMessage } from '../process/errors.ts'
-import type { QueueAction, SessionWriter, WriteOutcome } from '../session-writer-port.ts'
+import type { PromptOptions, QueueAction, SessionWriter, WriteOutcome } from '../session-writer-port.ts'
 import { RemoteFileUploadError } from './file-upload-remote.ts'
 import type {
   RemoteConnectionGenerationSource,
@@ -84,6 +84,13 @@ export interface RemoteBeginSubmissionInput {
   readonly mode: 'queue' | 'steer'
   readonly text: string
   readonly attachments: readonly RemotePendingAttachment[]
+  /**
+   * PR2: the official acceptance callback — called once when the Host
+   * accepted the prompt, whether the receipt or an Inbox row showed it
+   * first. Early acceptance wins: a later transport/execute error cannot
+   * turn an accepted prompt back into a refusal.
+   */
+  readonly onAccept?: () => void
 }
 
 /** One official submission handle. */
@@ -240,7 +247,12 @@ export class RemoteSessionWriter implements SessionWriter {
     return { binding: pinned.binding, captured, release: (): void => { pinned.release() } }
   }
 
-  async prompt(sessionId: string, message: unknown, mode: 'queue' | 'steer'): Promise<WriteOutcome> {
+  async prompt(
+    sessionId: string,
+    message: unknown,
+    mode: 'queue' | 'steer',
+    options?: PromptOptions,
+  ): Promise<WriteOutcome> {
     const resolved = this.resolve<undefined>(sessionId)
     if (resolved === undefined) return remoteNotDispatched()
     if ('kind' in resolved) return resolved
@@ -256,6 +268,23 @@ export class RemoteSessionWriter implements SessionWriter {
         return { kind: 'unsupported', reason: preflight.reason }
       }
       if (generationChanged(this.generation, captured)) return remoteNotDispatched()
+
+      // PR2: the official acceptance callback is latched ONCE per identified
+      // prompt; every later re-check (generation/binding/admission) and every
+      // late transport error must not re-fire or un-fire it. The captured
+      // connection generation and the exact pinned binding fence the callback
+      // itself, so a fenced-out old accept never reaches the Composer.
+      let acceptanceLatched = false
+      const onAccept = options?.onAccepted === undefined ? undefined : (): void => {
+        if (acceptanceLatched) return
+        if (this.lifetimeSignal?.aborted
+          || generationChanged(this.generation, captured)
+          || !Object.is(binding, this.sessions.binding(sessionId))) {
+          return
+        }
+        acceptanceLatched = true
+        options.onAccepted?.()
+      }
 
       let handle: RemoteSubmissionHandle
       let serialized: RemoteSerializeResult
@@ -291,6 +320,7 @@ export class RemoteSessionWriter implements SessionWriter {
             mode,
             text: serialized.echo.text,
             attachments: serialized.echo.attachments,
+            ...(onAccept === undefined ? {} : { onAccept }),
           })
         } catch (error) {
           return preDispatchFailure('session/prompt-echo-failed', error)
@@ -303,6 +333,7 @@ export class RemoteSessionWriter implements SessionWriter {
             mode,
             text: preflight.echo.text,
             attachments: preflight.echo.attachments,
+            ...(onAccept === undefined ? {} : { onAccept }),
           })
         } catch (error) {
           return preDispatchFailure('session/prompt-echo-failed', error)

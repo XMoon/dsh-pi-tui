@@ -630,3 +630,47 @@ test('queue mutation settlement is total for hostile thrown values', async () =>
     })
   }
 })
+
+// ── PR2: the Host-acceptance callback of one ordinary prompt ────────────────
+
+test('PR2: a successful prompt fires onAccepted exactly once, after the inbox insertion', async () => {
+  const order: string[] = []
+  const agents = new Map([['session-a', agent('session-a', {
+    followup: () => { order.push('followup') },
+  })]])
+  const w = writer(agents)
+  let accepted = 0
+  const outcome = await w.prompt('session-a', { text: 'hi' }, 'queue', {
+    onAccepted: () => { order.push('onAccepted'); accepted += 1 },
+  })
+  assert.deepEqual(outcome, { kind: 'committed', value: undefined })
+  assert.equal(accepted, 1)
+  assert.deepEqual(order, ['followup', 'onAccepted'],
+    'acceptance is proven only AFTER the synchronous inbox write committed')
+})
+
+test('PR2: a rejected prompt (followup throws) never fires onAccepted', async () => {
+  const agents = new Map([['session-a', agent('session-a', {
+    followup: () => { throw new Error('busy') },
+  })]])
+  const w = writer(agents)
+  let accepted = 0
+  const outcome = await w.prompt('session-a', { text: 'hi' }, 'queue', { onAccepted: () => { accepted += 1 } })
+  assert.equal(outcome.kind, 'rejected')
+  assert.equal(accepted, 0)
+})
+
+test('PR2: an unresolved session never fires onAccepted', async () => {
+  const w = writer(new Map())
+  let accepted = 0
+  const outcome = await w.prompt('session-ghost', { text: 'hi' }, 'queue', { onAccepted: () => { accepted += 1 } })
+  assert.equal(outcome.kind, 'rejected')
+  assert.equal(accepted, 0)
+})
+
+test('PR2: updateQueue never carries the acceptance callback', async () => {
+  const agents = new Map([['session-a', agent('session-a')]])
+  const w = writer(agents)
+  const outcome = await w.updateQueue('session-a', 'missing', { kind: 'steer' })
+  assert.equal(outcome.kind, 'rejected')
+})

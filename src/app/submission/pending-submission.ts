@@ -99,10 +99,15 @@ interface PendingSubmissionReceipt {
 /** One ledger record: the presentation echo plus its private Host receipt.
  *  The presentation fields are mutable ONLY for the authoritative placement
  *  transfer (a queued occurrence promoted to steering); identity and text never
- *  change. */
+ *  change. `accepted` gates PRESENTATION visibility (PR2): a record begins
+ *  registered-but-invisible so Direct's synchronously-emitted Inbox events can
+ *  still record receipts, and only the Host acceptance (`accept`) publishes
+ *  it — the same shape as the official `beginSubmission` echo, which enters
+ *  `pendingSubmissions` only once the Host accepted the prompt. */
 type PendingSubmissionRecord =
   { -readonly [K in keyof PendingSubmissionEcho]: PendingSubmissionEcho[K] }
   & { receipt?: PendingSubmissionReceipt }
+  & { accepted: boolean }
 
 /** Input accepted by {@link PendingSubmissions.begin}. */
 export interface PendingSubmissionBegin {
@@ -113,6 +118,15 @@ export interface PendingSubmissionBegin {
   readonly sessionId?: string
   readonly generation?: number
   readonly foldableText?: boolean
+  /**
+   * PR2: register the echo WITHOUT publishing it. A submission whose draft is
+   * still the live editor document (a held composer attempt) must not present
+   * a second "sent" object; its echo stays hidden until the Host acceptance
+   * publishes it through {@link PendingSubmissions.accept}. The default
+   * (absent) keeps the pre-PR2 immediately-visible registration the
+   * pre-cleared legacy paths rely on.
+   */
+  readonly hidden?: boolean
 }
 
 /**
@@ -137,7 +151,11 @@ export class PendingSubmissions {
   private records: PendingSubmissionRecord[] = []
 
   /** Register one echo. A duplicate request id replaces its own record only
-   *  (and never inherits the previous record's Host receipt). */
+   *  (and never inherits the previous record's Host receipt). A `hidden`
+   *  registration (PR2: a held composer attempt whose draft is still the live
+   *  document) stays invisible to `snapshot()` until {@link accept} publishes
+   *  it on the Host acceptance fact; every other registration is visible at
+   *  once, exactly as before. */
   begin(input: PendingSubmissionBegin): void {
     this.records = this.records.filter(record => record.requestId !== input.requestId)
     this.records.push({
@@ -148,7 +166,21 @@ export class PendingSubmissions {
       ...(input.sessionId === undefined ? {} : { sessionId: input.sessionId }),
       ...(input.generation === undefined ? {} : { generation: input.generation }),
       ...(input.foldableText === undefined ? {} : { foldableText: input.foldableText }),
+      accepted: input.hidden !== true,
     })
+  }
+
+  /** Publish one registered echo as VISIBLE on the Host acceptance fact
+   *  (Direct: the writer's successful synchronous Inbox insertion; the same
+   *  latch the official `beginSubmission.onAccept` proves). Exactly-once per
+   *  record; a record that already left the ledger (durable admission or a
+   *  terminal settlement) is a no-op — a late acceptance never resurrects a
+   *  retired echo. */
+  accept(requestId: string): boolean {
+    const record = this.records.find(candidate => candidate.requestId === requestId)
+    if (record === undefined || record.accepted) return false
+    record.accepted = true
+    return true
   }
 
   /** Remove one echo after its durable `user/message` became renderable. */
@@ -214,13 +246,17 @@ export class PendingSubmissions {
     this.records = []
   }
 
-  /** The insertion-ordered echoes, newest last. The private receipt never
-   *  leaves the ledger: presentation reads exactly the echo shape. */
+  /** The insertion-ordered echoes, newest last. Records not yet accepted by
+   *  the Host are HIDDEN (PR2: pre-acceptance presentation stays with the
+   *  live editor draft). The private receipt never leaves the ledger:
+   *  presentation reads exactly the echo shape. */
   snapshot(): readonly PendingSubmissionEcho[] {
-    return this.records.map(record => {
-      const { receipt: _receipt, ...echo } = record
-      return echo
-    })
+    return this.records
+      .filter(record => record.accepted)
+      .map(record => {
+        const { receipt: _receipt, accepted: _accepted, ...echo } = record
+        return echo
+      })
   }
 
   /** Fold one durable Inbox splice into the matching receipts. A removal only
@@ -272,21 +308,23 @@ export class PendingSubmissions {
       record.receipt = { target: splice.target, index: splice.start + offset, seq }
       if (splice.target === 'next-step' && record.placement !== 'steering') {
         record.placement = 'steering'
-        transferred = true
+        if (record.accepted) transferred = true
       }
     }
     return transferred
   }
 
   /** Retire every echo the Host claimed and then left behind a strictly later
-   *  turn boundary without a durable admission. */
+   *  turn boundary without a durable admission. Only an ACCEPTED record's
+   *  retirement changes the visible set — an invisible pre-acceptance record
+   *  leaving the ledger is not a presentation change. */
   private retireClaimed(subject: readonly PendingSubmissionRecord[], seq: number): boolean {
     const retiring = subject.filter(record =>
       record.receipt !== undefined && record.receipt.index === null && record.receipt.seq < seq)
     if (retiring.length === 0) return false
     const ids = new Set(retiring.map(record => record.requestId))
     this.records = this.records.filter(record => !ids.has(record.requestId))
-    return true
+    return retiring.some(record => record.accepted)
   }
 
   private remove(requestId: string): void {

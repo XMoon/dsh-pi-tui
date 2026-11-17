@@ -359,6 +359,8 @@ export interface SurfaceInputBinding {
    * History policy, blank, or a shell line TSP does not present).
    */
   submit(text: string, request: ComposerSubmitRequest, scopeToken?: number): void
+  /** PR2: the synchronous submit admission (see `TuiAppEventsBase`). */
+  beginComposerSubmission?(text: string, request: ComposerSubmitRequest | 'steer'): 'held' | 'legacy' | 'refused'
   /** The draft-steer entry (B2): `ApplicationEvents.events.onSteer`. */
   steer(text: string): void
   /**
@@ -3795,6 +3797,10 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
           exit: () => deps.events.onExit(),
           cancel: () => deps.events.onCancel?.(),
           submit: (text, request, scopeToken) => deps.events.onSubmit(text, request, scopeToken),
+          // PR2: the ONE synchronous admission shared with the application.
+          // Absent wiring keeps the pre-PR2 (clear-first) TSP sequence.
+          beginComposerSubmission: (text, request) =>
+            deps.events.beginComposerSubmission?.(text, request) ?? 'legacy',
           // `onSteer` is optional on the events table (the capability is
           // guarded at construction): an absent one leaves the gesture a
           // committed no-op rather than a fabricated submission.

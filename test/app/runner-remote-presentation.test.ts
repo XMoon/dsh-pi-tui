@@ -689,11 +689,15 @@ test('the resumed Remote startup keeps input accepted while its hydration read i
     `the snapshot carries the persisted submission only: ${JSON.stringify(first.entries)}`)
   assert.equal(first.entries.includes('pending remote prompt'), false,
     'the accepted-but-unpersisted submission is NOT in the snapshot')
-  // … and the recall it commits still holds that input, at its submission rank.
-  assert.deepEqual(first.recall, ['pending remote prompt', 'first remote prompt'],
-    `the hydration reconcile keeps the pending submission: ${JSON.stringify(first.recall)}`)
+  // PR2: the second submission's recall occurrence completes at its Host
+  // ACCEPTANCE, which follows the write — so the hydration commit that runs
+  // first legitimately carries only the persisted submission, while the
+  // pending one is still the LIVE DRAFT (held) at that moment.
+  assert.deepEqual(first.recall, ['first remote prompt'],
+    `the hydration commit carries the persisted submission only: ${JSON.stringify(first.recall)}`)
+  await waitFor('the pending submission accepted', () => editor.getDraft() === '', 20_000)
   assert.deepEqual([...editor.getInputHistory()], ['pending remote prompt', 'first remote prompt'],
-    'the hydration reconcile keeps the pending submission and never doubles the persisted one')
+    'the acceptance-boundary recall keeps the pending submission and never doubles the persisted one')
 
   // The late append lands under the SAME Session after the reseed, and the
   // recall is unchanged by it (its occurrence is already represented).

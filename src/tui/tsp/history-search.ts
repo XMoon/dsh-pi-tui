@@ -137,6 +137,10 @@ export interface TspHistorySearchPorts {
   /** The ONE Composer write: the exact stored content as one whole-document
    *  replacement. Only ever called AFTER this seat retired itself. */
   restoreToComposer(raw: string): void
+  /** PR2/R5-2: whether the Composer would accept the restore write RIGHT NOW
+   *  (a held submission owns the document). Decided BEFORE the seat retires,
+   *  so a refusal keeps the card live and browsable. */
+  composerWritable(): boolean
   /** The existing Client-local copy callback plus the settlement fence: the
    *  outcome notice may only land while `live()` still answers true. */
   copyRaw(raw: string, live: () => boolean): void
@@ -737,6 +741,11 @@ export function createTspHistorySearch(
         const row = settledSelected(owner)
         if (row === undefined) return
         const raw = row.content
+        // PR2/R5-2: the write admission is decided BEFORE the seat retires. A
+        // refused write (a held Composer owns the document) keeps the card
+        // LIVE and browsable — retiring first would leave its stale frame on
+        // screen with no owner behind it.
+        if (!ports.composerWritable()) return
         // CLOSE FIRST: the card, its timer and its click identity are gone
         // BEFORE the Composer mutation and the single frame it commits, so a
         // re-entrant render can never paint the buttons of a card that already

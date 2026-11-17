@@ -24,23 +24,35 @@ import { TranscriptFolder } from '../../src/transcript.ts'
 import type { TranscriptMessage, TurnActivity } from '../../src/transcript.ts'
 import type { JsonValue } from '../../src/domain/transcript/types.ts'
 import type { AssistantLiveChunk, AssistantLiveInput } from '../../src/runtime/assistant-stream-port.ts'
-import { TuiApp, ThinkingCompactComponent, TODO_COMPACT_LIMIT, TODO_SHORT_COMPACT_LIMIT, TODO_SHORT_SCREEN_MAX_ROWS, todoCompactLimit } from '../../src/tui-app.ts'
+import { TuiApp, ThinkingCompactComponent, TODO_COMPACT_LIMIT, TODO_SHORT_COMPACT_LIMIT, TODO_SHORT_SCREEN_MAX_ROWS, todoCompactLimit, type OwnedRunner } from '../../src/tui-app.ts'
 import { Text, stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
 import { ExtensionLedger } from '../../src/extension/internal/ledger.ts'
 import { SurfaceHost } from '../../src/extension/internal/surface-host.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 import { APP_KEYBINDINGS } from '../../src/tui/keybindings/definitions.ts'
 import { buildOsc52Sequence, copyToClipboard, type CopyExecutor } from '../../src/client/clipboard/copy.ts'
+import { runOwned } from '../../src/runtime/process/tasks.ts'
+import { createDiag } from '../../src/runtime/process/diagnostics.ts'
+
+const { started: startedApps, disposeAll: disposeStartedApps } = createAppLifecycleGuard<TuiApp>()
+afterEach(() => {
+  disposeStartedApps()
+})
+
+/** A `runOwned` entry for tests that open the external editor: the real
+ *  classifier with a silent diag (the owned failure path stays observable). */
+function ownedTaskEntry(): OwnedRunner {
+  const diag = createDiag({ filePath: undefined, stderrLevel: 'off' })
+  return (label, task, options) => {
+    runOwned(label, task, { ...options, diag })
+  }
+}
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp started in this file is
  * stopped after each test — the process's single-live-TUI slot (the
  * vendored keybindings are process-global) is held only by LIVE surfaces,
  * so a test that starts an app must not leak the slot into the next test
  * (see src/tui/process-slot.ts). */
-const { started: startedApps, disposeAll: disposeStartedApps } = createAppLifecycleGuard<TuiApp>()
-afterEach(() => {
-  disposeStartedApps()
-})
 
 
 function startApp(): {
@@ -5721,4 +5733,585 @@ test('a client-local queued echo alone never gets the parked-queue explanation',
   const view = vt.getViewport().join('\n')
   assert.ok(view.includes('❯ not yet acknowledged'), `the local echo must stay visible:\n${view}`)
   assert.ok(!view.includes('waiting for the next prompt'), `a local-only echo is not Host-acked parked work:\n${view}`)
+})
+
+// ── PR2 composer submission hold (renderer contract) ───────────────────────
+// The fork Editor keeps the exact submitted document until the Host acceptance;
+// the host input ladder, the public disableSubmit contract and the programmatic
+// mutator fences are the ONE freeze. (Owned here with TuiApp: the product lane's
+// Windows argv budget forbids one more test file.)
+
+
+interface HoldMount {
+  readonly vt: VirtualTerminal
+  readonly app: TuiApp
+  readonly submitted: Array<{ text: string; request: string }>
+  readonly steered: string[]
+  readonly admissions: Array<{ text: string; request: string }>
+  /** Answers `beginComposerSubmission`; default `'legacy'`. */
+  admit(text: string, request: string): 'held' | 'legacy' | 'refused'
+}
+
+function startHoldApp(): HoldMount {
+  const vt = new VirtualTerminal(100, 24)
+  const submitted: Array<{ text: string; request: string }> = []
+  const steered: string[] = []
+  const admissions: Array<{ text: string; request: string }> = []
+  const mount: HoldMount = {
+    vt,
+    app: undefined as unknown as TuiApp,
+    submitted,
+    steered,
+    admissions,
+    admit: () => 'legacy',
+  }
+  const app = new TuiApp(vt, {
+    onSubmit: (text, request) => { submitted.push({ text, request }) },
+    onSteer: (text) => { steered.push(text) },
+    onExit: () => {},
+    onCancel: () => {},
+    beginComposerSubmission: (text, request) => {
+      admissions.push({ text, request })
+      return mount.admit(text, request)
+    },
+  })
+  app.start()
+  startedApps.add(app)
+  ;(mount as { app: TuiApp }).app = app
+  return mount
+}
+
+async function typeHold(vt: VirtualTerminal, data: string): Promise<void> {
+  vt.sendInput(data)
+  await vt.waitForRender()
+}
+
+test('PR2: a held Enter keeps the document, freezes editing and never fires onSubmit', async () => {
+  const h = startHoldApp()
+  let holds = 0
+  h.admit = (text) => {
+    holds += 1
+    h.app.holdSubmission(`attempt-${holds}`)
+    return 'held'
+  }
+  await typeHold(h.vt, 'held prompt')
+  await typeHold(h.vt, '\r')
+  assert.equal(h.admissions.length, 1, 'the fork submit went through the ONE admission')
+  assert.deepEqual(h.admissions[0]?.text, 'held prompt')
+  assert.deepEqual(h.submitted, [], 'a held line is dispatched by the application, never by onSubmit')
+  assert.equal(h.app.getDraft(), 'held prompt', 'the fork kept the exact submitted document')
+  // Typing into the frozen composer changes nothing.
+  await typeHold(h.vt, 'X')
+  assert.equal(h.app.getDraft(), 'held prompt', 'the held document is read-only')
+  // A repeated Enter is consumed: no second admission, no submission.
+  await typeHold(h.vt, '\r')
+  assert.equal(h.admissions.length, 1, 'a repeated Enter is a no-op while sending')
+  assert.deepEqual(h.submitted, [])
+  // The accepted settlement clears the committed draft exactly once.
+  h.app.settleSubmission('attempt-1', 'accepted')
+  await h.vt.waitForRender()
+  assert.equal(h.app.getDraft(), '', 'only the Host acceptance clears the draft')
+})
+
+test('PR2: a refusal unlocks the editor with the draft intact and editable', async () => {
+  const h = startHoldApp()
+  h.admit = () => {
+    h.app.holdSubmission('attempt-refuse')
+    return 'held'
+  }
+  await typeHold(h.vt, 'keep me')
+  await typeHold(h.vt, '\r')
+  assert.equal(h.app.getDraft(), 'keep me')
+  h.app.settleSubmission('attempt-refuse', 'not-accepted')
+  await h.vt.waitForRender()
+  assert.equal(h.app.getDraft(), 'keep me', 'the refused draft is never cleared')
+  await typeHold(h.vt, '!')
+  assert.equal(h.app.getDraft(), 'keep me!', 'the editor is editable again (no restore duplicated the text)')
+})
+
+test('PR2: a programmatic insertion cannot mutate the held document', async () => {
+  const h = startHoldApp()
+  h.admit = () => {
+    h.app.holdSubmission('attempt-insert')
+    return 'held'
+  }
+  await typeHold(h.vt, 'original')
+  await typeHold(h.vt, '\r')
+  assert.equal(h.app.getDraft(), 'original')
+  h.app.insertIntoEditor(' UNSENT')
+  assert.equal(h.app.getDraft(), 'original', 'a held composer refuses programmatic insertion')
+  h.app.setEditorText('replacement')
+  assert.equal(h.app.getDraft(), 'original', 'and programmatic replacement too')
+  h.app.settleSubmission('attempt-insert', 'accepted')
+  await h.vt.waitForRender()
+  assert.equal(h.app.getDraft(), '', 'the accepted settlement clears the ORIGINAL document only')
+})
+
+test('PR2: a legacy verdict keeps the pre-PR2 clear-then-submit ordering', async () => {
+  const h = startHoldApp()
+  await typeHold(h.vt, '/status')
+  await typeHold(h.vt, '\r')
+  assert.deepEqual(h.submitted, [{ text: '/status', request: 'enter' }],
+    'a legacy line reaches onSubmit exactly as before')
+  assert.equal(h.app.getDraft(), '', 'the legacy path cleared the draft before dispatching')
+})
+
+test('PR2: a refused verdict neither clears nor dispatches', async () => {
+  const h = startHoldApp()
+  h.admit = () => 'refused'
+  await typeHold(h.vt, 'ignored')
+  await typeHold(h.vt, '\r')
+  assert.deepEqual(h.submitted, [])
+  assert.equal(h.app.getDraft(), 'ignored', 'the draft is preserved by a refused gesture')
+})
+
+test('PR2: the Ctrl+S steer gesture shares the admission and the freeze', async () => {
+  const h = startHoldApp()
+  h.admit = (_text, request) => {
+    if (request !== 'steer') return 'legacy'
+    h.app.holdSubmission('attempt-steer')
+    return 'held'
+  }
+  await typeHold(h.vt, 'steer me')
+  const dispatched = (h.app as unknown as {
+    actionDispatcher: { dispatch: (action: string, data?: string) => boolean }
+  }).actionDispatcher.dispatch('app.input.steer')
+  assert.equal(dispatched, true)
+  assert.equal(h.admissions.at(-1)?.request, 'steer', 'the steer gesture used the ONE admission')
+  assert.deepEqual(h.steered, [], 'a held steer is dispatched by the application, never re-dispatched')
+  assert.equal(h.app.getDraft(), 'steer me', 'the steered draft stays frozen until acceptance')
+  h.app.settleSubmission('attempt-steer', 'accepted')
+  await h.vt.waitForRender()
+  assert.equal(h.app.getDraft(), '')
+})
+
+// ── PR2/F1/F2: the hold owns every draft/publication entry point ───────────
+
+test('PR2: Ctrl+G during a held submission never starts the external editor', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const launches: string[] = []
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    openExternalEditor: async (draft) => { launches.push(draft); return draft },
+    runOwned: ownedTaskEntry(),
+  })
+  app.start()
+  startedApps.add(app)
+  try {
+    app.setDraft('held draft')
+    app.holdSubmission('attempt-editor')
+    await vt.waitForRender()
+    vt.sendInput('\x07') // Ctrl+G
+    await vt.waitForRender()
+    assert.deepEqual(launches, [], 'a held composer never hands its document to $EDITOR')
+    assert.equal(app.getDraft(), 'held draft', 'the submitted document is untouched')
+    // The Host acceptance releases the hold; the editor entry works again.
+    app.settleSubmission('attempt-editor', 'accepted')
+    await vt.waitForRender()
+    app.setDraft('next draft')
+    vt.sendInput('\x07')
+    await vt.waitForRender()
+    assert.deepEqual(launches, ['next draft'], 'after the acceptance the external editor runs normally')
+  } finally {
+    app.stop()
+  }
+})
+
+test('PR2: a settlement while the external editor is open releases the hold and discards the stale write-back', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  let releaseEditor!: () => void
+  const editorGate = new Promise<void>(resolve => { releaseEditor = resolve })
+  let editorOpened!: () => void
+  const opened = new Promise<void>(resolve => { editorOpened = resolve })
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    openExternalEditor: async () => {
+      editorOpened()
+      await editorGate
+      return 'external rewrite'
+    },
+    runOwned: ownedTaskEntry(),
+  })
+  app.start()
+  startedApps.add(app)
+  try {
+    app.setDraft('draft in editor')
+    vt.sendInput('\x07') // Ctrl+G: the editor opens over a TEMPORARILY suspended surface
+    await opened
+    // The symmetric path: the attempt settles while the editor holds the tty.
+    // The renderer must still release its hold (a temporary suspension is not
+    // a stop) …
+    app.holdSubmission('attempt-during-flight')
+    app.settleSubmission('attempt-during-flight', 'accepted')
+    releaseEditor()
+    await vt.waitForRender()
+    // … and the stale editor result must not be written back into the
+    // settled/cleared composer.
+    assert.equal(app.getDraft(), '', 'the stale external write-back is discarded')
+    // The editor is usable again (no permanent lock): a fresh ordinary
+    // submission works end to end.
+    app.setDraft('after resumption')
+    await vt.waitForRender()
+    vt.sendInput('typed') // editable again — the input lock died with the hold
+    await vt.waitForRender()
+    assert.ok(app.getDraft().includes('typed'), 'the composer accepts typing again after the resumption')
+  } finally {
+    app.stop()
+  }
+})
+
+test('PR2: Ctrl+V during a held submission never probes the clipboard', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  let pastes = 0
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    onClipboardPaste: () => { pastes += 1 },
+  })
+  app.start()
+  startedApps.add(app)
+  try {
+    app.setDraft('held')
+    app.holdSubmission('attempt-paste')
+    await vt.waitForRender()
+    vt.sendInput('\x16') // Ctrl+V
+    await vt.waitForRender()
+    assert.equal(pastes, 0, 'a held composer consumes Ctrl+V without probing the clipboard')
+    app.settleSubmission('attempt-paste', 'not-accepted')
+    vt.sendInput('\x16')
+    await vt.waitForRender()
+    assert.equal(pastes, 1, 'after the release the paste intent runs again')
+  } finally {
+    app.stop()
+  }
+})
+
+// ── PR2/F4: every remaining draft writer shares the ONE admission ──────────
+
+test('PR2: a fullscreen right-click paste is dropped while the composer is held', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  let releaseRead!: () => void
+  const gate = new Promise<void>(resolve => { releaseRead = resolve })
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+  }, {
+    readClipboardText: () => gate.then(() => 'pasted text'),
+  })
+  app.start()
+  startedApps.add(app)
+  try {
+    app.setFullscreen(true)
+    await vt.waitForRender()
+    app.setDraft('held right-click target')
+    // The right-click paste intent starts while the composer is editable …
+    vt.sendInput('\x1b[<2;10;10M')
+    vt.sendInput('\x1b[<2;10;10m')
+    await vt.waitForRender()
+    // … the submission hold begins before the clipboard read settles …
+    app.holdSubmission('attempt-rightclick')
+    releaseRead()
+    await vt.waitForRender()
+    await new Promise(resolve => setImmediate(resolve))
+    await vt.waitForRender()
+    assert.equal(app.getDraft(), 'held right-click target',
+      'the synthetic bracketed paste never reaches the held document')
+    // After the release the same paste path works again (the gate is one-shot:
+    // assert through a fresh read).
+    app.settleSubmission('attempt-rightclick', 'not-accepted')
+    await vt.waitForRender()
+    assert.equal(app.getDraft(), 'held right-click target')
+  } finally {
+    app.stop()
+    app.setFullscreen(false)
+  }
+})
+
+test('PR2: the advanced extension editor controls refuse writes while held', () => {
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  try {
+    app.setDraft('extension base draft')
+    const controls = app.advancedEditorControlsForTest()
+    app.holdSubmission('attempt-extension')
+    controls.setEditorText('extension rewrite')
+    controls.insertEditorText(' inserted')
+    controls.pasteToEditor(' pasted')
+    assert.equal(app.getDraft(), 'extension base draft',
+      'no advanced editor control may mutate a held composer')
+    app.settleSubmission('attempt-extension', 'accepted')
+    assert.equal(app.getDraft(), '', 'the accepted settlement clears the submitted document')
+    controls.setEditorText('after acceptance')
+    assert.equal(app.getDraft(), 'after acceptance', 'the controls work again once released')
+  } finally {
+    app.stop()
+  }
+})
+
+test('PR2/F5: a settlement while stopped completes the hold; start() leaves no stranded lock', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  try {
+    app.setDraft('settle while stopped')
+    app.holdSubmission('attempt-stopped')
+    app.stop()
+    // The Host acceptance lands while the surface is stopped: the LOGICAL
+    // settlement must complete (hold released) even though the stopped screen
+    // is never cleared or repainted — the document stays as inert state,
+    // exactly like the remote teardown contract.
+    app.settleSubmission('attempt-stopped', 'accepted')
+    app.start()
+    await vt.waitForRender()
+    // RFL009: the accepted clear itself is deferred to the restart — the
+    // stopped screen was never repainted, but the FIRST post-restart frame
+    // shows a CLEARED composer (the accepted document is not a live draft
+    // that a fresh Enter could resubmit).
+    assert.equal(app.getDraft(), '',
+      'the accepted-while-stopped document is cleared at the restart, never resubmittable')
+    vt.sendInput('fresh after restart')
+    await vt.waitForRender()
+    assert.equal(app.getDraft(), 'fresh after restart',
+      'the restarted editor accepts input — no stale submit lock')
+    app.holdSubmission('attempt-after-restart')
+    app.settleSubmission('attempt-after-restart', 'not-accepted')
+    assert.equal(app.getDraft(), 'fresh after restart',
+      'a rejection after the restart keeps the live draft')
+  } finally {
+    app.stop()
+  }
+})
+
+test('PR2/R5-1: a deferred restore parked by a stop window is replayed at the restart', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const submitted: string[] = []
+  const app = new TuiApp(vt, {
+    onSubmit: (text) => { submitted.push(text) },
+    onExit: () => {},
+  })
+  app.start()
+  startedApps.add(app)
+  try {
+    app.setDraft('B across the stop')
+    app.holdSubmission('attempt-r5')
+    // The settlement arrives while the surface is STOPPED: the logical release
+    // runs (the hold clears), but the parked deferred restore cannot be
+    // written yet.
+    app.stop()
+    app.settleSubmission('attempt-r5', 'accepted')
+    app.start()
+    await vt.waitForRender()
+    assert.equal(app.getDraft(), '', 'the deferred accepted clear completed at the restart')
+    // The renderer asked the owner to replay any parked obligation: nothing
+    // was lost, nothing was duplicated, and the composer is editable.
+    vt.sendInput('fresh input')
+    await vt.waitForRender()
+    assert.ok(app.getDraft().includes('fresh input'), 'the restarted composer is writable')
+  } finally {
+    app.stop()
+  }
+})
+
+test('PR2/R5-1: the restart replays a parked restore after a rejected stopped settlement', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  let replays = 0
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    onDeferredDraftRestore: () => { replays += 1 },
+  })
+  app.start()
+  startedApps.add(app)
+  try {
+    const baseline = replays // the initial start also asks (an empty queue is a no-op)
+    app.setDraft('B rejected while stopped')
+    app.holdSubmission('attempt-r5-rej')
+    app.stop()
+    app.settleSubmission('attempt-r5-rej', 'not-accepted')
+    app.start()
+    await vt.waitForRender()
+    assert.equal(replays, baseline + 1,
+      'the re-presentation asked the owner to replay even without a deferred accepted clear')
+    assert.equal(app.getDraft(), 'B rejected while stopped', 'the retained draft stayed')
+    // A second stop/start cycle asks exactly once more (the owner is idempotent).
+    app.stop()
+    app.start()
+    await vt.waitForRender()
+    assert.equal(replays, baseline + 2, 'each re-presentation asks exactly once')
+  } finally {
+    app.stop()
+  }
+})
+
+test('PR2/F5: a rejection while stopped unlocks the composer on start()', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  try {
+    app.setDraft('refused while stopped')
+    app.holdSubmission('attempt-refused-stopped')
+    app.stop()
+    app.settleSubmission('attempt-refused-stopped', 'not-accepted')
+    app.start()
+    await vt.waitForRender()
+    vt.sendInput('+refused')
+    await vt.waitForRender()
+    assert.equal(app.getDraft(), 'refused while stopped+refused',
+      'a refusal settled while stopped still unlocks the editor for the restart')
+  } finally {
+    app.stop()
+  }
+})
+
+test('PR2/RFL008: Ctrl+C during a hold cancels activity without clearing the submitted draft', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  try {
+    app.setDraft('held through ctrl+c')
+    app.holdSubmission('attempt-ctrlc')
+    await vt.waitForRender()
+    vt.sendInput('\x03') // Ctrl+C — pi-parity clear-then-confirm key
+    await vt.waitForRender()
+    assert.equal(app.getDraft(), 'held through ctrl+c',
+      'the pre-acceptance document survives Ctrl+C (cancel-activity only)')
+    app.settleSubmission('attempt-ctrlc', 'accepted')
+    await vt.waitForRender()
+    assert.equal(app.getDraft(), '', 'the acceptance still clears the document')
+  } finally {
+    app.stop()
+  }
+})
+
+test('PR2/RFL008: a replacement editor cannot mutate the held document', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const { EditorRegistry } = await import('../../src/extension/internal/editor-registry.ts')
+  const registry = new EditorRegistry()
+  let pluginText = 'held plugin base'
+  let inputEvents = 0
+  registry.register({
+    id: 'plugin-editor',
+    priority: 1,
+    create: () => ({
+      component: { kind: 'text', spans: [{ text: pluginText }] },
+      getText: () => pluginText,
+      setText: (text: string) => { pluginText = text },
+      getCursor: () => 0,
+      setCursor: () => {},
+      // The routed SEMANTIC input channel (P1-5): the plugin owns the key
+      // events it accepts. The hold gate must consume them before this hook.
+      handleInput: (event: import('../../src/extension/public-types.ts').EditorInputEvent) => {
+        inputEvents += 1
+        if (event.kind === 'text') pluginText += event.text
+        return true
+      },
+      dispose: () => {},
+    }),
+  }, 'plugin')
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { editorRegistry: registry })
+  app.start()
+  startedApps.add(app)
+  try {
+    app.reconcileEditorNow()
+    await vt.waitForRender()
+    assert.equal(app.seatEditorForTest().id, 'plugin-editor')
+    app.holdSubmission('attempt-plugin')
+    await vt.waitForRender()
+    const textAtHold = pluginText
+    vt.sendInput('X')
+    await vt.waitForRender()
+    assert.equal(inputEvents, 0,
+      'the replacement editor input is consumed while the composer is held')
+    assert.equal(pluginText, textAtHold, `the plugin document is unchanged (${JSON.stringify(textAtHold)})`)
+    app.settleSubmission('attempt-plugin', 'accepted')
+    await vt.waitForRender()
+    assert.equal(pluginText, '', 'the acceptance clears the LIVE plugin seat document')
+    assert.equal(inputEvents, 0, 'no unsent plugin input ever entered the cleared document')
+  } finally {
+    app.stop()
+  }
+})
+
+test('PR2/RFL011: a plugin EditorHost.replaceText cannot mutate the held document', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const { EditorRegistry } = await import('../../src/extension/internal/editor-registry.ts')
+  const registry = new EditorRegistry()
+  let pluginText = 'base'
+  let host: import('../../src/extension/public-types.ts').EditorHost | undefined
+  registry.register({
+    id: 'plugin-editor',
+    priority: 1,
+    create: (editorHost) => {
+      host = editorHost
+      return {
+        component: { kind: 'text', spans: [{ text: pluginText }] },
+        getText: () => pluginText,
+        setText: (text: string) => { pluginText = text },
+        getCursor: () => 0,
+        setCursor: () => {},
+        dispose: () => {},
+      }
+    },
+  }, 'plugin')
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { editorRegistry: registry })
+  app.start()
+  startedApps.add(app)
+  try {
+    app.reconcileEditorNow()
+    await vt.waitForRender()
+    assert.ok(host !== undefined, 'the plugin received its EditorHost')
+    app.holdSubmission('attempt-host-replace')
+    await vt.waitForRender()
+    host!.replaceText('new unsent extension text')
+    await vt.waitForRender()
+    assert.notEqual(pluginText, 'new unsent extension text',
+      'the public replaceText seam refuses to write the held document')
+    app.settleSubmission('attempt-host-replace', 'accepted')
+    await vt.waitForRender()
+    // After the release the seam is admitted again.
+    host!.replaceText('post-acceptance write')
+    assert.equal(pluginText, 'post-acceptance write',
+      'the seam works again once the composer is released')
+  } finally {
+    app.stop()
+  }
+})
+
+test('PR2/RFL009: an accepted-while-stopped prompt recalls exactly once after the restart', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  try {
+    app.setDraft('accepted recall witness')
+    app.holdSubmission('attempt-recall-stopped')
+    app.stop()
+    app.settleSubmission('attempt-recall-stopped', 'accepted')
+    app.start()
+    await vt.waitForRender()
+    assert.equal(app.getDraft(), '', 'the deferred accepted clear completed at the restart')
+    // The recall row exists exactly once: ↑ recalls the accepted text.
+    vt.sendInput('\x1b[A')
+    await vt.waitForRender()
+    assert.equal(app.getDraft(), 'accepted recall witness',
+      'the accepted-while-stopped prompt recalls after the restart (deferred exactly once)')
+    // And a LIVE acceptance still recalls the same way (no divergence).
+    app.setDraft('live recall witness')
+    await vt.waitForRender()
+    app.holdSubmission('attempt-recall-live')
+    app.settleSubmission('attempt-recall-live', 'accepted')
+    await vt.waitForRender()
+    vt.sendInput('\x1b[A')
+    await vt.waitForRender()
+    assert.equal(app.getDraft(), 'live recall witness', 'a live acceptance recalls identically')
+  } finally {
+    app.stop()
+  }
 })

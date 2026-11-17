@@ -909,12 +909,21 @@ export async function createDirectTspFixture(
     readonly sessionEvents: () => readonly { readonly type: string; readonly data?: unknown }[]
   }) => void): { readonly calls: () => number; readonly detach: () => void } => {
     const prototype = DirectSessionWriter.prototype as unknown as {
-      prompt(this: DirectSessionWriter, sessionId: string, message: unknown, mode: 'queue' | 'steer'): Promise<WriteOutcome>
+      prompt(
+        this: DirectSessionWriter,
+        sessionId: string,
+        message: unknown,
+        mode: 'queue' | 'steer',
+        options?: { readonly onAccepted?: () => void },
+      ): Promise<WriteOutcome>
     }
     const originalPrompt = prototype.prompt
     const settled: unknown[] = []
-    prototype.prompt = async function (this: DirectSessionWriter, sessionId, message, mode) {
-      const outcome = await originalPrompt.call(this, sessionId, message, mode)
+    prototype.prompt = async function (this: DirectSessionWriter, sessionId, message, mode, options) {
+      // PR2: the recorder TRANSPARENTLY forwards the Host-acceptance option —
+      // dropping it would make every recorded prompt settle as "committed
+      // without acceptance proof" in the application.
+      const outcome = await originalPrompt.call(this, sessionId, message, mode, options)
       // The record — and the count — exist only AFTER the write settles: a
       // caller waiting on `calls()` can never observe an entry whose settled
       // record is still missing (the round-4 fake-green: the busy guard once

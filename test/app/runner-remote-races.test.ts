@@ -447,7 +447,7 @@ test('teardown with a pending WRITE — observed surface-stop boundary, drain-se
   await waitFor('parked inside serialize', () => parked.parked(), 10_000)
   // OBSERVERS: the mounted TuiApp's REAL stop (the disposeSurface path) and
   // the selected transport disposer record the observed order.
-  const app = fixture.runnerApp() as unknown as { stop(): void; getDraft(): string }
+  const app = fixture.runnerApp() as unknown as { stop(): void; getDraft(): string; setDraft(text: string): void }
   // TERMINAL-WRITE COUNTER (the real render/callback channel): a disposed
   // surface must never paint again, whatever the Host commits afterwards. It
   // is installed BEFORE the stop wrapper, which samples it synchronously.
@@ -500,15 +500,23 @@ test('teardown with a pending WRITE — observed surface-stop boundary, drain-se
   // publishes no durable-flush verb.
   assert.equal(surfaceWrites.count - writesAtSurfaceStop.count, 0,
     'the surface stopped for good: no terminal write follows the surface stop')
+  // PR2: the draft state itself is NOT evidence of a post-shutdown write-back:
+  // a held (never accepted) submission legitimately keeps its document — it was
+  // never cleared before dispatch — and the retired attempt must not clear it
+  // either. The renderer assertions above (no physical write after stop, no Host
+  // row) are the contract. Assert the retired hold left the surface inert:
+  assert.equal((fixture.runnerApp() as unknown as { getDraft(): string }).getDraft(),
+    'pending write across teardown sigma',
+    'the unaccepted draft is retained in the stopped surface state (never pre-cleared)')
   assert.equal(hostUserRows(fixture, mainId).some(row => row.includes('pending write across teardown sigma')), false,
     'a write parked at the surface stop NEVER dispatches: no Host message, no silent send')
-  // The LIVE-surface half of the contract is proven by the §3.9a stale-capture
-  // case above, which observes the restored draft. Here the surface is already
-  // stopped, so the submission owner's disposed guard
-  // (`if (surface.isDisposed()) return`) suppresses the draft re-insertion and
-  // the notice: there is no live surface to receive them, and the guard must
-  // not be weakened to manufacture an observable callback after the stop.
-  assert.equal(app.getDraft(), '',
+  // PR2: the pre-PR2 assertion here expected an EMPTY draft because the editor
+  // was pre-cleared; under the acceptance contract the unaccepted document was
+  // never cleared, so the stopped surface keeps it as inert state. The contract
+  // is that nothing may mutate or paint it afterwards:
+  const draftAfterStop = app.getDraft()
+  app.setDraft('post-shutdown rewrite')
+  assert.equal(app.getDraft(), draftAfterStop,
     'the stopped surface receives no post-shutdown draft write-back')
 })
 

@@ -834,8 +834,13 @@ test('only the owner that is asked to consume the draft clears the editor', () =
   const events = ownerFile('src/app/surface/application-events.ts')
   assert.equal(events.split('submission.steer(').length - 1, 2,
     'exactly two production steer call sites must exist in the event owner (one consume-draft, one already-consumed)')
-  assert.match(events, /submission\.steer\(deps\.surface\.app\.getDraft\(\), \{ consumeDraft: true \}\)/u,
-    'the steer-draft action must ask the owner to consume the still-present draft')
+  // PR2/F4: the surface action shares the synchronous Composer admission; the
+  // owner is asked to consume the still-present draft only on the LEGACY
+  // verdict (`'held'` already started the attempt and freezes the document).
+  assert.match(events, /beginComposerSubmission\(text, 'steer'\)/u,
+    'the steer-draft action must enter the ONE composer admission first')
+  assert.match(events, /if \(admission === 'legacy'\) deps\.submission\.steer\(text, \{ consumeDraft: true \}\)/u,
+    'the legacy verdict asks the owner to consume the still-present draft')
   const onSteer = events.slice(events.indexOf('onSteer: (text) =>'), events.indexOf('onSteer: (text) =>') + 900)
   assert.match(onSteer, /submission\.steer\(text\)/u,
     'the TuiApp onSteer seam must NOT ask for a second consume (the caller already cleared)')

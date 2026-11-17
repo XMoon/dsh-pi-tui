@@ -89,6 +89,8 @@ interface Harness {
   readonly generation: { value: number }
   readonly sessionId: { value: string | undefined }
   setImageLimits(limits: Parameters<typeof checkImageLimits>[2] | undefined): void
+  /** PR2/F2: flip the composer's submission hold for the next committed paste. */
+  setComposerHold(active: boolean): void
   /** Resolve once every owned paste task (and its classification) settled. */
   drained(): Promise<void>
 }
@@ -101,6 +103,8 @@ function harness(): Harness {
   const sessionId: { value: string | undefined } = { value: 'session-a' }
   const started: number[] = []
   const probes: Probe[] = []
+  /** PR2/F2: the live submission-ownership fact the paste commit re-reads. */
+  const submitHold = { active: false }
   const owned: Promise<void>[] = []
   let cleanedUp = false
   let limits: Parameters<typeof checkImageLimits>[2] | undefined
@@ -109,7 +113,9 @@ function harness(): Harness {
   const deps = {
     // The groups the paste handler does not read (the event table requires
     // them, the clipboard path never calls them).
-    submission: {} as ApplicationEventsDeps['submission'],
+    submission: {
+      composerHoldActive: () => submitHold.active,
+    } as unknown as ApplicationEventsDeps['submission'],
     viewer: {} as ApplicationEventsDeps['viewer'],
     status: {} as ApplicationEventsDeps['status'],
     settings: {} as ApplicationEventsDeps['settings'],
@@ -183,6 +189,7 @@ function harness(): Harness {
     replaceComposer: (next) => { seat.current = next },
     bumpGeneration: () => { generation.value += 1 },
     setImageLimits: (next) => { limits = next },
+    setComposerHold: (active) => { submitHold.active = active },
     dispose: () => { cleanedUp = true },
     paste: () => events.onClipboardPaste!(),
     drained: async () => {
@@ -458,4 +465,51 @@ test('a committed clipboard image token is consumed by ordinary message preparat
     'the submission preparation consumes the clipboard image the handler staged')
   assert.deepEqual(message.content.filter(block => block.type === 'text').map(block => (block as { text: string }).text),
     ['look', '  at this'], 'the surrounding text keeps its order around the resolved image')
+})
+
+// ── PR2/F2: a held Composer owns the document (no orphan image drafts) ─────
+
+test('PR2: a held composer skips the clipboard probe entirely', async () => {
+  const h = harness()
+  h.setComposerHold(true)
+  h.scriptProbe()
+  h.paste()
+  await h.drained()
+  assert.deepEqual(h.started, [], 'no OS clipboard probe may run for a held composer')
+  assert.equal(h.store.size(), 0, 'no image bytes enter the draft store')
+  assert.deepEqual(h.composer.inserts, [], 'no placeholder is inserted')
+  assert.deepEqual(h.composer.notices, [], 'no "attached" notice is announced')
+  h.dispose()
+})
+
+test('PR2: a paste started BEFORE the hold that settles during it creates no draft, insert or notice', async () => {
+  const h = harness()
+  const probe = h.scriptProbe()
+  h.paste()
+  await flush()
+  assert.deepEqual(h.started, [0], 'the probe started before the hold')
+  // The read settles AFTER the submission hold began: the commit segment must
+  // re-read the ownership and drop the result (no orphan bytes/placeholder).
+  h.setComposerHold(true)
+  probe.resolve({ kind: 'image', bytes: Buffer.from([1, 2, 3]), mediaType: 'image/png', width: 2, height: 2 })
+  await h.drained()
+  assert.equal(h.store.size(), 0, 'the clipboard bytes never become a draft')
+  assert.deepEqual(h.composer.inserts, [], 'the draft never receives a placeholder')
+  assert.deepEqual(h.composer.notices, [], 'no success notice without a placeholder')
+  h.dispose()
+})
+
+test('PR2: the same paste settles normally once the hold is released before the commit', async () => {
+  const h = harness()
+  const probe = h.scriptProbe()
+  h.paste()
+  await flush()
+  h.setComposerHold(true)
+  h.setComposerHold(false)
+  probe.resolve({ kind: 'image', bytes: Buffer.from([1, 2, 3]), mediaType: 'image/png', width: 2, height: 2 })
+  await h.drained()
+  assert.equal(h.store.size(), 1, 'a released composer admits the image')
+  assert.equal(h.composer.inserts.length, 1, 'the placeholder lands')
+  assert.equal(h.composer.notices.length, 1, 'the success notice follows the placeholder')
+  h.dispose()
 })

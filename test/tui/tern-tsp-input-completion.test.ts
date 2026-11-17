@@ -2131,3 +2131,28 @@ test('a candidate description carrying ANSI/CR/LF/TAB is projected onto one safe
     'the sanitised projection did not touch what the accept inserts')
   assert.deepEqual(m.calls.submits, [], 'and the accept is still accept-only')
 })
+
+// ── PR2/F1: the submission hold owns every completion write ─────────────────
+
+test('PR2/F1: a held submission refuses the completion accept at the write and releases normally', async (t) => {
+  const m = await mountSlashPane(t, { chrome: true })
+  // Open the candidate list before the hold: this is the reachable popup-first
+  // window (the list is already painted when the Host acceptance is pending).
+  await m.type('/mo')
+  await m.key('d') // a REAL edit re-derives the seat and opens the list
+  await waitUntil('the candidate list painted', () => m.rows().length > 0)
+  m.renderer.composer.holdSubmission?.('attempt-completion')
+  const before = m.editor()
+  // Tab ACCEPT (and a pointer accept go through the same `accept()`): the held
+  // seat must not write the completion into the frozen document.
+  await m.quietKey(TAB)
+  assert.deepEqual(m.editor(), before, 'a held composer never accepts a completion')
+  // The refusal settlement unlocks; the same completion now lands.
+  m.renderer.composer.settleSubmission?.('attempt-completion', 'not-accepted')
+  await m.type('/mo')
+  await m.key('d')
+  await waitUntil('the candidate list painted again', () => m.rows().length > 0)
+  await m.key(TAB)
+  await waitUntil('the accepted completion reached the editor', () => m.editor().text !== '/mo')
+  assert.notEqual(m.editor().text, before.text, 'the released composer accepts the completion again')
+})

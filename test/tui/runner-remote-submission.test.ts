@@ -1381,10 +1381,6 @@ test('remote cancel: a real cancel gesture stops the running official turn and P
   // Queue a next-turn occurrence FIRST: the cancel must stop the running
   // turn WITHOUT discarding queued work (Direct keepInbox parity).
   const app = fixture.runnerApp() as unknown as { setDraft(text: string): void; submitDraft(request?: string): void }
-  app.setDraft('queued survives cancel lambda')
-  app.submitDraft('explicit-queue')
-  app.setDraft('queued second nu')
-  app.submitDraft('explicit-queue')
   const spliceOf = (marker: string): boolean => {
     const session = fixture.host.ctx.sessions.get(SessionId(mainId)) as unknown as {
       snapshotEvents(): Array<{ type: string; data: unknown }>
@@ -1392,7 +1388,14 @@ test('remote cancel: a real cancel gesture stops the running official turn and P
     return session.snapshotEvents().some(event => event.type === 'agent/inbox/spliced'
       && JSON.stringify(event.data).includes(marker))
   }
+  app.setDraft('queued survives cancel lambda')
+  app.submitDraft('explicit-queue')
+  // PR2: the first queued submission is HELD until the Host accepts it (the
+  // authoritative splice below IS that acceptance), so the second gesture is
+  // submitted only after the composer unlocked.
   await waitFor('queued occurrence spliced', () => spliceOf('queued survives cancel lambda'), 20_000)
+  app.setDraft('queued second nu')
+  app.submitDraft('explicit-queue')
   await waitFor('second queued occurrence spliced', () => spliceOf('queued second nu'), 20_000)
   // The REAL cancel gesture: a single Esc while the agent is busy (the
   // surface routes it to events.onCancel — the same seam cancel-activity

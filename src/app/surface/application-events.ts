@@ -461,6 +461,14 @@ export function createApplicationEvents(deps: ApplicationEventsDeps): Applicatio
     // chord, or the explicit queue action) rides along — the boundary resolves
     // its delivery mode.
     onSubmit: (text, request, scopeToken) => deps.submission.submit(text, request, scopeToken),
+    // PR2/R5-1: the surface presents again after a stop() window that parked a
+    // draft-restore obligation — the owner replays it on the writable composer.
+    onDeferredDraftRestore: () => deps.submission.replayDeferredDraftRestores(),
+    // PR2: the renderer's synchronous submit admission — ONE classification
+    // shared with the dispatch. `'held'` proves the attempt was registered
+    // and its delivery started; the renderer must not clear/submit itself.
+    beginComposerSubmission: (text, request, scopeToken) =>
+      deps.submission.beginComposerSubmission(text, request, scopeToken),
     // The image-only submit gate (plan §11.1): an empty-text draft with staged
     // images is a real submission.
     isImageDraft: () => draftHasImages(deps.surface.composer.getDraft(), deps.drafts.images),
@@ -500,6 +508,11 @@ export function createApplicationEvents(deps: ApplicationEventsDeps): Applicatio
         && deps.lifecycle.generation() === generation
         && deps.lifecycle.currentSessionId() === sessionId
         && deps.surface.composer === composer
+        // PR2/F2: a held Composer owns its document. The clipboard read is
+        // asynchronous, so this is re-read at BOTH the trigger and the commit:
+        // a gesture started before the hold and settling after it must not
+        // create an un-placeholdered image draft or announce one.
+        && !deps.submission.composerHoldActive()
       const work = clipboardPasteTail.then(async () => {
         // A paste whose ownership already moved (or whose surface died) never
         // probes the OS clipboard at all.
@@ -615,9 +628,15 @@ export function createApplicationEvents(deps: ApplicationEventsDeps): Applicatio
           // The steered draft is an agent-facing submission: the OWNER snapshots
           // the persist facts (ts + image check) BEFORE consuming the draft, and
           // the row is written after the session exists (the deferred-start
-          // gate) with the FINAL session id. This action hands the still-present
-          // draft over, so the owner consumes it.
-          deps.submission.steer(deps.surface.app.getDraft(), { consumeDraft: true })
+          // gate) with the FINAL session id. This action shares the SAME
+          // synchronous Composer admission as Ctrl+S (PR2/F4): 'held' has
+          // already opened the attempt, frozen the renderer and started the
+          // steer — the draft stays until the Host accepts it; 'refused' is a
+          // silent no-op (no second request id, no writer call, no history row);
+          // only 'legacy' keeps the pre-PR2 clear-then-steer contract.
+          const text = deps.surface.app.getDraft()
+          const admission = deps.submission.beginComposerSubmission(text, 'steer')
+          if (admission === 'legacy') deps.submission.steer(text, { consumeDraft: true })
           break
         }
         case 'cancel-activity': {

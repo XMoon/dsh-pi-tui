@@ -289,6 +289,14 @@ export interface TspInputHandlers {
    */
   submit(text: string, request: ComposerSubmitRequest, scopeToken?: number): void
   /**
+   * PR2: the SYNCHRONOUS submit admission shared with the application. The
+   * renderer calls it BEFORE any composer mutation: `'held'` means the
+   * application registered the attempt and started the delivery (the draft
+   * must stay and no `submit` may follow); `'legacy'` keeps the renderer's
+   * existing remember/clear/submit sequence; `'refused'` is a silent no-op.
+   */
+  beginComposerSubmission?(text: string, request: ComposerSubmitRequest | 'steer'): 'held' | 'legacy' | 'refused'
+  /**
    * TSP I-A: the HISTORY-eligibility read for one already-delivery-admitted
    * draft — the SAME `ApplicationEvents.shouldRememberInput` policy PiTui's
    * `TuiApp.rememberInput` consults (staged attachments, a pasted path whose
@@ -919,6 +927,16 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
    */
   const historyRecall = createHistoryRecallScope()
   /**
+   * PR2: the live submission attempt freezing the composer, or undefined.
+   * Set ONLY by the application's `holdSubmission` (through the composer
+   * port) and cleared by `settleSubmission`. While present the SDK editor is
+   * painted `readonly`, Send is disabled, and the composer reducer refuses
+   * edits and submits.
+   */
+  let heldSubmission: { readonly attemptId: string; readonly text: string; readonly remember: boolean } | undefined
+  /** PR2: whether the composer is held (the ONE read every gate consults). */
+  const composerHeld = (): boolean => heldSubmission !== undefined
+  /**
    * PR3-B B1: the ONE program-owned composer. The SDK controls the editor
    * node (`text`/`cursor` in UTF-16 units); the native edit/undo/send
    * features are NOT advertised — every authoritative mutation (a reducer
@@ -1046,14 +1064,21 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       // this mount's ONE composer object is a mount constant, so identity needs
       // no second fence here.
       current: () => !disposed && !hydrating && !historyHoldsComposerSeat()
+        && !composerHeld()
         && composer.editRevision() === acceptedRevision
         && composer.getDraft() === acceptedText
         && composer.state().cursor === acceptedCursor,
       draft: () => (disposed ? undefined : composer.getDraft()),
-      commit: (placeholder) => composer.replaceInlineAttachmentFragment(
-        { text: acceptedText, cursor: acceptedCursor, editRevision: acceptedRevision },
-        span,
-        placeholder,
+      commit: (placeholder) => (
+        // PR2/F1: the LAST fence — a hold that began after the read owns the
+        // document; the late placeholder must not land.
+        composerHeld()
+          ? false
+          : composer.replaceInlineAttachmentFragment(
+            { text: acceptedText, cursor: acceptedCursor, editRevision: acceptedRevision },
+            span,
+            placeholder,
+          )
       ),
       notify: (message, kind) => composer.notify(message, kind),
     })
@@ -1079,6 +1104,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // History card owns that seat — the same rule Send, Stop, Model and the
     // Permission menu answer to.
     admitted: () => composerActionsAdmitted()
+      && !composerHeld()
       && !permissionMenuOpen
       && modelQuick?.isOpen() !== true,
     requestRender: () => render(),
@@ -4624,6 +4650,14 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // flight must not be delivered as text, and the refusal must keep the
     // live draft/caret — the same gate the app's submit/steer owners enforce.
     if (!handlers.admitPastedPathDelivery(serializedDraft)) return
+    // PR2: the application admission runs while the draft is still the live
+    // document. `'held'` starts the submission itself; the renderer must not
+    // remember, clear or submit. `'legacy'` keeps the original sequence.
+    const admission = handlers.beginComposerSubmission?.(serializedDraft, gesture) ?? 'legacy'
+    if (admission === 'held' || admission === 'refused') {
+      render()
+      return
+    }
     // TSP I-A: the recall OCCURRENCE is taken here — AFTER the one delivery
     // admission (a refused paste leaves no occurrence behind) and BEFORE the
     // clear, from the same snapshot this submission was admitted from.
@@ -4663,6 +4697,10 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     if (!composerActionsAdmitted()) return
     const handlers = boundHandlers
     if (handlers === undefined) return
+    // PR2: a click from a frame painted BEFORE the hold must not submit the
+    // frozen document (the SDK dispatches by the painted id, so the button's
+    // own disabled state is not a gate).
+    if (composerHeld()) return
     if (!composerDraftSubmittable()) return
     submitComposerDraft(handlers, 'enter')
   }
@@ -4930,6 +4968,10 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
    *  with the v2 placeholder and NO `> ` prompt inside the quiet shell. */
   const composerEditorNode = (): Node => {
     const state = composer.state()
+    // PR2: a held submission paints the composer read-only (the native
+    // SDK-level affordance) — the business gates below are still the
+    // authority, the paint only tells the truth about them.
+    const readonly = composerHeld() ? { readonly: true } : {}
     return composerActionsSupported()
       ? ui.editor({
           key: 'composer',
@@ -4937,6 +4979,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
           cursor: state.cursor,
           maxLines: 8,
           placeholder: 'What would you like to work on?',
+          ...readonly,
         })
       : ui.editor({
           key: 'composer',
@@ -4945,6 +4988,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
           maxLines: 8,
           placeholder: 'Message',
           prompt: '> ',
+          ...readonly,
         })
   }
 
@@ -5153,7 +5197,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
         panel: modelQuick?.renderState(),
       },
       busy: presentedStatus?.activity.busy === true && !hydrating,
-      sendable: composerDraftSubmittable() && !historyOwnsComposerSeat(),
+      sendable: composerDraftSubmittable() && !historyOwnsComposerSeat() && !composerHeld(),
       // TSP I-C: the seat's OWN projection, observed at paint time. The painter
       // never queries and never re-sorts; a click is admitted only for the row
       // of the frame that painted it.
@@ -5488,6 +5532,16 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       handlers.cancel()
       return false
     }
+    // PR2/F2: a held submission freezes the composer as an INPUT OWNER — every
+    // remaining composer-destined key (typing, paste, Ctrl+V media, history
+    // browse, visual chords, Enter/Send) is consumed here, BEFORE the visual
+    // chords and the media intent can run. Escape/Ctrl+C and every higher seat
+    // (modal/Reader/pickers/menus/queue/search) already had their own routing
+    // above.
+    if (composerHeld()) {
+      dismissOwedFrame()
+      return false
+    }
     // PR3: the two visual chords are inserted AFTER every existing owner
     // (Reader/modal/Alt+Q/cancel/pickers/Esc) and BEFORE Ctrl+V and the
     // composer, so an older owner always wins. The matcher consumes the SAME
@@ -5515,6 +5569,15 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       handlers.pasteMedia()
       // The application owns the OS probe and may legitimately write nothing
       // (no image on the clipboard), so this branch cannot assume a frame.
+      dismissOwedFrame()
+      return false
+    }
+    // PR2: a held submission freezes the composer document. Every key that
+    // would reach the reducer (typing, paste, history browse, Enter/Send) is
+    // consumed here; the cancel/exit/presenter paths ABOVE keep their own
+    // routing (Escape/Ctrl+C already returned, the modal seat and every
+    // picker were offered the key first).
+    if (composerHeld()) {
       dismissOwedFrame()
       return false
     }
@@ -5984,7 +6047,41 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
   // composer object. `getDraft()` reads the VISIBLE TSP composer, never a
   // hidden PiTui instance; `setSubmitPending` surfaces the existing pending
   // fact in the dock (no derived queue state).
-  const composerPort: SubmissionComposerPort = composer
+  const composerPort: SubmissionComposerPort = {
+    getDraft: () => composer.getDraft(),
+    // PR2: a held document is frozen against programmatic writes too (the
+    // accepted settlement clears through the composer directly, below).
+    setDraft: (text) => { if (!composerHeld()) composer.setDraft(text) },
+    setEditorText: (text) => { if (!composerHeld()) composer.setEditorText(text) },
+    insertIntoEditor: (text) => { if (!composerHeld()) composer.insertIntoEditor(text) },
+    notify: (message, kind) => { composer.notify(message, kind) },
+    setSubmitPending: (detail) => { composer.setSubmitPending(detail) },
+    // PR2: the ONE renderer-owned hold of this mount. The application opens it
+    // synchronously BEFORE the dispatch and settles it at the write's Host
+    // acceptance — only `'accepted'` commits the draft (clear + recall
+    // occurrence + one render); the other outcomes unlock the editable draft.
+    holdSubmission: (attemptId) => {
+      const text = composer.getDraft()
+      heldSubmission = {
+        attemptId,
+        text,
+        remember: text.startsWith('!') ? false : (boundHandlers?.shouldRememberInput(text) ?? true),
+      }
+      render()
+    },
+    settleSubmission: (attemptId, result) => {
+      const hold = heldSubmission
+      if (hold === undefined || hold.attemptId !== attemptId) return
+      heldSubmission = undefined
+      if (result === 'accepted') {
+        // The accepted occurrence is what the ↑ recall records. Order: the
+        // recall occurrence (the document is still available), then the clear.
+        if (hold.remember) historyRecall.rememberAccepted(hold.text)
+        composer.setDraft('')
+      }
+      render()
+    },
+  }
   return {
     display,
     get modelPresentation() {
@@ -6168,7 +6265,12 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
         admitted: historySeatAdmitted,
         requestRender: () => render(),
         setFocus: () => applyFocus(true),
-        restoreToComposer: (raw) => { composer.setEditorText(raw) },
+        // PR2/R5-2: the write admission is decided in the seat (BEFORE it
+        // retires), so a refused Restore keeps the live card on screen.
+        composerWritable: () => !composerHeld(),
+        restoreToComposer: (raw) => {
+          composer.setEditorText(raw)
+        },
         copyRaw: (raw, live) => { issueHistoryCopy(raw, live) },
         reveal: (id) => { surface.reveal(id, 'nearest') },
         scroll: (id, to) => { surface.scroll(id, to) },

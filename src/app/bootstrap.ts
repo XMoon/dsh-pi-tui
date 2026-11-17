@@ -4403,31 +4403,33 @@ export function applyRunnerWithRuntime(
           command.runner().withPromptAdmission(scope, line, task),
         isDisposed: () => cleanedUp,
         isScopeCurrent: (scope) => sessionScope.isCurrent(scope),
+        // PR2: the live composer hold — every restore/merge of the hold's
+        // own text is a no-op (the draft never left the editor).
+        composerHoldActive: () => submission.composerHoldActive(),
         // PR3-B B2: the submission runtime's editor hooks are reachable on
         // BOTH renderers now that the TSP pane submits. They must go through the
         // renderer-neutral composer projection — the PiTui-only `app` binding is
         // undefined on the TSP branch (the B2 review's newly-reachable-consumer
         // requirement).
+        restoreSubmissionDraft: (text, ownerRequestId, originSubject) => {
+          submission.restoreSubmissionDraft(text, ownerRequestId, originSubject)
+        },
+        ownsComposerHold: (requestId) => submission.ownsComposerHold(requestId),
         mergeDraftIntoEditor: (text) => {
           const merged = mergeDraft(surface.composer.getDraft(), text)
           surface.composer.setEditorText(merged)
           return merged === text
         },
-        restoreStaleDraftIntoEditor: (text, capturedSubject) => {
-          // PR3-B §7.3 (F2): suppress ONLY when BOTH facts hold — the OWNER
-          // the submission's subject pinned was genuinely REPLACED (the
-          // ownership core's opaque-ref authority; a same-owner generation
-          // invalidation — e.g. a failed switch kept the old owner — is NOT
-          // a replacement) AND this renderer drops drafts at committed
-          // switches (TSP; its publication already cleared the text). Every
-          // other stale shape merges exactly like the ordinary restore.
+        restoreStaleDraftIntoEditor: (text, capturedSubject, ownerRequestId) => {
+          // PR3-B §7.3 (F2) keeps the suppression policy; PR2/RFL015 adds the
+          // owner proof: the owner-aware submission restore is the ONE seam —
+          // a foreign live hold's document is never written or rewritten and
+          // the restore is deferred to that hold's settlement.
           if (!surface.display.retainsStaleDraftRestore()
             && ownership.subjectAuthority.ownerReplaced(capturedSubject as SessionSubject | undefined)) {
             return 'dropped'
           }
-          const merged = mergeDraft(surface.composer.getDraft(), text)
-          surface.composer.setEditorText(merged)
-          return merged === text ? 'merged-verbatim' : 'merged'
+          return submission.restoreStaleDraftIntoEditor(text, capturedSubject, ownerRequestId)
         },
         consumeDraftAttachments: (text) => consumeDraftAttachments(text, draftImages, draftFiles),
         markDispatch: (sessionId) => submission.markDispatch(sessionId),
@@ -4469,7 +4471,8 @@ export function applyRunnerWithRuntime(
           // Client contract. Both branches share canonicalization + strict
           // placeholder semantics, not one preparation authority.
           : prepareRemotePrompt(text, requestId),
-        prompt: (sessionId, message) => backend.sessionWriter.prompt(sessionId, message, 'queue'),
+        prompt: (sessionId, message, options) =>
+          backend.sessionWriter.prompt(sessionId, message, 'queue', options),
       },
     })
     // The startup surface: a resumed session initializes everything; the
