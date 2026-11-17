@@ -267,71 +267,43 @@ test('the lane child never inherits the developer terminal identity or ambient m
   assert.deepEqual(sanitizeTestEnvironment({ PATH: '/bin' }), { PATH: '/bin' })
 })
 
-test('the runner FORWARDS the concurrency to Node, and Node applies it', () => {
-  // The runner's own ARGUMENT construction is what matters, so it is
-  // asserted on the runner's SOURCE: the flag must be part of the spawned
-  // argument list. The BEHAVIOUR that the flag produces is proved by the
-  // next case.
-  const source = readFileSync(join(ROOT, 'scripts', 'run-test-lane.mjs'), 'utf8')
-  assert.match(source, /\.\.\.\(concurrency === undefined \? \[\] : \[concurrency\]\)/u,
-    'the runner must put the parsed concurrency into the spawned argument list')
-  assert.match(source, /const concurrency = parseConcurrency\(args\)/u,
-    'the runner must parse the concurrency from its own arguments')
-})
-
-test('the CONCURRENCY level changes how many files Node keeps in flight', () => {
-  // The end-to-end proof that the flag means what it says: four files that
-  // each hold the event loop for 400ms take about 1.6s at concurrency 1 and
-  // about 0.4s at concurrency 4.
-  //
-  // The probe files are named RELATIVE to the working directory: Node only
-  // treats a path as a test file when it can recognise it as one, and an
-  // absolute path outside the working directory is not recognised — the run
-  // then reports nothing and looks instantly fast.
-  const directory = join(ROOT, 'temp', `dsh-concurrency-probe-${process.pid}`)
-  mkdirSync(directory, { recursive: true })
-  try {
-    const files = []
-    for (let index = 0; index < 4; index += 1) {
-      const file = join(directory, `probe-${index}.test.mjs`)
-      // The fixed hold is the MEASURED quantity, not a blind wait for a
-      // signal: each probe file occupies one worker for a known window, so
-      // the wall clock tells us how many files Node kept in flight.
-      writeFileSync(file,
-        `import test from 'node:test'\n`
-        // The window IS the experiment: concurrency 1 sums these windows
-        // while higher levels overlap them, so the wall clock is the window
-        // count. The wait is the measured quantity, not a blind sleep.
-        // deadline: none — the probe is bounded by its own 400 ms window.
-        + `test('hold ${index}', async () => { await new Promise(r => setTimeout(r, 400)) })\n`)
-      files.push(relative(ROOT, file))
-    }
-    const timeAt = (concurrency) => {
-      const start = Date.now()
-      const result = spawnSync(process.execPath, [
-        '--test', `--test-concurrency=${concurrency}`, '--test-reporter=spec', ...files,
-      ], {
-        cwd: ROOT,
-        encoding: 'utf8',
-        // The child of a test runner is told it is a test child. Inheriting
-        // that marker makes Node treat the probe run as an already-running
-        // test context instead of a fresh runner, and it then executes
-        // nothing at all — the run reports success in milliseconds.
-        env: { ...process.env, NODE_TEST_CONTEXT: undefined },
-      })
-      assert.equal(result.status, 0, result.stderr)
-      assert.match(result.stdout, /hold 3/u,
-        'the probe files must actually run')
-      return Date.now() - start
-    }
-    const serial = timeAt(1)
-    const parallel = timeAt(4)
-    assert.ok(serial >= 1400, `the serial run must take the sum of the files: ${serial}ms`)
-    assert.ok(parallel < serial - 600,
-      `the parallel run must be materially faster than the serial one: ${parallel}ms vs ${serial}ms`)
-  } finally {
-    rmSync(directory, { recursive: true, force: true })
+test('the lane runner actually applies concurrency to real test workers', (t) => {
+  // The 400ms window is the measured concurrency contract: four workers
+  // require roughly 1.6s serially and can overlap at concurrency 4.
+  const fixture = testLifecycle(t).tempDir('dsh-lane-concurrency-')
+  const scripts = join(fixture, 'scripts')
+  copyLaneRunnerSources(scripts)
+  writeFileSync(join(scripts, 'test-lanes.mjs'), `export const LANES = {
+  probe: { description: 'concurrency probe', patterns: ['probe/**'], suffixes: ['.test.mjs'] },
+}\n`)
+  const probe = join(fixture, 'test', 'probe')
+  mkdirSync(probe, { recursive: true })
+  for (let index = 0; index < 4; index += 1) {
+    writeFileSync(join(probe, `hold-${index}.test.mjs`),
+      `import test from 'node:test'
+test('hold ${index}', async () => { await new Promise(resolve => setTimeout(resolve, 400)) })
+`)
   }
+  const timeAt = (level) => {
+    const start = Date.now()
+    const result = spawnSync(process.execPath, [
+      join(scripts, 'run-test-lane.mjs'), 'probe', `--test-concurrency=${level}`,
+    ], {
+      cwd: fixture,
+      encoding: 'utf8',
+      timeout: 30_000,
+      env: { ...process.env, NODE_TEST_CONTEXT: undefined,
+        DSH_TEST_JSONL: undefined, DSH_TEST_EFFECTIVE_JSON: undefined },
+    })
+    assert.equal(result.status, 0, result.stderr ?? result.error?.message)
+    assert.match(result.stdout, /hold 3/u, 'the fourth test must run')
+    return Date.now() - start
+  }
+  const serial = timeAt(1)
+  const parallel = timeAt(4)
+  assert.ok(serial >= 1_400, `the serial run must hold all four files: ${serial}ms`)
+  assert.ok(parallel < serial - 600,
+    `the parallel run must overlap test workers: ${parallel}ms vs ${serial}ms`)
 })
 
 // ---------------------------------------------------------------------------
@@ -353,11 +325,7 @@ async function assertSignalReachesWorkerTree(t, signal) {
   // exercises. The probe itself runs in a real `node --test` WORKER and starts
   // a descendant that ignores every forwarded signal.
   const scripts = join(fixture, 'scripts')
-  mkdirSync(join(scripts, 'lib'), { recursive: true })
-  for (const name of ['run-test-lane.mjs', 'test-discovery.mjs']) {
-    writeFileSync(join(scripts, name), readFileSync(join(ROOT, 'scripts', name)))
-  }
-  writeFileSync(join(scripts, 'lib', 'owned-process-group.mjs'), readFileSync(join(ROOT, 'scripts', 'lib', 'owned-process-group.mjs')))
+  copyLaneRunnerSources(scripts)
   writeFileSync(join(scripts, 'test-lanes.mjs'), `export const LANES = {
   probe: { description: 'the wrapper signal probe', patterns: ['probe/**'], suffixes: ['.test.mjs'] },
 }
@@ -441,11 +409,7 @@ test('a lane whose leader handles SIGTERM and exits 0 still yields the interrupt
   const fixture = life.tempDir('dsh-lane-handled-')
   const marker = join(fixture, 'evidence.log')
   const scripts = join(fixture, 'scripts')
-  mkdirSync(join(scripts, 'lib'), { recursive: true })
-  for (const name of ['run-test-lane.mjs', 'test-discovery.mjs']) {
-    writeFileSync(join(scripts, name), readFileSync(join(ROOT, 'scripts', name)))
-  }
-  writeFileSync(join(scripts, 'lib', 'owned-process-group.mjs'), readFileSync(join(ROOT, 'scripts', 'lib', 'owned-process-group.mjs')))
+  copyLaneRunnerSources(scripts)
   writeFileSync(join(scripts, 'test-lanes.mjs'), `export const LANES = {
   probe: { description: 'the wrapper handled-signal probe', patterns: ['probe/**'], suffixes: ['.test.mjs'] },
 }
@@ -460,10 +424,9 @@ test('stays alive until the interruption', async () => {
   await new Promise(() => {})
 })
 `)
-  // NODE_OPTIONS loads this hook in EVERY Node process the lane starts. Only
-  // the `node --test` LEADER is the runner's direct child (it carries `--test`
-  // in execArgv); this makes THAT process handle the interruption and exit 0.
-  writeFileSync(join(fixture, 'signal-hook.cjs'), 'if (process.execArgv.includes("--test")) {\n'
+  // NODE_OPTIONS loads this hook in every Node process. Only the real lane
+  // child is the wrapper's direct child (it carries --lane-child in argv).
+  writeFileSync(join(fixture, 'signal-hook.cjs'), 'if (process.argv[2] === "--lane-child") {\n'
     + '  for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) process.on(signal, () => process.exit(0))\n'
     + '}\n')
   const child = spawn(process.execPath, [join(scripts, 'run-test-lane.mjs'), 'probe'], {
@@ -504,11 +467,7 @@ test('a lane whose worker leaves a running descendant keeps its temp root', { sk
   // A fixture repository whose probe test starts a descendant and RETURNS:
   // `node --test` finishes normally while the descendant keeps the group alive.
   const scripts = join(fixture, 'scripts')
-  mkdirSync(join(scripts, 'lib'), { recursive: true })
-  for (const name of ['run-test-lane.mjs', 'test-discovery.mjs']) {
-    writeFileSync(join(scripts, name), readFileSync(join(ROOT, 'scripts', name)))
-  }
-  writeFileSync(join(scripts, 'lib', 'owned-process-group.mjs'), readFileSync(join(ROOT, 'scripts', 'lib', 'owned-process-group.mjs')))
+  copyLaneRunnerSources(scripts)
   writeFileSync(join(scripts, 'test-lanes.mjs'), `export const LANES = {
   probe: { description: 'the wrapper lingering probe', patterns: ['probe/**'], suffixes: ['.test.mjs'] },
 }
