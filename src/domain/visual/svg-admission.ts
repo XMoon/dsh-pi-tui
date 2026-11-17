@@ -72,11 +72,13 @@ const ALLOWED_ATTRIBUTES: ReadonlySet<string> = new Set([
   'fill-opacity', 'stroke-opacity', 'transform', 'id', 'class', 'offset', 'stop-color',
   'stop-opacity', 'gradientUnits', 'mask', 'clip-path', 'fill-rule', 'font-family',
   'font-size', 'font-weight', 'text-anchor', 'dominant-baseline', 'dx', 'dy',
-  'letter-spacing',
+  'letter-spacing', 'stroke-dasharray', 'stroke-dashoffset', 'stroke-miterlimit', 'color',
 ])
 
 const URI_ATTRIBUTES: ReadonlySet<string> = new Set(['href', 'src'])
 const PAINT_ATTRIBUTES: ReadonlySet<string> = new Set(['fill', 'stroke', 'stop-color', 'clip-path', 'mask'])
+/** The `color` attribute feeds resvg's evaluation of `currentColor` paint. */
+const COLOR_ATTRIBUTE = 'color'
 const NUMBER_OR_LENGTH_ATTRIBUTES: ReadonlySet<string> = new Set([
   'x', 'y', 'cx', 'cy', 'r', 'rx', 'ry', 'x1', 'y1', 'x2', 'y2',
   'dx', 'dy', 'stroke-width', 'stop-opacity',
@@ -93,6 +95,14 @@ const COLOR_PATTERN = /^(#[0-9a-fA-F]{3,8}|[a-zA-Z]+|rgb\([^)]*\)|rgba\([^)]*\)|
 const TRANSFORM_PATTERN = /^[a-zA-Z]+\([^)]*\)(?:\s*,?\s*[a-zA-Z]+\([^)]*\))*$/
 const PAINT_URL_PATTERN = /url\(\s*(?:"([^"]*)"|'([^']*)'|([^)'"]*))\s*\)/g
 const NUMBER_TOKEN_PATTERN = /[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?/g
+// The dash-list grammar: 1–32 separator-separated UNITLESS non-negative finite
+// decimal numbers (fractions allowed, exponents/percentages/functions are not).
+// Each term is additionally bounded by LIMITS.maxCoord in attributeProblem.
+const DASH_TERM = String.raw`(?:\d+\.?\d*|\.\d+)`
+const DASH_SEP = String.raw`(?:[ \t]*,[ \t]*|\s+)`
+const DASH_LIST_PATTERN = new RegExp(`^${DASH_TERM}(?:${DASH_SEP}${DASH_TERM}){0,31}$|^none$`)
+// A single signed UNITLESS finite decimal for dashoffset / miterlimit.
+const SIGNED_DECIMAL_PATTERN = /^[+-]?(?:\d+\.?\d*|\.\d+)$/
 
 // The safe subset admits only ABSOLUTE length units (or a unitless user
 // value). Relative units depend on a font/viewport the gate does not model;
@@ -141,13 +151,19 @@ function checkLength(value: string, what: string, limit: number): number {
   return px
 }
 
-function checkPaint(value: string, what: string): void {
+function checkPaint(value: string, what: string, allowCurrentColor: boolean): void {
   const text = value.trim()
   if (text === '' || text === 'none' || text === 'inherit') return
   // SVG/CSS values are case-insensitive for these keywords. Rejecting only
   // the canonical spelling let `currentcolor` / `VAR(--fg)` through the
   // fixed-colour subset and back to the renderer's black theme fallback.
   const lower = text.toLowerCase()
+  // PR-4B: an EXACT `currentColor` paint value (fill/stroke/stop-color only)
+  // is admitted — resvg evaluates it from the document's static inherited
+  // `color` attribute (or the SVG default). Mixed tokens (`url(#g) currentColor`,
+  // `currentColor blue`) still fall through to the fixed-colour rejection
+  // below: only the WHOLE trimmed value qualifies.
+  if (allowCurrentColor && lower === 'currentcolor') return
   if (lower.includes('var(') || lower.includes('currentcolor')) {
     reject(`${what}: theme-dependent paint is outside the v1 fixed-colour subset`)
   }
@@ -159,6 +175,23 @@ function checkPaint(value: string, what: string): void {
   for (const token of residue.split(/\s+/u)) {
     if (token === '' || token === 'none' || token === 'inherit') continue
     if (!COLOR_PATTERN.test(token)) reject(`${what}: ${clip(token)} is not a colour`)
+  }
+}
+
+/** The static inherited `color` value: one recognizable fixed colour. */
+function checkColor(value: string, what: string): void {
+  const text = value.trim()
+  // Deliberately NOT accepted: `currentColor` (self-reference), `inherit`
+  // (environment dependence), `var(...)`/`url(...)` (dynamic/external), and
+  // every unrecognized keyword — the attribute feeds `currentColor` paint
+  // evaluation, so it must itself be a fixed, statically known colour.
+  if (text === '' || !COLOR_PATTERN.test(text)) {
+    reject(`${what}: ${clip(value)} is not a fixed colour`)
+  }
+  const lower = text.toLowerCase()
+  if (lower === 'currentcolor' || lower === 'inherit' || lower === 'none'
+    || lower.includes('var(') || lower.includes('url(')) {
+    reject(`${what}: ${clip(value)} must be a static fixed colour`)
   }
 }
 
@@ -260,7 +293,49 @@ function attributeProblem(attribute: SaxesAttributeLike): void {
     return
   }
   if (PAINT_ATTRIBUTES.has(local)) {
-    checkPaint(value, what)
+    // Exact `currentColor` paint is admitted for the VALUE fields resvg
+    // evaluates from the static inherited `color` (fill/stroke/stop-color);
+    // clip-path/mask keep the strict fixed-colour subset.
+    checkPaint(value, what, local === 'fill' || local === 'stroke' || local === 'stop-color')
+    return
+  }
+  if (local === COLOR_ATTRIBUTE) {
+    checkColor(value, what)
+    return
+  }
+  if (local === 'stroke-dasharray') {
+    // 1–32 non-negative UNITLESS finite decimals, or `none`; every term is
+    // additionally bounded by the shared coordinate limit. Exponents,
+    // percentages, signs and functions are outside the dash grammar itself.
+    const text = value.trim()
+    if (!DASH_LIST_PATTERN.test(text)) reject(`${what}: ${clip(value)} is not a bounded dash list`)
+    for (const token of text.split(/[ \t]*,[ \t]*|\s+/u)) {
+      if (token === 'none') continue
+      const number = Number(token)
+      if (!Number.isFinite(number) || number > LIMITS.maxCoord) {
+        reject(`${what}: a dash length ${clip(token)} exceeds ${LIMITS.maxCoord}`)
+      }
+    }
+    return
+  }
+  if (local === 'stroke-dashoffset') {
+    // One signed UNITLESS finite decimal, bounded like every coordinate.
+    const text = value.trim()
+    if (!SIGNED_DECIMAL_PATTERN.test(text)) reject(`${what}: ${clip(value)} is not a bounded dash offset`)
+    const number = Number(text)
+    if (!Number.isFinite(number) || Math.abs(number) > LIMITS.maxCoord) {
+      reject(`${what}: a dash offset ${clip(value)} exceeds ${LIMITS.maxCoord}`)
+    }
+    return
+  }
+  if (local === 'stroke-miterlimit') {
+    // resvg clamps the SVG-spec range; the gate admits only the bounded 1..1000.
+    const text = value.trim()
+    if (!SIGNED_DECIMAL_PATTERN.test(text)) reject(`${what}: ${clip(value)} is not a bounded miter limit`)
+    const number = Number(text)
+    if (!Number.isFinite(number) || number < 1 || number > 1000) {
+      reject(`${what}: a miter limit must be between 1 and 1000`)
+    }
     return
   }
   if (NUMBER_OR_LENGTH_ATTRIBUTES.has(local)) {

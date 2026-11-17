@@ -10,6 +10,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { inflateSync } from 'node:zlib'
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { EventEmitter } from 'node:events'
 import { PassThrough } from 'node:stream'
@@ -26,6 +27,7 @@ const SVG_SOURCE = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 32">
   + '<text x="4" y="20" font-size="12" fill="#ffffff">Gateway</text></svg>'
 
 const TINY_PNG_BASE64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='
+
 
 test('the loader dedupes one digest, notifies on settle and keeps an unrequested digest idle', async () => {
   let rasterCalls = 0
@@ -74,6 +76,125 @@ const nativeRasterSkip = process.platform === 'linux' || process.platform === 'd
 
 test('the isolated raster lane is enabled on Linux and macOS', { skip: nativeRasterSkip }, () => {
   assert.equal(isolatedSvgRasterSupported(), true)
+})
+
+// ── PR-4B: the new static paint attributes reach REAL resvg pixels ────────
+
+/**
+ * Decode one RGBA PNG (the rasterizer's own output) into its IHDR dimensions
+ * and raw pixel rows, so the static-attribute positives assert the PAINTED
+ * COLOR at a known coordinate — not merely that resvg produced any bytes.
+ * Uses only `node:zlib` (the test owns the tiny PNG defilter loop).
+ */
+function decodePngRgba(bytes: Uint8Array): { width: number; height: number; at(x: number, y: number): [number, number, number, number] } {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+  assert.equal(bytes[0], 0x89)
+  assert.equal(bytes[1], 0x50, 'PNG signature')
+  const width = view.getUint32(16)
+  const height = view.getUint32(20)
+  let offset = 8
+  const idat: Uint8Array[] = []
+  while (offset + 8 <= bytes.length) {
+    const length = view.getUint32(offset)
+    const type = Buffer.from(bytes.buffer, bytes.byteOffset + offset + 4, 4).toString('latin1')
+    if (type === 'IDAT') idat.push(bytes.subarray(offset + 8, offset + 8 + length))
+    offset += 12 + length
+  }
+  const raw = inflateSync(Buffer.concat(idat.map(copy => Buffer.from(copy))))
+  const stride = width * 4 + 1
+  const rows: Buffer[] = []
+  let previous = Buffer.alloc(width * 4)
+  for (let y = 0; y < height; y++) {
+    const line = Buffer.from(raw.subarray(y * stride, (y + 1) * stride))
+    const filter = line[0]
+    const current = Buffer.from(line.subarray(1))
+    for (let x = 0; x < width * 4; x++) {
+      const left = x >= 4 ? current[x - 4]! : 0
+      const up = previous[x]!
+      const upLeft = x >= 4 ? previous[x - 4]! : 0
+      if (filter === 1) current[x] = (current[x]! + left) & 0xff
+      else if (filter === 2) current[x] = (current[x]! + up) & 0xff
+      else if (filter === 3) current[x] = (current[x]! + ((left + up) >> 1)) & 0xff
+      else if (filter === 4) {
+        const p = left + up - upLeft
+        const pa = Math.abs(p - left)
+        const pb = Math.abs(p - up)
+        const pc = Math.abs(p - upLeft)
+        current[x] = (current[x]! + (pa <= pb && pa <= pc ? left : pb <= pc ? up : upLeft)) & 0xff
+      }
+    }
+    rows.push(current)
+    previous = current
+  }
+  return {
+    width,
+    height,
+    at(x: number, y: number): [number, number, number, number] {
+      const row = rows[y]!
+      return [row[x * 4]!, row[x * 4 + 1]!, row[x * 4 + 2]!, row[x * 4 + 3]!]
+    },
+  }
+}
+
+test('a real child raster renders the new static paint attributes into distinct pixels', { skip: nativeRasterSkip }, async () => {
+  // One figure per new attribute, each with a known coordinate/color contract:
+  // the dash pattern leaves the background visible between dashes; the offset
+  // shifts the visible dash phase; currentColor resolves from the inherited
+  // static `color` attribute.
+  const dashSvg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">'
+    + '<rect width="128" height="128" fill="#000000"/>'
+    + '<path d="M8 64 L120 64" stroke="#ff0000" stroke-width="16" stroke-dasharray="32 32"/></svg>'
+  const offsetSvg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">'
+    + '<rect width="128" height="128" fill="#000000"/>'
+    + '<path d="M8 64 L120 64" stroke="#00ff00" stroke-width="16" stroke-dasharray="16 48" stroke-dashoffset="16"/></svg>'
+  const colorSvg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">'
+    + '<rect width="128" height="128" fill="#000000"/>'
+    + '<rect x="16" y="16" width="96" height="96" color="#0000ff" fill="currentColor"/></svg>'
+  const miterSvg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">'
+    + '<rect width="128" height="128" fill="#000000"/>'
+    + '<path d="M20 108 L64 28 L108 108" fill="none" stroke="#ffff00" stroke-width="8" stroke-miterlimit="4"/></svg>'
+  const [dash, offset, color, miter] = await Promise.all([
+    rasterizeSvg(dashSvg, { targetWidth: 128, signal: new AbortController().signal }),
+    rasterizeSvg(offsetSvg, { targetWidth: 128, signal: new AbortController().signal }),
+    rasterizeSvg(colorSvg, { targetWidth: 128, signal: new AbortController().signal }),
+    rasterizeSvg(miterSvg, { targetWidth: 128, signal: new AbortController().signal }),
+  ])
+  // Each render is a real bounded PNG of the exact requested canvas.
+  for (const [name, result] of [['dash', dash], ['offset', offset], ['color', color], ['miter', miter]] as const) {
+    assert.equal(result.widthPx, 128, `${name} width`)
+    assert.equal(result.heightPx, 128, `${name} height`)
+    const decoded = decodePngRgba(result.png)
+    assert.equal(decoded.width, 128)
+    assert.equal(decoded.height, 128)
+  }
+  // Dash: an odd dash cycle over 112px leaves black background gaps on the line.
+  const dashImage = decodePngRgba(dash.png)
+  const dashReds: boolean[] = []
+  const dashBlacks: boolean[] = []
+  for (let x = 8; x <= 120; x++) {
+    const [r, g, b] = dashImage.at(x, 64)
+    if (r > 200 && g < 60 && b < 60) dashReds.push(true)
+    if (r < 40 && g < 40 && b < 40) dashBlacks.push(true)
+  }
+  assert.ok(dashReds.length > 0, 'the dash stroke paints red segments')
+  assert.ok(dashBlacks.length > 0, 'the dash gap keeps the black background (the dash pattern is really applied)')
+  // Offset: shifting the dash phase by 16px paints green at a coordinate the
+  // unshifted pattern leaves black (the offset really moves the dash phase).
+  const offsetImage = decodePngRgba(offset.png)
+  const offsetShiftedGreens: boolean[] = []
+  for (let x = 8; x <= 120; x++) {
+    const [r, g, b] = offsetImage.at(x, 64)
+    if (r < 60 && g > 200 && b < 60) offsetShiftedGreens.push(true)
+  }
+  assert.ok(offsetShiftedGreens.length > 0, 'the offset dash stroke paints green segments')
+  // currentColor: the inherited static color attribute becomes the fill.
+  const colorImage = decodePngRgba(color.png)
+  const [cr, cg, cb] = colorImage.at(64, 64)
+  assert.ok(cb > 150 && cr < 60 && cg < 60, `currentColor resolved to the inherited blue, saw rgb(${cr},${cg},${cb})`)
+  // Miter: the miter limit of 4 keeps the sharp corner painted yellow.
+  const miterImage = decodePngRgba(miter.png)
+  const [mr, mg, mb] = miterImage.at(64, 34)
+  assert.ok(mr > 150 && mg > 150 && mb < 80, `the mitered corner paints yellow, saw rgb(${mr},${mg},${mb})`)
 })
 
 test('the Linux launcher keeps the verified ulimit cap and the Darwin launcher has no shell', async () => {
