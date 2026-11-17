@@ -974,12 +974,20 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
   /** Scroll a non-list body by one visible page. Panel-local, never a Host intent. */
   private pageBody(direction: -1 | 1): void {
     const page = Math.max(1, Math.floor(this.deps.rows()) - 4)
-    if (this.snapshot.mode === 'detail') this.detailScroll = Math.max(0, this.detailScroll + direction * page)
-    else if (this.snapshot.mode === 'history') {
+    const frame = this.frame
+    if (frame === undefined) return
+    const layout = scheduleWorkspaceLayout(Math.min(frame.width, Math.max(1, Math.floor(this.deps.columns()))), frame.height)
+    if (this.snapshot.mode === 'detail') {
+      this.detailScroll = Math.max(0, this.detailScroll + direction * page)
+      this.retirePressedOnPendingViewport(frame, layout, 'detail')
+    } else if (this.snapshot.mode === 'history') {
       this.historyScroll = Math.max(0, this.historyScroll + direction * page)
       this.historyScrollPinned = true
+      this.retirePressedOnPendingViewport(frame, layout, 'history')
+    } else if (this.snapshot.mode === 'help') {
+      this.helpScroll = Math.max(0, this.helpScroll + direction * page)
+      this.retirePressedOnPendingViewport(frame, layout, 'help')
     }
-    else if (this.snapshot.mode === 'help') this.helpScroll = Math.max(0, this.helpScroll + direction * page)
     this.deps.requestRender()
   }
 
@@ -988,6 +996,46 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
   }
 
   // ── rendering ──────────────────────────────────────────────────────────────
+
+  /** The shared chrome budget of the CURRENT snapshot: which page chrome the
+   *  frame paints and what body height it leaves. `render` paints from it; the
+   *  pointer handlers read `bodyHeight` to predict the pending painted
+   *  viewport with the SAME math (no drift between predict and paint). */
+  private chromeBudget(paintedWidth: number, rows: number): {
+    readonly isListPage: boolean
+    readonly banner: PaintedBanner | undefined
+    readonly editorNotice: ScheduleWorkspaceSnapshot['notice']
+    readonly editorNoticeLines: readonly string[]
+    readonly bodyHeight: number
+  } {
+    const isListPage = this.snapshot.mode === 'list' && this.snapshot.confirm === undefined
+    const banner = this.listBanner()
+    const editorNotice = this.snapshot.mode === 'editor' && this.snapshot.confirm === undefined
+      ? this.snapshot.notice
+      : undefined
+    const wrappedEditorNotice = editorNotice === undefined
+      ? []
+      : wrapTextWithAnsi(
+          sanitizedPhysicalLine(editorNotice.text),
+          Math.max(1, paintedWidth - 2),
+        )
+    const statusBudget = Math.max(1, rows - 1 - (isListPage ? 2 : 0) - 1 - 1)
+    const editorNoticeLines = wrappedEditorNotice.length > statusBudget
+      ? [
+          ...wrappedEditorNotice.slice(0, statusBudget - 1),
+          `${truncateToWidth(
+            wrappedEditorNotice[statusBudget - 1] ?? '',
+            Math.max(1, paintedWidth - 3),
+            '',
+            false,
+          )}…`,
+        ]
+      : wrappedEditorNotice
+    const statusRows = editorNotice !== undefined ? editorNoticeLines.length : banner === undefined ? 0 : 1
+    const chromeRows = 1 + (isListPage ? 2 : 0) + statusRows + 1
+    const bodyHeight = Math.max(0, rows - chromeRows)
+    return { isListPage, banner, editorNotice, editorNoticeLines, bodyHeight }
+  }
 
   render(width: number): string[] {
     if (this.disposed) return []
@@ -1013,28 +1061,10 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
     // A stale/error catalog is a fact about EVERY page: the detail and history
     // snapshots behind it were read before the invalidation, so the banner is
     // painted above the body instead of only inside the list.
-    const banner = this.listBanner()
-    const editorNotice = snapshot.mode === 'editor' && snapshot.confirm === undefined
-      ? snapshot.notice
-      : undefined
-    const wrappedEditorNotice = editorNotice === undefined
-      ? []
-      : wrapTextWithAnsi(
-          sanitizedPhysicalLine(editorNotice.text),
-          Math.max(1, paintedWidth - 2),
-        )
-    const statusBudget = Math.max(1, rows - 1 - (isListPage ? 2 : 0) - 1 - 1)
-    const editorNoticeLines = wrappedEditorNotice.length > statusBudget
-      ? [
-          ...wrappedEditorNotice.slice(0, statusBudget - 1),
-          `${truncateToWidth(
-            wrappedEditorNotice[statusBudget - 1] ?? '',
-            Math.max(1, paintedWidth - 3),
-            '',
-            false,
-          )}…`,
-        ]
-      : wrappedEditorNotice
+    const budget = this.chromeBudget(paintedWidth, rows)
+    const banner = budget.banner
+    const editorNotice = budget.editorNotice
+    const editorNoticeLines = budget.editorNoticeLines
     if (editorNotice !== undefined) {
       for (const [index, text] of editorNoticeLines.entries()) {
         const prefix = index === 0 ? `${editorNotice.kind === 'error' ? '✗' : 'ℹ'} ` : '  '
@@ -1044,9 +1074,7 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
     } else if (banner !== undefined) {
       lines.push(banner.paint(truncateToWidth(sanitizedPhysicalLine(banner.text), paintedWidth, '…', false)))
     }
-    const statusRows = editorNotice !== undefined ? editorNoticeLines.length : banner === undefined ? 0 : 1
-    const chromeRows = 1 + (isListPage ? 2 : 0) + statusRows + 1
-    const bodyHeight = Math.max(0, rows - chromeRows)
+    const bodyHeight = budget.bodyHeight
 
     if (snapshot.confirm !== undefined) {
       this.paintSingleBody(lines, regions, paintedWidth, bodyHeight, this.confirmBody(snapshot.confirm, paintedWidth), 0)
@@ -2217,6 +2245,78 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
     this.activateHit(hit)
   }
 
+  /** The viewport position the NEXT paint will draw for ONE pane, computed
+   *  with the same clamp/reveal math the paint paths use. This lets the wheel
+   *  handler retire a pressed gesture at the MUTATION boundary — before the
+   *  scheduled render runs — while a wheel the paint would clamp back (edge,
+   *  no-overflow content, caret-follow reveal) still keeps the press. */
+  private pendingEffectiveViewport(
+    frame: PaintedFrame,
+    layout: ReturnType<typeof scheduleWorkspaceLayout>,
+    pane: 'list' | 'detail' | 'history' | 'editor' | 'help',
+  ): { readonly pane: 'list' | 'detail' | 'history' | 'editor' | 'help'; readonly value: number } | undefined {
+    if (this.snapshot.confirm !== undefined) return undefined
+    const { bodyHeight } = this.chromeBudget(frame.width, frame.height)
+    if (pane === 'help') {
+      return { pane, value: this.scrolled(this.helpScroll, this.helpBody(frame.width).length, bodyHeight) }
+    }
+    if (layout === 'wide') {
+      const leftWidth = this.wideLeftWidth(frame.width)
+      const rightWidth = Math.max(1, frame.width - 2 - leftWidth)
+      if (pane === 'list') {
+        return { pane, value: this.listViewport(this.listBody(leftWidth), bodyHeight) }
+      }
+      const right = this.wideRightBody(rightWidth)
+      switch (pane) {
+        case 'detail':
+          return { pane, value: this.scrolled(this.detailScroll, right.length, bodyHeight) }
+        case 'history':
+          return { pane, value: this.revealHistorySelection(right, this.historyScroll, bodyHeight) }
+        case 'editor':
+          return {
+            pane,
+            value: this.chooser === undefined
+              ? this.revealField(right, this.editorScroll, bodyHeight)
+              : this.revealChooser(right, this.editorScroll, bodyHeight),
+          }
+        default:
+          return undefined
+      }
+    }
+    switch (pane) {
+      case 'list':
+        return { pane, value: this.listViewport(this.listBody(frame.width), bodyHeight) }
+      case 'detail':
+        return { pane, value: this.scrolled(this.detailScroll, this.detailBody(this.detailEntry(), frame.width).length, bodyHeight) }
+      case 'history': {
+        const content = this.historyBody(frame.width)
+        return { pane, value: this.revealHistorySelection(content, this.historyScroll, bodyHeight) }
+      }
+      case 'editor': {
+        const content = this.editorBody(frame.width)
+        return {
+          pane,
+          value: this.chooser === undefined
+            ? this.revealField(content, this.editorScroll, bodyHeight)
+            : this.revealChooser(content, this.editorScroll, bodyHeight),
+        }
+      }
+      default:
+        return undefined
+    }
+  }
+
+  /** Retire the pressed gesture when the pointed pane's pending painted
+   *  viewport differs from the one on screen: an effective scroll is a gesture
+   *  boundary OBSERVABLE NOW, not only at the next frame (a burst of opposite
+   *  wheels that returns to the press-time position before the paint must not
+   *  revive the press). */
+  private retirePressedOnPendingViewport(frame: PaintedFrame, layout: ReturnType<typeof scheduleWorkspaceLayout>, pane: 'list' | 'detail' | 'history' | 'editor' | 'help'): void {
+    const pending = this.pendingEffectiveViewport(frame, layout, pane)
+    if (pending === undefined) return
+    if (this.paintedViewport[pending.pane] !== pending.value) this.pressed = undefined
+  }
+
   handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
     if (this.disposed || event.type !== 'wheel') return undefined
     const frame = this.frame
@@ -2225,23 +2325,29 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
     if (delta === 0) return undefined
     const step = delta < 0 ? -1 : 1
     if (this.snapshot.confirm !== undefined) return undefined
+    const layout = scheduleWorkspaceLayout(Math.min(frame.width, Math.max(1, Math.floor(this.deps.columns()))), frame.height)
     if (this.snapshot.mode === 'list') {
-      const layout = scheduleWorkspaceLayout(frame.width, frame.height)
       if (layout === 'wide' && event.x >= this.wideLeftWidth(frame.width) + 2) {
         this.detailScroll = Math.max(0, this.detailScroll + step)
+        this.retirePressedOnPendingViewport(frame, layout, 'detail')
       } else {
         this.listScroll = Math.max(0, this.listScroll + step)
         this.listScrollPinned = true
+        this.retirePressedOnPendingViewport(frame, layout, 'list')
       }
     } else if (this.snapshot.mode === 'detail') {
       this.detailScroll = Math.max(0, this.detailScroll + step)
+      this.retirePressedOnPendingViewport(frame, layout, 'detail')
     } else if (this.snapshot.mode === 'history') {
       this.historyScroll = Math.max(0, this.historyScroll + step)
       this.historyScrollPinned = true
+      this.retirePressedOnPendingViewport(frame, layout, 'history')
     } else if (this.snapshot.mode === 'editor') {
       this.editorScroll = Math.max(0, this.editorScroll + step)
+      this.retirePressedOnPendingViewport(frame, layout, 'editor')
     } else if (this.snapshot.mode === 'help') {
       this.helpScroll = Math.max(0, this.helpScroll + step)
+      this.retirePressedOnPendingViewport(frame, layout, 'help')
     }
     this.deps.requestRender()
     return { handled: true, render: true }

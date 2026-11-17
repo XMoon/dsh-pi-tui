@@ -1091,3 +1091,193 @@ test('an effective RAW Editor wheel refuses a stale Esc-back press', async () =>
     controller.dispose()
   }
 })
+
+test('a same-turn press -> effective wheel -> release cannot commit the stale Help action', async () => {
+  const port = createRecordingPort()
+  const controller = createController(port, false)
+  const vt = new VirtualTerminal(120, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  started.add(app)
+  const handle = app.openScheduleWorkspace({
+    snapshot: () => controller.snapshot(),
+    dispatch: intent => { controller.dispatch(intent) },
+    onClose: () => {},
+  })
+  const unsubscribe = controller.subscribe(() => handle.update(controller.snapshot()))
+  try {
+    await controller.whenIdle()
+    handle.update(controller.snapshot())
+    await vt.waitForRender()
+    vt.sendInput('?')
+    await vt.waitForRender()
+    assert.ok(paintRows(vt).some(line => line.includes('Esc close help')), 'precondition: the help page is painted')
+    const close = paintCell(vt, 'Esc close help')
+    // NO render between the press, the effective wheel and the release: the
+    // real terminal delivers these in one turn while the paint is still
+    // pending, so the retirement must happen at the mutation boundary.
+    wheelPress(vt, close)
+    wheelScroll(vt, { row: Math.max(2, close.row - 3), column: 20 })
+    wheelScroll(vt, { row: Math.max(2, close.row - 3), column: 20 })
+    wheelRelease(vt, close)
+    await vt.waitForRender()
+    assert.ok(paintRows(vt).some(line => line.includes('Esc close help')), 'the stale close-help press must not commit across a same-turn effective wheel')
+    // The away-and-back burst (still no renders) must not revive it either.
+    wheelPress(vt, close)
+    wheelScroll(vt, { row: Math.max(2, close.row - 3), column: 20 })
+    vt.sendInput(`\x1b[<64;${close.column + 1};${Math.max(2, close.row - 3)}M`)
+    wheelRelease(vt, close)
+    await vt.waitForRender()
+    assert.ok(paintRows(vt).some(line => line.includes('Esc close help')), 'a same-turn away-and-back wheel burst must not revive the stale press')
+    // Fresh control: after everything settles, a fresh click still closes.
+    await controller.whenIdle()
+    for (let turn = 0; turn < 4; turn += 1) {
+      await new Promise<void>(resolve => setImmediate(resolve))
+      await vt.waitForRender()
+    }
+    const fresh = paintCell(vt, 'Esc close help')
+    const freshCell = { row: fresh.row, column: fresh.column + 3 }
+    wheelPress(vt, freshCell)
+    wheelRelease(vt, freshCell)
+    await vt.waitForRender()
+    assert.ok(!paintRows(vt).some(line => line.includes('Esc close help')), 'a fresh close-help click still works after the bursts')
+  } finally {
+    unsubscribe()
+    app.dispose()
+    controller.dispose()
+  }
+})
+
+test('a same-turn press -> effective wheel -> release cannot move the History selection', async () => {
+  const port = createRecordingPort()
+  const records = Array.from({ length: 60 }, (_, index) => ({
+    messageId: `m${index}`,
+    targetSessionId: 'session-target',
+    scheduledAt: '2026-06-01T09:00:00.000Z',
+    deliveredAt: '2026-06-01T09:01:00.000Z',
+    prompt: `history entry ${String(index).padStart(2, '0')} with a wrap-length prompt line`,
+  }))
+  port.history = async request => ({
+    id: request.id,
+    status: 'ready',
+    nextBefore: null,
+    earlierRecordsUnavailable: false,
+    earlierRecordsPruned: false,
+    records,
+  } as unknown as Awaited<ReturnType<SchedulePort['history']>>)
+  const controller = createController(port, true)
+  const vt = new VirtualTerminal(120, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  started.add(app)
+  const handle = app.openScheduleWorkspace({
+    snapshot: () => controller.snapshot(),
+    dispatch: intent => { controller.dispatch(intent) },
+    onClose: () => {},
+  })
+  const unsubscribe = controller.subscribe(() => handle.update(controller.snapshot()))
+  try {
+    await controller.whenIdle()
+    handle.update(controller.snapshot())
+    await vt.waitForRender()
+    vt.sendInput('h')
+    await vt.waitForRender()
+    // Fresh selection: #2 gains the marker.
+    const recordTwo = paintCell(vt, '#2 Delivered')
+    wheelPress(vt, recordTwo)
+    wheelRelease(vt, recordTwo)
+    await vt.waitForRender()
+    assert.ok(paintRows(vt).some(line => line.includes('> #2 Delivered')), 'precondition: a fresh record click selects #2')
+    // Same-turn stale journey: press the UNSELECTED #1 row and wheel without
+    // any render between press, wheel and release.
+    const recordOne = paintCell(vt, '#1 Delivered')
+    wheelPress(vt, recordOne)
+    for (let notch = 0; notch < 2; notch += 1) wheelScroll(vt, { row: Math.min(recordOne.row, 12), column: 20 })
+    wheelRelease(vt, recordOne)
+    await vt.waitForRender()
+    assert.ok(paintRows(vt).some(line => line.includes('> #2 Delivered')), 'the stale unselected-record press must not move the selection across a same-turn wheel')
+    assert.ok(!paintRows(vt).some(line => line.includes('> #1 Delivered')), 'the pressed unselected record must stay unselected')
+    // Fresh control: a fresh click still selects.
+    await controller.whenIdle()
+    for (let turn = 0; turn < 4; turn += 1) {
+      await new Promise<void>(resolve => setImmediate(resolve))
+      await vt.waitForRender()
+    }
+    const freshOne = paintCell(vt, '#1 Delivered')
+    const freshCell = { row: freshOne.row, column: freshOne.column + 3 }
+    wheelPress(vt, freshCell)
+    wheelRelease(vt, freshCell)
+    await vt.waitForRender()
+    assert.ok(paintRows(vt).some(line => line.includes('> #1 Delivered')), 'a fresh record click still selects after the burst')
+  } finally {
+    unsubscribe()
+    app.dispose()
+    controller.dispose()
+  }
+})
+
+test('a same-turn wheel retires the RAW Editor press when effective and keeps it when clamped', async () => {
+  const longPrompt = Array.from({ length: 60 }, (_, line) => `editor proof line ${String(line).padStart(2, '0')}`).join('\n')
+  const port = createRecordingPort([task({ id: 'task-a', title: 'Alpha report', prompt: longPrompt })])
+  const controller = createController(port, true)
+  const vt = new VirtualTerminal(120, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  started.add(app)
+  const handle = app.openScheduleWorkspace({
+    snapshot: () => controller.snapshot(),
+    dispatch: intent => { controller.dispatch(intent) },
+    onClose: () => {},
+  })
+  const unsubscribe = controller.subscribe(() => handle.update(controller.snapshot()))
+  try {
+    await controller.whenIdle()
+    handle.update(controller.snapshot())
+    await vt.waitForRender()
+    vt.sendInput('e')
+    await vt.waitForRender()
+    assert.ok(paintRows(vt).some(line => line.includes('Instruction')), 'precondition: the editor page is painted')
+    // Effective leg: focus the RAW field and put the caret in the MIDDLE of
+    // the field, with painted window room below it, so a wheel-down really
+    // moves the painted window while the reveal keeps the caret visible.
+    vt.sendInput('\t')
+    await vt.waitForRender()
+    for (let step = 0; step < 20; step += 1) vt.sendInput('\x1b[A')
+    await vt.waitForRender()
+    const escBack = paintCell(vt, 'Esc back')
+    wheelPress(vt, escBack)
+    for (let notch = 0; notch < 2; notch += 1) wheelScroll(vt, { row: Math.max(2, escBack.row - 3), column: 20 })
+    wheelRelease(vt, escBack)
+    await vt.waitForRender()
+    assert.equal(controller.snapshot().mode, 'editor', 'the stale Esc-back press must not commit across a same-turn effective wheel')
+    // Clamped leg: first scroll the window DOWN to its caret-anchored maximum
+    // (no press alive, so nothing is retired), until the painted window start
+    // stops moving. From there a wheel-down is revealed back to the caret row:
+    // the pending painted viewport equals the painted one, so a fresh press
+    // stays VALID and the same-cell release still leaves the editor.
+    for (let step = 0; step < 40; step += 1) wheelScroll(vt, { row: 12, column: 20 })
+    await vt.waitForRender()
+    const windowStart = (): number => {
+      for (const line of paintRows(vt)) {
+        const match = /editor proof line (\d+)/.exec(line)
+        if (match) return Number(match[1])
+      }
+      return -1
+    }
+    const beforeClamp = windowStart()
+    for (let step = 0; step < 40; step += 1) wheelScroll(vt, { row: 12, column: 20 })
+    await vt.waitForRender()
+    assert.equal(windowStart(), beforeClamp, 'precondition: the editor window reached its reveal-anchored maximum')
+    const escBackEnd = paintCell(vt, 'Esc back')
+    const escCell = { row: escBackEnd.row, column: escBackEnd.column + 3 }
+    wheelPress(vt, escCell)
+    for (let notch = 0; notch < 2; notch += 1) wheelScroll(vt, { row: Math.max(2, escBackEnd.row - 3), column: 20 })
+    wheelRelease(vt, escCell)
+    await vt.waitForRender()
+    assert.notEqual(controller.snapshot().mode, 'editor', 'a caret-reveal-clamped same-turn wheel keeps the legitimate Esc-back press')
+  } finally {
+    unsubscribe()
+    app.dispose()
+    controller.dispose()
+  }
+})
