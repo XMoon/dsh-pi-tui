@@ -187,6 +187,71 @@ describe("SelectList mouse parity (last-painted rows)", () => {
 		assert.strictEqual(selected, undefined, "the repainted row must not receive the pressed item's click");
 	});
 
+	it("retires a pressed row when an effective wheel moves the selection (X079)", () => {
+		const items = Array.from({ length: 6 }, (_, i) => ({ value: `item-${i}`, label: `Item ${i}` }));
+		const list = new SelectList(items, 5, testTheme);
+		let applied: string | undefined;
+		list.onSelect = (item) => {
+			applied = item.value;
+		};
+		list.render(40); // row 0 = item-0, row 1 = item-1 (selection 0)
+		list.handleMouse(mouse("press", 0));
+		// An effective wheel notch moves the selection to item-1 while the
+		// painted window keeps its start: row 0 still shows item-0.
+		list.handleMouse({
+			type: "wheel",
+			button: "none",
+			x: 1,
+			y: 1,
+			screenX: 1,
+			screenY: 1,
+			width: 40,
+			height: 5,
+			wheelDelta: 1,
+			shift: false,
+			alt: false,
+			ctrl: false,
+		});
+		assert.strictEqual(list.getSelectedItem()?.value, "item-1", "the wheel moved the live selection");
+		list.render(40);
+		// The same-cell release on the still-painted pressed row must NOT
+		// activate the pre-wheel item.
+		list.handleMouse(mouse("click", 0));
+		assert.strictEqual(applied, undefined, "the stale pressed item must not be activated after an effective wheel");
+		// A fresh gesture on the newly selected row still applies.
+		list.handleMouse(mouse("press", 1));
+		list.handleMouse(mouse("click", 1));
+		assert.strictEqual(applied, "item-1", "a fresh click still applies the live selection");
+	});
+
+	it("keeps a pressed row across a boundary wheel that cannot move (X079)", () => {
+		const items = Array.from({ length: 3 }, (_, i) => ({ value: `item-${i}`, label: `Item ${i}` }));
+		const list = new SelectList(items, 5, testTheme);
+		let applied: string | undefined;
+		list.onSelect = (item) => {
+			applied = item.value;
+		};
+		list.render(40);
+		list.handleMouse(mouse("press", 0));
+		// Wheel UP at the first item: selection clamps, nothing moves.
+		list.handleMouse({
+			type: "wheel",
+			button: "none",
+			x: 1,
+			y: 0,
+			screenX: 1,
+			screenY: 0,
+			width: 40,
+			height: 5,
+			wheelDelta: -1,
+			shift: false,
+			alt: false,
+			ctrl: false,
+		});
+		list.handleMouse(mouse("click", 0));
+		assert.strictEqual(applied, "item-0", "a zero-effect boundary wheel keeps the existing same-cell gesture");
+	});
+
 	it("clears the pressed identity when the filter empties the list", () => {
 		const items = [
 			{ value: "a", label: "A" },

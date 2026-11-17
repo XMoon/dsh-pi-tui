@@ -139,7 +139,14 @@ export class SelectList implements Component {
 			const delta = event.wheelDelta < 0 ? -1 : 1;
 			const previousIndex = this.selectedIndex;
 			this.selectedIndex = Math.max(0, Math.min(this.filteredItems.length - 1, this.selectedIndex + delta));
-			if (this.selectedIndex !== previousIndex) this.notifySelectionChange();
+			if (this.selectedIndex !== previousIndex) {
+				// An EFFECTIVE wheel moves the selection under the pressed row:
+				// the release must not activate the item the user pressed before
+				// navigating away (a boundary wheel that cannot move keeps the
+				// existing same-cell contract). (dsh-pi-tui divergence X079.)
+				this.mousePressedItem = undefined;
+				this.notifySelectionChange();
+			}
 			return { handled: true, render: this.selectedIndex !== previousIndex };
 		}
 		// Hover must not change selection: the visible range is centered on it.

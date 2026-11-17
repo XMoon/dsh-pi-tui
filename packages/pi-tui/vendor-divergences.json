@@ -8074,6 +8074,105 @@
     ],
     "notes": "Source-verified against the pinned v1.5.0 tree (f9a2636): the upstream diff loop starts at row 0 and full-renders on firstChanged < prevViewportTop. Evidence level is the fork test suite (1481 pass incl. the new X078 group); the real-terminal flicker reproduction belongs to the PR record, not this ledger. Every incremental commit now keeps the full previous cache (raw, processed text and image metadata) for the skipped above-viewport prefix, so the model equals committed scrollback; a later full render reprocesses the raw, repaints the row and deletes exactly the images the model still holds."
    }
+  },
+  "X079": {
+   "title": "SelectList retires a pressed row when an effective wheel moves the selection",
+   "status": "ACTIVE",
+   "category": [
+    "BUGFIX_MISSING_UPSTREAM"
+   ],
+   "risk": "MEDIUM",
+   "files": [
+    "src/components/select-list.ts"
+   ],
+   "why": "The select list records the row identity a mouse press started on, and a synthesized click may only activate that exact identity. The wheel branch moves selectedIndex and repaints, but it did not retire the pressed identity. The painted-row hit map is built from the FINAL rows of the last render, and the wheel only moves the visible window's start when the selection leaves the half-window; with a list at or below the visible cap (or a selection still inside the window) the pressed row keeps showing the SAME item after the wheel. The stale release then activates the pre-wheel item — in the mounted editor autocomplete this applies the old completion and closes the dropdown. Upstream has the same behavior; the fork now treats an EFFECTIVE wheel (the selection actually moved) as a gesture boundary, while a boundary/zero-effect wheel keeps the existing same-cell contract so a clamped wheel never cancels a legitimate press.",
+   "changedSurface": [
+    "SelectList.handleMouse wheel branch: when the wheel actually moved selectedIndex, clear mousePressedItem together with notifySelectionChange(); the subsequent same-cell click fails its exact-identity check and activates nothing.",
+    "A wheel that cannot move the selection (first/last item boundary or empty list) keeps the pressed identity: the existing same-cell contract is unchanged.",
+    "No new public API, no change to the press/click identity rules, no change to the rendered rows or the selection window math."
+   ],
+   "dependencies": {
+    "vendorInternal": {
+     "audited": true,
+     "items": [
+      "The Editor's internal autocomplete dropdown forwards press/click/wheel to its own SelectList instance through the mouse-parity wrapper; the wrapper's own pressed-list identity and the painted-list fence are unchanged.",
+      "SelectList.onSelect / onSelectionChange callbacks keep their existing semantics and ordering; only the pressed identity is retired on an effective wheel.",
+      "Other SelectList consumers (the slash-command and any host-side select lists) share the same primitive and therefore the same guard; no consumer relied on activating a pre-wheel item after the wheel moved the selection."
+     ],
+     "notes": "The change is confined to the wheel branch of one component; the render, hit-map construction and click identity rules are untouched."
+    },
+    "inheritanceStructural": {
+     "audited": true,
+     "items": [
+      "SelectList implements Component directly and is not subclassed in the fork; no subclass or structural consumer overrides the pressed identity.",
+      "The Editor mounts the list privately (not in the TUI tree) and rewrites dispatch targets to itself; that wrapper does not read SelectList's private pressed state."
+     ],
+     "notes": "No inheritance or structural edge reaches the pressed item."
+    },
+    "host": {
+     "audited": true,
+     "items": [
+      "src/tui/file-completion path commands use the fork Editor autocomplete; the host does not construct SelectList directly for the dropdown.",
+      "The mounted fullscreen editor autocomplete journey (real SGR press -> wheel -> release) no longer applies the pre-wheel completion; a fresh click still applies the live selection."
+     ],
+     "notes": "Host-visible behavior change: a stale completion can no longer be submitted from a pre-wheel press; fresh clicks and keyboard Tab accept the live selection as before."
+    },
+    "publicExtension": {
+     "audited": true,
+     "items": [
+      "SelectList is exported from the fork's public index; its public methods and callbacks are unchanged, and the pressed identity is private.",
+      "No extension-facing type or option changes."
+     ],
+     "notes": "Purely behavioral hardening inside an existing component."
+    },
+    "behavioral": {
+     "audited": true,
+     "items": [
+      "Press item A -> effective wheel moves the selection to B (A still painted on the pressed row) -> same-cell release activates NOTHING and the list stays open.",
+      "Press item A -> wheel at the first/last boundary (selection cannot move) -> same-cell release still activates A (existing contract).",
+      "Press item A -> filter/repaint swaps the row identity -> release still activates nothing (pre-existing exact-identity rule).",
+      "Keyboard selection (arrow/PageUp/PageDown) followed by Enter/Tab is unaffected."
+     ],
+     "notes": "The guard is keyed on the selection ACTUALLY moving, not on the wheel event alone."
+    }
+   },
+   "tests": [
+    "packages/pi-tui/test/select-list.test.ts: retires a pressed row when an effective wheel moves the selection (X079) — fails on the previous code",
+    "packages/pi-tui/test/select-list.test.ts: keeps a pressed row across a boundary wheel that cannot move (X079)",
+    "test/integration/autocomplete-active-screen-repaint.test.ts: fullscreen stale autocomplete press journey (end-to-end positive; the discriminating guard is the SelectList unit test above)"
+   ],
+   "upstream": {
+    "equivalence": "NO",
+    "checkedAgainst": {
+     "repo": "earendil-works/pi",
+     "baselineRef": "f9a26365568127461c47a07a37dcb42c140a3ac5",
+     "referenceRef": "f9a26365568127461c47a07a37dcb42c140a3ac5"
+    },
+    "relevantFiles": [
+     "packages/tui/src/components/select-list.ts"
+    ],
+    "relevantIssues": [],
+    "semanticDelta": "Upstream moves selectedIndex on a wheel without retiring the pressed row; the fork clears the pressed identity only when the selection actually moved, so an effective wheel cannot activate the pre-wheel item while a zero-effect boundary wheel keeps the same-cell gesture."
+   },
+   "retirement": {
+    "conditions": [
+     "Retire when upstream retires the pressed row on an effective wheel (or otherwise makes the stale release inert), then run the SelectList unit regressions and the mounted editor autocomplete journey."
+    ],
+    "replacementMapping": [],
+    "evidence": []
+   },
+   "audit": {
+    "lastAuditedAt": "2026-11-17",
+    "scope": [
+     "vendor-internal",
+     "inheritance-structural",
+     "host",
+     "public-extension",
+     "behavioral",
+     "tests"
+    ],
+    "notes": "Added by PR-4 R6 (stale autocomplete completion). The mounted probe reproduced the old completion being applied after an effective wheel; the fork unit regression fails on the previous code and the boundary control keeps the existing same-cell contract."
+   }
   }
  }
 }
