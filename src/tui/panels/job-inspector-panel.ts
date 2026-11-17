@@ -1006,14 +1006,20 @@ function positionFacts(
   return { start: top + 1, end: Math.min(total, top + viewportHeight), total }
 }
 
-/** The chrome geometry of ONE painted frame: the terminal grant and the painted
- *  header/bar boxes. A press records it, and the release accepts the gesture
- *  only while the LIVE grant still matches it and the CURRENT painted frame has
- *  the identical geometry (a resize/repaint boundary revokes it). */
+/** The chrome geometry of ONE painted frame: the terminal grant, the painted
+ *  header/bar boxes and the LIVE reading-viewport positions. A press records
+ *  it, and the release accepts the gesture only while the LIVE grant still
+ *  matches it, the CURRENT painted frame has the identical geometry and the
+ *  viewports did not move (a resize/repaint/scroll boundary revokes it — an
+ *  effective wheel scrolls content under the press). */
 interface JobChromeFrame {
   readonly rows: number
   readonly columns: number
   readonly headerTop: number
+  /** The Output page's viewport position at the press. */
+  readonly scrollTop: number
+  /** The Command page's viewport position at the press. */
+  readonly commandScrollTop: number
   readonly bar: { readonly x: number; readonly y: number; readonly width: number; readonly height: number } | undefined
 }
 
@@ -1092,7 +1098,7 @@ export class JobInspectorPanel extends VStack {
    *  header/bar boxes). Every pointer release re-proves it, so a resize,
    *  remount or chrome row change between press and release is inert instead of
    *  replaying an old Esc coordinate. */
-  private paintedChromeFrame: JobChromeFrame = { rows: -1, columns: -1, headerTop: 0, bar: undefined }
+  private paintedChromeFrame: JobChromeFrame = { rows: -1, columns: -1, headerTop: 0, scrollTop: 0, commandScrollTop: 0, bar: undefined }
   /** The ONE press-time target of the LAST gesture: either the header's painted
    *  affordance or the bar's Esc affordance. The release re-proves the SAME
    *  owner, cells, view and search mode before acting. */
@@ -1166,6 +1172,11 @@ export class JobInspectorPanel extends VStack {
       searchRowVisible: (width) => readState.view === 'command' && plan(width).searchRows === 1,
     })
     holders.commandReader = commandReader
+    // The ONE gesture-boundary notification: any EFFECTIVE viewport move on
+    // either reading page retires a pressed chrome gesture immediately (an
+    // away-and-back scroll before the next paint must not revive it).
+    scrollView.onViewportMoved = () => { this.pressed = undefined }
+    commandReader.setViewportMovedCallback(() => { this.pressed = undefined })
     /** The reading facts of the CURRENT page: the page's disclosure plus the real
      *  measured viewport position, or undefined when the page shows none. */
     const readingFacts = (width: number): { readonly note: string; readonly position?: string } | undefined => {
@@ -1324,15 +1335,31 @@ export class JobInspectorPanel extends VStack {
     // The ONE frame identity every pointer release re-proves. The LIVE grant is
     // read here (this frame was painted at that grant) and the real boxes are
     // committed, so neither a pre-repaint resize nor a chrome-row move can keep
-    // an old gesture alive.
+    // an old gesture alive. The two reading-viewport positions are part of the
+    // identity: an effective wheel scrolls content under the press, and the
+    // release must not replay a target that no longer sits on the same view.
     this.paintedChromeFrame = {
       rows: this.intents.rows(),
       columns: this.intents.columns(),
       headerTop: this.headerTop,
+      scrollTop: this.scrollView.scrollTop,
+      commandScrollTop: this.commandReader.scroll.scrollTop,
       bar: barBox === undefined
         ? undefined
         : { x: barBox.x, y: barBox.y, width: barBox.width, height: barBox.height },
     }
+    if (this.pressed !== undefined) {
+      // Frame-boundary backstop for every scroll path that repainted (wheel,
+      // page keys, scrollbar drag, follow auto-scroll): any viewport move while
+      // the press is alive retires it. The scrollBy hooks below cover a burst
+      // of opposite wheels that returns to the press-time position BEFORE this
+      // paint is committed.
+      if (this.pressed.chrome.scrollTop !== this.scrollView.scrollTop
+        || this.pressed.chrome.commandScrollTop !== this.commandReader.scroll.scrollTop) {
+        this.pressed = undefined
+      }
+    }
+
     if (this.readState.view === 'command') {
       if (this.commandReader.search.mode !== 'inactive' && this.chrome.plan.searchRows === 0) {
         this.exitSearch()
@@ -1569,6 +1596,8 @@ export class JobInspectorPanel extends VStack {
       rows: frame.rows,
       columns: frame.columns,
       headerTop: frame.headerTop,
+      scrollTop: frame.scrollTop,
+      commandScrollTop: frame.commandScrollTop,
       bar: frame.bar === undefined
         ? undefined
         : { x: frame.bar.x, y: frame.bar.y, width: frame.bar.width, height: frame.bar.height },
@@ -1576,12 +1605,16 @@ export class JobInspectorPanel extends VStack {
   }
 
   /** Whether the gesture's painted frame is still the LIVE one: the terminal
-   *  grant did not move (a resize before the next paint is refused) and the
+   *  grant did not move (a resize before the next paint is refused), the
    *  current painted geometry is identical (a repaint at another width/height
-   *  or with another chrome row layout is refused). A benign repaint with the
-   *  same geometry keeps the gesture alive, exactly as §5.2 requires. */
+   *  or with another chrome row layout is refused) and NEITHER reading viewport
+   *  moved under the press (an effective wheel revokes it — content scrolled
+   *  away from the pressed affordance's view). A benign repaint with the same
+   *  geometry and viewport keeps the gesture alive, exactly as §5.2 requires. */
   private chromeFrameCurrent(chrome: JobChromeFrame): boolean {
     if (this.intents.rows() !== chrome.rows || this.intents.columns() !== chrome.columns) return false
+    if (this.scrollView.scrollTop !== chrome.scrollTop) return false
+    if (this.commandReader.scroll.scrollTop !== chrome.commandScrollTop) return false
     const live = this.paintedChromeFrame
     if (live.rows !== chrome.rows || live.columns !== chrome.columns || live.headerTop !== chrome.headerTop) return false
     if (live.bar === undefined || chrome.bar === undefined) return live.bar === chrome.bar

@@ -1881,3 +1881,167 @@ test('entering the Job workspace re-samples the observation its predecessor lost
     else process.env.COLORFGBG = saved.COLORFGBG
   }
 })
+
+// ── PR-4 R1: an effective wheel revokes a pressed header/bar gesture ─────────
+
+test('PR-4 R1: an effective Output-body wheel revokes a pressed header entry (no ghost Command page)', async () => {
+  const { vt, app } = startApp()
+  const harness = attachTasks(app, { jobIds: ['job-a'] })
+  await flush()
+  harness.tasks.openTasksBrowser('full')
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  const longBody = Array.from({ length: 120 }, (_, line) => `wheel proof line ${String(line).padStart(3, '0')}`).join('\n')
+  harness.observation.latest()!.emit({ text: longBody })
+  await flush()
+  await vt.waitForRender()
+
+  const locate = (needle: string): { readonly row: number; readonly col: number } => {
+    const lines = rawView(vt)
+    const row = lines.findIndex(line => line.includes(needle))
+    assert.ok(row >= 0, `no painted row with ${needle}:\n${lines.join('\n')}`)
+    return { row, col: lines[row]!.indexOf(needle) }
+  }
+  const press = (cell: { readonly row: number; readonly col: number }): void => {
+    vt.sendInput(`\x1b[<0;${cell.col + 1};${cell.row + 1}M`)
+  }
+  const release = (cell: { readonly row: number; readonly col: number }): void => {
+    vt.sendInput(`\x1b[<0;${cell.col + 1};${cell.row + 1}m`)
+  }
+  // The visible body TEXT window (scrollbar glyphs move with the scroll position
+  // and are not part of the window identity).
+  const bodyWindow = (): string => rawView(vt)
+    .map(line => /wheel proof line (\d{3})/.exec(line)?.[1])
+    .filter((value): value is string => value !== undefined)
+    .join(',')
+
+  // The fresh positive: the painted entry IS a real click target.
+  const entry = locate('↗ Command')
+  press(entry)
+  await vt.waitForRender()
+  release(entry)
+  await vt.waitForRender()
+  assert.match(rawView(vt).join('\n'), /Copy All/, 'precondition: a fresh entry click opens the Command page')
+  const back = locate('Output [Esc]')
+  press(back)
+  await vt.waitForRender()
+  release(back)
+  await vt.waitForRender()
+  assert.ok(rawView(vt).some(line => line.includes('wheel proof line 119')), 'precondition: the Output page is back')
+
+  // ROUND-TRIP regression: an effective scroll away AND back to the press-time
+  // position must still retire the press (the boundary is the scroll, not the
+  // final position).
+  const roundTripEntry = locate('↗ Command')
+  const roundTripBody = locate('wheel proof line 119')
+  press(roundTripEntry)
+  await vt.waitForRender()
+  const atPress = bodyWindow()
+  vt.sendInput(`\x1b[<64;12;${Math.max(4, Math.min(roundTripBody.row, 20))}M`)
+  await vt.waitForRender()
+  assert.notEqual(bodyWindow(), atPress, 'round-trip leg 1: the wheel scrolled the body')
+  vt.sendInput(`\x1b[<65;12;${Math.max(4, Math.min(roundTripBody.row, 20))}M`)
+  await vt.waitForRender()
+  assert.equal(bodyWindow(), atPress, 'round-trip leg 2: the wheel scrolled back to the press-time window')
+  release(roundTripEntry)
+  await vt.waitForRender()
+  assert.ok(!rawView(vt).join('\n').includes('Copy All'), 'the stale press must stay retired across a round-trip scroll')
+
+  // Control: a ZERO-EFFECT wheel (down at the follow tail) keeps the same-cell
+  // press valid — the fence revokes only on a REAL viewport move.
+  const heldEntry = locate('↗ Command')
+  // Use a different cell inside the SAME painted segment: the round-trip press
+  // just released on the text cell, and a second same-cell click within the
+  // fork's double-click interval becomes a word-selection click, not a
+  // disclosure.
+  const heldCell = { row: heldEntry.row, col: heldEntry.col + 3 }
+  const tailRow = locate('wheel proof line 119')
+  const tailWheelRow = Math.max(4, Math.min(tailRow.row, 20))
+  press(heldCell)
+  await vt.waitForRender()
+  const atTail = rawView(vt).join('\n')
+  const boundaryBefore = bodyWindow()
+  vt.sendInput(`\x1b[<65;12;${tailWheelRow}M`)
+  await vt.waitForRender()
+  // The first bottom wheel may pause follow (a real state change); the SECOND
+  // is a true no-op. Both leave the OUTPUT WINDOW unmoved.
+  vt.sendInput(`\x1b[<65;12;${tailWheelRow}M`)
+  await vt.waitForRender()
+  assert.equal(bodyWindow(), boundaryBefore, 'the bottom-boundary wheels leave the painted body window unchanged')
+  release(heldCell)
+  await vt.waitForRender()
+  assert.match(rawView(vt).join('\n'), /Copy All/, `a zero-effect wheel keeps the legitimate same-cell press (existing contract):\n${rawView(vt).join('\n')}`)
+  const back2 = locate('Output [Esc]')
+  press(back2)
+  await vt.waitForRender()
+  release(back2)
+  await vt.waitForRender()
+
+  // The stale journey: press the entry, let a REAL wheel scroll the body, then
+  // release on the same cell. The wheel must actually move the window.
+  const staleEntry = locate('↗ Command')
+  const bodyRow = locate('wheel proof line 119')
+  press(staleEntry)
+  await vt.waitForRender()
+  const before = bodyWindow()
+  const wheelRow = Math.max(4, Math.min(bodyRow.row, 20))
+  vt.sendInput(`\x1b[<64;12;${wheelRow}M`)
+  await vt.waitForRender()
+  assert.notEqual(bodyWindow(), before, 'the wheel really scrolled the Output body window')
+  release(staleEntry)
+  await vt.waitForRender()
+  assert.ok(!rawView(vt).join('\n').includes('Copy All'), 'the stale header press must not open the Command page after an effective wheel')
+  app.stop()
+})
+
+// ── PR-4 R1: same-tick opposite-wheel burst ─────────────────────────────────
+
+test('PR-4 R1: a same-tick opposite-wheel burst still retires the pressed header entry', async () => {
+  const { vt, app } = startApp()
+  const harness = attachTasks(app, { jobIds: ['job-a'] })
+  await flush()
+  harness.tasks.openTasksBrowser('full')
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  const longBody = Array.from({ length: 120 }, (_, line) => `burst proof line ${String(line).padStart(3, '0')}`).join('\n')
+  harness.observation.latest()!.emit({ text: longBody })
+  await flush()
+  await vt.waitForRender()
+  const lines = (): string[] => rawView(vt)
+  const row = lines().findIndex(line => line.includes('↗ Command'))
+  assert.ok(row >= 0, `the header entry is painted:\n${lines().join('\n')}`)
+  const col = lines()[row]!.indexOf('↗ Command')
+  const bodyRow = lines().findIndex(line => line.includes('burst proof line 119'))
+  const wheelRow = Math.max(4, Math.min(bodyRow, 20))
+  vt.sendInput(`\x1b[<0;${col + 1};${row + 1}M`)
+  // Two opposite effective wheels in the SAME input turn, before any paint.
+  vt.sendInput(`\x1b[<64;12;${wheelRow}M`)
+  vt.sendInput(`\x1b[<65;12;${wheelRow}M`)
+  vt.sendInput(`\x1b[<0;${col + 1};${row + 1}m`)
+  await vt.waitForRender()
+  assert.ok(!lines().join('\n').includes('Copy All'), 'the same-tick round-trip must not revive the stale press')
+
+  // The control proves Home/End really move the Output viewport.
+  harness.observation.latest()!.emit({ text: longBody })
+  await flush()
+  await vt.waitForRender()
+  vt.sendInput('\x1b[H')
+  await vt.waitForRender()
+  assert.match(lines().join('\n'), /burst proof line 000/, 'Home really jumps the Output viewport to the head')
+  vt.sendInput('\x1b[F')
+  await vt.waitForRender()
+  assert.match(lines().join('\n'), /burst proof line 119/, 'End really jumps the Output viewport back to the tail')
+
+  // The same-tick Home -> End burst (no paint between the two jumps) must too.
+  const entryRow = lines().findIndex(line => line.includes('↗ Command'))
+  const entryCol = lines()[entryRow]!.indexOf('↗ Command')
+  vt.sendInput(`\x1b[<0;${entryCol + 1};${entryRow + 1}M`)
+  vt.sendInput('\x1b[H')
+  vt.sendInput('\x1b[F')
+  vt.sendInput(`\x1b[<0;${entryCol + 1};${entryRow + 1}m`)
+  await vt.waitForRender()
+  assert.ok(!lines().join('\n').includes('Copy All'), 'a same-tick Home/End round-trip must not revive the stale press')
+  app.stop()
+})
