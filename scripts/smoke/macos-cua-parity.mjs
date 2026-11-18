@@ -1617,14 +1617,10 @@ async function sceneSplit({ installation, workRoot, report, textEditPid }) {
   // Question review/answer state: select only on a painted option row, and
   // submit only on a painted Submit row, re-reading the frame between keys.
   await answerApprovalQuestion(tui, 'Allow for this session', 'Split consent answer')
-  // The pending Question must still be paintable when the answer is sent: an
-  // aborted ask (the flow left the seat before the submit) settles isError
-  // 'aborted before the user answered' and is an operator-timing failure, not
-  // a product one. Fail fast with that fact.
-  // Poll BOTH facts each tick: the settled result and the Question's seat
-  // liveness. A Question that leaves the seat before the answer settles is an
-  // aborted ask (operator timing), not a product failure — fail fast with that
-  // fact instead of waiting out the whole consent budget.
+  // The answer has been submitted through the painted states; only the settled
+  // dispatch or the consent budget may end this wait. (The earlier seat-
+  // liveness poll fired AFTER a successful submit: the review seat and the
+  // transcript legitimately stop painting 'Allow computer use'.)
   const deadline = Date.now() + TIMEOUTS.consent
   let splitConsent
   while (true) {
@@ -1633,10 +1629,6 @@ async function sceneSplit({ installation, workRoot, report, textEditPid }) {
     if (settled !== undefined) { splitConsent = { result: settled, events }; break }
     if (Date.now() > deadline) {
       throw new SplitSmokeAssertionError('Split consent: the dispatch never settled within the consent budget')
-    }
-    if (tmuxSessionExists(tui)
-      && !tmuxCapture(tui, 'Split consent liveness').includes('Allow computer use')) {
-      throw new SplitSmokeAssertionError('Split consent: the Question left the seat before the answer was submitted (aborted ask); re-run the lane')
     }
     await sleep(1_000)
   }
