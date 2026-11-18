@@ -6789,7 +6789,7 @@ The fork suppressed the process-wide iTerm2 image capability whenever AltScreen 
 - Direct iTerm2 emits OSC 1337 Image bytes inside AltScreen when the static capability is retained; the fork Image path handles cursor-up placement without the old process-wide suppression.
 - PI_IMAGE_PROTOCOL=none remains text-only and the root SVG/Image viewer gates fail closed when no protocol is admitted.
 - The root Retry affordance and sink re-check live preview permission, so capability revocation cannot expose Retry or start another raster.
-- Audit note: Unit/fork wire tests and root viewer tests guard the protocol and live-permission behavior. On the installed tarball a real iTerm2 verifies the Regular SVG thumbnail, the fullscreen OSC 1337 Preview at 100x30/44x20/30x10/80x24, Tab to Source, CSI-u Escape back to the transcript, Copy of the exact source, and the PI_IMAGE_PROTOCOL=none text fallback. The wider frozen-plan matrix (raster ImageViewer confirm, scroll/overlay, multiplexer/protocol-mismatch negatives) remains unverified; evidence lives outside repository docs.
+- Audit note: Unit/fork wire tests and root viewer tests guard the protocol and live-permission behavior. On the installed tarball a real iTerm2 verifies the Regular SVG thumbnail, the fullscreen OSC 1337 Preview at 100x30/44x20/30x10/80x24, Tab to Source, CSI-u Escape back to the transcript, Copy of the exact source, the raster ImageViewer opened from the /view-image list with its Esc return to the list and transcript, and the PI_IMAGE_PROTOCOL=none text fallback. Remaining frozen-plan items (Source scroll past the viewport, overlay show/hide, multiplexer/protocol-mismatch negatives, session-switch release) stay unverified outside repository docs.
 
 #### Guarding tests
 
