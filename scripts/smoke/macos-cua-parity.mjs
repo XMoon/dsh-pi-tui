@@ -1661,7 +1661,12 @@ async function sceneSplit({ installation, workRoot, report, textEditPid }) {
   assert(splitRefs.length > 0, 'Split screenshot carried no durable attachment reference')
   const splitDimensions = imageDimensions(readFileSync(attachmentObjectPath(dshHome, splitRefs[0])))
   assert(splitDimensions !== undefined, 'Split screenshot attachment is not a supported image')
-  const splitImageFrame = await waitFrameText(tui, '🖼️', 'Split Client image identity row', TIMEOUTS.mount)
+  // The direct scene proved the real identity row vocabulary: the expanded
+  // nested cua screenshot card paints the frozen '[IMAGE] name · W×H · bytes'
+  // row (imageIdentityText), not the draft-only emoji. The Split Client uses
+  // the SAME projection; expand its card and wait for the same row.
+  await expandNestedToolCard(tui, 'cua · screenshot', 'Split screenshot card')
+  const splitImageFrame = await waitFrameText(tui, '[IMAGE]', 'Split Client image identity row', TIMEOUTS.mount)
   assert(splitImageFrame.includes(`${String(splitDimensions.width)}×${String(splitDimensions.height)}`),
     'Split Client image row does not name the admitted screenshot dimensions')
   await waitTurnEnd(dshHome, screenshot.sessionId, screenshot.afterIndex, 'Split screenshot turn completed')
