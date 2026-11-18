@@ -442,9 +442,19 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
     const snapshot = this.controller.getSnapshot()
     this.grantAwaitingPaintValue = false
     const bodyRows = Math.max(0, this.rowGrant - 1)
-    const all = this.confirmation === undefined
-      ? this.buildContent(snapshot, width)
-      : this.buildConfirmation(width)
+    let all: PageLine[]
+    let confirmationVisible = false
+    if (this.confirmation === undefined) {
+      all = this.buildContent(snapshot, width)
+    } else {
+      // The long hint is the conservative probe; the short confirm hint is
+      // only used when that SAME frame's full text (including the long hint)
+      // fits. Body hint, confirm bar and painted rows therefore agree.
+      const probe = this.buildConfirmation(width, 'long')
+      confirmationVisible = probe.length <= bodyRows
+      all = confirmationVisible ? this.buildConfirmation(width, 'short') : probe
+    }
+    this.confirmationVisible = confirmationVisible
     this.contentLength = all.length
     const actionLines = all
       .map((line, index) => line.action === undefined ? undefined : { line, index, action: line.action })
@@ -454,11 +464,8 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
     this.cursor = this.confirmation === undefined
       ? Math.max(0, Math.min(this.cursor, Math.max(0, this.paintedActions.length - 1)))
       : 0
-    this.confirmationVisible = false
     if (this.confirmation !== undefined) {
-      const height = this.buildConfirmation(width).length
-      this.confirmationVisible = height <= bodyRows
-      const maxOffset = Math.max(0, height - bodyRows)
+      const maxOffset = Math.max(0, all.length - bodyRows)
       this.confirmation = { ...this.confirmation, offset: Math.max(0, Math.min(this.confirmation.offset, maxOffset)) }
     }
     const activeOffset = this.confirmation?.offset ?? this.offset
@@ -667,7 +674,7 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
     return lines
   }
 
-  private buildConfirmation(width: number): PageLine[] {
+  private buildConfirmation(width: number, hintKind: 'short' | 'long'): PageLine[] {
     const confirmation = this.confirmation
     if (confirmation === undefined) return []
     // The two-space indent is part of the painted cells; wrap the content to
@@ -686,7 +693,7 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
       }
     }
     lines.push({ text: '' })
-    const hint = this.confirmationVisible
+    const hint = hintKind === 'short'
       ? '  y/Enter confirm · n/Esc cancel; no change has been made yet.'
       : '  The full risk text must fit before confirm is available; n/Esc cancels.'
     for (const part of wrapText(hint, width)) {
@@ -773,7 +780,8 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
   private scrollConfirmation(delta: number): void {
     if (this.confirmation === undefined) return
     const bodyRows = Math.max(1, this.rowGrant - 1)
-    const maxOffset = Math.max(0, this.buildConfirmation(this.paint?.width ?? 80).length - bodyRows)
+    const maxOffset = Math.max(0, this.buildConfirmation(this.paint?.width ?? 80,
+      this.confirmationVisible ? 'short' : 'long').length - bodyRows)
     this.confirmation = { ...this.confirmation, offset: Math.max(0, Math.min(this.confirmation.offset + delta, maxOffset)) }
     this.bump()
   }

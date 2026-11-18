@@ -50,10 +50,11 @@ export class DirectCuaAccessPort implements CuaAccessPort {
   private readonly ctx: DirectCuaAccessContextLike
 
   readonly observation: CuaAccessObservation = {
-    // The Direct process sees the bundle service appear/disappear through the
-    // same Context; a reload that keeps a service present is re-read on every
-    // call. There is no cross-process generation to subscribe to here.
-    readSnapshot: () => this.ctx.get('cuaAccess') === undefined ? 'absent' : 'present',
+    // The service VALUE itself is the Direct observation basis: a plugin reload
+    // can replace the provider while it stays present, and a present/absent
+    // boolean would let an old confirmation dispatch to the new service. Every
+    // read/action compares this object before touching the new provider.
+    readSnapshot: () => this.ctx.get('cuaAccess'),
     subscribe: () => () => {},
   }
 

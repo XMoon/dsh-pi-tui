@@ -401,17 +401,26 @@ async function waitSessionExit(session, label) {
 // ── process table / ownership ──────────────────────────────────────────────
 
 function processTable() {
-  const result = spawnSync('ps', ['-axo', 'pid=,ppid=,command='], { encoding: 'utf8', timeout: 15_000 })
+  // `lstart` is the kernel-visible process start time. Unlike a bare pid or a
+  // command string it changes when the pid is reused, so it is the lane's
+  // terminal-signal identity.
+  const result = spawnSync('ps', ['-axo', 'pid=,ppid=,lstart=,command='], {
+    encoding: 'utf8', timeout: 15_000, env: { ...process.env, LC_ALL: 'C' },
+  })
   if (result.error !== undefined || result.status !== 0) {
     throw new SplitSmokeAssertionError(`process table: ps failed: ${result.error?.message ?? result.stderr ?? ''}`)
   }
   const rows = []
   for (const line of result.stdout.split('\n')) {
-    const match = /^\s*(\d+)\s+(\d+)\s+(.*)$/u.exec(line)
+    const match = /^\s*(\d+)\s+(\d+)\s+(\w{3}\s+\w{3}\s+\d+\s+\d{2}:\d{2}:\d{2}\s+\d{4})\s+(.*)$/u.exec(line)
     if (match === null) continue
-    rows.push({ pid: Number(match[1]), ppid: Number(match[2]), command: match[3] })
+    rows.push({ pid: Number(match[1]), ppid: Number(match[2]), started: match[3].replace(/\s+/gu, ' '), command: match[4] })
   }
   return rows
+}
+
+function processStarted(pid) {
+  return processTable().find(row => row.pid === pid)?.started
 }
 
 function alive(pid) {
@@ -445,9 +454,9 @@ function ownedRoles(workRoot) {
   }
 }
 
-async function waitOwnedRoleGone(workRoot, pid, label) {
+async function waitOwnedRoleGone(workRoot, pid, started, label) {
   await waitFor(() => (!alive(pid) ? true : undefined), `${label} pid ${String(pid)} is gone`, TIMEOUTS.process)
-  const stillOwned = ownedProcessRows(workRoot).find(row => row.pid === pid)
+  const stillOwned = ownedProcessRows(workRoot).find(row => row.pid === pid && row.started === started)
   assert(stillOwned === undefined, `${label}: pid ${String(pid)} still belongs to this work root`)
 }
 
@@ -958,19 +967,22 @@ async function openBlankTextEdit(workRoot) {
     const created = textEditPids().filter(candidate => !before.has(candidate))
     return created.length === 1 ? created[0] : undefined
   }, 'ONE new TextEdit instance for the qualification', TIMEOUTS.process)
-  return { file, pid, before: [...before] }
+  const started = processStarted(pid)
+  assert(started !== undefined, 'the qualification TextEdit instance has no kernel start identity')
+  return { file, pid, started, before: [...before] }
 }
 
-function processIsTextEdit(pid) {
+function processIsTextEdit(pid, started) {
   const row = processTable().find(candidate => candidate.pid === pid)
-  return row !== undefined && /(?:^|\/)TextEdit(?:\s|$)/u.test(row.command.trim())
+  return row !== undefined && row.started === started
+    && /(?:^|\/)TextEdit(?:\s|$)/u.test(row.command.trim())
 }
 
 async function stopBlankTextEdit(textEdit) {
   if (textEdit === undefined) return []
   const errors = []
-  if (alive(textEdit.pid) && !processIsTextEdit(textEdit.pid)) {
-    errors.push(`the qualification TextEdit pid ${String(textEdit.pid)} no longer names TextEdit; refusing to signal it`)
+  if (alive(textEdit.pid) && !processIsTextEdit(textEdit.pid, textEdit.started)) {
+    errors.push(`the qualification TextEdit pid ${String(textEdit.pid)} no longer has this run's kernel start identity; refusing to signal it`)
     return errors
   }
   if (alive(textEdit.pid)) {
@@ -980,8 +992,8 @@ async function stopBlankTextEdit(textEdit) {
     } catch {
       // A PID can be reused while waiting. Never escalate to SIGKILL unless the
       // CURRENT process at that pid is still this run's TextEdit.
-      if (!processIsTextEdit(textEdit.pid)) {
-        errors.push(`the qualification TextEdit pid ${String(textEdit.pid)} changed identity before SIGKILL; refusing to signal it`)
+      if (!processIsTextEdit(textEdit.pid, textEdit.started)) {
+        errors.push(`the qualification TextEdit pid ${String(textEdit.pid)} changed kernel identity before SIGKILL; refusing to signal it`)
       } else {
         try { process.kill(textEdit.pid, 'SIGKILL') } catch { /* already gone */ }
         try {
@@ -1200,14 +1212,15 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
   }
   for (const helper of helpersBefore) {
     try {
-      await waitOwnedRoleGone(workRoot, helper.pid, 'MAC09-03 helper restart')
+      await waitOwnedRoleGone(workRoot, helper.pid, helper.started, 'MAC09-03 helper restart')
     } catch {
       // Never escalate a helper pid after the wait without re-proving that the
-      // CURRENT process at that pid is still this run's helper.
-      const stillHelper = ownedRoles(workRoot).helpers.some(row => row.pid === helper.pid && alive(row.pid))
+      // CURRENT process at that pid still has this run's kernel start identity.
+      const stillHelper = ownedRoles(workRoot).helpers.some(row => row.pid === helper.pid
+        && row.started === helper.started && alive(row.pid))
       if (stillHelper) {
         try { process.kill(helper.pid, 'SIGKILL') } catch { /* already gone */ }
-        await waitOwnedRoleGone(workRoot, helper.pid, 'MAC09-03 helper restart')
+        await waitOwnedRoleGone(workRoot, helper.pid, helper.started, 'MAC09-03 helper restart')
       }
     }
   }
@@ -1294,6 +1307,9 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
   const shotEvents = eventsOf(dshHome, screenshot.sessionId)
   const shotDispatches = cuaDispatches(shotEvents, screenshot.afterIndex)
     .filter(dispatch => dispatch.rootCallId === screenshot.dispatch.rootCallId)
+  assert(JSON.stringify(shotDispatches.map(dispatchMethod))
+    === JSON.stringify(['getApp', 'listWindows', 'screenshot']),
+  'MAC09-07: the controlled root dispatched an unexpected cua method sequence')
   const shotGetApp = shotDispatches.find(dispatch => dispatchMethod(dispatch) === 'getApp')
   const shotWindows = shotDispatches.find(dispatch => dispatchMethod(dispatch) === 'listWindows')
   const shotDispatch = shotDispatches.find(dispatch => dispatchMethod(dispatch) === 'screenshot')
@@ -1367,6 +1383,7 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
     .filter(dispatch => dispatch.rootCallId === input.dispatch.rootCallId)
   const getAppDispatch = liveInputDispatches().find(dispatch => dispatchMethod(dispatch) === 'getApp')
   const showDispatch = liveInputDispatches().find(dispatch => dispatchMethod(dispatch) === 'show')
+  const activateDispatch = liveInputDispatches().find(dispatch => dispatchMethod(dispatch) === 'activate')
   const typeDispatch = liveInputDispatches().find(dispatch => dispatchMethod(dispatch) === 'typeText')
   // typeText settles BEFORE the sequential getState dispatch is durable: wait
   // for the getState dispatch on the live event stream instead of freezing the
@@ -1374,6 +1391,9 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
   const stateDispatch = await waitFor(() => liveInputDispatches()
     .find(dispatch => dispatchMethod(dispatch) === 'getState'),
   'MAC09-08 official getState dispatch', TIMEOUTS.turn)
+  assert(JSON.stringify(liveInputDispatches().map(dispatchMethod))
+    === JSON.stringify(['getApp', 'listWindows', 'show', 'activate', 'typeText', 'getState']),
+  'MAC09-08: the controlled root dispatched an unexpected cua method sequence')
   assert(getAppDispatch !== undefined && dispatchParams(getAppDispatch)?.selector === String(textEditPid),
     'MAC09-08: the official getApp did not select this run\'s exact TextEdit PID')
   const inputEventsNow = eventsOf(dshHome, input.sessionId)
@@ -1388,11 +1408,13 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
   const typeParams = dispatchParams(typeDispatch)
   const stateParams = dispatchParams(stateDispatch)
   const showParams = dispatchParams(showDispatch)
+  const activateParams = dispatchParams(activateDispatch)
   assert(typeDispatch !== undefined && typeParams?.text === marker,
     'MAC09-08: the official typeText argument is not the exact random marker')
   assert(typeof typeParams?.appHandle === 'string' && typeParams.appHandle === controlledHandle
     && stateParams?.appHandle === controlledHandle
     && showParams?.appHandle === controlledHandle
+    && activateParams?.appHandle === controlledHandle
     && dispatchParams(listWindowsDispatch)?.appHandle === controlledHandle,
     'MAC09-08: listWindows/show/typeText/getState do not use the exact approved getApp handle')
   const controlledInputWindow = Array.isArray(controlledWindows)
@@ -1524,6 +1546,9 @@ async function sceneSplit({ installation, workRoot, report, textEditPid }) {
   const splitEvents = eventsOf(dshHome, screenshot.sessionId)
   const splitDispatches = cuaDispatches(splitEvents, screenshot.afterIndex)
     .filter(dispatch => dispatch.rootCallId === screenshot.dispatch.rootCallId)
+  assert(JSON.stringify(splitDispatches.map(dispatchMethod))
+    === JSON.stringify(['getApp', 'listWindows', 'screenshot']),
+  'Split MAC09-10: the controlled root dispatched an unexpected cua method sequence')
   const splitGetApp = splitDispatches.find(dispatch => dispatchMethod(dispatch) === 'getApp')
   const splitWindowsDispatch = splitDispatches.find(dispatch => dispatchMethod(dispatch) === 'listWindows')
   const splitAppResult = cuaResults(splitEvents, 0).find(result => result.subCallId === splitGetApp?.subCallId)
@@ -1562,15 +1587,16 @@ async function sceneSplit({ installation, workRoot, report, textEditPid }) {
     method: 'getApp',
   })
   await waitFrameText(tui, 'Allow computer use', 'MAC09-10 pending consent Question', TIMEOUTS.consent)
-  const clientPids = ownedRoles(workRoot).clients.filter(row => alive(row.pid)).map(row => row.pid)
-  assert(clientPids.length === 1, `MAC09-10: expected one owned Split Client, saw ${String(clientPids.length)}`)
-  const clientPid = clientPids[0]
+  const clientRows = ownedRoles(workRoot).clients.filter(row => alive(row.pid))
+  assert(clientRows.length === 1, `MAC09-10: expected one owned Split Client, saw ${String(clientRows.length)}`)
+  const clientPid = clientRows[0].pid
+  const clientStarted = clientRows[0].started
   assert(clientPid !== registry.record.hostPid,
     `MAC09-10: the Split Client pid ${String(clientPid)} equals the Host pid ${String(registry.record.hostPid)}`)
   logOperator([`MAC09-10 is killing the Split Client pid ${String(clientPid)} while the Question is pending.`,
     'Do NOT answer it. A new Client will reopen the same Session.'])
   try { process.kill(clientPid, 'SIGTERM') } catch { /* already gone */ }
-  await waitOwnedRoleGone(workRoot, clientPid, 'MAC09-10 old Split Client')
+  await waitOwnedRoleGone(workRoot, clientPid, clientStarted, 'MAC09-10 old Split Client')
   if (tmuxSessionExists(tui)) tmux(['kill-session', '-t', tui], 'MAC09-10 remove old Client pane', { allowMissing: true })
 
   const resumed = startTui({
@@ -1651,13 +1677,15 @@ async function cleanup({ workRoot, dshHome, report, textEdit, helperAppPath }) {
     ? undefined
     : owned.find(row => row.pid === registry.record.hostPid && roleOf(row) === 'host')
   const targets = [
-    ...(registryHost === undefined ? [] : [{ pid: registryHost.pid, command: registryHost.command }]),
-    ...owned.filter(row => alive(row.pid)).map(row => ({ pid: row.pid, command: row.command })),
+    ...(registryHost === undefined ? [] : [{ pid: registryHost.pid, command: registryHost.command, started: registryHost.started }]),
+    ...owned.filter(row => alive(row.pid)).map(row => ({ pid: row.pid, command: row.command, started: row.started })),
   ]
-  // Re-read the work-root ownership before EVERY signal: a bare pid is not an
-  // identity. A target whose pid now names another command is left untouched.
+  // Re-read the work-root ownership before EVERY signal: pid plus kernel start
+  // time plus the owned command/role. A reused pid has a different start time
+  // and is left untouched.
   const currentOwnedTarget = (target) => ownedProcessRows(workRoot)
-    .find(row => row.pid === target.pid && row.command === target.command && roleOf(row) !== undefined)
+    .find(row => row.pid === target.pid && row.command === target.command
+      && row.started === target.started && roleOf(row) !== undefined)
   for (const target of targets) {
     if (currentOwnedTarget(target) === undefined) continue
     try { process.kill(target.pid, 'SIGTERM') } catch { /* already gone */ }

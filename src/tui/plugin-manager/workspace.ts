@@ -2590,10 +2590,14 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       this.pendingCuaFirstEnable = undefined
       return
     }
-    if (card.enabled) {
+    if (card.enabled && card.error === undefined) {
       this.pendingCuaFirstEnable = undefined
       this.firstCuaEnableNotice = true
       this.controller.explain('Computer Use is enabled. Press o to open Settings → Tools · Computer Use and authorize Accessibility and Screen Recording on the Host Mac, or l to continue later.')
+    } else if (card.enabled) {
+      // Selection saved but the official provider reports a preparation error:
+      // never overwrite that error with a first-use success claim.
+      this.pendingCuaFirstEnable = undefined
     } else if (this.controller.notice() !== undefined) {
       // The settled Host result was a failure/no-op; its generic message owns
       // the explanation and no first-use claim is made.
@@ -2603,8 +2607,9 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
 
   private renderNotice(plan: ChromePlan, targets: HitTarget[]): string {
     if (this.firstCuaEnableNotice) {
-      const label = 'Computer Use is enabled. '
-      const openLabel = '[Open Computer Use settings]'
+      const narrow = plan.width < 60
+      const label = narrow ? 'Computer Use enabled. ' : 'Computer Use is enabled. '
+      const openLabel = narrow ? '[Open]' : '[Open Computer Use settings]'
       const laterLabel = '[Later]'
       const text = `${color.textMuted('ℹ ')}${label}${color.primary(openLabel)} ${color.textDim(laterLabel)}`
       const row = plan.searchRows

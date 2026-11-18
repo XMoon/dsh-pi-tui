@@ -395,6 +395,16 @@ export class CuaAccessSettingsController {
     const basis = this.deps.cuaAccess.observation.readSnapshot()
     if (!Object.is(basis, this.observedBasis)) {
       this.invalidateObservation()
+      this.patch({
+        action: {
+          ...receipt,
+          kind,
+          state: 'unknown',
+          text: 'The Host CUA provider changed; the action was NOT dispatched. Refresh before retrying.',
+          at: Date.now(),
+        },
+        busy: false,
+      })
       return
     }
     this.actionInFlight = true
