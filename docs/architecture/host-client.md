@@ -205,12 +205,12 @@ confirmed exact Session is restored instead of re-running the public intent.
 The daemon backend is the LOCAL split process on Linux and macOS: it requires a
 real interactive TTY, and any other OS or a non-interactive launch fails closed.
 A real public-managed start uses the platform's supervision path when one
-exists (the Linux user manager with a strict-absence detached process
-fallback); on macOS it always uses that existing detached Host process
-fallback, because there is no launchd supervisor. The public
-`dsh daemon status/start/stop/restart/logs` management verbs DO cover this
-macOS detached process (see the management section below); no launchd unit is
-involved. Selection is cold-launch only: writing the Profile value shows "applies on next
+exists: Linux delegates to the verified systemd user unit, and macOS to the
+verified user-level LaunchAgent; in BOTH cases the strict-absence detached Host
+process remains the fallback only when no service definition is installed. The
+public `dsh daemon status/start/stop/restart/logs/install/uninstall`
+management verbs cover both the launchd job and the independent macOS Host
+process (see the management section below). Selection is cold-launch only: writing the Profile value shows "applies on next
 launch" and never hot-switches the running process or restarts the Host, and an
 environment override never writes back to the Profile. The `.volatile()` Config
 value lets a Direct and a Remote TUI Client read and write the same Host Profile
@@ -429,32 +429,43 @@ The basic daemon is an independent Host process. A public `daemon` cold start
 that finds no reusable authenticated Host brings one up without requiring any
 system service manager; the profile-scoped manager facts decide only OS
 supervision, never the Host business services, the authenticated carrier, the
-Session/Writer authority or readiness.
+Session/Writer authority or readiness. Linux supports the verified systemd user
+unit; macOS supports an explicit user-level launchd LaunchAgent when one is
+installed for this Profile. Both managers are optional: with no installed
+service definition a cold start keeps the basic detached Host. Windows is not a
+supported Daemon platform in this contract.
 
 - **Manager vs. authentication authority.** The manager answers "how is the Host
   OS process supervised", never "is a Host ready". When a live Host is already
   reusable it is authenticated and reused before any manager work; the manager
   never replaces, adopts, kills or migrates a live Host (including a compatible
-  different build or one without a product unit). Readiness remains the official
+  different build or one without a product service definition). Readiness remains the official
   `/connect` Cookie + authenticated identity echo + `/proc` starttime handshake.
-  A manager `ActiveState=active` or a `systemctl start` returning 0 is only a
-  submitted request, never `Ready`.
-- **The installed unit is the ONLY manager-IO admission.** A public cold start
-  first authenticates and reuses a live Host. Only when it must start one does it
-  inspect whether THIS Profile has an installed unit: no unit (or no user unit
-  directory) means an immediate detached Host spawn with no user-manager probe
-  and no `systemctl` invocation at all, so a missing, broken or absent user
-  manager cannot affect the basic daemon. An installed unit must be loaded by the
-  real manager with this Profile's metadata, installed build and canonical
-  `FragmentPath`; it is then started through exactly one
-  `systemctl --user start <verified-name>`. A manager error, an unloaded unit or
-  a conflicting `FragmentPath` is a hard `HOST_MANAGER_START_FAILED` /
+  A systemd `ActiveState=active` / `systemctl start` returning 0, or a launchd
+  job whose `launchctl print` reports `state = running` / `kickstart` returning
+  0, is only a submitted request, never `Ready`.
+- **The installed service definition is the ONLY manager-IO admission.** A
+  public cold start first authenticates and reuses a live Host. Only when it
+  must start one does it inspect whether THIS Profile has an installed service
+  definition: no unit/plist (or no user-manager directory) means an immediate
+  detached Host spawn with no user-manager probe and no
+  `systemctl`/`launchctl` invocation at all, so a missing, broken or absent
+  user manager cannot affect the basic daemon. An installed Linux unit must be
+  loaded by the real manager with this Profile's metadata, installed build and
+  canonical `FragmentPath`; it is then started through exactly one
+  `systemctl --user start <verified-name>`. An installed macOS LaunchAgent must
+  be loaded by the real `gui/<uid>` launchd domain with this Profile's metadata,
+  installed build and a printed source file that is the canonical target of the
+  exact plist path; it is started through `bootstrap` (only when not loaded) and
+  one `kickstart`. A manager error, an unloaded service, a foreign source or a
+  conflicting loaded definition is a hard `HOST_MANAGER_START_FAILED` /
   `HOST_MANAGER_UNIT_CONFLICT` and never degrades to a detached process.
 - **Public vs. internal start boundary.** Only the real public surface launch —
   a strictly-decoded public Client launch envelope with no internal exact-id
   handoff — requests the public start (`hostStartPolicy: 'public'`). Internal
   qualification/peer/manual surface launches and the Client reexec handoff keep
-  the exact historic detached process path and never consider a user unit.
+  the exact historic detached process path and never consider a user service
+  definition.
 - **User-owned unit identity.** The systemd user unit belongs to the user. Its
   identity is the exact profile unit name
   (`dsh-pi-tui@<slug>-<scope prefix>.service`), the
@@ -504,10 +515,40 @@ Session/Writer authority or readiness.
   cross-build replacement belongs to an explicit upgrade flow. Installing a unit
   beside a running independent Host does not migrate it: the Host keeps running
   and is still `manager=process`.
+- **User-owned macOS LaunchAgent identity.** The LaunchAgent belongs to the
+  user. Its identity is the exact label `com.xmoon.dsh-pi-tui.<scope-prefix>`
+  and the regular, non-symlink file
+  `<account-home>/Library/LaunchAgents/<label>.plist`; the file must carry the
+  `X-DshPiTuiOwner`, `X-DshPiTuiScopeId`, `X-DshPiTuiProfileIdentity` and
+  `X-DshPiTuiInstallBuild` metadata and the current file `(dev,ino,content)`.
+  The account home is the OS account home, never `$HOME`/`DSH_HOME`. A live job
+  is attributed only when `launchctl print` reports a `LaunchAgent` whose
+  `path` is the canonical target of that exact file, whose fixed launch facts
+  (program, arguments, working directory, stdout/stderr sinks and the three
+  official environment anchors) match the installed profile, and whose real
+  `pid` equals the authenticated Host PID. User runtime directives outside
+  those fixed facts belong to the user/launchd. The default job is created with
+  `RunAtLoad=false` and `KeepAlive=false`: installation never enables login
+  startup and launchd never auto-restarts the Host after a crash. The two
+  private launchd logs are distinct, bounded, separately labelled sources; an
+  installed-but-not-loaded plist does not govern an independent Host.
+- **Explicit macOS installation and reuse.** `daemon install` writes only the
+  account-home LaunchAgent plist, atomically as 0600 and never overwriting an
+  existing file; it requires a queryable `gui/<uid>` domain and a same-label job
+  that is not loaded from another source, and it never `bootstrap`s,
+  `kickstart`s, enables or restarts a job, creates the profile runtime scope or
+  migrates a running independent Host. A same-identity plist is reused
+  byte-for-byte; a foreign identity, symlink, other scope/profile/build or
+  foreign loaded job is refused. `daemon uninstall` removes only that verified
+  plist and, when the job is loaded from it, `bootout`s only that verified job;
+  it keeps the private logs, Sessions, Workspace and credentials, and leaves a
+  running independent Host untouched.
 - **Stop/log ownership.** An independent Host writes its private `host.log` and
-  has no periodic auto-restart (only the manager restarts a supervised Host).
-  Host stop remains the Host's own `runProfile` shutdown owner; the manager only
-  sends the OS signal, and a Client exit/crash never stops the Host.
+  has no periodic auto-restart (only an explicitly enabled manager restarts a
+  supervised Host; the default macOS LaunchAgent does not). Host stop remains
+  the Host's own `runProfile` shutdown owner; the manager only sends the OS
+  signal (`systemctl stop` or a verified `launchctl bootout`), and a Client
+  exit/crash never stops the Host.
 
 ### Daemon management commands
 
@@ -521,10 +562,12 @@ command. A management command publishes one typed intent to the same
 artifact, opens no Direct/Remote TUI, creates no Session/Agent/Writer and starts
 no Host unless `start`/`restart` asks for one. The verbs are supported on Linux
 and macOS. Linux attributes OS supervision through the verified systemd user
-unit; macOS has no service manager and manages only the independent Host
-process, with no launchd supervisor. The macOS local Host/Client link never
-depends on a service manager. `--help`
-provides neither startup service.
+unit; macOS attributes it through an explicit user-level launchd LaunchAgent
+when this Profile has one installed, and otherwise manages the independent Host
+process. Neither platform requires a service manager for the basic daemon. On
+macOS the supported domain is the current user's `gui/<uid>` domain: system
+LaunchDaemons, `sudo`, login items and automatic `enable`/`disable` are not
+used. `--help` provides neither startup service.
 
 The exit and error taxonomy is fixed: `0` success (including a confirmed
 `stopped`, an idempotent stop and an uninstall with no owned unit), `2` CLI usage,
@@ -536,7 +579,7 @@ stdout/stderr.
 
 - **Status is a pure read.** The management command performs no Host
   control-plane mutation: it does not create the profile run directory or a
-  unit, does not reload/start/stop the manager, starts no Host, Session, Agent
+  service definition, does not reload/start/stop the manager, starts no Host, Session, Agent
   or TUI, and writes no credential, setting or job. The surrounding official
   DSH Profile Boot keeps its existing behavior; this contract is about the
   management control plane, not a claim that the whole CLI process is
@@ -544,24 +587,33 @@ stdout/stderr.
   run the official authenticated `/connect` handshake. Its stable `key=value`
   block carries `profile`, `manager`, `user-manager`, `host`, `unit`,
   `unit-state` and `compatibility` (plus a bounded `pid`/`instance` while one
-  is live). With no installed unit the command issues NO manager query and
+  is live). With no installed service definition the command issues NO manager query and
   reports `user-manager=not-checked`; `user-manager=available|error` only
-  describes the real `systemctl show` of an installed unit, and no absence is
-  inferred or reported as `absent`. On macOS there is no unit fact at all: the
-  command never inspects a unit path, resolves a systemd runtime directory or
-  invokes `systemctl`/`journalctl`/`launchctl`, and always reports
+  describes the real manager query (`systemctl show` or `launchctl print`) of an
+  installed service definition, and no absence is inferred or reported as
+  `absent`. On macOS the installed fact is the verified LaunchAgent plist: with
+  no plist the command never inspects a unit path, resolves a systemd runtime
+  directory or invokes `systemctl`/`journalctl`/`launchctl`, and reports
   `user-manager=not-checked`, `unit=none`, `unit-state=not-found`; an
   authenticated live Host is `manager=process` and `host=ready`, and with no
-  Host the macOS status is `manager=unmanaged` and `host=stopped`. `manager`
-  names the VERIFIED supervision
-  attribution: `systemd` only when the loaded unit's `MainPID` equals the
-  authenticated Host PID, `process` for a verified independent Host (even when a
-  user bus exists), otherwise `unmanaged`; it never means "systemctl exists".
-  `unit` is the installed-unit fact and is independent of `manager`.
-  `ActiveState=active` or a registry PID is not readiness: a supervised but
-  unauthenticated Host is `starting`/`unresponsive`, and an
+  Host the macOS status is `manager=unmanaged` and `host=stopped`. With an owned
+  plist it reports `unit=<label>`, the real `launchctl print` outcome as
+  `user-manager=available|error`, and `unit-state` as the actual launchd job
+  state (`running`, `not-running`, `spawn-scheduled`, `not-found` or `unknown`);
+  `manager=launchd` only when the printed source is that plist's canonical
+  target, the fixed launch facts match and the real job PID equals the
+  authenticated Host PID. A loaded job in flux or a foreign/stale source is
+  never attributed and stays fail-closed. `manager`
+  names the VERIFIED supervision attribution: `systemd` only when the loaded
+  unit's `MainPID` equals the authenticated Host PID, `launchd` only when the
+  printed job source/facts match and its real PID equals the authenticated Host
+  PID, `process` for a verified independent Host (even when a user bus
+  exists), otherwise `unmanaged`; it never means "a manager executable exists".
+  `unit` is the installed service-definition fact and is independent of
+  `manager`. A manager active state or a registry PID is not readiness: a
+  supervised but unauthenticated Host is `starting`/`unresponsive`, and an
   unreadable/contradictory state is `unknown`.
-  A manager-reported `activating` unit is a Host that may still come up: it is
+  For the systemd manager, an `activating` unit is a Host that may still come up: it is
   reported `starting` (never `stopped`) even before any `MainPID` exists, while
   any other unconfirmed transition (`deactivating`, `reloading`, an unrecognized
   `ActiveState`) beside a live Host keeps the authenticated `host=ready` truth,
@@ -580,16 +632,18 @@ stdout/stderr.
   manager, so a manager error never fails that path (`status` still reports
   the same combination nonzero, because its question — "is everything
   confirmed?" — includes the supervisor). Otherwise it creates only the needed
-  0700 scope run directory and asks the existing
-  `ensureLocalHost({hostStartPolicy:'public'})` to bring one up, then
-  waits for authenticated readiness. A manager error never degrades to the
-  process fallback; a different installed build or unknown unit is a conflict;
-  a live unauthenticated/incompatible Host is never replaced or killed.
+  0700 scope run directory (including the private launchd log sinks on macOS)
+  and asks the existing `ensureLocalHost({hostStartPolicy:'public'})` to bring
+  one up, then waits for authenticated readiness. A manager error never
+  degrades to the process fallback; a different installed build or unknown
+  service definition is a conflict; a live unauthenticated/incompatible Host is
+  never replaced or killed.
 - **stop needs proven supervision.** A loaded `active`/`activating` profile unit
   whose `MainPID` is the authenticated Host is stopped only through
   `systemctl --user stop <verified-name>`, followed by a bounded wait for the
-  original MainPID to exit. An independent authenticated Host — no unit, a unit
-  reported `inactive`/`failed`, or an installed but unloaded unit — is stopped
+  original MainPID to exit. An independent authenticated Host — no service
+  definition, a unit reported `inactive`/`failed`, an installed but unloaded
+  unit, or a plist whose job is not loaded — is stopped
   only by one SIGTERM to the verified original PID after re-authentication,
   re-checking the kernel starttime and the product Host entry command identity;
   this routing does not depend on whether the machine happens to have systemd.
@@ -598,7 +652,11 @@ stdout/stderr.
   `assertRecordedHostKernelIdentityCurrent()` must still prove the SAME kernel
   process, the kernel read is repeated immediately before the signal, and a
   `gone`/`different`/`unknown` observation or a replaced registry instance is
-  refused with ZERO signals. The bounded wait then requires that recorded kernel identity to
+  refused with ZERO signals. A loaded macOS LaunchAgent whose printed source and
+  fixed launch facts match and whose real PID is the authenticated Host is
+  stopped only through `launchctl bootout` of that verified job, followed by the
+  same bounded kernel-identity wait; a loaded job with no live Host is booted
+  out without any signal. The bounded wait then requires that recorded kernel identity to
   become `gone`/`different`; `unknown` stays uncertainty and is never treated as
   stopped. No platform invokes `readLinuxStarttime`/`/proc` or a Linux abstract
   admin seat on macOS. The Host's existing `SIGTERM` process-lifetime admission
@@ -612,12 +670,13 @@ stdout/stderr.
   A live Host that fails the Cookie/identity/starttime handshake is
   `unresponsive`; one whose protocol or DSH runtime differs is `incompatible`.
   Both are nonzero diagnostics, and the product never restarts, stops,
-  rewrites or enables a unit on its own. An explicit `stop`, `restart` or
-  `uninstall` may still act on an already-verified current-Profile unit when
-  the manager is available and the unit's `MainPID` is the live Host PID the
-  command is about to stop (or there is no live registry Host): readiness and
-  compatibility are Host verdicts, not the unit-ownership verdict. Foreign
-  identity, wrong scope, wrong `FragmentPath`, a mismatched `MainPID` and an
+  rewrites or enables a service definition on its own. An explicit `stop`,
+  `restart` or `uninstall` may still act on an already-verified current-Profile
+  service when the manager is available and its `MainPID`/printed PID is the
+  live Host PID the command is about to stop (or there is no live registry
+  Host): readiness and compatibility are Host verdicts, not the
+  service-ownership verdict. Foreign identity, wrong scope, wrong
+  `FragmentPath`/plist source, a mismatched `MainPID`/PID and an
   independent Host without a fresh authenticated identity remain refusals.
   A restart still stops the old instance and proves a new authenticated Ready
   instance; a failed recovery reports the real failure. An ordinary surface
@@ -631,27 +690,30 @@ stdout/stderr.
   for a replaced expected Client instance.
 - **restart and uninstall are ONE explicit transition.** `restart` stops, awaits
   a confirmed old-instance exit, and only then starts a new instance; a stop
-  that is unknown, failed or still running forbids the start. An owned unit
-  whose install build differs from THIS installation is refused (exit 3) and
-  left untouched: cross-build unit replacement belongs to the explicit upgrade
-  flow, not to a management command — the unit metadata alone cannot prove a
+  that is unknown, failed or still running forbids the start. An owned service
+  definition whose install build differs from THIS installation is refused
+  (exit 3) and left untouched: cross-build replacement belongs to the explicit
+  upgrade flow, not to a management command — the metadata alone cannot prove a
   historical build's compatibility. An `install` only writes and verifies this
-  Profile's unit; it never starts, stops, enables or migrates anything, so a
-  running independent Host keeps its instance and stays `manager=process`.
-  `uninstall` is idempotent when no unit is installed; it stops only a running
-  verified unit whose `MainPID` is the live Host (or a unit with no live Host),
-  unlinks only this Profile's verified unit path, and reloads. An
-  `inactive`/unloaded unit is unlink-only and leaves an independent running Host
-  untouched; that successful result claims no interrupted Session. For a symlink
-  the unlink leaves its source target intact; drop-in files are also retained. It
-  never removes the Profile, `DSH_HOME`, Sessions, credentials, `launch.json` or
-  another Profile's unit, and it never kills an independent Host. A reload
+  Profile's service definition; it never starts, stops, enables or migrates
+  anything, so a running independent Host keeps its instance and stays
+  `manager=process`. `uninstall` is idempotent when no service definition is
+  installed; it stops only a running verified systemd unit whose `MainPID` is
+  the live Host (or a unit with no live Host) and only a verified loaded
+  LaunchAgent, unlinks only this Profile's verified path, and reloads systemd.
+  An `inactive`/unloaded unit or unloaded plist is unlink-only and leaves an
+  independent running Host untouched; that successful result claims no
+  interrupted Session. For a symlink the unlink leaves its source target
+  intact; drop-in files and launchd private logs are also retained. It never
+  removes the Profile, `DSH_HOME`, Sessions, credentials, `launch.json` or
+  another Profile's service, and it never kills an independent Host. A reload
   failure is reported as a failure, never as a completed uninstall. A cold `start` never
   silently upgrades a different build. A mutating verb's exit 0 requires the
   post-transition snapshot to contain NO blocking failure AND the expected
   outcome: `start`/`restart` need an authenticated Ready Host (plus a new
   `instanceId` for `restart`), `stop` needs `host=stopped`, and `uninstall` needs
-  the owned unit confirmed gone after a successful `daemon-reload`. A Ready
+  the owned service definition confirmed gone (after the platform reload when
+  one exists). A Ready
   observation never outranks a supervision/ownership failure, and an uninstall
   whose OS actions committed but whose confirmation failed reports the failure
   (no reinstall, no rollback).
@@ -665,9 +727,13 @@ stdout/stderr.
   unit whose `MainPID` differs, a unit in flux, or an unreadable manager is an
   explicit exit-4 log-source failure and never a guessed file. There is no
   arbitrary path/command input and no business side effect; missing/unreadable
-  output is exit 4. On macOS there is no journal path at all: `daemon logs`
-  always reads the same bounded/sanitized scope `host.log` tail and never invokes
-  `journalctl`/`launchctl` or invents another source. Output is bounded and
+  output is exit 4. On macOS a verified loaded LaunchAgent is the source:
+  `daemon logs` reads its two private files (`launchd.stdout.log` and
+  `launchd.stderr.log`) as separately bounded, separately labelled streams and
+  never pretends they are time-merged; an independent Host (no plist, or an
+  installed-but-unloaded plist) keeps the bounded/sanitized scope `host.log`
+  tail. Missing output is exit 4; a stale log from another process is never
+  presented as the current record. Output is bounded and
   best-effort
   sanitized (ANSI/control sequences, token/cookie/Authorization and
   connect/launch URL material); the user-facing notice states that the
@@ -682,11 +748,11 @@ stdout/stderr.
   when the command exits, so there is no persistent lock file or second state
   machine. A second
   concurrent mutating command for the same Profile gets `DAEMON_CONTROL_BUSY`
-  and exit 5 before any Host/unit mutation; another Profile is unaffected. A
-  normal Client cold start keeps its existing Host kernel-singleton semantics and
-  takes no admin seat. On macOS `install`/`uninstall` refuse as
-  `UNSUPPORTED_PLATFORM`/exit 3 before taking the seat, writing a unit or
-  creating any directory; no launchd plist exists.
+  and exit 5 before any Host/service mutation; another Profile is unaffected. A
+  normal Client cold start keeps its existing Host kernel-singleton semantics
+  and takes no admin seat. On macOS `install`/`uninstall` take the same admin
+  seat before writing or removing the verified LaunchAgent plist; they do not
+  create the profile runtime scope.
 - **Running-work boundary.** `stop`/`restart` are explicit user Host control and
   can interrupt a running Session, accepted Turn, tool or pending Interaction;
   `uninstall` prints the same warning only when it actually stopped a running
