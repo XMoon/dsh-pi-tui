@@ -2625,6 +2625,13 @@ async function runD4LaunchdScene({ installation, workRoot, report, start, projec
     'L05: the stopped Host registry still claims the old instance')
   report.rows.push({ id: 'L05', status: 'PASS', hostPid: restartedHost.record.hostPid, kernelIdentityGone: true, jobRemoved: true })
 
+  // Stopping the launchd Host keeps the plist and its private streams. `logs`
+  // must use those retained streams, never the older independent host.log.
+  const postStopLogs = daemon(['logs', '--lines', '20'])
+  assert(postStopLogs.status === 0 && /\[dsh-pi-tui daemon: launchd (stdout|stderr)\]/u.test(postStopLogs.stdout),
+    `L08-POSTSTOP: a stopped launchd Host must keep its retained stream source, saw exit ${String(postStopLogs.status)}: ${postStopLogs.stderr.slice(-500)}`)
+  report.rows.push({ id: 'L08-POSTSTOP', status: 'PASS', source: 'retained launchd streams after stop', staleHostLogIgnored: true })
+
   // ── L09 (second profile install isolation, best-effort native) ──────────
   let secondProfileEvidence
   try {
@@ -2662,14 +2669,25 @@ async function runD4LaunchdScene({ installation, workRoot, report, start, projec
     report.rows.push({ id: 'L09-PROFILE', status: 'NOT_VERIFIED', reason: error instanceof Error ? error.message : String(error), secondProfileAttempted: true })
   }
 
-  // ── L07: uninstall removes the job + plist and keeps the private logs ────
+  // ── L07: uninstall removes a LOADED job + plist and keeps the logs ───────
+  // Start the launchd Host again after the second-profile block so the
+  // production uninstall path really boots out a loaded, authenticated job.
+  const l07Start = daemonOk(['start'], 'L07 uninstall start')
+  assert(l07Start.fields.manager === 'launchd' && l07Start.fields.host === 'ready',
+    `L07: the pre-uninstall start did not produce a launchd Host: ${JSON.stringify(l07Start.fields)}`)
+  const l07Host = requireLiveHost('L07 uninstall host')
+  const l07Print = launchctlJobPrint(label)
+  const l07Pid = parseLaunchctlJobPid(l07Print.stdout)
+  assert(l07Print.status === 0 && l07Pid !== undefined && l07Pid === l07Host.record.hostPid,
+    'L07: the job must be loaded and running the authenticated Host before uninstall')
   const l07 = daemonOk(['uninstall'], 'L07 launchd uninstall')
   assert(!existsSync(plistPath), 'L07: uninstall did not remove the owned plist')
   assert(launchctlJobPrint(label).status === 113, 'L07: uninstall left the verified job loaded')
+  assert(!alive(l07Host.record.hostPid), 'L07: uninstall did not stop the loaded launchd Host')
   assert(existsSync(stdoutLog) && existsSync(stderrLog), 'L07: uninstall must retain the private launchd logs')
   const l07Again = daemonOk(['uninstall'], 'L07 idempotent')
   assert(/^unit=none$/mu.test(l07Again.result.stdout), 'L07: a repeat uninstall must be an idempotent no-plist success')
-  report.rows.push({ id: 'L07', status: 'PASS', plistRemoved: true, jobRemoved: true, logsRetained: true, idempotent: true })
+  report.rows.push({ id: 'L07', status: 'PASS', plistRemoved: true, jobRemoved: true, loadedJobStopped: true, hostPidGone: true, logsRetained: true, idempotent: true })
 
   // ── L12: the independent daemon is still the default afterward ──────────
   const legacyStart = daemonOk(['start'], 'L12 legacy start')

@@ -1539,6 +1539,69 @@ test('darwin logs reports an unavailable launchd source without inventing one', 
   assertCode(result, 4, /LOG_SOURCE_UNAVAILABLE/u)
 })
 
+test('darwin logs keeps the retained launchd streams after the launchd Host stops', async t => {
+  const fx = fixture(t)
+  writeOwnedLaunchd(fx)
+  const facts = launchdFactsOf(fx)
+  const logs = launchdLogPaths(facts.scopeDir)
+  const launchctl = fakeLaunchd(fx, { loaded: false })
+  const result = await runDaemonControl({ verb: 'logs', lines: 20 }, fx.profile, darwinDepsOf(fx, {
+    launchctl: launchctl.run,
+    readRecord: () => undefined,
+    inspectProcess: () => 'dead',
+    hostLogTail: async path => {
+      if (path === logs.stdout) return 'retained launchd stdout\n'
+      if (path === logs.stderr) return undefined
+      assert.fail(`the stopped launchd Host must not fall back to ${path}`)
+    },
+  }))
+  assertCode(result, 0)
+  assert.match(result.stdout, /\[dsh-pi-tui daemon: launchd stdout\]/u)
+  assert.match(result.stdout, /retained launchd stdout/u)
+})
+
+test('darwin logs uses host.log only when an installed plist never created a launchd stream', async t => {
+  const fx = fixture(t)
+  writeOwnedLaunchd(fx)
+  const facts = launchdFactsOf(fx)
+  const logs = launchdLogPaths(facts.scopeDir)
+  const launchctl = fakeLaunchd(fx, { loaded: false })
+  const result = await runDaemonControl({ verb: 'logs', lines: 20 }, fx.profile, darwinDepsOf(fx, {
+    launchctl: launchctl.run,
+    readRecord: () => undefined,
+    inspectProcess: () => 'dead',
+    hostLogTail: async path => {
+      if (path === logs.stdout || path === logs.stderr) return undefined
+      if (path === join(fx.scope.dir, 'host.log')) return 'independent host line\n'
+      assert.fail(`unexpected log source ${path}`)
+    },
+  }))
+  assertCode(result, 0)
+  assert.match(result.stdout, /independent host line/u)
+  assert.doesNotMatch(result.stdout, /\[dsh-pi-tui daemon: launchd/u)
+})
+
+test('darwin logs does not fall back to host.log when retained launchd streams are empty', async t => {
+  const fx = fixture(t)
+  writeOwnedLaunchd(fx)
+  const facts = launchdFactsOf(fx)
+  const logs = launchdLogPaths(facts.scopeDir)
+  const launchctl = fakeLaunchd(fx, { loaded: false })
+  let hostLogReads = 0
+  const result = await runDaemonControl({ verb: 'logs', lines: 20 }, fx.profile, darwinDepsOf(fx, {
+    launchctl: launchctl.run,
+    readRecord: () => undefined,
+    inspectProcess: () => 'dead',
+    hostLogTail: async path => {
+      if (path === logs.stdout || path === logs.stderr) return ''
+      hostLogReads += 1
+      return 'stale host.log\n'
+    },
+  }))
+  assertCode(result, 4, /LOG_SOURCE_UNAVAILABLE/u)
+  assert.equal(hostLogReads, 0, 'an empty retained launchd stream never falls back to a stale host.log')
+})
+
 test('darwin stop signals the kernel-verified Host exactly once and waits for its identity to go', { skip: process.platform !== 'darwin' ? 'Darwin kernel seats require macOS' : false }, async t => {
   const fx = fixture(t)
   const record = darwinRecordOf(fx.scope)

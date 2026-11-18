@@ -500,6 +500,21 @@ test('start re-proves the plist identity after the async inspection and before b
   assert.equal(base.calls.some(args => args[0] === 'bootstrap' || args[0] === 'kickstart'), false, 'a plist changed after inspection is never bootstrapped')
 })
 
+test('start refuses a user-edited plist before any launchctl call', async t => {
+  const fx = fixture(t)
+  const launchctl = fakeLaunchctl(fx, { loaded: false })
+  const deps = depsOf(fx, { launchctl: launchctl.run })
+  const installed = await installLaunchdUnit(fx.facts, deps)
+  writeFileSync(installed.filePath, `${readFileSync(installed.filePath, 'utf8')}\n<!-- user runtime edit -->\n`, { mode: 0o600 })
+  const unit = ownedUnitOf(fx, deps)
+  launchctl.calls.length = 0
+  await assert.rejects(
+    startLaunchdService(fx.facts, unit, deps),
+    (error: unknown) => error instanceof LocalScopeError && error.code === 'HOST_MANAGER_UNIT_CONFLICT',
+  )
+  assert.deepEqual(launchctl.calls, [], 'an edited plist is refused before bootstrap can execute it')
+})
+
 test('stop boots out only a matched job, verifies removal and never signals twice', async t => {
   const fx = fixture(t)
   const launchctl = fakeLaunchctl(fx, { loaded: false })

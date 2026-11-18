@@ -543,10 +543,14 @@ supported Daemon platform in this contract.
   `kickstart`s, enables or restarts a job, creates the profile runtime scope or
   migrates a running independent Host. A same-identity plist is reused
   byte-for-byte; a foreign identity, symlink, other scope/profile/build or
-  foreign loaded job is refused. `daemon uninstall` removes only that verified
-  plist and, when the job is loaded from it, `bootout`s only that verified job;
-  it keeps the private logs, Sessions, Workspace and credentials, and leaves a
-  running independent Host untouched.
+  foreign loaded job is refused. `daemon start` proves the canonical fixed
+  definition before any `bootstrap`: a user-edited plist is preserved on disk
+  but refused rather than executed (a user-edited `RunAtLoad=true` can run a
+  modified program during bootstrap), and the command never rewrites it.
+  `daemon uninstall` removes only that verified plist and, when the job is
+  loaded from it, `bootout`s only that verified job; it keeps the private logs,
+  Sessions, Workspace and credentials, and leaves a running independent Host
+  untouched.
 - **Stop/log ownership.** An independent Host writes its private `host.log` and
   has no periodic auto-restart (only an explicitly enabled manager restarts a
   supervised Host; the default macOS LaunchAgent does not). Host stop remains
@@ -734,10 +738,13 @@ stdout/stderr.
   output is exit 4. On macOS a verified loaded LaunchAgent is the source:
   `daemon logs` reads its two private files (`launchd.stdout.log` and
   `launchd.stderr.log`) as separately bounded, separately labelled streams and
-  never pretends they are time-merged; an independent Host (no plist, or an
-  installed-but-unloaded plist) keeps the bounded/sanitized scope `host.log`
-  tail. Missing output is exit 4; a stale log from another process is never
-  presented as the current record. Output is bounded and
+  never pretends they are time-merged; after a launchd Host stops, its retained
+  private streams are the current source when they exist. An independent Host
+  (no plist, or an installed plist that never produced a launchd stream) keeps
+  the bounded/sanitized scope `host.log` tail. Missing output is exit 4; an
+  empty retained launchd stream is unavailable, never a stale `host.log`
+  substitute; a stale log from another process is never presented as the
+  current record. Output is bounded and
   best-effort
   sanitized (ANSI/control sequences, token/cookie/Authorization and
   connect/launch URL material); the user-facing notice states that the

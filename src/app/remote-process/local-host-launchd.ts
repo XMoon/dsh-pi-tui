@@ -828,11 +828,14 @@ async function kickstartLaunchdJob(unit: OwnedLaunchdUnit, deps: LaunchdAdapterD
 }
 
 /**
- * Start the installed job through launchd only: inspect the current service,
- * refuse a foreign/stale loaded definition, `bootstrap` exactly once when the
- * job is not loaded, then `kickstart` exactly once when no process is running.
- * The manager request is never readiness; the caller still waits for the
- * official authenticated Host.
+ * Start the installed job through launchd only: prove the canonical fixed
+ * definition, inspect the current service, refuse a foreign/stale loaded
+ * definition, `bootstrap` exactly once when the job is not loaded, then
+ * `kickstart` exactly once when no process is running. A user-edited plist is
+ * preserved on disk but is never bootstrapped: `RunAtLoad=true` can execute a
+ * modified program during `bootstrap`, before a post-load check. The manager
+ * request is never readiness; the caller still waits for the official
+ * authenticated Host.
  */
 export async function startLaunchdService(
   facts: LaunchdUnitFacts,
@@ -845,6 +848,14 @@ export async function startLaunchdService(
   // mutation. Re-prove the captured file identity at the adapter boundary and
   // again immediately before each mutating request.
   assertLaunchdFileIdentity(unit, facts, deps)
+  // A user-edited plist can change RunAtLoad or ProgramArguments. `bootstrap`
+  // may execute such a definition IMMEDIATELY (verified by the native probe),
+  // so the fixed definition must be proven before any manager operation that
+  // could start it. User edits are preserved on disk; they are never
+  // bootstrapped by this product.
+  if (unit.content !== renderLaunchdPlist(facts)) {
+    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'launchd: the profile plist contains user edits; refusing to bootstrap an unverified definition')
+  }
   let observed = await inspectLaunchdService(unit, deps)
   if (observed.kind === 'unknown') {
     throw new LocalScopeError('HOST_MANAGER_START_FAILED', 'launchd: the loaded job state is not recognizable; refusing to start')
