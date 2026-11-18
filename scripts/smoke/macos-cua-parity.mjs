@@ -368,7 +368,12 @@ async function waitFrameText(session, needle, label, timeoutMs = TIMEOUTS.mount)
 }
 
 async function waitComposer(session, label) {
-  return await waitFrameText(session, 'type a message', `${label} composer ready`, TIMEOUTS.mount)
+  // The welcome card's `type a message` placeholder exists only before the
+  // first Session; an established Session still paints the composer prompt
+  // `❯` at the start of a row. Both are real painted composer facts.
+  return await waitFrameMatching(session,
+    frame => frame.includes('type a message') || /^❯/mu.test(frame),
+    `${label} composer ready`, TIMEOUTS.mount)
 }
 
 /** Wait for a bounded conjunction of painted facts, not one racing capture. */
