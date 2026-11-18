@@ -6854,7 +6854,7 @@ The fork suppressed the process-wide iTerm2 image capability whenever AltScreen 
 #### Dependency map
 
 **Vendor internal**
-- The change is confined to AltScreen capability lifetime; Kitty upload/placement and SIXEL screen ownership remain unchanged.
+- X080 owns two fork behaviors: AltScreen iTerm2 capability lifetime (src/tui-alt-screen.ts) and TuiBase.compositeOverlays iTerm2 image-block preemption (src/tui.ts); Kitty and SIXEL ownership stays with X077/X074.
 - The single process-wide capability cache remains the fork terminal-image authority; no second detector or cache was added.
 - TuiBase.compositeOverlays (src/tui.ts) iTerm2 block preemption
 - Audit note: X080 owns TWO fork hunks: the AltScreen capability-lifetime change in src/tui-alt-screen.ts and the Direct iTerm2 overlay-block preemption in src/tui.ts. Kitty upload/placement and SIXEL screen ownership remain X077/X074 territory and are unchanged.
@@ -6897,12 +6897,12 @@ The fork suppressed the process-wide iTerm2 image capability whenever AltScreen 
 - packages/tui/src/tui.ts
 - Relevant issues/PRs:
 - None recorded; issue/PR state was not used as semantic proof.
-- Remaining semantic delta: Pinned upstream f9a26365568127461c47a07a37dcb42c140a3ac5 suppresses the process-wide iTerm2 capability while AltScreen is active (savedCapabilities + setCapabilities({...images: null}) in beforeTerminalStart, restore in afterTerminalStop). The fork had inherited and relied on that suppression for an older workspace restriction; X080 removes it, keeps the process capability stable and guards the real Direct iTerm2 OSC 1337 contract in the vendored source plus root consumers.
+- Remaining semantic delta: Pinned upstream f9a26365568127461c47a07a37dcb42c140a3ac5 suppresses the process-wide iTerm2 capability while AltScreen is active (savedCapabilities + setCapabilities({...images: null}) in beforeTerminalStart, restore in afterTerminalStop). The fork had inherited and relied on that suppression for an older workspace restriction; X080 removes it, keeps the process capability stable and guards the real Direct iTerm2 OSC 1337 contract in the vendored source plus root consumers. The fork additionally preempts a Direct iTerm2 image block whose painted rows a visible overlay intersects: the anchor yields the frame and the image returns on close, so upstream has no equivalent overlay-vs-image compositing rule.
 
 #### Retirement conditions
 
-- Retire only if upstream introduces an equivalent capability-lifetime contract or the product deliberately removes Direct iTerm2 workspace support.
-- Retirement must rerun the X080 fork wire tests and the real iTerm2 qualification matrix.
+- Retire only if upstream introduces BOTH an equivalent iTerm2 capability-lifetime contract AND an equivalent overlay-block preemption for inline iTerm2 images, or the product deliberately removes Direct iTerm2 workspace support with an explicit Owner decision.
+- Retirement must rerun the X080 fork wire tests (capability lifetime + overlay preemption) and the real iTerm2 qualification matrix.
 
 #### Replacement mapping
 

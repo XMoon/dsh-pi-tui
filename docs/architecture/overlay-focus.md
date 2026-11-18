@@ -1090,8 +1090,9 @@ modal-pre-emption, exactly-once close and final-dispose rules.
   facts admit it, and Direct iTerm2 paints through the fork's OSC 1337 `Image`
   path (X080). Multiplexer panes and `PI_IMAGE_PROTOCOL=none` remain text-only;
   AltScreen no longer mutates the process-wide iTerm2 capability. Transcript
-  iTerm2 thumbnails may paint pixels but do not publish clickable pixel-body
-  geometry; the explicit View action remains the viewer entry.
+  SVG iTerm2 thumbnails may paint pixels but do not publish clickable
+  pixel-body geometry; the ordinary raster thumbnail keeps its legacy iTerm2
+  hit body, and the explicit View action remains the SVG viewer entry.
 
 ### 10.5 Session Workspace: the fourth leased screen
 
