@@ -255,20 +255,42 @@ export function renderLaunchdPlist(facts: LaunchdUnitFacts): string {
   return lines.join('\n')
 }
 
-/** Read one exact plist `<key>...</key><string>...</string>` value, rejecting duplicates. */
-function readPlistString(content: string, key: string): string {
-  const pattern = new RegExp(`<key>${key}</key>\\s*<string>([^<]*)</string>`, 'gu')
-  const matches = [...content.matchAll(pattern)]
-  if (matches.length !== 1) {
-    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', `launchd: the plist has no single ${key} value`)
+/** Decode one plist with the native parser; structural/unsupported input fails closed. */
+function decodeLaunchdPlist(content: string): Record<string, unknown> {
+  const decoded = spawnSync('/usr/bin/plutil', ['-convert', 'json', '-o', '-', '--', '-'], {
+    input: content,
+    encoding: 'utf8',
+    timeout: 5_000,
+    maxBuffer: 64 * 1024,
+  })
+  if (decoded.error !== undefined || decoded.status !== 0 || typeof decoded.stdout !== 'string' || decoded.stdout.trim() === '') {
+    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'launchd: the native plist decoder rejected the plist')
   }
-  return decodePlistValue(matches[0][1] as string)
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(decoded.stdout)
+  } catch {
+    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'launchd: the native plist decoder did not produce JSON')
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'launchd: the plist root is not a dictionary')
+  }
+  return parsed as Record<string, unknown>
+}
+
+function requirePlistString(root: Record<string, unknown>, key: string): string {
+  const value = root[key]
+  if (typeof value !== 'string') {
+    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', `launchd: the plist has no single top-level ${key} value`)
+  }
+  return value
 }
 
 /** Top-level plist keys that can start the job or override its fixed execution identity. */
 const UNSAFE_FIXED_KEYS = [
   'WatchPaths',
   'QueueDirectories',
+  'EnableGlobbing',
   'StartInterval',
   'StartCalendarInterval',
   'StartOnMount',
@@ -297,25 +319,7 @@ export function assertLaunchdFileDefinition(facts: LaunchdUnitFacts, content: st
   const reject = (reason: string): never => {
     throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', `launchd: the profile plist has a changed fixed launch definition (${reason}); refusing to bootstrap it`)
   }
-  const decoded = spawnSync('/usr/bin/plutil', ['-convert', 'json', '-o', '-', '--', '-'], {
-    input: content,
-    encoding: 'utf8',
-    timeout: 5_000,
-    maxBuffer: 64 * 1024,
-  })
-  if (decoded.error !== undefined || decoded.status !== 0 || typeof decoded.stdout !== 'string' || decoded.stdout.trim() === '') {
-    return reject('the native plist decoder rejected the document')
-  }
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(decoded.stdout)
-  } catch {
-    return reject('the native plist decoder did not produce JSON')
-  }
-  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    return reject('the plist root is not a dictionary')
-  }
-  const root = parsed as Record<string, unknown>
+  const root = decodeLaunchdPlist(content)
   const value = (key: string): unknown => {
     if (!Object.hasOwn(root, key)) reject(key)
     return root[key]
@@ -351,21 +355,22 @@ export function assertLaunchdFileDefinition(facts: LaunchdUnitFacts, content: st
   }
 }
 
-/** The installed plist metadata of one owned unit. */
+/** The installed plist metadata of one owned unit (native top-level values). */
 function inspectLaunchdIdentity(content: string, facts: LaunchdUnitFacts, label: string): string {
-  if (readPlistString(content, 'Label') !== label) {
+  const root = decodeLaunchdPlist(content)
+  if (requirePlistString(root, 'Label') !== label) {
     throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'launchd: the plist Label is not this profile scope')
   }
-  if (readPlistString(content, 'X-DshPiTuiOwner') !== LAUNCHD_OWNER_MARKER) {
+  if (requirePlistString(root, 'X-DshPiTuiOwner') !== LAUNCHD_OWNER_MARKER) {
     throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'launchd: the plist is not owned by this product')
   }
-  if (readPlistString(content, 'X-DshPiTuiScopeId') !== facts.scopeId) {
+  if (requirePlistString(root, 'X-DshPiTuiScopeId') !== facts.scopeId) {
     throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'launchd: the plist belongs to another profile scope')
   }
-  if (readPlistString(content, 'X-DshPiTuiProfileIdentity') !== facts.profileIdentity) {
+  if (requirePlistString(root, 'X-DshPiTuiProfileIdentity') !== facts.profileIdentity) {
     throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'launchd: the plist belongs to another canonical profile')
   }
-  const installBuild = readPlistString(content, 'X-DshPiTuiInstallBuild')
+  const installBuild = requirePlistString(root, 'X-DshPiTuiInstallBuild')
   if (!/^[0-9a-f]{64}$/u.test(installBuild)) {
     throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'launchd: the plist has no valid install build identity')
   }

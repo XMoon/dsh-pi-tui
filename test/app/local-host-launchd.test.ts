@@ -304,7 +304,7 @@ test('launchctl print parsing fails closed when a required block is missing or a
   assert.equal(parseLaunchctlPrint(nonAgent), undefined)
 })
 
-test('service matching requires the exact file, program, argv, cwd, sinks and anchors', t => {
+test('service matching requires the exact file, program, argv, cwd, sinks and anchors', { skip: NATIVE_PLIST_DECODER_SKIP }, t => {
   const fx = fixture(t)
   const deps = depsOf(fx)
   assert.equal(inspectOwnedLaunchdUnit(fx.facts, deps).kind, 'none')
@@ -340,7 +340,7 @@ test('inspect with no LaunchAgents chain is a side-effect-free none', t => {
   assert.equal(existsSync(join(fx.accountHome, 'Library')), false, 'inspection must not create directories')
 })
 
-test('install writes one 0600 plist without bootstrap, kickstart or bootout', async t => {
+test('install writes one 0600 plist without bootstrap, kickstart or bootout', { skip: NATIVE_PLIST_DECODER_SKIP }, async t => {
   const fx = fixture(t)
   const launchctl = fakeLaunchctl(fx, { loaded: false })
   const result = await installLaunchdUnit(fx.facts, depsOf(fx, { launchctl: launchctl.run }))
@@ -354,7 +354,7 @@ test('install writes one 0600 plist without bootstrap, kickstart or bootout', as
   ], 'install checks the domain and same-label source but never starts/stops a job')
 })
 
-test('install is idempotent and never rewrites a same-identity user plist', async t => {
+test('install is idempotent and never rewrites a same-identity user plist', { skip: NATIVE_PLIST_DECODER_SKIP }, async t => {
   const fx = fixture(t)
   const launchctl = fakeLaunchctl(fx, { loaded: false })
   const deps = depsOf(fx, { launchctl: launchctl.run })
@@ -367,7 +367,7 @@ test('install is idempotent and never rewrites a same-identity user plist', asyn
   assert.equal(readFileSync(first.filePath, 'utf8'), edited, 'an existing same-owner plist is never rewritten')
 })
 
-test('install refuses a foreign file, a symlink and another installed build without overwriting', async t => {
+test('install refuses a foreign file, a symlink and another installed build without overwriting', { skip: NATIVE_PLIST_DECODER_SKIP }, async t => {
   const fx = fixture(t)
   const dir = join(fx.accountHome, 'Library', 'LaunchAgents')
   mkdirSync(dir, { recursive: true, mode: 0o700 })
@@ -394,7 +394,7 @@ test('install refuses a foreign file, a symlink and another installed build with
   assert.equal(readFileSync(path, 'utf8'), otherBuild, 'a plist from another build is never overwritten')
 })
 
-test('install refuses a same-label job loaded from another source and writes nothing', async t => {
+test('install refuses a same-label job loaded from another source and writes nothing', { skip: NATIVE_PLIST_DECODER_SKIP }, async t => {
   const fx = fixture(t)
   const foreignPath = join(fx.root, 'foreign', 'foreign.plist')
   mkdirSync(join(fx.root, 'foreign'), { recursive: true, mode: 0o700 })
@@ -407,7 +407,7 @@ test('install refuses a same-label job loaded from another source and writes not
   assert.equal(existsSync(plistPathOf(fx)), false, 'no plist may be written while a foreign job owns the label')
 })
 
-test('install refuses a same-path loaded job when the owned plist is absent', async t => {
+test('install refuses a same-path loaded job when the owned plist is absent', { skip: NATIVE_PLIST_DECODER_SKIP }, async t => {
   const fx = fixture(t)
   const launchctl = fakeLaunchctl(fx, { loaded: true })
   await assert.rejects(
@@ -417,7 +417,7 @@ test('install refuses a same-path loaded job when the owned plist is absent', as
   assert.equal(existsSync(plistPathOf(fx)), false, 'a loaded job whose source file is gone must not receive a new unproven plist')
 })
 
-test('install fails closed when the user GUI domain is unavailable', async t => {
+test('install fails closed when the user GUI domain is unavailable', { skip: NATIVE_PLIST_DECODER_SKIP }, async t => {
   const fx = fixture(t)
   const run: LaunchctlRunner = async args => {
     if (args[0] === 'print' && args[1] === `gui/${String(UID)}`) return exited(112, '', 'Could not find domain')
@@ -581,6 +581,14 @@ test('the fixed-definition reader keeps harmless edits and rejects execution tri
   assert.throws(
     () => assertLaunchdFileDefinition(
       fx.facts,
+      canonical.replace('\n</dict>\n</plist>', '\n  <key>EnableGlobbing</key>\n  <true/>\n</dict>\n</plist>'),
+    ),
+    (error: unknown) => error instanceof LocalScopeError && error.code === 'HOST_MANAGER_UNIT_CONFLICT',
+    'EnableGlobbing can rewrite argv before invocation and must never be accepted',
+  )
+  assert.throws(
+    () => assertLaunchdFileDefinition(
+      fx.facts,
       canonical.replace('<key>RunAtLoad</key>\n  <false/>', '<key>RunAtLoad</key>\n  <true/>'),
     ),
     (error: unknown) => error instanceof LocalScopeError && error.code === 'HOST_MANAGER_UNIT_CONFLICT',
@@ -601,7 +609,25 @@ test('the fixed-definition reader keeps harmless edits and rejects execution tri
   }
 })
 
-test('stop boots out only a matched job, verifies removal and never signals twice', async t => {
+test('owner metadata in XML comments does not make a plist owned', { skip: NATIVE_PLIST_DECODER_SKIP }, t => {
+  const fx = fixture(t)
+  const deps = depsOf(fx)
+  mkdirSync(join(fx.accountHome, 'Library', 'LaunchAgents'), { recursive: true, mode: 0o700 })
+  const canonical = renderLaunchdPlist(fx.facts)
+  let content = canonical
+  for (const key of ['X-DshPiTuiOwner', 'X-DshPiTuiScopeId', 'X-DshPiTuiProfileIdentity', 'X-DshPiTuiInstallBuild']) {
+    content = content.replace(new RegExp(`  <key>${key}</key>\n  <string>[^<]*</string>\n`, 'u'), '')
+  }
+  content = content.replace('</dict>', '  <!-- <key>X-DshPiTuiOwner</key><string>local-host-launchd-v1</string> <key>X-DshPiTuiScopeId</key><string>claimed</string> <key>X-DshPiTuiProfileIdentity</key><string>claimed</string> <key>X-DshPiTuiInstallBuild</key><string>claimed</string> -->\n</dict>')
+  writeFileSync(plistPathOf(fx), content, { mode: 0o600 })
+  assert.throws(
+    () => inspectOwnedLaunchdUnit(fx.facts, deps),
+    (error: unknown) => error instanceof LocalScopeError && error.code === 'HOST_MANAGER_UNIT_CONFLICT',
+    'owner declarations inside a comment are not top-level native plist keys',
+  )
+})
+
+test('stop boots out only a matched job, verifies removal and never signals twice', { skip: NATIVE_PLIST_DECODER_SKIP }, async t => {
   const fx = fixture(t)
   const launchctl = fakeLaunchctl(fx, { loaded: false })
   const deps = depsOf(fx, { launchctl: launchctl.run })
@@ -624,7 +650,7 @@ test('stop boots out only a matched job, verifies removal and never signals twic
   assert.deepEqual(launchctl.calls, [['print', `gui/${String(UID)}/${unit.label}`]], 'an already removed job is an idempotent no-op')
 })
 
-test('stop refuses to boot out a foreign or mismatched loaded job', async t => {
+test('stop refuses to boot out a foreign or mismatched loaded job', { skip: NATIVE_PLIST_DECODER_SKIP }, async t => {
   const fx = fixture(t)
   const launchctl = fakeLaunchctl(fx, { loaded: false })
   const deps = depsOf(fx, { launchctl: launchctl.run })
@@ -642,7 +668,7 @@ test('stop refuses to boot out a foreign or mismatched loaded job', async t => {
   assert.equal(launchctl.calls.some(args => args[0] === 'bootout'), false, 'a mismatched job is never booted out')
 })
 
-test('stop refuses a loaded job whose real PID changed before bootout', async t => {
+test('stop refuses a loaded job whose real PID changed before bootout', { skip: NATIVE_PLIST_DECODER_SKIP }, async t => {
   const fx = fixture(t)
   const launchctl = fakeLaunchctl(fx, { loaded: false })
   const deps = depsOf(fx, { launchctl: launchctl.run })
@@ -659,7 +685,7 @@ test('stop refuses a loaded job whose real PID changed before bootout', async t 
   assert.deepEqual(launchctl.calls, [['print', `gui/${String(UID)}/${unit.label}`]], 'a changed real PID is never booted out')
 })
 
-test('stop re-proves the plist identity after the async inspection and before bootout', async t => {
+test('stop re-proves the plist identity after the async inspection and before bootout', { skip: NATIVE_PLIST_DECODER_SKIP }, async t => {
   const fx = fixture(t)
   const base = fakeLaunchctl(fx, { loaded: false })
   const deps = depsOf(fx, { launchctl: base.run })
@@ -685,7 +711,7 @@ test('stop re-proves the plist identity after the async inspection and before bo
   assert.equal(base.calls.some(args => args[0] === 'bootout'), false, 'a plist changed after inspection is never booted out')
 })
 
-test('stop refuses an idle job that becomes running at the final inspection without an expected PID', async t => {
+test('stop refuses an idle job that becomes running at the final inspection without an expected PID', { skip: NATIVE_PLIST_DECODER_SKIP }, async t => {
   const fx = fixture(t)
   const base = fakeLaunchctl(fx, { loaded: false })
   const deps = depsOf(fx, { launchctl: base.run })
@@ -713,7 +739,7 @@ test('stop refuses an idle job that becomes running at the final inspection with
   assert.equal(base.calls.some(args => args[0] === 'bootout'), false, 'an idle-to-running race without an authenticated PID is never booted out')
 })
 
-test('stop refuses an idle job that becomes spawn scheduled at the final inspection without an expected PID', async t => {
+test('stop refuses an idle job that becomes spawn scheduled at the final inspection without an expected PID', { skip: NATIVE_PLIST_DECODER_SKIP }, async t => {
   const fx = fixture(t)
   const base = fakeLaunchctl(fx, { loaded: false })
   const deps = depsOf(fx, { launchctl: base.run })
@@ -741,7 +767,7 @@ test('stop refuses an idle job that becomes spawn scheduled at the final inspect
   assert.equal(base.calls.some(args => args[0] === 'bootout'), false, 'an idle-to-starting race without an authenticated PID is never booted out')
 })
 
-test('uninstall removes only the verified plist and leaves the private logs', async t => {
+test('uninstall removes only the verified plist and leaves the private logs', { skip: NATIVE_PLIST_DECODER_SKIP }, async t => {
   const fx = fixture(t)
   const launchctl = fakeLaunchctl(fx, { loaded: false })
   const deps = depsOf(fx, { launchctl: launchctl.run })
@@ -761,7 +787,7 @@ test('uninstall removes only the verified plist and leaves the private logs', as
   assert.equal(readFileSync(logs.stderr, 'utf8'), 'stderr retained\n')
 })
 
-test('uninstall refuses a plist whose captured identity changed and keeps the file', async t => {
+test('uninstall refuses a plist whose captured identity changed and keeps the file', { skip: NATIVE_PLIST_DECODER_SKIP }, async t => {
   const fx = fixture(t)
   const launchctl = fakeLaunchctl(fx, { loaded: false })
   const deps = depsOf(fx, { launchctl: launchctl.run })
@@ -775,7 +801,7 @@ test('uninstall refuses a plist whose captured identity changed and keeps the fi
   assert.equal(existsSync(installed.filePath), true, 'a changed plist is never removed')
 })
 
-test('uninstall re-proves the plist identity after inspection and before any bootout', async t => {
+test('uninstall re-proves the plist identity after inspection and before any bootout', { skip: NATIVE_PLIST_DECODER_SKIP }, async t => {
   const fx = fixture(t)
   const base = fakeLaunchctl(fx, { loaded: false })
   const deps = depsOf(fx, { launchctl: base.run })
@@ -803,7 +829,7 @@ test('uninstall re-proves the plist identity after inspection and before any boo
   assert.equal(readFileSync(installed.filePath, 'utf8'), changed)
 })
 
-test('uninstall refuses a loaded job that becomes running with a different PID before bootout', async t => {
+test('uninstall refuses a loaded job that becomes running with a different PID before bootout', { skip: NATIVE_PLIST_DECODER_SKIP }, async t => {
   const fx = fixture(t)
   const base = fakeLaunchctl(fx, { loaded: false })
   const deps = depsOf(fx, { launchctl: base.run })
@@ -834,7 +860,7 @@ test('uninstall refuses a loaded job that becomes running with a different PID b
   assert.equal(existsSync(installed.filePath), true, 'a refused uninstall keeps the plist')
 })
 
-test('uninstall refuses a loaded job that enters spawn scheduled without a PID before bootout', async t => {
+test('uninstall refuses a loaded job that enters spawn scheduled without a PID before bootout', { skip: NATIVE_PLIST_DECODER_SKIP }, async t => {
   const fx = fixture(t)
   const base = fakeLaunchctl(fx, { loaded: false })
   const deps = depsOf(fx, { launchctl: base.run })

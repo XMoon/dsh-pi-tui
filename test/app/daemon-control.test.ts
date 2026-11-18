@@ -54,6 +54,8 @@ import type {
 } from '../../src/app/remote-process/local-discovery.ts'
 import type { DarwinKernelProcessIdentity, KernelObservation } from '../../src/runtime/native-process/identity.ts'
 
+const DARWIN_SKIP = process.platform !== 'darwin' ? 'the launchd manager uses the macOS native plist decoder' : false
+
 const DSH_VERSION = '0.2.2-rc.3'
 const UUID = '11111111-1111-4111-8111-111111111111'
 
@@ -1026,7 +1028,7 @@ test('an unsupported platform exits 3 before touching the filesystem', async t =
 
 // ── darwin (macOS): process-only management ─────────────────────────────────
 
-test('darwin status with no Host reports the fixed no-unit facts without touching the filesystem', async t => {
+test('darwin status with no Host reports the fixed no-unit facts without touching the filesystem', { skip: DARWIN_SKIP }, async t => {
   const fx = fixture(t)
   const systemctlCalls: string[][] = []
   const result = await runDaemonControl({ verb: 'status' }, fx.profile, darwinDepsOf(fx, {
@@ -1045,7 +1047,7 @@ test('darwin status with no Host reports the fixed no-unit facts without touchin
   assert.equal(existsSync(join(fx.accountHome, '.dsh-pi-tui')), false, 'status must never create the Darwin seat chain')
 })
 
-test('darwin status never inspects an installed systemd unit file', async t => {
+test('darwin status never inspects an installed systemd unit file', { skip: DARWIN_SKIP }, async t => {
   const fx = fixture(t)
   writeOwnedUnit(fx)
   const systemctlCalls: string[][] = []
@@ -1060,7 +1062,7 @@ test('darwin status never inspects an installed systemd unit file', async t => {
   assert.deepEqual(systemctlCalls, [], 'a Linux unit file is not a macOS unit fact')
 })
 
-test('darwin status reports an authenticated Host as process-supervised with no unit facts', async t => {
+test('darwin status reports an authenticated Host as process-supervised with no unit facts', { skip: DARWIN_SKIP }, async t => {
   const fx = fixture(t)
   const record = darwinRecordOf(fx.scope)
   const result = await runDaemonControl({ verb: 'status' }, fx.profile, darwinDepsOf(fx, {
@@ -1079,7 +1081,7 @@ test('darwin status reports an authenticated Host as process-supervised with no 
   assert.match(result.stdout, /^instance=11111111$/mu)
 })
 
-test('darwin logs reads the scope host.log and never a unit journal', async t => {
+test('darwin logs reads the scope host.log and never a unit journal', { skip: DARWIN_SKIP }, async t => {
   const fx = fixture(t)
   let journalReads = 0
   const result = await runDaemonControl({ verb: 'logs', lines: 20 }, fx.profile, darwinDepsOf(fx, {
@@ -1141,7 +1143,7 @@ test('darwin install is idempotent and refuses a same-label job from another sou
   assert.equal(existsSync(launchdPlistPathOf(foreignFx)), false, 'no plist is written while a foreign job owns the label')
 })
 
-test('darwin status claims launchd only when the real job PID is the authenticated Host', async t => {
+test('darwin status claims launchd only when the real job PID is the authenticated Host', { skip: DARWIN_SKIP }, async t => {
   const fx = fixture(t)
   writeOwnedLaunchd(fx)
   const record = darwinRecordOf(fx.scope)
@@ -1161,7 +1163,7 @@ test('darwin status claims launchd only when the real job PID is the authenticat
   assert.match(result.stdout, /^pid=4242$/mu)
 })
 
-test('darwin status refuses a launchd PID that is not the authenticated Host without claiming launchd', async t => {
+test('darwin status refuses a launchd PID that is not the authenticated Host without claiming launchd', { skip: DARWIN_SKIP }, async t => {
   const fx = fixture(t)
   writeOwnedLaunchd(fx)
   const record = darwinRecordOf(fx.scope)
@@ -1178,7 +1180,7 @@ test('darwin status refuses a launchd PID that is not the authenticated Host wit
   assert.doesNotMatch(result.stdout, /^manager=launchd$/mu)
 })
 
-test('darwin status reports a loaded not-running job as stopped and never as launchd supervision', async t => {
+test('darwin status reports a loaded not-running job as stopped and never as launchd supervision', { skip: DARWIN_SKIP }, async t => {
   const fx = fixture(t)
   writeOwnedLaunchd(fx)
   const launchctl = fakeLaunchd(fx, { loaded: true, state: 'not running' })
@@ -1190,7 +1192,7 @@ test('darwin status reports a loaded not-running job as stopped and never as lau
   assert.match(result.stdout, new RegExp(`^unit=${buildLaunchdLabel(fx.scope.scopeId)}$`, 'mu'))
 })
 
-test('darwin status fails closed when the loaded job does not match the installed plist', async t => {
+test('darwin status fails closed when the loaded job does not match the installed plist', { skip: DARWIN_SKIP }, async t => {
   const fx = fixture(t)
   writeOwnedLaunchd(fx)
   const record = darwinRecordOf(fx.scope)
@@ -1581,7 +1583,7 @@ test('darwin uninstall with no plist is an idempotent no-op and never calls laun
   assert.match(result.stdout, /^unit=none$/mu)
 })
 
-test('darwin logs reads the two launchd streams with explicit sources and never host.log', async t => {
+test('darwin logs reads the two launchd streams with explicit sources and never host.log', { skip: DARWIN_SKIP }, async t => {
   const fx = fixture(t)
   writeOwnedLaunchd(fx)
   const facts = launchdFactsOf(fx)
@@ -1608,7 +1610,7 @@ test('darwin logs reads the two launchd streams with explicit sources and never 
   assert.doesNotMatch(result.stdout, /SECRET/u)
 })
 
-test('darwin logs keeps host.log for an independent Host beside an installed but unloaded plist', async t => {
+test('darwin logs keeps host.log for an independent Host beside an installed but unloaded plist', { skip: DARWIN_SKIP }, async t => {
   const fx = fixture(t)
   writeOwnedLaunchd(fx)
   const record = darwinRecordOf(fx.scope)
@@ -1628,7 +1630,7 @@ test('darwin logs keeps host.log for an independent Host beside an installed but
   assert.match(result.stdout, /independent host line/u)
 })
 
-test('darwin logs keeps host.log for an independent Host beside a loaded but not-running owned job', async t => {
+test('darwin logs keeps host.log for an independent Host beside a loaded but not-running owned job', { skip: DARWIN_SKIP }, async t => {
   const fx = fixture(t)
   writeOwnedLaunchd(fx)
   const record = darwinRecordOf(fx.scope)
@@ -1651,7 +1653,7 @@ test('darwin logs keeps host.log for an independent Host beside a loaded but not
   assert.deepEqual(reads, [join(fx.scope.dir, 'host.log')], 'a loaded not-running job does not govern the authenticated independent Host')
 })
 
-test('darwin logs refuses to attribute a different running launchd job to the authenticated Host', async t => {
+test('darwin logs refuses to attribute a different running launchd job to the authenticated Host', { skip: DARWIN_SKIP }, async t => {
   const fx = fixture(t)
   writeOwnedLaunchd(fx)
   const record = darwinRecordOf(fx.scope)
@@ -1671,7 +1673,7 @@ test('darwin logs refuses to attribute a different running launchd job to the au
   assert.equal(hostLogReads, 0, 'a conflicting running job never falls back to host.log')
 })
 
-test('darwin logs reports an unavailable launchd source without inventing one', async t => {
+test('darwin logs reports an unavailable launchd source without inventing one', { skip: DARWIN_SKIP }, async t => {
   const fx = fixture(t)
   writeOwnedLaunchd(fx)
   const record = darwinRecordOf(fx.scope)
@@ -1686,7 +1688,7 @@ test('darwin logs reports an unavailable launchd source without inventing one', 
   assertCode(result, 4, /LOG_SOURCE_UNAVAILABLE/u)
 })
 
-test('darwin logs refuses to guess a source after the launchd job stops', async t => {
+test('darwin logs refuses to guess a source after the launchd job stops', { skip: DARWIN_SKIP }, async t => {
   const fx = fixture(t)
   writeOwnedLaunchd(fx)
   const launchctl = fakeLaunchd(fx, { loaded: false })
@@ -1704,7 +1706,7 @@ test('darwin logs refuses to guess a source after the launchd job stops', async 
   assert.equal(hostLogReads, 0, 'a stopped launchd job has no provable current source; no file is read')
 })
 
-test('darwin logs refuses to guess after the launchd plist was uninstalled with retained streams', async t => {
+test('darwin logs refuses to guess after the launchd plist was uninstalled with retained streams', { skip: DARWIN_SKIP }, async t => {
   const fx = fixture(t)
   writeOwnedLaunchd(fx)
   const facts = launchdFactsOf(fx)
