@@ -1188,7 +1188,7 @@ describe("TuiAltScreen", () => {
 		tui.stop();
 	});
 
-	it("emits iTerm2 OSC 1337 pixels and no Kitty commands (X079)", async () => {
+	it("emits iTerm2 OSC 1337 pixels and no Kitty commands (X080)", async () => {
 		setCapabilities({ images: "iterm2", trueColor: true, hyperlinks: true });
 		try {
 			const terminal = new RecordingTerminal(20, 3);
@@ -4584,7 +4584,7 @@ describe("TuiAltScreen overlay text selection (X068)", () => {
 				.join("");
 		}
 
-		it("keeps the process capability while an instance Kitty override is active (X079)", async () => {
+		it("keeps the process capability while an instance Kitty override is active (X080)", async () => {
 			setCapabilities({ images: "iterm2", trueColor: true, hyperlinks: true });
 			registerKittyImageMetadata({ imageId: 777, columns: 2, rows: 2, widthPx: 10, heightPx: 10 });
 			try {

@@ -19,7 +19,7 @@
  *
  * PIXELS: Kitty and Direct SIXEL place PNG payloads through the ONE managed
  * `ImageGraphics` owner (Image-8 / I8-2B); Direct iTerm2 places the original
- * MIME through the fork `Image` OSC 1337 path (X079). SIXEL readiness is the
+ * MIME through the fork `Image` OSC 1337 path (X080). SIXEL readiness is the
  * owner's live `canPaint()` answer, never a process-wide capability.
  *
  * KITTY/SIXEL JPEG/WEBP (Image-6B): neither transport can place JPEG/WebP bytes

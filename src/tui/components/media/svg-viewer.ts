@@ -19,7 +19,7 @@
  *   `Copy` sends it unchanged.
  *
  * Preview pixels are available on Kitty, Direct SIXEL (Image-8 / I8-2B) and
- * Direct iTerm2 (OSC 1337, X079). Without a usable protocol the page says
+ * Direct iTerm2 (OSC 1337, X080). Without a usable protocol the page says
  * `Preview unavailable` and Source/Copy stay fully usable.
  * @module @xmoon76/dsh-pi-tui/tui/components/media/svg-viewer
  */
@@ -438,7 +438,7 @@ export class SvgViewerPanel implements Component {
 
   /** Whether this surface may paint real SVG pixels at all: Kitty, Direct
    *  SIXEL (the isolated raster lane is supported on Linux and, under the
-   *  Owner-accepted risk policy, macOS) and Direct iTerm2 OSC 1337 (X079). */
+   *  Owner-accepted risk policy, macOS) and Direct iTerm2 OSC 1337 (X080). */
   private previewSupported(): boolean {
     const protocol = effectiveImageProtocol(this.input.graphics, this.input.imageProtocolPreference)
     return this.input.loader !== undefined

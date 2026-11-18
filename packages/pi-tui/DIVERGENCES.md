@@ -175,7 +175,7 @@
 | X076 | ACTIVE | HIGH | PUBLIC_COMPONENT_CONTRACT | NO |
 | X077 | ACTIVE | MEDIUM | BUGFIX_MISSING_UPSTREAM | NO |
 | X078 | ACTIVE | HIGH | BUGFIX_MISSING_UPSTREAM | NO |
-| X079 | ACTIVE | HIGH | BUGFIX_MISSING_UPSTREAM | NO |
+| X080 | ACTIVE | HIGH | BUGFIX_MISSING_UPSTREAM | NO |
 
 ## Divergences
 
@@ -5950,7 +5950,7 @@ Image-7C admits a managed Native Kitty handle for a Zellij pane when its live a=
 
 - TuiAltScreenOptions.imageProtocolOverride?: ImageProtocol — optional per-instance protocol selection.
 - TuiAltScreen.beforeTerminalStart() uses imageProtocolOverride when supplied, otherwise the existing getCapabilities().images answer; the global capability cache is never mutated.
-- AltScreen never mutates the process-wide capability cache; Direct iTerm2 remains available through the X079 fork contract.
+- AltScreen never mutates the process-wide capability cache; Direct iTerm2 remains available through the X080 fork contract.
 - No option means the existing per-instance protocol behavior remains; tmux virtual and legacy protocol paths keep their own selection.
 
 #### Dependency map
@@ -5979,8 +5979,8 @@ Image-7C admits a managed Native Kitty handle for a Zellij pane when its live a=
 **Behavioral coupling**
 - With imageProtocolOverride kitty, an image-anchor change uses the Kitty placement-delete path and Alt stop releases the managed ids; no 2J branch or global delete reaches the physical terminal.
 - Without the option, imageProtocol is latched from the process-wide capability snapshot; the option never mutates that snapshot.
-- Direct iTerm2 capability lifetime and OSC 1337 emission are owned by X079.
-- Audit note: Guarded by packages/pi-tui/test/tui-alt-screen.test.ts (X070 group), the host Zellij delayed-OK integration cases and X079 wire tests.
+- Direct iTerm2 capability lifetime and OSC 1337 emission are owned by X080.
+- Audit note: Guarded by packages/pi-tui/test/tui-alt-screen.test.ts (X070 group), the host Zellij delayed-OK integration cases and X080 wire tests.
 
 #### Guarding tests
 
@@ -6013,7 +6013,7 @@ Image-7C admits a managed Native Kitty handle for a Zellij pane when its live a=
 #### Audit record
 
 - Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
-- Notes: Owner-approved RFL-001 scope extension after a real Alt ghost-placement defect: Zellij live OK can exceed the static fork capability, so the Alt screen needs an instance-level protocol value from the one managed graphics handle. Direct iTerm2 capability lifetime was subsequently moved into X079.
+- Notes: Owner-approved RFL-001 scope extension after a real Alt ghost-placement defect: Zellij live OK can exceed the static fork capability, so the Alt screen needs an instance-level protocol value from the one managed graphics handle. Direct iTerm2 capability lifetime was subsequently moved into X080.
 
 ### X071 — Passive DA1 SIXEL observation exposed to the host capability candidate
 
@@ -6745,7 +6745,7 @@ The differential renderer compared every document row from 0, so any change ABOV
 - Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
 - Notes: Source-verified against the pinned v1.5.0 tree (f9a2636): the upstream diff loop starts at row 0 and full-renders on firstChanged < prevViewportTop. Evidence level is the fork test suite (1481 pass incl. the new X078 group); the real-terminal flicker reproduction belongs to the PR record, not this ledger. Every incremental commit now keeps the full previous cache (raw, processed text and image metadata) for the skipped above-viewport prefix, so the model equals committed scrollback; a later full render reprocesses the raw, repaints the row and deletes exactly the images the model still holds.
 
-### X079 — Direct iTerm2 OSC 1337 remains available inside AltScreen
+### X080 — Direct iTerm2 OSC 1337 remains available inside AltScreen
 
 - Status: `ACTIVE`
 - Category: `BUGFIX_MISSING_UPSTREAM`
@@ -6771,7 +6771,7 @@ The fork suppressed the process-wide iTerm2 image capability whenever AltScreen 
 **Vendor internal**
 - The change is confined to AltScreen capability lifetime; Kitty upload/placement and SIXEL screen ownership remain unchanged.
 - The single process-wide capability cache remains the fork terminal-image authority; no second detector or cache was added.
-- Audit note: The old suppression and saved snapshot were the only X079-owned fork hunk.
+- Audit note: The old suppression and saved snapshot were the only X080-owned fork hunk.
 
 **Inheritance / structural**
 - TuiAltScreen remains the only fork AltScreen implementation and keeps the existing imageProtocolOverride precedence.
@@ -6793,8 +6793,8 @@ The fork suppressed the process-wide iTerm2 image capability whenever AltScreen 
 
 #### Guarding tests
 
-- packages/pi-tui/test/tui-alt-screen.test.ts: X079 — iTerm2 emits OSC 1337 and does not emit Kitty/OSC133 zone commands.
-- packages/pi-tui/test/tui-alt-screen.test.ts: X079 — AltScreen leaves the process capability unchanged across an instance Kitty override.
+- packages/pi-tui/test/tui-alt-screen.test.ts: X080 — iTerm2 emits OSC 1337 and does not emit Kitty/OSC133 zone commands.
+- packages/pi-tui/test/tui-alt-screen.test.ts: X080 — AltScreen leaves the process capability unchanged across an instance Kitty override.
 - test/client/svg-viewer.test.ts: live capability revocation hides Retry and starts no new raster.
 - test/client/transcript-image-viewer.test.ts: Direct iTerm2 preserves original JPEG MIME and exact OSC 1337 payload bytes.
 
@@ -6807,12 +6807,12 @@ The fork suppressed the process-wide iTerm2 image capability whenever AltScreen 
 - packages/tui/src/tui-alt-screen.ts
 - Relevant issues/PRs:
 - None recorded; issue/PR state was not used as semantic proof.
-- Remaining semantic delta: Pinned upstream f9a26365568127461c47a07a37dcb42c140a3ac5 suppresses the process-wide iTerm2 capability while AltScreen is active (savedCapabilities + setCapabilities({...images: null}) in beforeTerminalStart, restore in afterTerminalStop). The fork had inherited and relied on that suppression for an older workspace restriction; X079 removes it, keeps the process capability stable and guards the real Direct iTerm2 OSC 1337 contract in the vendored source plus root consumers.
+- Remaining semantic delta: Pinned upstream f9a26365568127461c47a07a37dcb42c140a3ac5 suppresses the process-wide iTerm2 capability while AltScreen is active (savedCapabilities + setCapabilities({...images: null}) in beforeTerminalStart, restore in afterTerminalStop). The fork had inherited and relied on that suppression for an older workspace restriction; X080 removes it, keeps the process capability stable and guards the real Direct iTerm2 OSC 1337 contract in the vendored source plus root consumers.
 
 #### Retirement conditions
 
 - Retire only if upstream introduces an equivalent capability-lifetime contract or the product deliberately removes Direct iTerm2 workspace support.
-- Retirement must rerun the X079 fork wire tests and the real iTerm2 qualification matrix.
+- Retirement must rerun the X080 fork wire tests and the real iTerm2 qualification matrix.
 
 #### Replacement mapping
 
@@ -6825,4 +6825,4 @@ The fork suppressed the process-wide iTerm2 image capability whenever AltScreen 
 #### Audit record
 
 - Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
-- Notes: Audited against pinned upstream f9a26365568127461c47a07a37dcb42c140a3ac5, which contains the old iTerm2 suppression/save/restore behavior; X079 is therefore a real fork divergence. Root/fork tests pass, and the installed-tarball real-iTerm2 matrix passes for the Regular SVG thumbnail, the fullscreen OSC 1337 Preview at 100x30/44x20/30x10, Tab to Source, and CSI-u Escape back to the transcript. Physical qualification evidence is recorded outside repository docs.
+- Notes: Audited against pinned upstream f9a26365568127461c47a07a37dcb42c140a3ac5, which contains the old iTerm2 suppression/save/restore behavior; X080 is therefore a real fork divergence. Root/fork tests pass, and the installed-tarball real-iTerm2 matrix passes for the Regular SVG thumbnail, the fullscreen OSC 1337 Preview at 100x30/44x20/30x10, Tab to Source, and CSI-u Escape back to the transcript. Physical qualification evidence is recorded outside repository docs.

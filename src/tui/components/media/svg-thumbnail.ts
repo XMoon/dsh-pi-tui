@@ -136,7 +136,7 @@ export class SvgThumbnail implements Component {
    * @returns the painted body row count and its widest occupied column.
    */
   paintedImageBody(width: number): SvgThumbnailBody | undefined {
-    // iTerm2 (X079) has no last-committed real geometry authority for its OSC
+    // iTerm2 (X080) has no last-committed real geometry authority for its OSC
     // 1337 rows: the thumbnail paints pixels but never claims a clickable body.
     // The figure's explicit View action remains the sole viewer entry.
     if (effectiveImageProtocol(this.graphics, this.imageProtocolPreference) === 'iterm2') return undefined
@@ -223,7 +223,7 @@ export class SvgThumbnail implements Component {
     // paints nothing at all.
     if (width <= 2) return []
     // SVG preview pixels are available through Kitty, Direct SIXEL
-    // (Image-8 / I8-2B) and Direct iTerm2 OSC 1337 (X079). Platforms without an
+    // (Image-8 / I8-2B) and Direct iTerm2 OSC 1337 (X080). Platforms without an
     // isolated raster lane keep the description and source actions instead of
     // faking a pixel body. An admitted tmux virtual handle is a real Kitty
     // transport here.
@@ -289,7 +289,7 @@ export class SvgThumbnail implements Component {
         return ['', ...body]
       }
       const columns = this.instance.paintedBodyAt?.(width)?.columns ?? paintedImageColumns(body)
-      // iTerm2 pixels carry no trustworthy click geometry (X079): paint them,
+      // iTerm2 pixels carry no trustworthy click geometry (X080): paint them,
       // but do not publish a hit body. Kitty still reports its real columns.
       if (columns !== undefined && protocol !== 'iterm2') {
         this.paintedBody = { width, rows: body.length, endCol: columns }
