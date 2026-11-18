@@ -1857,11 +1857,25 @@ async function runD2AcpScene({ installation, workRoot, report, start, projectA, 
   assert(isEmptyAcpResult(resumeBForDisconnect),
     `M07: the disconnect probe must attach Session B first (got ${JSON.stringify(resumeBForDisconnect?.error ?? resumeBForDisconnect?.result)})`)
   const heldText = 'd2acp m07 held tui during acp disconnect'
+  // The fixture's userText is the WHOLE conversation truncated to 400 bytes, so
+  // match the NEW held event by Session and sequence, not by prompt substring.
+  const heldCountBefore = readHeldTurnEvents(heldTurnRoot)
+    .filter(event => event.kind === 'long-turn-held' && event.sessionId === sessionB).length
   rmSync(releaseBarrier, { force: true })
   sendKeys(tuiB, heldText, 'M07 held TUI turn on the ACP-attached Session')
-  const held = await waitFor(() => readHeldTurnEvents(heldTurnRoot).find(event =>
-    event.kind === 'long-turn-held' && String(event.userText ?? '').includes(heldText)),
-  'M07 Host-admitted TUI turn is held', TIMEOUTS.turn)
+  let held
+  const heldDeadline = Date.now() + TIMEOUTS.turn
+  while (Date.now() < heldDeadline) {
+    const heldEvents = readHeldTurnEvents(heldTurnRoot)
+      .filter(event => event.kind === 'long-turn-held' && event.sessionId === sessionB)
+    held = heldEvents.length > heldCountBefore ? heldEvents.at(-1) : undefined
+    if (held !== undefined) break
+    await sleep(100)
+  }
+  assert(held !== undefined,
+    'M07 Host-admitted TUI turn is held: the fixture recorded no NEW long-turn-held event for the Session; '
+    + `held=${String(heldCountBefore)}; events=${JSON.stringify(readHeldTurnEvents(heldTurnRoot).slice(-4))}; `
+    + `frame=${tmuxCapture(tuiB, 'M07 held-turn debug frame').replace(/[\u0000-\u001f\u007f]/gu, ' ').slice(-900)}`)
   assert(typeof held.sessionId === 'string' && Number.isInteger(held.attempt),
     'M07: the held-turn fixture must name the Session and attempt')
   connDisconnect.close()
