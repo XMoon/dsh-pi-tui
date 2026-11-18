@@ -1372,8 +1372,9 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
   // The TSP tool-result image identity line is the frozen `[IMAGE] name ·
   // W×H · bytes` row (`imageIdentityText`); `🖼️` is the DRAFT/queued
   // attachment vocabulary, never the tool-result row.
+  const identityText = `[IMAGE] ${dimensions.width}×${dimensions.height}`
   const imageFrame = await waitFrameText(tui, '[IMAGE]', 'MAC09-07 Client image identity row', TIMEOUTS.mount)
-  assert(imageFrame.includes(`${String(dimensions.width)}×${String(dimensions.height)}`),
+  assert(imageFrame.includes(identityText),
     'MAC09-07: the Client image row does not name the admitted screenshot dimensions')
   pushRow(report, 'MAC09-07', 'PASS', {
     sessionId: sha16(screenshot.sessionId),
