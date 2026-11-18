@@ -97,8 +97,8 @@ export function productionFilesUnder(root: string, dir: string): string[] {
 /**
  * Every `src/app/bootstrap/**` composition helper, sorted deterministically. The
  * zone is directory-defined (plan §7), so a new helper — at ANY depth — joins the
- * aggregate owner surface automatically instead of escaping its bag/single-owner
- * locks.
+ * aggregate owner surface automatically instead of escaping owner-module
+ * enumeration and location checks.
  */
 function bootstrapHelperModules(): OwnerModule[] {
   return productionFilesUnder(ROOT, BOOTSTRAP_ZONE)

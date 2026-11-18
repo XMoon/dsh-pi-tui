@@ -721,10 +721,9 @@ test('every extracted-owner factory is called exactly once, from the composition
 /**
  * Owner-internal presentation constructors and the modules that must hold them.
  *
- * `SINGLE_OWNER_SITES` in the A5 composition inventory counts across the whole
- * owner surface (which includes the composition root), so moving one of these
- * back into bootstrap would keep the aggregate count green (A5b-1 review P2).
- * These rows pin the concrete module set.
+ * Whole-production-tree construction counts can remain unchanged when a
+ * constructor moves back into bootstrap. These rows separately pin each
+ * presentation constructor to its actual owning module.
  */
 const EXTRACTED_CONSTRUCTIONS: ReadonlyArray<readonly [string, readonly string[]]> = [
   ['src/app/surface/session-presentation.ts', ['new TranscriptFolder(', 'new StatsFolder(', 'new TranscriptWindowController(']],

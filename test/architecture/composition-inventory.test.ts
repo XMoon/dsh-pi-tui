@@ -698,8 +698,8 @@ test('the composition zone is enumerated RECURSIVELY (nested helpers included)',
     ],
     'the composition surface must include a NESTED zone helper over every production extension',
   )
-  // The SAME enumerator feeds OWNER_MODULES (`bootstrapHelperModules`), so the
-  // aggregate bag/single-owner locks see nested helpers too.
+  // The SAME enumerator feeds OWNER_MODULES (`bootstrapHelperModules`), so
+  // nested helpers remain visible to the owner-module location checks.
   assert.deepEqual(
     productionFilesUnder(root, 'src/app/bootstrap'),
     [
@@ -708,16 +708,15 @@ test('the composition zone is enumerated RECURSIVELY (nested helpers included)',
       'src/app/bootstrap/top.ts',
     ],
   )
-  // ...and their CONTENT is part of what the content locks scan: a bad
-  // universal-dependency bag (or a hard-coded chord) hidden in a nested helper
-  // must be visible to the composed surface text, not just to the file list.
+  // ...and their CONTENT is part of the composed surface text, not just the
+  // file list. This proves enumeration, not semantic detection of a broad bag.
   writeFileSync(
     join(root, 'src', 'app', 'bootstrap', 'nested', 'bad.ts'),
-    'interface EverythingBag { readonly everything: unknown }\n',
+    'interface NestedProbe { readonly value: unknown }\n',
   )
   const composed = compositionSourceUnder(root)
-  assert.ok(composed.includes('interface EverythingBag {'),
-    'a bag declared in a NESTED composition helper must appear in the composed composition surface')
+  assert.ok(composed.includes('interface NestedProbe {'),
+    'a declaration in a NESTED composition helper must appear in the composed composition surface')
   assert.ok(composed.includes('// >>> src/app/bootstrap/nested/bad.ts'),
     'the composed surface must banner the nested helper it now covers')
   // The real tree is unchanged by the recursion: every helper is flat today
