@@ -157,9 +157,7 @@ test('the real pinned dsh launcher forwards the PR2 Session grammar to tuiStartu
   delete env.SPLIT_PROCESS_CLIENT_MODE
   delete env.SPLIT_PROCESS_CLIENT_SESSION
 
-  const resolveAt = performance.now()
   const launcher = resolveLauncher(home, env)
-  t.diagnostic(`P3-A2 resolve launcher: ${(performance.now() - resolveAt).toFixed(1)} ms`)
 
   // Each actual CLI launch owns a separate DSH_HOME. Seven concurrent real
   // processes must never share the session/workspace authorities they may
@@ -196,7 +194,6 @@ test('the real pinned dsh launcher forwards the PR2 Session grammar to tuiStartu
     args: readonly string[],
     caseEnv: NodeJS.ProcessEnv,
   ): Promise<{ readonly status: number | null; readonly output: string }> => {
-    const invocationAt = performance.now()
     const child = spawn(launcher.command, [...launcher.prefix, '--profile', PROFILE, '--patch', patchPath, ...args], {
       cwd: ROOT,
       env: caseEnv,
@@ -208,11 +205,11 @@ test('the real pinned dsh launcher forwards the PR2 Session grammar to tuiStartu
     child.stderr.setEncoding('utf8')
     child.stdout.on('data', (chunk: string) => { stdout += chunk })
     child.stderr.on('data', (chunk: string) => { stderr += chunk })
+    // reason: a bounded external CLI lifetime; a missing close must terminate and fail.
     const deadline = setTimeout(() => child.kill('SIGKILL'), 120_000)
     try {
       const [status, signal] = await once(child, 'close')
       assert.equal(signal, null, `dsh CLI was terminated for ${JSON.stringify(args)}`)
-      t.diagnostic(`P3-A2 invoke ${JSON.stringify(args)}: ${(performance.now() - invocationAt).toFixed(1)} ms`)
       return { status, output: `${stdout}${stderr}` }
     } finally {
       clearTimeout(deadline)
@@ -252,7 +249,9 @@ test('the real pinned dsh launcher forwards the PR2 Session grammar to tuiStartu
   // Session/Workspace write. Existence alone is not enough: a pre-existing
   // durable file must not be MODIFIED either, so the snapshot records the
   // content digest and stat identity of every entry under the two authorities.
-  const conflictHome = prepareHome()
+  // Reuse a FINISHED successful invocation's isolated home: the conflict
+  // must preserve any durable Session/Workspace files it already contains.
+  const conflictHome = prepared[0]!.isolated
   const durable = (): string => {
     const entries: string[] = []
     const visit = (path: string): void => {
