@@ -332,21 +332,35 @@ test('an abort during a budgeted finder run cancels without a fallback scan', as
     'the user abort settles as cancellation, never as a timeout or a fallback scan')
 })
 
-test('a newline-dialect finder that finishes over the budget is a failure with the fallback answer', async (t) => {
+test('a NUL-free run that crosses the budget inside finish() is a failure, never a partial success', async (t) => {
   const life = testLifecycle(t)
   const cwd = life.tempDir('dsh-client-budget-newline-')
   writeFileSync(join(cwd, 'fallback-needle.txt'), 'x')
-  // A fake finder that ignores --print0: it emits 40 newline records, while a
-  // payload payload takes long enough that the post-finish deadline check is
-  // the ONLY guard left (fewer than 64 records, so the per-record check never
-  // fires). The run must still fail and the fallback must answer.
+  // Decisive RFL-005 witness: the finder closes WHILE THE BUDGET IS STILL
+  // OPEN, and the clock crosses the deadline only while finish() synchronously
+  // classifies its NUL-free records. An injected clock makes the timing exact:
+  // without the post-finish deadline re-check the run would publish its
+  // partial collector as success. The fake finder exits immediately; the
+  // imported real adapter owns the whole close → finish → settle path.
   const finder = fakeFinder(life,
-    `i=0; while [ $i -lt 40 ]; do printf 'needle-%s\\n' "$i"; i=$((i+1)); done; sleep 0.2`)
-  const driver = new ClientLocalDiscoveryDriver(finder.path, 30)
+    `printf 'needle-one\\nneedle-two\\nneedle-three\\n'`)
+  // The injected clock establishes the deadline (call 1) and is still inside
+  // budget at the close handler's pre-finish check (call 2: 100 < 100+500).
+  // `finish()` emits its newline records synchronously WITHOUT calling the
+  // clock; the third call is the post-finish check, which sees an over-budget
+  // time (1000 >= 600) and is the ONLY decision point that can fail this run.
+  // Removing that check makes this test fail with the finder's partial
+  // records published as a successful answer.
+  let calls = 0
+  const scriptedNow = (): number => {
+    calls += 1
+    return calls <= 2 ? 100 : 1000
+  }
+  const driver = new ClientLocalDiscoveryDriver(finder.path, 500, scriptedNow)
   const candidates = await discoverForQuery(resolvePathQuery('needle', cwd, ENV), driver, abort)
   const paths = candidates.map(candidate => candidate.path)
   assert.ok(paths.includes('fallback-needle.txt'),
-    `the bounded fallback answers after the post-finish budget check: ${JSON.stringify(paths)}`)
+    `the bounded fallback answers after the finish() budget crossing: ${JSON.stringify(paths)}`)
   assert.ok(!paths.some(path => path.startsWith('needle-')),
     'the over-budget newline run contributes no partial match')
 })

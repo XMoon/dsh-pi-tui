@@ -701,17 +701,26 @@ test('a Host finder run over the wall budget is a failure with the bounded fallb
     'a killed Host finder contributes no partial match')
 })
 
-test('a Host newline-dialect finder finishing over the budget settles as failure, never partial success', async (t) => {
+test('a Host NUL-free run that crosses the budget inside finish() settles as failure', async (t) => {
   const life = testLifecycle(t)
   const root = life.tempDir('dsh-hostfile-budget-newline-')
-  // Fewer than 40 newline records (below the 64-record in-loop check): the
-  // post-finish deadline re-check is the ONLY guard for this slow close path.
-  const finder = fakeFd(life,
-    `i=0; while [ $i -lt 40 ]; do printf 'needle-%s\\n' "$i"; i=$((i+1)); done; sleep 0.2`)
-  const driver = new DirectHostDiscoveryDriver(finder, 30)
+  // Decisive RFL-005 witness on the Host locality: the finder closes inside
+  // the budget (first clock call), then the clock crosses the deadline before
+  // the post-finish check. With the old implementation (no post-finish check)
+  // the Host adapter would publish the partial newline records as success.
+  const finder = fakeFd(life, `printf 'needle-one\nneedle-two\nneedle-three\n'`)
+  // Call 1 establishes the deadline, call 2 is the close handler's
+  // pre-finish check (still inside budget); call 3 is the post-finish check
+  // (over budget) and must be the deciding failure point.
+  let calls = 0
+  const scriptedNow = (): number => {
+    calls += 1
+    return calls <= 2 ? 100 : 1000
+  }
+  const driver = new DirectHostDiscoveryDriver(finder, 500, scriptedNow)
   const result = await driver.find(root, 'needle', abort)
   assert.equal(result, null,
-    'a run that crosses the wall budget inside finish() is a finder FAILURE')
+    'a run crossing the budget during finish() is a finder FAILURE, never a partial success')
 })
 
 test('the Host-home shorthand returns an ABSOLUTE Host path, never a literal ~/... value', async (t) => {

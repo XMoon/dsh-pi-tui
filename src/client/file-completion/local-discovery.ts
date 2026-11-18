@@ -109,6 +109,7 @@ function runClientFinder(
   term: string,
   signal: AbortSignal,
   finderWallMs: number,
+  now: () => number = performance.now,
 ): Promise<readonly PathCandidate[] | null> {
   const args = [
     '--base-directory', baseDir,
@@ -158,7 +159,7 @@ function runClientFinder(
     // The ONE wall-clock budget (Owner amendment D4): a monotonic deadline the
     // timer AND the per-record processing both check, so a synchronous
     // record/stat burst cannot starve the timer and run on unbounded.
-    const deadline = performance.now() + finderWallMs
+    const deadline = now.call(performance) + finderWallMs
     let settled = false
     let budgetTimer: NodeJS.Timeout | undefined
     const stopBudget = (): void => {
@@ -182,10 +183,15 @@ function runClientFinder(
       settle([])
     }
     signal.addEventListener('abort', onAbort, { once: true })
-    budgetTimer = setTimeout(() => {
-      if (child.exitCode === null) child.kill('SIGKILL')
-      settle(null)
-    }, finderWallMs)
+    // With the production clock the timer enforces the same wall budget.
+    // A custom clock (tests) controls the deadline deterministically; the
+    // timer is unnecessary there and would race the injected decisions.
+    if (now === performance.now) {
+      budgetTimer = setTimeout(() => {
+        if (child.exitCode === null) child.kill('SIGKILL')
+        settle(null)
+      }, finderWallMs)
+    }
     // Record classification must re-check the deadline at least every 64
     // records (amendment D5): the emit callback runs inside the synchronous
     // stream push, where a timer cannot fire.
@@ -207,7 +213,7 @@ function runClientFinder(
       recordsSinceDeadlineCheck += 1
       if (recordsSinceDeadlineCheck >= 64) {
         recordsSinceDeadlineCheck = 0
-        if (performance.now() >= deadline) {
+        if (now.call(performance) >= deadline) {
           if (child.exitCode === null) child.kill('SIGKILL')
           settle(null)
         }
@@ -245,7 +251,7 @@ function runClientFinder(
         settle(null)
         return
       }
-      if (performance.now() >= deadline) {
+      if (now.call(performance) >= deadline) {
         // The whole finder work — spawn through the last record and the close
         // itself — owns ONE budget (amendment D4): a late close is a failure,
         // never a partial success.
@@ -259,7 +265,7 @@ function runClientFinder(
       // `finish()` synchronously classifies any buffered newline-dialect
       // records; a slow burst can cross the deadline INSIDE it. Re-check AFTER
       // the work, so an over-budget run can never settle as a success.
-      if (performance.now() >= deadline) {
+      if (now.call(performance) >= deadline) {
         settle(null)
         return
       }
@@ -279,13 +285,16 @@ function runClientFinder(
 export class ClientLocalDiscoveryDriver implements LocalDiscoveryDriver {
   private readonly fdPathValue: string | null
   private readonly finderWallMsValue: number
+  private readonly nowValue: () => number
 
   constructor(
     fdPath: string | null | undefined = undefined,
     finderWallMs: number = MAX_FINDER_WALL_MS,
+    now: () => number = performance.now,
   ) {
     this.fdPathValue = fdPath === undefined ? resolveFdPath() : fdPath
     this.finderWallMsValue = finderWallMs
+    this.nowValue = now
   }
 
   /** The pinned/detected Client finder (null = bounded-fallback only). */
@@ -316,6 +325,6 @@ export class ClientLocalDiscoveryDriver implements LocalDiscoveryDriver {
 
   async find(baseDir: string, term: string, signal: AbortSignal): Promise<readonly PathCandidate[] | null> {
     if (this.fdPathValue === null) return null
-    return runClientFinder(this.fdPathValue, baseDir, term, signal, this.finderWallMsValue)
+    return runClientFinder(this.fdPathValue, baseDir, term, signal, this.finderWallMsValue, this.nowValue)
   }
 }
