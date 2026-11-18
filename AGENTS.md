@@ -268,9 +268,12 @@ everything else (`mise exec -- pnpm <script>`). Use the smallest relevant
 validation for the current change. Prefer targeted tests first; do not run
 expensive compatibility suites mechanically.
 
-Adding or changing a test? Read `docs/guides/testing.md` first: it owns the
-test-tree ownership map, the new-test rules, the lane commands and the
-objective discovery guards.
+Before adding, changing, retaining as mandatory or retiring a test, establish
+its independent failure-detection value. A code change or review finding does
+not automatically require a new test; reduce or retire redundant and
+implementation-bound tests rather than strengthening them. Read
+`docs/guides/testing.md` first: it owns test worthiness, the test-tree ownership
+map, lane commands and objective discovery guards.
 
 A stage-final validation must not run the same suite twice. `pnpm verify:release`
 is the repository's full pipeline: `typecheck:fork` + `typecheck:bench`,

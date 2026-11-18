@@ -1,11 +1,13 @@
 # Testing guide
 
-This document owns the rules for ADDING and CHANGING tests in this repository.
+This document owns the rules for ADDING, CHANGING, RETAINING and RETIRING
+tests in this repository.
 It is the long-lived contract; the implementation lives in
 `scripts/test-discovery.mjs`, `scripts/test-lanes.mjs` and the tests
 themselves.
 
-Read it before writing a test. The six rules below are the whole policy —
+Read it before writing or revising a test. The seven rules below are the
+whole policy —
 they are deliberately few, because a rule that cannot be applied is a rule
 that gets ignored.
 
@@ -39,7 +41,7 @@ COMPOSITION it exercises, not under every layer it imports.
 discovery by DIRECTORY, so a file placed there is never run as a test
 even if its name looks like one.
 
-## 1. The six rules
+## 1. The seven rules
 
 ### 1. Ownership First
 
@@ -62,6 +64,33 @@ already has. Before adding one, answer:
 A new production function does not imply a new test file. Two tests that
 assert the same contract at the same level are a maintenance cost with no
 detection value.
+
+**Test-worthiness gate — before improving assertions.** When adding, materially
+changing, retaining or retiring a test, decide whether it independently detects
+a current observable failure class that existing tests or real qualification do
+not already protect. Consider the maintenance and execution cost; choose
+**ADD, KEEP, REDUCE or RETIRE** as appropriate. In routine changes this is a
+review judgement, not a mandatory per-case matrix or new CI gate. A plan's test
+roster, a previously green test or a review request does not itself establish
+that a test is worth keeping.
+
+Do not create or preserve tests solely to freeze retired names/paths, historical
+migration steps, implementation-private fields, helper calls, source order,
+incidental construction counts, case inventories, titles or candidate versions.
+Tests that only echo a mock's own answer, reimplement the expected result or
+assert a tautology have no independent detection value. Ask whether a supported
+extension or behavior-preserving refactor would fail the test; if so, its exact
+shape must be part of an explicit **current, durable** contract to justify the
+constraint.
+
+Static/AST guards are still appropriate for **unique load-bearing** security,
+trust-boundary, authority, compatibility or architecture invariants, including
+an exact owner count when uniqueness is the contract. Do not replace a retired
+source-text lock with another regex, roster or proxy test by default. Deleting
+a redundant test is a valid outcome without a replacement; first identify any
+specific surviving contract that would otherwise lose its only proof. When a
+test is retired, also inspect test-only production hooks, fixtures and branches
+for actual remaining consumers before keeping or removing them.
 
 ### 3. Evidence Integrity
 
@@ -516,18 +545,21 @@ root.
 
 ## 3. Adding a test — the checklist
 
-1. Name the production owner; put the file in that owner's directory.
-2. Name the failure class; confirm no existing test already covers it.
-3. Name the evidence level the test really reaches.
-4. Reuse an existing narrow fixture; do not widen a fake's capabilities.
-5. Wait on an authoritative signal; justify any time window.
-6. Run the lane that owns the file and confirm it is DISCOVERED (a test that
+1. Name the observable failure class and check existing tests and real
+   qualification for independent coverage; add nothing if no gap remains.
+2. Check that a legitimate extension or refactor does not break the proposed
+   assertions unless their exact shape is itself a durable contract.
+3. Name the production owner; put the file in that owner's directory.
+4. Name the evidence level the test really reaches.
+5. Reuse an existing narrow fixture; do not widen a fake's capabilities.
+6. Wait on an authoritative signal; justify any time window.
+7. Run the lane that owns the file and confirm it is DISCOVERED (a test that
    does not appear in the lane's file list is not running).
 
 ## 4. The objective guards
 
-The rules above are enforced by OBJECTIVE, automatable checks — not by
-review judgement:
+The objectively checkable parts of the rules above have automatable guards;
+test worthiness and assertion quality remain review judgements:
 
 | Rule | Guard | Where |
 |---|---|---|

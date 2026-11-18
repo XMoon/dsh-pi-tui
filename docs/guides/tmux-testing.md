@@ -5,7 +5,8 @@
 **Use headless tests for routine development and regression**
 (`test/`, `@xterm/headless` drives real rendering and
 input routing): fast, deterministic, no TTY or model dependency, CI-runnable.
-Feature changes must be covered by headless tests first.
+Use a headless regression first when it can decisively prove the changed
+behavior; do not invent a headless proxy for a terminal/OS-only contract.
 
 **tmux testing is only for what headless cannot cover**:
 
@@ -15,8 +16,11 @@ Feature changes must be covered by headless tests first.
 | Real dsh end-to-end | Model sessions, `ctx.jobs` background tasks, preset combinations, tool-job completion notifications, real subagent behavior |
 | Interaction "feel" | Keyboard rhythm, modal stacking, ghost-overlay timing/focus issues (hard to catch headless) |
 
-Rule: tmux is a **complement**, not a replacement for headless; when a
-problem surfaces in tmux, add the regression test to headless.
+Rule: tmux is a **complement**, not a replacement for headless. When a problem
+surfaces in tmux, choose the smallest decisive regression evidence: add a
+headless case only if it independently detects the same failure class. Otherwise
+retain the relevant real-terminal qualification and report the evidence limit;
+do not create a weaker proxy test just to satisfy a test-count requirement.
 
 ## Environment prep
 

@@ -1492,6 +1492,18 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
         diag,
         signal: startupAbort.signal,
         onFatal: onTransportFatal,
+        // Qualification-only: when the smoke's prompt-ACK-drop fault is armed,
+        // record the one real hit in this Client's own 0600 JSONL sink. The
+        // record carries no user text, Session id, Cookie, Host URL or path;
+        // a surface Client without a record sink, and every production Client,
+        // emit nothing because the fault env is never set.
+        ...(options.mode === 'surface' && process.env.SPLIT_PROCESS_CLIENT_DROP_PROMPT_ACK === '1'
+          ? {
+              qualificationPromptAckDropped: (): void => {
+                emit({ m4b2s: 'qualification', op: 'prompt-ack-dropped' })
+              },
+            }
+          : {}),
         ...(options.mode === 'peer'
           ? { qualificationWebSocketObserver: (_url, socket) => observeQualificationSocket(socket, emit) }
           : {}),

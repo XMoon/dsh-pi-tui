@@ -934,7 +934,26 @@ test('Root pointer Save and Confirm persist through official SettingsForms and r
   assert.deepEqual(h.settingsMutateCalls, [])
   await click('Y confirm')
   assert.deepEqual(h.settingsMutateCalls, ['mcp-manager'])
-  assert.match(h.view(), /Saved · waiting for Host reconcile|Saved/u,
+  // The official SettingsForms writer also waits for file locking, atomic
+  // persistence and Loader reconcile. A fixed microtask flush observes the
+  // dispatch but cannot establish that the Host write/readback has settled.
+  const controller = embeddedController(h)
+  const deadline = Date.now() + 10_000
+  while (Date.now() < deadline) {
+    const snapshot = controller.snapshot()
+    if (snapshot.configStatus?.kind === 'saved'
+      && snapshot.config?.kind === 'ready'
+      && snapshot.config.revision > before.revision!
+      && h.view().includes('Saved · waiting for Host reconcile')) break
+    if (snapshot.configStatus !== undefined
+      && snapshot.configStatus.kind !== 'saving'
+      && snapshot.configStatus.kind !== 'saved') break
+    await frames(h.vt)
+  }
+  const settled = controller.snapshot()
+  assert.equal(settled.configStatus?.kind, 'saved',
+    `the official Host write did not settle as saved: ${JSON.stringify(settled.configStatus)}\n${h.view()}`)
+  assert.match(h.view(), /Saved · waiting for Host reconcile/u,
     `the saved verdict comes from the re-read descriptor: ${h.view()}`)
   const after = settingsService.describe()!.find(row => row.ns === 'mcp-manager')!
   assert.ok(after.revision! > before.revision!, 'the official namespace revision advanced')
@@ -947,8 +966,7 @@ test('Root pointer Save and Confirm persist through official SettingsForms and r
   assert.match(patch, /mouse-save/u, 'ConfigEditor persisted the profile patch')
   assert.match(patch, /--keepme/u, 'the surviving argument was persisted')
   assert.doesNotMatch(patch, /--dropme/u, 'the removed argument never reached the patch')
-  const controller = (h.embeddedMcpPage() as unknown as { controller: McpServersController }).controller
-  const config = controller.snapshot().config!
+  const config = settled.config!
   assert.equal(config.kind, 'ready')
   if (config.kind !== 'ready') assert.fail('the page must hold the official committed descriptor')
   assert.equal(config.revision, after.revision)

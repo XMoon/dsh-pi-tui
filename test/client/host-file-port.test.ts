@@ -14,11 +14,13 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { chmodSync, existsSync, mkdirSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { isAbsolute, join } from 'node:path'
 import { DirectHostFilePort, resolveFdPath } from '../../src/runtime/direct/host-file-direct.ts'
 import { isExplicitHostFileQuery } from '../../src/runtime/direct/host-file-augmentation-direct.ts'
+import { discoverForQuery } from '../../src/domain/file-completion/discovery-policy.ts'
+import { resolvePathQuery } from '../../src/domain/file-completion/query.ts'
 import { RemoteHostFilePort } from '../../src/runtime/remote/host-file-remote.ts'
 import { createPiTuiHostFileReferenceRuntime } from '../../src/runtime/remote/pi-tui-file-reference-host-bridge.ts'
 import { createObservableGenerationHarness } from '../support/remote-generation.ts'
@@ -432,6 +434,32 @@ function fakeFd(life: TestLifecycle, body: string): string {
   return script
 }
 
+/** A scripted fake `fd` over a records file: it records its argv and honours
+ * fd's own `--max-results` bound, so an early-output cutoff in the production
+ * argument list is observable as BEHAVIOUR, not only as text. */
+function scriptedFd(
+  life: TestLifecycle,
+  records: readonly string[],
+): { path: string; argsFile: string } {
+  const dir = life.tempDir('dsh-scriptedfd-')
+  const recordFile = join(dir, 'records.bin')
+  writeFileSync(recordFile, records.map(record => `${record}\0`).join(''))
+  const argsFile = join(dir, 'args.txt')
+  const path = join(dir, 'fd')
+  writeFileSync(path, `#!/usr/bin/env node
+const fs = require('node:fs')
+const args = process.argv.slice(2)
+fs.writeFileSync(${JSON.stringify(argsFile)}, args.join('\\n'))
+const maxIndex = args.indexOf('--max-results')
+const max = maxIndex === -1 ? Infinity : Number(args[maxIndex + 1])
+const records = fs.readFileSync(${JSON.stringify(recordFile)}, 'utf8').split('\\u0000')
+if (records.at(-1) === '') records.pop()
+process.stdout.write(records.slice(0, max).map(record => record + '\\u0000').join(''))
+`)
+  chmodSync(path, 0o755)
+  return { path, argsFile }
+}
+
 // ── session-vs-workspace routing (source -> route -> sink) ────────────────
 
 /** The two facts one discovery driver answers with (the spy target shape). */
@@ -568,6 +596,37 @@ test('an EXPLICIT session path scope routes to the Host scanner ONLY — the off
   }
 })
 
+test('an explicit Host @ scope keeps a late high-score directory and never caps the finder argv', async (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-hostfile-late-')
+  mkdirSync(join(root, 'de', 'nested', 'x-deep'), { recursive: true })
+  writeFileSync(join(root, 'de', 'deep-nested.ts'), 'x')
+  // 120 weaker file matches stream out first (basename prefix, score 80); the
+  // high-score directory (80 + 10) is emitted LAST, beyond the retired
+  // 100-record finder cap. It is NESTED so the neutral root direct-child merge
+  // cannot re-add it independently of the finder record.
+  const records = Array.from({ length: 120 }, (_value, index) =>
+    `x-filler-${String(index).padStart(3, '0')}.txt`)
+  records.push('nested/x-deep/')
+  const finder = scriptedFd(life, records)
+  const live = { session: { header: { cwd: root } } }
+  // No Host context: the EXPLICIT scoped route never consults the official
+  // provider, so the scoped finder is the only source here.
+  const port = new DirectHostFilePort(
+    (sessionId) => sessionId === 'session-live' ? live : undefined,
+    finder.path,
+  )
+  const items = okItems(await port.listReferences(
+    { kind: 'session', sessionId: 'session-live' },
+    'de/x',
+  ))
+  const args = readFileSync(finder.argsFile, 'utf8').split(/\r?\n/)
+  assert.ok(!args.includes('--max-results'),
+    `the Host finder must not truncate before ranking: ${JSON.stringify(args)}`)
+  assert.ok(items.some(item => item.path === 'de/nested/x-deep' && item.kind === 'directory'),
+    `the late Host-directory match must survive the union: ${JSON.stringify(items)}`)
+})
+
 test('the explicit session scope reaches excluded, symlinked and absolute Host directories through the port', async (t) => {
   const life = testLifecycle(t)
   const root = life.tempDir('dsh-hostfile-scopes-')
@@ -590,6 +649,78 @@ test('the explicit session scope reaches excluded, symlinked and absolute Host d
   // A Host-absolute scope outside the workspace, with no containment rule.
   assert.deepEqual(okItems(await port.listReferences(scope, `${outside}/logs/`)),
     [{ path: `${outside}/logs/a.log`, kind: 'file' }])
+})
+
+test('a Host finder record over the IO bound is a finder failure with the bounded fallback', async (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-hostfile-overbound-')
+  writeFileSync(join(root, 'fallback-needle.txt'), 'x')
+  // One NUL-terminated record longer than the guard: the Host run fails and
+  // the bounded scan answers, like the Client adapter.
+  const finder = scriptedFd(life, ['x'.repeat(65_600)])
+  const live = { session: { header: { cwd: root } } }
+  const port = new DirectHostFilePort(
+    (sessionId) => sessionId === 'session-live' ? live : undefined,
+    finder.path,
+  )
+  const items = okItems(await port.listReferences(
+    { kind: 'session', sessionId: 'session-live' },
+    // EXPLICIT scope: the Host finder owns this route (a bare query belongs
+    // to the official provider, which this case does not exercise).
+    `${root}/needle`,
+  ))
+  assert.ok(items.some(item => item.path === join(root, 'fallback-needle.txt')),
+    `the bounded fallback answers: ${JSON.stringify(items)}`)
+  assert.ok(!items.some(item => item.path.length > 65_536),
+    'the over-bound Host record never surfaces as a candidate')
+})
+
+test('a Host finder run over the wall budget is a failure with the bounded fallback', async (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-hostfile-budget-')
+  writeFileSync(join(root, 'fallback-needle.txt'), 'x')
+  // Amendment D4 on the Host locality: the same neutral budget, the same
+  // failure semantics, proven at the Host driver's owning seam (the port-level
+  // routing is covered by the other cases). A short injected budget keeps the
+  // case deterministic.
+  const finder = fakeFd(life, `printf '%s\\0' 'finder-only-needle.txt'; sleep 5`)
+  const driver = new DirectHostDiscoveryDriver(finder, 50)
+  const candidates = await driver.find(root, 'needle', abort)
+  assert.ok(candidates === null, 'an over-budget Host run is a finder FAILURE, never a partial success')
+  const fallback = await discoverForQuery(
+    resolvePathQuery(`${root}/needle`, root, { homeDir: homedir(), windowsHost: false }),
+    driver,
+    abort,
+  )
+  // The scope's OWN matching direct child answered (amendment D2: a direct
+  // match needs no finder and no subtree scan), and the killed finder
+  // contributed nothing.
+  assert.ok(fallback.some(item => item.path === 'fallback-needle.txt'),
+    `the scope still answers after the budget: ${JSON.stringify(fallback)}`)
+  assert.ok(!fallback.some(item => item.path.includes('finder-only-needle')),
+    'a killed Host finder contributes no partial match')
+})
+
+test('a Host NUL-free run that crosses the budget inside finish() settles as failure', async (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-hostfile-budget-newline-')
+  // Decisive RFL-005 witness on the Host locality: the finder closes inside
+  // the budget (first clock call), then the clock crosses the deadline before
+  // the post-finish check. With the old implementation (no post-finish check)
+  // the Host adapter would publish the partial newline records as success.
+  const finder = fakeFd(life, `printf 'needle-one\nneedle-two\nneedle-three\n'`)
+  // Call 1 establishes the deadline, call 2 is the close handler's
+  // pre-finish check (still inside budget); call 3 is the post-finish check
+  // (over budget) and must be the deciding failure point.
+  let calls = 0
+  const scriptedNow = (): number => {
+    calls += 1
+    return calls <= 2 ? 100 : 1000
+  }
+  const driver = new DirectHostDiscoveryDriver(finder, 500, scriptedNow)
+  const result = await driver.find(root, 'needle', abort)
+  assert.equal(result, null,
+    'a run crossing the budget during finish() is a finder FAILURE, never a partial success')
 })
 
 test('the Host-home shorthand returns an ABSOLUTE Host path, never a literal ~/... value', async (t) => {

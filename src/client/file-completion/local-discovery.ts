@@ -18,12 +18,13 @@ import { homedir } from 'node:os'
 import { spawn } from 'node:child_process'
 import type { PathQueryEnvironment } from '../../domain/file-completion/query.ts'
 import {
+  createFinderRecordStream,
   escapeFinderRegex,
-  MAX_FINDER_RESULTS,
-  normalizeFinderRecords,
+  MAX_FINDER_WALL_MS,
   type LocalDirectoryEntry,
   type LocalDiscoveryDriver,
 } from '../../domain/file-completion/discovery-policy.ts'
+import { createBoundedFinderCandidateCollector } from '../../domain/file-completion/ranking.ts'
 import type { PathCandidate } from '../../domain/file-completion/types.ts'
 
 /**
@@ -91,17 +92,27 @@ function entryIsDirectory(
 }
 
 /** Run the CLIENT finder for one query. Returns NULL on finder FAILURE
- * (non-zero exit, spawn error — NOT a valid empty result: the neutral policy
- * then runs the bounded fallback), `[]` on a genuine no-match or an abort. */
+ * (non-zero exit, spawn error, truncated output, over-bound record, over-budget
+ * run — NOT a valid empty result: the neutral policy then runs the bounded
+ * fallback), `[]` on a genuine no-match or an abort.
+ *
+ * The finder runs UNBOUNDED by any argv result cap: every match it produces
+ * competes in the neutral two-top-50 collector (all types + directories only)
+ * as it streams out of the process, so a highly relevant late match is never
+ * lost to an early-output cutoff. The ONE wall-clock budget
+ * ({@link MAX_FINDER_WALL_MS}, Owner amendment D4) bounds the whole run: an
+ * over-budget finder is killed and settles as a failure, never as a partial
+ * success. Neither the whole stdout nor the whole record list is retained. */
 function runClientFinder(
   fdPath: string,
   baseDir: string,
   term: string,
   signal: AbortSignal,
+  finderWallMs: number,
+  now: () => number = performance.now,
 ): Promise<readonly PathCandidate[] | null> {
   const args = [
     '--base-directory', baseDir,
-    '--max-results', String(MAX_FINDER_RESULTS),
     // The finder's DEFAULT is smart-case (case-insensitive for a lowercase
     // query, case-SENSITIVE when the query contains uppercase) — but the
     // shared ranking contract is case-INSENSITIVE (scorePathCandidate
@@ -144,11 +155,23 @@ function runClientFinder(
       resolve(null)
       return
     }
-    let stdout = ''
+    const collector = createBoundedFinderCandidateCollector(term)
+    // The ONE wall-clock budget (Owner amendment D4): a monotonic deadline the
+    // timer AND the per-record processing both check, so a synchronous
+    // record/stat burst cannot starve the timer and run on unbounded.
+    const deadline = now.call(performance) + finderWallMs
     let settled = false
+    let budgetTimer: NodeJS.Timeout | undefined
+    const stopBudget = (): void => {
+      if (budgetTimer !== undefined) {
+        clearTimeout(budgetTimer)
+        budgetTimer = undefined
+      }
+    }
     const settle = (results: readonly PathCandidate[] | null): void => {
       if (settled) return
       settled = true
+      stopBudget()
       signal.removeEventListener('abort', onAbort)
       resolve(results)
     }
@@ -160,9 +183,62 @@ function runClientFinder(
       settle([])
     }
     signal.addEventListener('abort', onAbort, { once: true })
+    // With the production clock the timer enforces the same wall budget.
+    // A custom clock (tests) controls the deadline deterministically; the
+    // timer is unnecessary there and would race the injected decisions.
+    if (now === performance.now) {
+      budgetTimer = setTimeout(() => {
+        if (child.exitCode === null) child.kill('SIGKILL')
+        settle(null)
+      }, finderWallMs)
+    }
+    // Record classification must re-check the deadline at least every 64
+    // records (amendment D5): the emit callback runs inside the synchronous
+    // stream push, where a timer cannot fire.
+    let recordsSinceDeadlineCheck = 0
+    const records = createFinderRecordStream((record) => {
+      let isDirectory = record.directoryHint
+      if (!isDirectory) {
+        // The finder's default print format does not guarantee a trailing
+        // `/` for directories: classify the fact against the Client fs
+        // (statSync follows symlinks, so a symlink dir still completes with
+        // the directory kind).
+        try {
+          isDirectory = statSync(join(baseDir, record.path)).isDirectory()
+        } catch {
+          isDirectory = false
+        }
+      }
+      collector.offer({ path: record.path, kind: isDirectory ? 'directory' : 'file' })
+      recordsSinceDeadlineCheck += 1
+      if (recordsSinceDeadlineCheck >= 64) {
+        recordsSinceDeadlineCheck = 0
+        if (now.call(performance) >= deadline) {
+          if (child.exitCode === null) child.kill('SIGKILL')
+          settle(null)
+        }
+      }
+    }, { shouldStop: () => settled })
     child.stdout.setEncoding('utf-8')
-    child.stdout.on('data', (chunk: string) => { stdout += chunk })
+    child.stdout.on('data', (chunk: string) => {
+      // A settled request (abort, budget or an earlier failure) never consumes
+      // later stdout: no partial candidate may publish after its request ended.
+      if (settled) return
+      if (!records.push(chunk)) {
+        // An over-bound unterminated record or an abandoned run is an external
+        // process failure: discard the partial collector so the neutral
+        // fallback answers.
+        if (child.exitCode === null) child.kill('SIGKILL')
+        settle(null)
+      }
+    })
     child.on('error', () => settle(null))
+    child.stdout.on('error', () => {
+      // A stdout stream error is an INCOMPLETE finder run: stop the producer
+      // so nothing keeps filling a dead pipe and settle once as a failure.
+      if (child.exitCode === null) child.kill('SIGKILL')
+      settle(null)
+    })
     child.on('close', (code) => {
       if (signal.aborted) {
         settle([])
@@ -175,23 +251,25 @@ function runClientFinder(
         settle(null)
         return
       }
-      const results: PathCandidate[] = []
-      for (const record of normalizeFinderRecords(stdout)) {
-        let isDirectory = record.directoryHint
-        if (!isDirectory) {
-          // The finder's default print format does not guarantee a trailing
-          // `/` for directories: classify the fact against the Client fs
-          // (statSync follows symlinks, so a symlink dir still completes with
-          // the directory kind).
-          try {
-            isDirectory = statSync(join(baseDir, record.path)).isDirectory()
-          } catch {
-            isDirectory = false
-          }
-        }
-        results.push({ path: record.path, kind: isDirectory ? 'directory' : 'file' })
+      if (now.call(performance) >= deadline) {
+        // The whole finder work — spawn through the last record and the close
+        // itself — owns ONE budget (amendment D4): a late close is a failure,
+        // never a partial success.
+        settle(null)
+        return
       }
-      settle(results)
+      if (!records.finish()) {
+        settle(null)
+        return
+      }
+      // `finish()` synchronously classifies any buffered newline-dialect
+      // records; a slow burst can cross the deadline INSIDE it. Re-check AFTER
+      // the work, so an over-budget run can never settle as a success.
+      if (now.call(performance) >= deadline) {
+        settle(null)
+        return
+      }
+      settle(collector.finish())
     })
   })
 }
@@ -206,9 +284,17 @@ function runClientFinder(
  */
 export class ClientLocalDiscoveryDriver implements LocalDiscoveryDriver {
   private readonly fdPathValue: string | null
+  private readonly finderWallMsValue: number
+  private readonly nowValue: () => number
 
-  constructor(fdPath: string | null | undefined = undefined) {
+  constructor(
+    fdPath: string | null | undefined = undefined,
+    finderWallMs: number = MAX_FINDER_WALL_MS,
+    now: () => number = performance.now,
+  ) {
     this.fdPathValue = fdPath === undefined ? resolveFdPath() : fdPath
+    this.finderWallMsValue = finderWallMs
+    this.nowValue = now
   }
 
   /** The pinned/detected Client finder (null = bounded-fallback only). */
@@ -239,6 +325,6 @@ export class ClientLocalDiscoveryDriver implements LocalDiscoveryDriver {
 
   async find(baseDir: string, term: string, signal: AbortSignal): Promise<readonly PathCandidate[] | null> {
     if (this.fdPathValue === null) return null
-    return runClientFinder(this.fdPathValue, baseDir, term, signal)
+    return runClientFinder(this.fdPathValue, baseDir, term, signal, this.finderWallMsValue, this.nowValue)
   }
 }

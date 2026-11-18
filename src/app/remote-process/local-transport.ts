@@ -120,6 +120,15 @@ export interface StartLocalTransportOptions {
    *  internals. */
   readonly qualificationWebSocketObserver?: (url: string, socket: ConnectionWebSocketLike) => void
   /**
+   * Qualification-only witness of the injected prompt ACK drop: fired ONCE,
+   * synchronously, after the real `session/prompt` request reached the Host and
+   * its response body was discarded, immediately before the injected transport
+   * error. It proves the fault injection actually hit; it is never acceptance,
+   * an RPC outcome or a UI fact. Production never sets the fault env, so this
+   * observer does not exist on a production path.
+   */
+  readonly qualificationPromptAckDropped?: () => void
+  /**
    * Terminal transport failure. The Client entry must stop and report this
    * error; the official Connection loop must not silently retry a replaced
    * Host identity.
@@ -207,6 +216,7 @@ function cookieFetch(
   origin: string,
   currentCookie: () => string,
   includeCookie: boolean,
+  qualificationPromptAckDropped?: () => void,
 ): (input: string | URL, init?: RequestInit) => Promise<Response> {
   // Qualification-only post-dispatch prompt ACK drop (T35): the request reaches
   // the Host, then the response is discarded so the caller observes a real
@@ -241,6 +251,10 @@ function cookieFetch(
         promptAckDropped = true
         const response = await fetch(url, request)
         await response.body?.cancel()
+        // The witness fires only after the real Host round trip completed and
+        // the response was discarded: it is the qualification proof that the
+        // fault injection hit, never an acceptance or RPC-outcome signal.
+        qualificationPromptAckDropped?.()
         throw new Error('local transport: qualification dropped the session/prompt ACK after Host receipt')
       }
     }
@@ -549,7 +563,12 @@ export async function installLocalTransport(
   const includeCookie = process.env.SPLIT_PROCESS_CLIENT_OMIT_COOKIE !== '1'
   // The borrowed HTTP fetch for the Remote archive adapter: the SAME origin
   // and Cookie policy the official Connection's unary carrier uses.
-  const fetchAuthenticated = cookieFetch(origin, () => cookie, includeCookie)
+  const fetchAuthenticated = cookieFetch(
+    origin,
+    () => cookie,
+    includeCookie,
+    options.qualificationPromptAckDropped,
+  )
 
   let typertFiber: Fiber | undefined
   let connectionFiber: Fiber | undefined
@@ -606,7 +625,7 @@ export async function installLocalTransport(
       modules.connection.installConnection(connectionContext, {
         interactions: 'answer',
         transport: {
-          fetch: cookieFetch(origin, () => cookie, includeCookie),
+          fetch: cookieFetch(origin, () => cookie, includeCookie, options.qualificationPromptAckDropped),
           createWebSocket: url => {
             const socket = createWebSocket(url)
             options.qualificationWebSocketObserver?.(url, socket)

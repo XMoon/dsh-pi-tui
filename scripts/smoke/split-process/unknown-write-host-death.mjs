@@ -1,17 +1,21 @@
 /**
  * Continuity T66: an ACK-dropped unknown write survives Host death truthfully.
  *
- * The Host commits one write whose ACK is dropped, so the Client can only paint
- * `indeterminate`. The committing Host is then SIGKILLed before the Turn ends;
- * a later Host cold-resumes the SAME Session and must see the original user
- * text exactly once, settle the intercepted Turn as `interrupted` and never
- * fabricate an assistant answer or replay the write.
+ * The Host commits one write whose RPC ACK is dropped, so the Client's local
+ * write outcome is `indeterminate` while the Host durable row already exists.
+ * Whether the official acceptance wins that race is independent: an accepted
+ * prompt clears its draft, a real unknown keeps it with the uncertainty notice.
+ * The committing Host is then SIGKILLed before the Turn ends; a later Host
+ * cold-resumes the SAME Session and must see the original user text exactly
+ * once, settle the intercepted Turn as `interrupted` and never fabricate an
+ * assistant answer or replay the write.
  *
  * @module split-process/unknown-write-host-death
  */
 
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
+import { setTimeout as sleep } from 'node:timers/promises'
 
 import { SplitSmokeAssertionError } from '../../lib/split-smoke-diagnostics.mjs'
 import { waitForC1WorkEvent } from '../../lib/split-smoke-fixtures.mjs'
@@ -86,11 +90,11 @@ export async function runUnknownWriteHostDeath(context) {
   }
 
   try {
-    // T66: the UNKNOWN-WRITE half of the Host-death contract. An ACK-dropped
-    // write is committed by the Host while the Client can only report
-    // `indeterminate`; the committing Host then dies. A later Host must read the
-    // durable log exactly once (never replay the unknown write), and no Host may
-    // ever report that write as a success it did not observe.
+    // T66: the UNKNOWN-WRITE half of the Host-death contract. The Host commits
+    // an ACK-dropped write (so the Client's RPC outcome is `indeterminate`),
+    // then the committing Host dies. A later Host must read the durable log
+    // exactly once (never replay the unknown write), and no Host may ever
+    // report that write as a success it did not observe.
     {
       const releaseBarrier = join(workDir, 't66-long-turn.release')
       const { host, ready, workRoot } = await startC1Host('long-turn', 't66', { C1_HOLD_LONG_TURN: releaseBarrier })
@@ -100,16 +104,60 @@ export async function runUnknownWriteHostDeath(context) {
       const { client } = await startC1Client('T66 Client', { SPLIT_PROCESS_CLIENT_DROP_PROMPT_ACK: '1' })
       const unknownToken = 't66 unknown-write'
       const sessionId = await openC1Session(client, unknownToken, 'T66')
-      // `waitForScreen` is a verdict helper: it throws unless the painted row
-      // appears, so a returned value would be a fiction. The painted
-      // `indeterminate` notice IS the observation.
-      await client.waitForScreen('indeterminate', 'T66 indeterminate notice', 120_000)
+      // The injection witness and the Host's held Turn are TWO independent
+      // facts: the fault hit this Client's real prompt RPC, and the Host is
+      // holding the Turn it already committed.
+      await client.waitFor(
+        record => record.m4b2s === 'qualification' && record.op === 'prompt-ack-dropped',
+        'T66 prompt ACK-drop injection witness',
+        60_000,
+      )
       await waitForC1WorkEvent(workRoot, event => event.kind === 'long-turn-held' && event.sessionId === sessionId, 'T66 held Turn')
       const hostBefore = await hostIdentityFacts(host)
       const hostPid = ready.pid
       const text = hostUserTexts(hostSessionEvents(dshHome, sessionId) ?? [])
         .filter(entry => entry === unknownToken).length
       assert(text === 1, `T66 the Host did not commit the ACK-dropped write exactly once (${String(text)})`)
+      // The Composer/ACK terminal: the RPC ACK is unknown but the Host
+      // committed, so the official acceptance may already have cleared the
+      // draft. The held long Turn legitimately keeps its working activity;
+      // only THIS gesture's generic motion row must be gone.
+      const settleDeadline = Date.now() + 60_000
+      let disposition
+      while (Date.now() < settleDeadline) {
+        const viewport = await client.viewport()
+        const frame = viewport.join('\n')
+        const composer = client.composerOf(viewport)
+        const pendingAck = frame.includes('Submitting…') || frame.includes('Queued…')
+        if (composer !== undefined && !composer.includes(unknownToken)) {
+          if (pendingAck) { await sleep(50); continue }
+          disposition = 'accepted'
+          break
+        }
+        if (composer !== undefined && composer.includes(unknownToken)) {
+          if (!frame.includes('indeterminate') || pendingAck) { await sleep(50); continue }
+          const occurrences = composer.split(unknownToken).length - 1
+          assert(occurrences === 1,
+            `T66 the retained draft appears ${String(occurrences)} times after the unknown write`)
+          disposition = 'unknown'
+          break
+        }
+        await sleep(50)
+      }
+      assert(disposition !== undefined,
+        'T66 the ACK-dropped gesture never reached a settled Composer/ACK state')
+      const settledFrame = (await client.viewport()).join('\n')
+      assert(!settledFrame.includes('Submitting…') && !settledFrame.includes('Queued…'),
+        `T66 left a pending motion row after the ${disposition} disposition`)
+      if (disposition === 'accepted') {
+        assert(!settledFrame.includes('indeterminate'),
+          'T66 an accepted prompt painted the retry/uncertainty notice anyway')
+      } else {
+        assert(settledFrame.includes('indeterminate'),
+          'T66 the unaccepted unknown discarded its uncertainty notice')
+      }
+      assert(client.records.filter(record => record.m4b2s === 'qualification' && record.op === 'prompt-ack-dropped').length === 1,
+        'T66 the prompt ACK-drop witness must fire exactly once for this Client')
       // The committing Host dies BEFORE the Turn settles: the write's outcome is
       // now permanently unknown to every Client.
       process.kill(hostPid, 'SIGKILL')
@@ -157,7 +205,10 @@ export async function runUnknownWriteHostDeath(context) {
       trace('t66', {
         hostPid,
         signal: 'SIGKILL',
-        unknownWrite: 'indeterminate',
+        rpcOutcome: 'indeterminate',
+        ackDropped: 'prompt-ack-dropped',
+        composerDisposition: disposition,
+        ackSettled: true,
         hostCommits: 1,
         clientObserved: lost.transport,
         replayedAfterResume: false,

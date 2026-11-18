@@ -10,7 +10,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { completeDirectory } from '../../src/client/file-completion/directory-completion.ts'
 import { ClientLocalDiscoveryDriver, clientPathQueryEnvironment } from '../../src/client/file-completion/local-discovery.ts'
@@ -20,6 +20,35 @@ import { testLifecycle } from '../support/temp-lifecycle.ts'
  * so the fixture results never depend on an installed finder). */
 function clientDriver(): ClientLocalDiscoveryDriver {
   return new ClientLocalDiscoveryDriver(null)
+}
+
+/**
+ * A pinned fake Client finder over a scripted record list. It records its argv
+ * and honours fd's OWN `--max-results` bound, so the retired early-output
+ * cutoff is observable as BEHAVIOUR: a capped run really omits the late
+ * directory instead of it merely being filtered by the consumer.
+ */
+function scriptedFinder(
+  life: ReturnType<typeof testLifecycle>,
+  records: readonly string[],
+): { path: string; argsFile: string } {
+  const dir = life.tempDir('dsh-dir-fd-scripted-')
+  const recordFile = join(dir, 'records.bin')
+  writeFileSync(recordFile, records.map(record => `${record}\0`).join(''))
+  const path = join(dir, 'fd')
+  const argsFile = join(dir, 'args.txt')
+  writeFileSync(path, `#!/usr/bin/env node
+const fs = require('node:fs')
+const args = process.argv.slice(2)
+fs.writeFileSync(${JSON.stringify(argsFile)}, args.join('\\n'))
+const maxIndex = args.indexOf('--max-results')
+const max = maxIndex === -1 ? Infinity : Number(args[maxIndex + 1])
+const records = fs.readFileSync(${JSON.stringify(recordFile)}, 'utf8').split('\\u0000')
+if (records.at(-1) === '') records.pop()
+process.stdout.write(records.slice(0, max).map(record => record + '\\u0000').join(''))
+`)
+  chmodSync(path, 0o755)
+  return { path, argsFile }
 }
 
 /** A fixture root with directories and files (files must never be suggested). */
@@ -108,4 +137,31 @@ test('aborted completion returns null', async (t) => {
   controller.abort()
   const items = await completeDirectory('./', cwd, clientDriver(), clientPathQueryEnvironment(), controller.signal)
   assert.equal(items, null)
+})
+
+test('a late high-score directory survives 100 earlier files in the Save Location suggestions', async (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-dir-late-')
+  const cwd = join(root, 'cwd')
+  mkdirSync(cwd)
+  // 120 file records stream out first (score 80: basename prefix); the only
+  // FILESYSTEM directory among the finder records is emitted LAST and carries
+  // the directory bonus (90), so a pre-ranking 100-record cutoff loses it.
+  const records = Array.from({ length: 120 }, (_value, index) =>
+    `s-file-${String(index).padStart(3, '0')}.txt`)
+  records.push('src/')
+  const finder = scriptedFinder(life, records)
+  const items = await completeDirectory(
+    './s',
+    cwd,
+    new ClientLocalDiscoveryDriver(finder.path),
+    clientPathQueryEnvironment(),
+    new AbortController().signal,
+  )
+  const args = readFileSync(finder.argsFile, 'utf8').split(/\r?\n/)
+  assert.ok(!args.includes('--max-results'), `no early-output cap may reach the finder: ${JSON.stringify(args)}`)
+  assert.ok(items !== null, 'the late directory keeps the directory chooser non-empty')
+  const values = items.map(item => item.value)
+  assert.ok(values.includes('./src/'), `the late high-score directory is suggested: ${JSON.stringify(values)}`)
+  assert.ok(!values.some(value => value.includes('.txt')), 'files never surface in the directory-only chooser')
 })

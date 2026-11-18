@@ -46,6 +46,22 @@ trigger a scan of its root cause across callers, siblings, symmetric operations
 and equivalent paths within the affected contract; report unrelated issues
 separately rather than expanding the authorized fix scope.
 
+**Review test value before assertion quality.** For added, rewritten,
+retained-as-mandatory or retired tests, identify the distinct observable
+failure class, other existing proof and whether a legitimate extension or
+behavior-preserving refactor would fail the test. Decide **KEEP**, **REDUCE**
+or **RETIRE** before requesting tighter assertions or replacement coverage. A
+historical inventory, private source shape, passing CI result or accepted-plan
+case count is not by itself a contract. Conversely, keep a unique static guard
+for a current security, architecture, authority, trust or compatibility boundary.
+
+If a test has no independent detection value, deletion can be the correct fix;
+do not demand a replacement without identifying a required failure class that
+would lose its last protection. Check whether test-only production hooks and
+fixtures have real remaining consumers. Scale this reasoning to the change —
+do not require a per-test matrix for ordinary reviews. See
+[`testing.md` §2](testing.md#2-contract-first) for the owning rule.
+
 For applicable areas, ask:
 
 - Who owns the fact and its composition? Did a projection, cache, presentation

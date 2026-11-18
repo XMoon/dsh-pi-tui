@@ -19,7 +19,16 @@ import {
   type PathQueryEnvironment,
 } from '../../src/domain/file-completion/query.ts'
 import {
+  createFinderRecordStream,
+  discoverForQuery,
+  MAX_UNTERMINATED_FINDER_CODE_UNITS,
+  normalizeFinderRecord,
+  type FinderRecord,
+  type LocalDiscoveryDriver,
+} from '../../src/domain/file-completion/discovery-policy.ts'
+import {
   compareScoredPaths,
+  createBoundedFinderCandidateCollector,
   MAX_LOCAL_COMPLETION_SUGGESTIONS,
   rankPathCandidates,
   scorePathCandidate,
@@ -29,6 +38,7 @@ import type { PathCandidate } from '../../src/domain/file-completion/types.ts'
 const POSIX: PathQueryEnvironment = { homeDir: '/home/fixture', windowsHost: false }
 const WINDOWS: PathQueryEnvironment = { homeDir: 'C:\\Users\\fixture', windowsHost: true }
 const CWD = '/ws'
+const abort = new AbortController().signal
 
 test('the resolver is environment-neutral: the explicit windowsHost selects the join, never process.platform', () => {
   // The same raw token and cwd under the two INJECTED host facts. Every expected
@@ -202,6 +212,214 @@ test('the ranked set is bounded by the locality-neutral completion cap', () => {
   }))
   assert.equal(rankPathCandidates(many, 'file').length, MAX_LOCAL_COMPLETION_SUGGESTIONS)
   assert.equal(MAX_LOCAL_COMPLETION_SUGGESTIONS, 50)
+})
+
+// ── the finder's incremental two-top-50 competition ──────────────────────
+
+test('the bounded finder collector keeps a late exact basename beyond any early-output cutoff', () => {
+  const collector = createBoundedFinderCandidateCollector('needle')
+  for (let index = 0; index < 150; index += 1) {
+    collector.offer({ path: `nested/needle-${String(index).padStart(3, '0')}.txt`, kind: 'file' })
+  }
+  collector.offer({ path: 'needle', kind: 'file' })
+  const ranked = rankPathCandidates(collector.finish(), 'needle')
+  assert.equal(ranked[0]?.path, 'needle', 'the exact basename wins despite 150 earlier records')
+  assert.equal(ranked.length, MAX_LOCAL_COMPLETION_SUGGESTIONS, 'the presentation cap stays 50')
+})
+
+test('the collector keeps a directory-only top 50 even when files fill the all-types top 50', () => {
+  const collector = createBoundedFinderCandidateCollector('needle')
+  // 60 files score as basename prefixes (80); 60 directories match only
+  // through the full-path tier (30 + 10) — the all-types top 50 is all files.
+  for (let index = 0; index < 60; index += 1) {
+    collector.offer({ path: `needle-file-${String(index).padStart(3, '0')}.txt`, kind: 'file' })
+  }
+  for (let index = 0; index < 60; index += 1) {
+    collector.offer({ path: `deep/needle/deeper-${String(index).padStart(3, '0')}`, kind: 'directory' })
+  }
+  const union = collector.finish()
+  assert.ok(union.length <= 100, `the union is capped by the two top-50 competitions: ${union.length}`)
+  const overall = rankPathCandidates(union, 'needle')
+  assert.equal(overall.length, MAX_LOCAL_COMPLETION_SUGGESTIONS)
+  assert.ok(overall.every(candidate => candidate.kind === 'file'),
+    `the all-types top 50 is genuinely filled by files: ${JSON.stringify(overall.map(candidate => candidate.path))}`)
+  // The Save Location consumer filters the SAME union to directories: its own
+  // top 50 must still exist even though no directory reached the all-types set.
+  const directories = rankPathCandidates(union.filter(candidate => candidate.kind === 'directory'), 'needle')
+  assert.equal(directories.length, MAX_LOCAL_COMPLETION_SUGGESTIONS,
+    'the directory top 50 survives beside the all-types competition')
+  assert.deepEqual(directories.map(candidate => candidate.path), Array.from({ length: 50 }, (_value, index) =>
+    `deep/needle/deeper-${String(index).padStart(3, '0')}`),
+  'the directory competition uses the shared score/compare order')
+})
+
+test('the collector reuses the one scoring model: case, ties, empty term, zero score and duplicates', () => {
+  const cased = createBoundedFinderCandidateCollector('FOO')
+  cased.offer({ path: 'foo.txt', kind: 'file' })
+  assert.deepEqual(cased.finish(), [{ path: 'foo.txt', kind: 'file' }],
+    'the collector lowercases the term exactly like scorePathCandidate')
+  const listing = createBoundedFinderCandidateCollector('')
+  listing.offer({ path: 'b.txt', kind: 'file' })
+  listing.offer({ path: 'adir', kind: 'directory' })
+  assert.deepEqual(rankPathCandidates(listing.finish(), '').map(candidate => candidate.path), ['adir', 'b.txt'],
+    'an empty term keeps the listing order (directories lead)')
+  const duplicate = createBoundedFinderCandidateCollector('foo')
+  duplicate.offer({ path: 'foo-dir', kind: 'directory' })
+  duplicate.offer({ path: 'foo-dir', kind: 'directory' })
+  const union = duplicate.finish()
+  assert.deepEqual(union, [{ path: 'foo-dir', kind: 'directory' }],
+    'a directory competes in both sets but appears ONCE in the union')
+  const zero = createBoundedFinderCandidateCollector('foo')
+  zero.offer({ path: 'unrelated.txt', kind: 'file' })
+  assert.deepEqual(zero.finish(), [], 'a score-0 candidate is discarded')
+  const tie = createBoundedFinderCandidateCollector('foo')
+  tie.offer({ path: 'b-foo.txt', kind: 'file' })
+  tie.offer({ path: 'a-foo.txt', kind: 'file' })
+  assert.deepEqual(rankPathCandidates(tie.finish(), 'foo').map(candidate => candidate.path),
+    ['a-foo.txt', 'b-foo.txt'], 'ties fall back to the shared path-ascending comparator')
+})
+
+// ── the finder stdout record stream ───────────────────────────────────────
+
+test('a finder record stream parses NUL records split across chunks and normalizes each record', () => {
+  const records: FinderRecord[] = []
+  const stream = createFinderRecordStream(record => records.push(record))
+  assert.equal(stream.push('./src/foo'), true)
+  assert.equal(stream.push('bar.ts\0./baz'), true)
+  assert.equal(stream.push('dir/\0./.git/config\0'), true)
+  assert.equal(stream.finish(), true)
+  assert.deepEqual(records, [
+    { path: 'src/foobar.ts', directoryHint: false },
+    { path: 'bazdir', directoryHint: true },
+  ], 'a record split across chunks is ONE record; .git records never surface')
+  // The single-record normalizer is the same policy for every caller.
+  assert.deepEqual(normalizeFinderRecord('./a/b.txt'), { path: 'a/b.txt', directoryHint: false })
+  assert.deepEqual(normalizeFinderRecord('dir/'), { path: 'dir', directoryHint: true })
+  assert.equal(normalizeFinderRecord('.git'), undefined)
+  assert.equal(normalizeFinderRecord('x/.git/y'), undefined)
+  assert.equal(normalizeFinderRecord(''), undefined)
+})
+
+test('a NUL-free newline dialect is only accepted at close; a truncated NUL run fails', () => {
+  const legacy: FinderRecord[] = []
+  const newlineDialect = createFinderRecordStream(record => legacy.push(record))
+  assert.equal(newlineDialect.push('a.txt\nmy file.txt\n'), true)
+  assert.equal(legacy.length, 0,
+    'nothing is emitted while the whole output may still be one unfinished NUL record')
+  assert.equal(newlineDialect.finish(), true)
+  assert.deepEqual(legacy.map(record => record.path), ['a.txt', 'my file.txt'])
+
+  const truncated: FinderRecord[] = []
+  const cut = createFinderRecordStream(record => truncated.push(record))
+  assert.equal(cut.push('ok.txt\0partial'), true)
+  assert.equal(cut.finish(), false, 'an unterminated --print0 record is a failure')
+  assert.deepEqual(truncated, [{ path: 'ok.txt', directoryHint: false }],
+    'a failed stream is never consumed as a partial result')
+})
+
+test('a stop requested during newline-dialect finish emits no further records', () => {
+  // Review RFL-005: finish() must honor the same abandonment signal as push().
+  const records: FinderRecord[] = []
+  let emitted = 0
+  const stream = createFinderRecordStream(record => {
+    records.push(record)
+    emitted += 1
+    if (emitted === 1) stopped = true
+  }, { shouldStop: () => stopped })
+  let stopped = false
+  assert.equal(stream.push('one\ntwo\nthree\n'), true)
+  assert.equal(stream.finish(), false,
+    'the run was abandoned during the first record, so finish fails')
+  assert.deepEqual(records.map(record => record.path), ['one'],
+    'remaining buffered records are never emitted into a discarded collector')
+})
+
+test('an unterminated record over the IO bound trips the stream guard', () => {
+  const stream = createFinderRecordStream(() => {})
+  assert.equal(stream.push('a'.repeat(MAX_UNTERMINATED_FINDER_CODE_UNITS + 1)), false)
+  assert.equal(stream.finish(), false)
+})
+
+// ── the discovery routes (Owner amendment D2: direct-child-first scopes) ──
+
+/** A recording driver: `find` never answers unless the test wants it to. */
+function recordingDriver(options: {
+  readonly entries?: readonly { name: string; kind: 'file' | 'directory' }[]
+  readonly findResult?: readonly PathCandidate[] | null
+} = {}): LocalDiscoveryDriver & { calls: string[] } {
+  const calls: string[] = []
+  return {
+    calls,
+    async listDirectory(_baseDir, relativeDir) {
+      calls.push(`list:${relativeDir}`)
+      return (options.entries ?? []).map(entry => ({
+        name: entry.name,
+        kind: entry.kind,
+        descendable: entry.kind === 'directory',
+      }))
+    },
+    async find() {
+      calls.push('find')
+      return options.findResult ?? []
+    },
+  }
+}
+
+test('an explicit scope answers from its DIRECT children first and never calls the finder', async () => {
+  // The Owner-amended contract (D2): the user explicitly named this directory,
+  // so its own matching entries answer before any subtree work — however many
+  // deeper candidates a finder would race in.
+  const driver = recordingDriver({
+    entries: [
+      { name: 'tmp', kind: 'directory' },
+      { name: 'home', kind: 'directory' },
+    ],
+  })
+  const found = await discoverForQuery(resolvePathQuery('/tm', '/', POSIX), driver, abort)
+  assert.deepEqual(found, [{ path: 'tmp', kind: 'directory' }],
+    'the direct child matching the term is the answer')
+  assert.ok(!driver.calls.includes('find'),
+    `the finder never runs when a direct child matches: ${JSON.stringify(driver.calls)}`)
+  // The empty-term scoped listing keeps its complete-children route.
+  const listing = await discoverForQuery(resolvePathQuery('/', '/', POSIX), driver, abort)
+  assert.deepEqual(listing.map(candidate => candidate.path), ['tmp', 'home'])
+})
+
+test('a direct prefix match outranks a deeper exact basename on an explicit scope', async () => {
+  // The finder WOULD return `dir/src` (exact basename, score 100); the direct
+  // child `srcray` matches only as a prefix (80). The amended contract answers
+  // with the direct match and skips the subtree race entirely.
+  const driver = recordingDriver({
+    entries: [{ name: 'srcray', kind: 'file' }],
+    findResult: [{ path: 'src', kind: 'file' }],
+  })
+  const found = await discoverForQuery(resolvePathQuery('dir/sr', '/ws', POSIX), driver, abort)
+  assert.deepEqual(found, [{ path: 'srcray', kind: 'file' }])
+  assert.ok(!driver.calls.includes('find'))
+})
+
+test('a scoped query with NO direct match keeps the finder and its result merge', async () => {
+  const driver = recordingDriver({
+    entries: [{ name: 'sub', kind: 'directory' }],
+    findResult: [{ path: 'sub/utility.ts', kind: 'file' }],
+  })
+  const found = await discoverForQuery(resolvePathQuery('dir/uti', '/ws', POSIX), driver, abort)
+  assert.deepEqual(found, [{ path: 'sub/utility.ts', kind: 'file' }],
+    'no direct child matches `uti`, so the finder answers')
+  assert.equal(driver.calls.filter(call => call === 'find').length, 1)
+})
+
+test('a record that reaches the bound and is terminated in a later chunk still trips the guard', () => {
+  // The reviewer's exact probe: the fragment sits exactly at the bound, then
+  // the over-bound completion and its NUL arrive in ONE later chunk. The
+  // completed record is over the bound, so the run fails — the record is
+  // never emitted as a success.
+  const records: FinderRecord[] = []
+  const stream = createFinderRecordStream(record => records.push(record))
+  assert.equal(stream.push('a'.repeat(MAX_UNTERMINATED_FINDER_CODE_UNITS)), true)
+  assert.equal(stream.push('a\0'), false)
+  assert.equal(stream.finish(), false)
+  assert.equal(records.length, 0, 'an over-bound record is never emitted')
 })
 
 function file2(path: string): PathCandidate {

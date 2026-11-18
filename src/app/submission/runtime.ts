@@ -403,6 +403,12 @@ export function bindSubmissionRuntime(deps: SubmissionRuntimeDeps): SubmissionRu
             if (attempt?.isAccepted() === true) {
               options?.releaseReservation?.()
               surface.consumeDraftAttachments(text)
+              // The Host accepted this gesture before the transport outcome was
+              // lost: the write's LOCAL terminal is still observable, so the
+              // temporary submit ack must settle with THIS gesture's token. A
+              // tokenless clear could retire a newer gesture's row, and leaving
+              // it unsettled would hang `Submitting…`/`Queued…` forever.
+              surface.settleSubmitAck('session write settled after Host acceptance', { token: ackToken, terminal: true })
               return
             }
             surface.settleLocalSubmission(requestId)
@@ -438,6 +444,7 @@ export function bindSubmissionRuntime(deps: SubmissionRuntimeDeps): SubmissionRu
             if (attempt?.isAccepted() === true) {
               options?.releaseReservation?.()
               surface.consumeDraftAttachments(text)
+              surface.settleSubmitAck('session write settled after Host acceptance', { token: ackToken, terminal: true })
               return
             }
             // PR2/F3: the owner-aware restore — THIS attempt's held draft is
@@ -488,6 +495,7 @@ export function bindSubmissionRuntime(deps: SubmissionRuntimeDeps): SubmissionRu
       if (attempt?.isAccepted() === true) {
         options?.releaseReservation?.()
         surface.consumeDraftAttachments(text)
+        surface.settleSubmitAck('session write settled after Host acceptance', { token: ackToken, terminal: true })
         return
       }
       if (error instanceof TransitionInProgressError) {
