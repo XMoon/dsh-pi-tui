@@ -93,7 +93,48 @@ const SCENARIOS = new Set([
   // FR4: the same real Host composition plus ONE plugin-registered server, so
   // the configuration surface must classify it Plugin-owned and offer no CRUD.
   'mcp-servers-fr4',
+  // FR8: the official `exit_plan_mode` review and the official Team task board
+  // driven by a real Split Client. Both scenarios only author model chunks; the
+  // official ToolRuntime and the official projections do every write.
+  'plan-review',
+  'team-board',
 ])
+
+/**
+ * FR8 Split scenario markers (frozen identities this case owns).
+ *
+ * The smoke authors these EXACT strings as user prompts; the scripted Host
+ * model turns each into the official tool call the scenario names. Nothing
+ * else in this fixture reacts to them, and no Session event is written by hand.
+ */
+const FR8_PLAN_APPROVE = 'FR8_PLAN_APPROVE'
+const FR8_PLAN_KEEP = 'FR8_PLAN_KEEP'
+const FR8_PLAN_DISMISS = 'FR8_PLAN_DISMISS'
+const FR8_PLAN_NEXT_STEP = 'FR8_PLAN_NEXT_STEP'
+const FR8_TEAM_CREATE = 'FR8_TEAM_CREATE'
+const FR8_TEAM_UPDATE = 'FR8_TEAM_UPDATE'
+const FR8_PLAN_TEXT = '# FR8 official plan\n- 检查真实 Host\n- 保存会话事实\n\nFR8_PLAN_TAIL_END'
+const FR8_TEAM_SUBJECT = 'FR8_BOARD_TASK'
+const FR8_TEAM_DESCRIPTION = 'FR8 official task projection'
+
+/** The FIRST official `team_task_create` result already committed in this
+ *  request history (`{ id, revision }`), or undefined. The update addresses
+ *  exactly that task — the fixture never invents an id or a revision. */
+const FR8_TEAM_TASK_OF = (messages) => {
+  for (const message of messages ?? []) {
+    if (message?.role !== 'tool' || !Array.isArray(message.content)) continue
+    for (const part of message.content) {
+      if (part?.type !== 'text' || typeof part.text !== 'string') continue
+      try {
+        const parsed = JSON.parse(part.text)
+        if (typeof parsed?.id === 'string' && Number.isInteger(parsed?.revision)) {
+          return { id: parsed.id, revision: parsed.revision }
+        }
+      } catch { /* a non-JSON tool result never carries the task fact */ }
+    }
+  }
+  return undefined
+}
 
 /**
  * PO-4B qualification sample: the offline model emits these two Markdown text
@@ -293,6 +334,19 @@ class C1Model extends LlmAdapter {
     this.longTurnCount = new Map()
     this.failflowStep = new Map()
     this.childHeld = false
+  }
+
+  /** Emit ONE standard provider tool-call block (the same chunk shape every
+   *  other C1 scenario uses), so the official ToolRuntime admits and executes
+   *  it exactly as it would a real model's request. */
+  async *toolCall(name, callId, args) {
+    yield { type: 'block-start', index: 0, blockType: 'tool-call' }
+    yield {
+      type: 'block-end',
+      index: 0,
+      block: { type: 'tool-call', id: callId, name, arguments: JSON.stringify(args) },
+    }
+    yield { type: 'finish', reason: { kind: 'tool-calls' } }
   }
 
   record(kind, fields = {}) {
@@ -701,6 +755,75 @@ class C1Model extends LlmAdapter {
       yield { type: 'block-start', index: 0, blockType: 'text' }
       yield { type: 'text-delta', index: 0, text: `${this.scenario} answer ${token}` }
       yield { type: 'block-end', index: 0, block: { type: 'text', text: `${this.scenario} answer ${token}` } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+      return
+    }
+
+    if (this.scenario === 'plan-review') {
+      // FR8: the ONLY authored markers, matched against the NEWEST authored
+      // user text (the Host appends its own user-role context after it). Every
+      // other prompt keeps the ordinary text answer, so `/plan` and the other
+      // real Client gestures are never turned into tool calls.
+      const authoredUser = [...(options.messages ?? [])].reverse()
+        .find(message => message?.role === 'user' && message?.source?.kind === 'user')
+      const authoredText = (authoredUser?.content ?? [])
+        .map(part => typeof part?.text === 'string' ? part.text : '')
+        .join('')
+      for (const [marker, review] of [
+        [FR8_PLAN_APPROVE, 'approve'],
+        [FR8_PLAN_KEEP, 'keep'],
+        [FR8_PLAN_DISMISS, 'dismiss'],
+      ]) {
+        if (!authoredText.includes(marker)) continue
+        // One exit_plan_mode per authored marker per Session: a repeated prompt
+        // must not fabricate a second review of the same identity.
+        const callId = `c1-plan-${review}-${sessionId}`
+        if (this.toolIssued.has(callId)) break
+        this.toolIssued.add(callId)
+        yield* this.toolCall('exit_plan_mode', callId, { plan: FR8_PLAN_TEXT })
+        return
+      }
+      const answer = `${authoredText.includes(FR8_PLAN_NEXT_STEP) ? 'next-step' : 'plan-review'} answer ${token}`
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text: answer }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: answer } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+      return
+    }
+
+    if (this.scenario === 'team-board') {
+      // FR8: the created task's identity and revision come from the OFFICIAL
+      // `team_task_create` tool result in this SAME request history — never a
+      // pre-seeded task, never a guessed id.
+      const authoredUser = [...(options.messages ?? [])].reverse()
+        .find(message => message?.role === 'user' && message?.source?.kind === 'user')
+      const authoredText = (authoredUser?.content ?? [])
+        .map(part => typeof part?.text === 'string' ? part.text : '')
+        .join('')
+      if (authoredText.includes(FR8_TEAM_CREATE) && !this.toolIssued.has(`team-create:${sessionId}`)) {
+        this.toolIssued.add(`team-create:${sessionId}`)
+        yield* this.toolCall('team_task_create', `c1-team-create-${sessionId}`, {
+          subject: FR8_TEAM_SUBJECT,
+          description: FR8_TEAM_DESCRIPTION,
+        })
+        return
+      }
+      if (authoredText.includes(FR8_TEAM_UPDATE) && !this.toolIssued.has(`team-update:${sessionId}`)) {
+        this.toolIssued.add(`team-update:${sessionId}`)
+        const created = FR8_TEAM_TASK_OF(options.messages)
+        if (created === undefined) throw new Error('m4-c1-host-work: team-board update has no official create result to address')
+        yield* this.toolCall('team_task_update', `c1-team-update-${sessionId}`, {
+          task_id: created.id,
+          expected_revision: created.revision,
+          action: 'reassign',
+          owner: 'lead',
+        })
+        return
+      }
+      const answer = `team-board answer ${token}`
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text: answer }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: answer } }
       yield { type: 'finish', reason: { kind: 'stop' } }
       return
     }
