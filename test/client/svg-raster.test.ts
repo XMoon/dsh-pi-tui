@@ -349,62 +349,30 @@ test('a legitimate raster timeout with no worker milestones at all still classif
   assert.ok(failure.message.endsWith('[]'), `no milestone was invented: ${failure.message}`)
 })
 
-test('a raster child that outlives the 3 s bound is classified as a timeout after its real close', { skip: nativeRasterSkip }, async () => {
-  // The ONE hard-timeout path, measured on a REAL child: a process that never
-  // answers, the SIGKILL at the shared `SVG_RASTER_TIMEOUT_MS` bound, and a
-  // promise that settles only after `close`. This is the event-order evidence
-  // for the `SVG rasterization exceeded 3000 ms` failure class; it does not
-  // change the production budget. It asserts only what stays true when the child
-  // is starved of CPU: a real child is not guaranteed to report any milestone
-  // before the bound, and requiring that here would make the guard depend on the
-  // scheduling it exists to diagnose.
-  const events: string[] = []
-  let child: ChildProcessWithoutNullStreams | undefined
-  const spawnProcess = ((..._args: Parameters<typeof spawn>): ReturnType<typeof spawn> => {
-    const spawned = spawn(process.execPath, ['-e', 'setInterval(() => {}, 60_000)'], {
-      stdio: ['pipe', 'pipe', 'pipe'],
-      windowsHide: true,
-    })
-    child = spawned
-    events.push('spawn')
-    spawned.on('exit', (code, signal) => events.push(`exit:${signal ?? code}`))
-    spawned.on('close', (code, signal) => events.push(`close:${signal ?? code}`))
-    return spawned
-  }) as typeof spawn
-  const rasterize = createSvgRasterizer(spawnProcess)
-  const started = Date.now()
-  const failure = await rasterize(SVG_SOURCE, { targetWidth: 128, signal: new AbortController().signal }).then(
-    () => assert.fail('the never-answering child must reject'),
-    (error: unknown) => error as Error,
-  )
-  events.push('settled')
-  const elapsed = Date.now() - started
-  assert.deepEqual(events, ['spawn', 'exit:SIGKILL', 'close:SIGKILL', 'settled'],
-    'the failure settles from the real child close, never from the timer alone')
-  assert.ok(elapsed >= 3000, `the shared hard timeout really elapsed: ${elapsed} ms`)
-  assert.ok(elapsed < 10_000, `the failure is bounded by the raster budget, not a 30 s wait: ${elapsed} ms`)
-  assert.equal(child?.signalCode, 'SIGKILL', 'the child process is really gone before the promise settles')
-  assert.equal(child?.exitCode, null)
-  assert.match(failure.message, /SVG rasterization exceeded 3000 ms/u)
-  assert.match(failure.message, /\[spawn=\d+ /u, `the timeline starts at the spawn: ${failure.message}`)
-  assert.match(failure.message, /terminate=\d+\(timeout\)/u,
-    `the timeout names its own boundary: ${failure.message}`)
-  assert.ok(!failure.message.includes('firstStdout'),
-    'the real child answered nothing, so no stdout boundary is recorded')
-})
-
 test('a real timeout -> loader retry -> real successor PNG is ONE chain', { skip: nativeRasterSkip }, async () => {
-  // §5 item 1 joins three boundaries on the PRODUCTION rasterizer: a real child
-  // that outlives the 3 s bound, the loader's typed retry eligibility, and a
-  // real successor render on the same single lane. No fake rasterizer, no sleep.
+  // One REAL timeout → child close → typed Loader error → user retry →
+  // REAL PNG successor. The first child's event order and diagnostic
+  // previously had a separate test with another 3-second OS deadline.
   let spawns = 0
+  let timeoutChild: ChildProcessWithoutNullStreams | undefined
+  let timeoutCloseElapsedMs: number | undefined
+  const timeoutEvents: string[] = []
   const spawnProcess = ((...args: Parameters<typeof spawn>): ReturnType<typeof spawn> => {
     spawns += 1
     if (spawns === 1) {
-      return spawn(process.execPath, ['-e', 'setInterval(() => {}, 60_000)'], {
+      const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 60_000)'], {
         stdio: ['pipe', 'pipe', 'pipe'],
         windowsHide: true,
       })
+      timeoutChild = child
+      const childStartedAt = Date.now()
+      timeoutEvents.push('spawn')
+      child.on('exit', (code, signal) => timeoutEvents.push(`exit:${signal ?? code}`))
+      child.on('close', (code, signal) => {
+        timeoutEvents.push(`close:${signal ?? code}`)
+        timeoutCloseElapsedMs = Date.now() - childStartedAt
+      })
+      return child
     }
     return spawn(...args)
   }) as typeof spawn
@@ -427,7 +395,25 @@ test('a real timeout -> loader retry -> real successor PNG is ONE chain', { skip
       const state = loader.get(digest, width)
       return state.state === 'error' ? state : undefined
     }, 'the real child timeout classification')
-    assert.ok(errored.error instanceof SvgRasterFailure, `the real timeout is the typed failure: ${errored.error.message}`)
+    // A Loader error is only committed after its rasterizer Promise settles.
+    // If the child has not really closed yet, this full-chain guard fails.
+    timeoutEvents.push('classified')
+    assert.deepEqual(timeoutEvents, ['spawn', 'exit:SIGKILL', 'close:SIGKILL', 'classified'],
+      'the loader reports a timeout only after the real child close')
+    // Measure the real child, not the later Loader polling observation:
+    // CI scheduling can delay that observation after the child has closed.
+    const elapsed = timeoutCloseElapsedMs
+    assert.ok(elapsed !== undefined, 'the child close supplied the deadline measurement')
+    assert.ok(elapsed >= 3000, 'the shared hard timeout really elapsed: ' + elapsed + ' ms')
+    assert.ok(elapsed < 10_000, 'the failure is bounded by the raster budget, not a 30 s wait: ' + elapsed + ' ms')
+    assert.equal(timeoutChild?.signalCode, 'SIGKILL', 'the child is gone before the loader reports error')
+    assert.equal(timeoutChild?.exitCode, null)
+    assert.ok(errored.error instanceof SvgRasterFailure, 'the real timeout is typed: ' + errored.error.message)
+    assert.equal(errored.error.kind, 'timeout', 'real-child failure taxonomy is exact')
+    assert.match(errored.error.message, /SVG rasterization exceeded 3000 ms/u)
+    assert.match(errored.error.message, /\[spawn=\d+ /u)
+    assert.match(errored.error.message, /terminate=\d+\(timeout\)/u)
+    assert.ok(!errored.error.message.includes('firstStdout'), 'the real unanswered child has no stdout milestone')
     assert.equal(isRetryableRasterFailure(errored.error), true, 'a real timeout is retryable')
     assert.equal(loader.canRetryFailed(digest, width), true, 'the loader exposes Retry for the settled timeout')
     assert.equal(loader.retryFailed(digest, SVG_SOURCE, width), true, 'the ONE retry lane accepts the real failure')
@@ -437,7 +423,8 @@ test('a real timeout -> loader retry -> real successor PNG is ONE chain', { skip
     }, 'the real successor render')
     assert.equal(spawns, 2, 'exactly one successor child on the same lane')
     assert.ok(ready.base64.startsWith('iVBOR'), 'the successor carries a real PNG payload')
-    assert.ok(ready.widthPx > 0 && ready.heightPx > 0, 'the successor carries real raster dimensions')
+    assert.equal(ready.widthPx, 128, 'the real successor renders the requested width')
+    assert.equal(ready.heightPx, 64, 'the admitted 64:32 viewport renders at the matching height')
   } finally {
     loader.dispose()
   }
@@ -1241,40 +1228,5 @@ test('an evicted errored variant is terminal: no retry, no resurrection', async 
   } else {
     assert.equal(loader.retryFailed('d', 'src', 64), false, 'an evicted variant never resurrects through retry')
   }
-  loader.dispose()
-})
-
-test('a real child timeout is classified, the loader exposes retry, and the successor child succeeds', { skip: nativeRasterSkip }, async (t) => {
-  // LAYER 1 - the REAL rasterizer classifies a timed-out child as the typed
-  // `timeout` failure: the scripted child runs to the 3 s bound, dies by
-  // SIGKILL and settles from its close, and the rejection carries the kind.
-  t.mock.timers.enable({ apis: ['setTimeout'] })
-  t.after(() => t.mock.timers.reset())
-  const scripted = scriptedRasterChild(ms => t.mock.timers.tick(ms))
-  const failure = await scripted.runToTimeout('rp request=1')
-  assert.ok(failure instanceof SvgRasterFailure, `a timeout is the typed failure: ${failure.message}`)
-  assert.equal(failure.kind, 'timeout')
-
-  // LAYER 2 - the loader flow around that classification: the typed timeout
-  // enters the cache as an error, the ONE user retry rebuilds the SAME
-  // variant through load, and the successor child succeeds.
-  let firstAttempt = true
-  const loader = new SvgRasterLoader(async () => {
-    if (firstAttempt) {
-      firstAttempt = false
-      throw failure
-    }
-    return { png: new Uint8Array(), base64: TINY_PNG_BASE64, widthPx: 128, heightPx: 64 }
-  })
-  loader.subscribe('digest-timeout', 128, () => {})
-  loader.load('digest-timeout', SVG_SOURCE, 128)
-  await new Promise(resolve => setImmediate(resolve))
-  assert.equal(loader.get('digest-timeout', 128).state, 'error')
-  assert.equal(loader.canRetryFailed('digest-timeout', 128), true, 'the typed timeout is retry-eligible')
-  assert.equal(loader.retryFailed('digest-timeout', SVG_SOURCE, 128), true)
-  await new Promise(resolve => setImmediate(resolve))
-  const ready = loader.get('digest-timeout', 128)
-  assert.equal(ready.state, 'ready', JSON.stringify(ready))
-  assert.equal(ready.state === 'ready' ? ready.widthPx : 0, 128)
   loader.dispose()
 })
