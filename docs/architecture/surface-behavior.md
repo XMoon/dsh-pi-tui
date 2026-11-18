@@ -1176,8 +1176,9 @@ specialist-page contract below).
 - `Tools` holds the built-in `Visual tools` row (backed by the Host profile's
   `pi-tui-visual-tools.enabled` volatile Config, schema default On), the
   `Shell execution` specialist entry, the `ACP Server` runtime row, the
-  `Web Search / Fetch` page entry and, when the official manager is mounted,
-  `MCP servers`, in that frozen order. The next-Split-Host Web/ACP startup
+  `Web Search / Fetch` page entry, when the official manager is mounted
+  `MCP servers`, and when the official Computer Use provider and Plugin
+  Manager roster are mounted `Computer Use`, in that frozen order. The next-Split-Host Web/ACP startup
   preferences are NOT in Tools: they live in `General` under the SAME row ids
   (`web-autostart`, `acp-autostart`) with no duplicate Tools entry.
   Its stated value is the effective Host form value; `[default]` marks a value
@@ -1841,6 +1842,52 @@ offer permanent Delete for an inherited/overridden server, show a resolved
 secret, own a second fleet/status cache, optimistically paint Connected after a
 configuration write or restart, retry a dispatched write, or let a late result
 from a replaced Host generation reach the page.
+
+### Computer Use page
+
+`/settings → Tools → Computer Use` is ONE embedded specialist page inside the
+same Settings lease (no second alt-screen, modal or Settings workspace). The
+official Experimental `Computer use` Plugin Manager card's bounded
+`Manage Computer Use…` action switches to the SAME page in the SAME lease: the
+root retires the Plugin child and releases its claim on the next frame before
+mounting the page. The page is omitted when the composition has no official CUA
+access port and no Plugin Manager roster; it must not be painted as an inert
+control.
+
+Authority is never the page: the bundle selection/availability comes from the
+existing Plugin Manager roster, the saved default preset from the existing
+`ConfigPort.presetDefault`, and system permissions, the official helper /
+launch-application identity, PTC execution and persisted application decisions
+come from the official provider through the ONE semantic `cuaAccess` port
+(Direct: the live Host service resolved per call; Split: the official generated
+`@deepseek-ai/dsh-cua/remote` namespace with connection-generation fencing).
+The page owns only a per-open observation epoch, one serialized write and its
+cursor/scroll/confirmation/help state.
+
+A disabled or missing bundle paints `Disabled`/`Unavailable` and performs no
+CUA query; it is never a fabricated denial or `Ready`. A supported Host paints
+Accessibility and Screen Recording as two independent observations
+(`Allowed`/`Not allowed`/`Unknown`), and the helper/launch-application identity
+and Host platform actually reported by the provider. `Request permission` and
+`Open settings` are action receipts only: a successful call does not paint
+Allowed; a fresh read must observe it. An unknown/unavailable read never keeps
+an older `Allowed` actionable. The PTC facts are separate: the saved default
+preset changes NEW Sessions only, while persistent PTC is an explicit
+confirmed write with a possible runtime reload.
+
+The persisted application decisions are listed from the official
+`applications()` result only; Session-only grants are not listed. `Revoke…` and
+`Allow asking again…` use the exact opaque `CuaApplicationId` that was painted,
+require a reviewable confirmation (affected work may stop / no access is
+granted), never target an application by name re-resolution, and re-read the
+official list afterwards. Closing the page or a Host/connection generation
+change discards late results; a dispatched Host effect is not claimed undone.
+
+Must-not: read or write the macOS TCC database, call `osascript`/`tccutil`, run
+`open` on the Client to fake the Host's System Settings, infer the responsible
+app from the terminal, keep a second permission/application store, poll in the
+background, auto-enable the bundle or persistent PTC, or paint a Client-local
+platform verdict for a Split Host.
 
 ## Model picker (`/model`)
 

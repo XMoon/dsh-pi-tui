@@ -2553,6 +2553,10 @@ export function applyRunnerWithRuntime(
       backend: {
         kind: selectedRuntime.kind,
         sessionReader: backend.sessionReader,
+        // PR-5/MAC-09 v2: the official CUA access port and the official
+        // Plugin Manager roster the Settings Computer Use page reuses.
+        cuaAccess: backend.cuaAccess,
+        pluginManager: backend.pluginManager,
         // M5-U-C: the SAME official Host read port the backend resolved; the
         // command runner forwards it unchanged to the PiTUI Session Workspace.
         sessionWorkspaceFacts: backend.sessionWorkspaceFacts,

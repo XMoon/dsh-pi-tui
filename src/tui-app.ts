@@ -1964,6 +1964,7 @@ export interface SettingsWorkspaceOpenOptions {
    */
   readonly onOpenPlugins?: (
     onYieldNavigation: () => void,
+    onManageComputerUse: () => string | undefined,
   ) => import('./tui/plugin-manager/workspace.ts').EmbeddedPluginPage | undefined
   /** Fired once when the workspace is torn down by ANY path, with the reason
    *  the lease really closed. `user-exit` is the panel's own L0 Esc/Close
@@ -2036,6 +2037,10 @@ export interface SettingsWorkspaceOpenOptions {
    * starts its single watch only after this factory runs on the live lease.
    */
   readonly createMcpServersPage?: (
+    done: () => void,
+  ) => import('./tui/panels/settings-workspace-panel.ts').EmbeddedSpecialistPage | undefined
+  /** PR-5/MAC-09 v2: the ONE same-lease Computer Use page factory. */
+  readonly createComputerUsePage?: (
     done: () => void,
   ) => import('./tui/panels/settings-workspace-panel.ts').EmbeddedSpecialistPage | undefined
 }
@@ -27902,6 +27907,9 @@ export class TuiApp {
       ...(options.createMcpServersPage === undefined
         ? {}
         : { createMcpServersPage: options.createMcpServersPage }),
+      ...(options.createComputerUsePage === undefined
+        ? {}
+        : { createComputerUsePage: options.createComputerUsePage }),
       // The clipboard capability stays the SAME Client-local `copySelection` the
       // rest of the surface already uses; the settlement re-proves THIS workspace
       // record before it may notify.

@@ -325,6 +325,10 @@ export interface CommandSurfaceDeps<Selection extends ModelSelectionValue, Exact
     readonly acpAccess: TuiCommandRunner['acpAccess']
     /** FR3: the ONE official Host MCP manager port (Settings MCP page). */
     readonly mcpServers: TuiCommandRunner['mcpServers']
+    /** PR-5/MAC-09 v2: the official CUA access port and the official Plugin
+     *  Manager roster the Settings Computer Use page reuses. */
+    readonly cuaAccess: TuiCommandRunner['cuaAccess']
+    readonly pluginManager: TuiCommandRunner['pluginManager']
     /** Shell amendment (M3-4 PR3): whether Host-shell completion facts are
      * reachable on the selected backend. */
     readonly hostShellCompletion: import('../../runtime/host-shell-completion-port.ts').HostShellCompletionPort
@@ -400,7 +404,10 @@ export interface CommandSurfaceDeps<Selection extends ModelSelectionValue, Exact
   /** The profile-wide Plugin Manager controller (never session-owned): its ONE
    *  embedded page belongs to the Settings workspace lease. */
   readonly pluginManager: {
-    page(onYieldNavigation: () => void): ReturnType<TuiCommandRunner['createPluginManagerPage']>
+    page(
+      onYieldNavigation: () => void,
+      onManageComputerUse?: () => string | undefined,
+    ): ReturnType<TuiCommandRunner['createPluginManagerPage']>
   }
   /** The shared client clipboard delivery policy. */
   readonly client: {
@@ -1570,6 +1577,8 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
       acpAccess: deps.backend.acpAccess,
       // FR3: the ONE official Host MCP manager port for the Settings page.
       mcpServers: deps.backend.mcpServers,
+      cuaAccess: deps.backend.cuaAccess,
+      pluginManager: deps.backend.pluginManager,
       hostShellCompletion: deps.backend.hostShellCompletion,
       // The readable-transcript business capability is NOT a pre-read flag:
       // the command only acknowledges, and the post-success save owner reads
@@ -1717,7 +1726,7 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
       openRewindPicker: deps.openRewindPicker,
       // `/plugins` opens the profile-wide Plugin Manager panel (P1-A). It is
       // NOT session-owned: it never creates or switches a Session.
-      createPluginManagerPage: (onYieldNavigation) => deps.pluginManager.page(onYieldNavigation),
+      createPluginManagerPage: (onYieldNavigation, onManageComputerUse) => deps.pluginManager.page(onYieldNavigation, onManageComputerUse),
       // The attachment-intake UX fence: the ONE production reader of the
       // transition gate. Staging an attachment while a transition is in flight
       // (quiesce → commit) would inject a draft into a session about to be

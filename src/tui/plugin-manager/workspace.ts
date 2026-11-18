@@ -1874,6 +1874,18 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       case PLUGIN_ACTION.remove:
         if (card !== undefined && this.controller.requestRemove(card.value)) this.openConfirmation()
         return
+      case PLUGIN_ACTION.manageComputerUse: {
+        if (card === undefined) return
+        const detail = this.detailView(card)
+        const action = detail.actions.find(candidate => candidate.value === PLUGIN_ACTION.manageComputerUse)
+        if (action === undefined || !action.enabled) {
+          this.controller.explain(action?.reason ?? 'The Computer Use settings page is not available.')
+          return
+        }
+        const reason = this.intents.openComputerUseSettings?.()
+        if (reason !== undefined) this.controller.explain(reason)
+        return
+      }
       case PLUGIN_ACTION.officialInstall: {
         if (card === undefined) return
         const detail = this.detailView(card)
@@ -3982,6 +3994,10 @@ export interface PluginManagerWorkspacePanelIntents {
   /** The Settings root's navigation yield (Esc/Left/Shift+Tab at the list
    * root). The page only reports the intent; the ROOT commits the focus. */
   readonly onYieldNavigation: () => void
+  /** PR-5/MAC-09 v2: request the SAME Settings lease's Tools · Computer Use
+   *  page. Undefined = the switch was scheduled; a string = the exact reason
+   *  it cannot happen right now (the page explains it and stays put). */
+  readonly openComputerUseSettings?: () => string | undefined
 }
 
 /**

@@ -72,7 +72,8 @@ Consequences that are part of the contract:
 `pendingInputReader`, `sessionWriter`, `sessionLifecycle`, `interaction`,
 `catalog`, `config`, `hostFile`, `sessionArchive`, `sessionMarkdown`,
 `hostCommand`, `pluginManager`, `jobObservation`, `hostUserShell`,
-`hostShellCompletion`, `deliveredFileRead`, `webAccess`, `sessionWorkspaceFacts`, `schedule`), never a
+`hostShellCompletion`, `deliveredFileRead`, `webAccess`, `cuaAccess`,
+`sessionWorkspaceFacts`, `schedule`), never a
 `TuiBackend` god object. A port exposes detached semantic facts, opaque identities/request ids,
 event surfaces (for example authorization: begin → attemptId → notice/prompt →
 respond/cancel) and semantic operations. It owns no Host database, state machine

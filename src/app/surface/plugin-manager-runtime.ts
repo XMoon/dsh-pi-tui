@@ -59,6 +59,8 @@ export interface PluginManagerWorkspacePanelDeps {
    *  Left / Shift+Tab at the list root) and the ROOT commits the focus change.
    *  It never closes the page or releases the owner. */
   readonly onYieldNavigation: () => void
+  /** PR-5/MAC-09 v2: the Settings root's in-lease Computer Use navigation. */
+  readonly openComputerUseSettings?: () => string | undefined
   /** Release the owner once, on a REAL teardown (never a navigation yield). */
   readonly onDispose: () => void
 }
@@ -81,7 +83,7 @@ export interface SurfacePluginManager {
    * instead of nesting a second owner. The page is created lazily: opening
    * Settings alone never calls this and therefore never reads the inventory.
    */
-  page(onYieldNavigation: () => void): Component | undefined
+  page(onYieldNavigation: () => void, openComputerUseSettings?: () => string | undefined): Component | undefined
 }
 
 /** The acquisition inputs of the Plugin Manager owner; one cohesive lifetime. */
@@ -138,6 +140,7 @@ export function createPluginManagerRuntime(options: PluginManagerRuntimeOptions)
       const panelDeps = (
         claim: PluginManagerHostClaim,
         onYieldNavigation: () => void,
+        openComputerUseSettings: (() => string | undefined) | undefined,
       ): PluginManagerWorkspacePanelDeps => ({
         requestRender: () => options.mounted().requestRender(),
         onCopy: text => options.mounted().copyWorkspaceText(text),
@@ -154,9 +157,10 @@ export function createPluginManagerRuntime(options: PluginManagerRuntimeOptions)
           )
         },
         onYieldNavigation,
+        ...(openComputerUseSettings === undefined ? {} : { openComputerUseSettings }),
         onDispose: () => { claim.release() },
       })
-      const page = (onYieldNavigation: () => void): Component | undefined => {
+      const page = (onYieldNavigation: () => void, openComputerUseSettings?: () => string | undefined): Component | undefined => {
         // The Settings root hosts exactly ONE page: a still-living page keeps
         // its claim (and its query/selection/scroll) instead of nesting a
         // second owner.
@@ -166,7 +170,7 @@ export function createPluginManagerRuntime(options: PluginManagerRuntimeOptions)
         try {
           // Claim BEFORE any synchronous callback can observe the new page.
           claim = hosts.claim()
-          panel = options.createPanel(controller, panelDeps(claim, onYieldNavigation))
+          panel = options.createPanel(controller, panelDeps(claim, onYieldNavigation, openComputerUseSettings))
         } catch (error) {
           // A failed factory never leaves a phantom owner or a half-built page
           // behind; the error stays the caller's (no fabricated success).

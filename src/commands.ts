@@ -71,6 +71,8 @@ import type { SessionWriter } from './runtime/session-writer-port.ts'
 import type { SessionWorkspaceFactsPort } from './runtime/session-workspace-facts-port.ts'
 import type { HostDirectoryBrowsePort } from './runtime/host-directory-browse-port.ts'
 import type { McpServerPort } from './runtime/mcp-server-port.ts'
+import type { CuaAccessPort } from './runtime/cua-access-port.ts'
+import type { PluginManagerPort } from './runtime/plugin-manager-port.ts'
 import type { InteractionPort } from './runtime/interaction-port.ts'
 import type {
   CreateSessionRequest,
@@ -514,6 +516,15 @@ export interface TuiCommandRunner {  ctx: Context
    *  no Host MCP manager (e.g. a native renderer surface), where the row is
    *  omitted rather than shown as an inert control. */
   readonly mcpServers: McpServerPort
+  /** The official CUA provider access port (PR-5/MAC-09 v2): the Settings
+   *  Tools · Computer Use page reads/mutates permissions and application
+   *  decisions through this ONE semantic surface. No TCC access and no second
+   *  permission store. */
+  readonly cuaAccess?: CuaAccessPort
+  /** The official Plugin Manager roster (PR-5 bundle selection/availability);
+   *  the Computer Use page reuses it and never infers provider readiness from
+   *  the card's presence. */
+  readonly pluginManager?: PluginManagerPort
   /** Host-owned/direct/remote shell completion capability, never a Client PATH guess. */
   readonly hostShellCompletion: HostShellCompletionPort
   /** The minimal commands registry for the TUI's OWN registrations
@@ -859,7 +870,10 @@ export interface TuiCommandRunner {  ctx: Context
    * plain `Component`, and this composition-only signature is where the
    * concrete page type is named.
    */
-  createPluginManagerPage(onYieldNavigation: () => void): EmbeddedPluginPage | undefined
+  createPluginManagerPage(
+    onYieldNavigation: () => void,
+    onManageComputerUse?: () => string | undefined,
+  ): EmbeddedPluginPage | undefined
   /**
    * Open the conversation rewind picker (plan: the ONE entry shared by the
    * idle empty-editor double-Esc and `/rewind`). The runner decides what

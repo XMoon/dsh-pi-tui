@@ -393,6 +393,8 @@ function fakeRunnerDeps(options: {
       webAccess: runner.webAccess,
       acpAccess: runner.acpAccess,
       mcpServers: runner.mcpServers,
+      cuaAccess: runner.cuaAccess,
+      pluginManager: runner.pluginManager,
       hostShellCompletion: { pathAuthority: 'host' as const, complete: async () => ({ kind: 'unavailable' as const, reason: 'test Host unavailable' }) },
     },
     session: {

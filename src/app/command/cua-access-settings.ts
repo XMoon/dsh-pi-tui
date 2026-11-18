@@ -251,12 +251,21 @@ export class CuaAccessSettingsController {
       async () => { await this.deps.cuaAccess.retryApproval(id) })
   }
 
-  /** Drop this open's results; a Host-side effect already dispatched is not undone. */
-  async dispose(): Promise<void> {
-    if (this.disposed !== undefined) return this.disposed
+  /**
+   * Synchronously close this open's state. In-flight reads are discarded by
+   * their epoch check; a Host-side effect already dispatched is not undone.
+   */
+  close(): void {
+    if (this.closed) return
     this.closed = true
     this.epoch++
     this.listeners.clear()
+  }
+
+  /** Close and wait for the already-started local reads/writes to settle. */
+  async dispose(): Promise<void> {
+    if (this.disposed !== undefined) return this.disposed
+    this.close()
     this.disposed = Promise.all([this.readInFlight, this.tail]).then(() => {})
     await this.disposed
   }

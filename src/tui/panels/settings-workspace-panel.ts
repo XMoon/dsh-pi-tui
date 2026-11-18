@@ -112,6 +112,7 @@ export type SettingsWorkspaceRowId =
   | 'footer-configurator'
   | 'keyboard-shortcuts'
   | 'mcp-servers'
+  | 'computer-use'
   | `ext-setting:${string}`
 
 /** The prefix that separates a dynamic extension-setting row from the static
@@ -235,7 +236,7 @@ export interface SettingsWorkspaceRow {
    *  specialist page. */
   readonly specialist?:
     | 'subagent-settings' | 'web-settings' | 'footer-configurator' | 'keybindings' | 'mcp-servers'
-    | 'agent-loop-settings' | 'shell-execution-settings'
+    | 'computer-use' | 'agent-loop-settings' | 'shell-execution-settings'
   /** Whether the row's specialist page may be opened RIGHT NOW. Absent = yes.
    *  A non-current authority (a stale/unavailable backend) paints the row and
    *  its last-known facts but offers no Manage action, because the page could
@@ -382,7 +383,10 @@ export interface SettingsWorkspacePanelIntents {
    * the intent (Esc/Left/Shift+Tab at its list root) and the root commits the
    * focus change; it never closes the page by itself.
    */
-  readonly onOpenPlugins?: (onYieldNavigation: () => void) => EmbeddedPluginPage | undefined
+  readonly onOpenPlugins?: (
+    onYieldNavigation: () => void,
+    onManageComputerUse: () => string | undefined,
+  ) => EmbeddedPluginPage | undefined
   /** The lazily built Models direct page (the Settings category keeps the
    * same screen lease). `openAccount` switches this workspace to the Account
    * page when the Models list's account entry is activated. */
@@ -443,6 +447,13 @@ export interface SettingsWorkspacePanelIntents {
    * it. There is no writable document field and no second Observation owner.
    */
   readonly createMcpServersPage?: (done: () => void) => EmbeddedSpecialistPage | undefined
+  /**
+   * PR-5 / MAC-09 v2: the ONE per-open Computer Use specialist page. It
+   * forwards only the official CUA access port, the existing Plugin Manager
+   * roster and the existing preset-default writer; `done` returns to the Tools
+   * row that opened it. No second Settings lease or permission store.
+   */
+  readonly createComputerUsePage?: (done: () => void) => EmbeddedSpecialistPage | undefined
   /** The live terminal row budget (the panel never reads the terminal itself). */
   readonly rows: () => number
   /** The live terminal column budget (the projection's width). */
@@ -827,6 +838,7 @@ function isWorkspaceRowId(id: string): id is SettingsWorkspaceRowId {
     || id === 'footer-configurator'
     || id === 'keyboard-shortcuts'
     || id === 'mcp-servers'
+    || id === 'computer-use'
     || id.startsWith(EXTENSION_SETTING_ROW_PREFIX)
 }
 
@@ -1182,6 +1194,10 @@ export class SettingsWorkspacePanel implements Component {
     readonly rowId: SettingsWorkspaceRowId
     readonly specialist: SettingsWorkspaceSpecialistRoute
   } | undefined
+  /** PR-5: an in-lease Plugin Manager → Tools · Computer Use navigation,
+   *  consumed at the START of the next frame (before the direct projection is
+   *  chosen) so the retired Plugin page cannot be painted by the old frame. */
+  private pendingComputerUseNavigation = false
   /** The ONE command-facing settlement of the typed deeplink: it resolves on
    *  the frame that really mounts the page (or on a failure/teardown), so the
    *  command can return a REAL error instead of a silent row fallback. */
@@ -1726,6 +1742,10 @@ export class SettingsWorkspacePanel implements Component {
     }
     this.lastRenderWidth = width
     this.lastRenderRows = liveRows
+    // PR-5: a Plugin Manager → Computer Use switch is a same-lease navigation.
+    // It must be committed BEFORE `direct` is chosen: `direct` would otherwise
+    // still describe the retired Plugins category and paint the closed page.
+    this.consumeComputerUseNavigation()
     const choosing = this.choiceField() !== undefined
     const direct = this.paintsDirectPage(width)
     const plan = planSettingsChrome(
@@ -3283,6 +3303,8 @@ export class SettingsWorkspacePanel implements Component {
         return this.intents.createKeybindingsPage === undefined ? undefined : { label: 'Configure shortcuts…' }
       case 'mcp-servers':
         return this.intents.createMcpServersPage === undefined ? undefined : { label: 'Manage MCP servers…' }
+      case 'computer-use':
+        return this.intents.createComputerUsePage === undefined ? undefined : { label: 'Manage Computer Use…' }
       case 'agent-loop-settings':
         return this.intents.createHostNumericSettingsPage === undefined ? undefined : { label: 'Configure Agent loop…' }
       case 'shell-execution-settings':
@@ -3777,7 +3799,7 @@ export class SettingsWorkspacePanel implements Component {
       || row.specialist === 'agent-loop-settings'
       || row.specialist === 'shell-execution-settings'
       ? 1
-      : row.specialist === 'web-settings' || row.specialist === 'mcp-servers'
+      : row.specialist === 'web-settings' || row.specialist === 'mcp-servers' || row.specialist === 'computer-use'
         ? 1
         : 0
     if (this.bodyFloor() < floor) return
@@ -3816,6 +3838,9 @@ export class SettingsWorkspacePanel implements Component {
         break
       case 'mcp-servers':
         page = this.intents.createMcpServersPage?.(done)
+        break
+      case 'computer-use':
+        page = this.intents.createComputerUsePage?.(done)
         break
       case 'agent-loop-settings':
         page = this.intents.createHostNumericSettingsPage?.('agent-loop', done, changed)
@@ -4050,7 +4075,10 @@ export class SettingsWorkspacePanel implements Component {
    */
   private ensurePluginPageMounted(): void {
     if (this.pluginPage !== undefined || this.disposed) return
-    const page = this.intents.onOpenPlugins?.(() => this.yieldPluginNavigation())
+    const page = this.intents.onOpenPlugins?.(
+      () => this.yieldPluginNavigation(),
+      () => this.requestComputerUseNavigation(),
+    )
     if (page === undefined) return
     this.pluginPage = page
     this.bumpRevision()
@@ -4108,6 +4136,55 @@ export class SettingsWorkspacePanel implements Component {
     this.contentPressed = undefined
     this.bumpRevision()
     this.intents.requestRender()
+  }
+
+  /**
+   * PR-5: the Plugin Manager's explicit `Manage Computer Use…` intent. It
+   * validates the SAME lease destination before anything is retired, so a
+   * missing row/factory returns the exact reason to the plugin page instead of
+   * closing it into a dead end. The actual switch is consumed on the next frame
+   * (a synchronous close inside the plugin's own input/dispatch stack would
+   * dispose the caller under itself).
+   */
+  private requestComputerUseNavigation(): string | undefined {
+    if (this.disposed) return 'The Settings workspace is closing.'
+    if (this.pendingComputerUseNavigation) return undefined
+    if (this.categoryId !== 'plugins') return 'The Plugin Manager page is not current.'
+    if (this.specialistPage !== undefined) return 'Another Settings page is already open.'
+    if (this.pluginPageHasPendingMutation()) return 'The Plugin Manager is still saving a change; wait for it to settle.'
+    if (this.intents.createComputerUsePage === undefined) return 'The Computer Use settings page is not available in this build.'
+    const row = this.snapshot.rows.find(candidate => candidate.id === 'computer-use')
+    if (row === undefined || row.category !== 'tools' || row.specialist !== 'computer-use' || row.specialistAvailable === false) {
+      return 'The Computer Use settings row is not available right now.'
+    }
+    if (this.bodyFloor() < 1) return 'The window is too small to show the Computer Use page.'
+    this.pendingComputerUseNavigation = true
+    this.intents.requestRender()
+    return undefined
+  }
+
+  /**
+   * PR-5: consume the one deferred Plugin → Computer Use navigation. Order is
+   * load-bearing: retire the Plugin child and release its Host claim FIRST,
+   * commit the Tools row/focus SECOND, and mount the specialist THIRD.
+   */
+  private consumeComputerUseNavigation(): void {
+    if (!this.pendingComputerUseNavigation) return
+    this.pendingComputerUseNavigation = false
+    if (this.disposed) return
+    this.closePluginPage()
+    this.categoryId = 'tools'
+    this.rowId = 'computer-use'
+    this.focus = 'rows'
+    this.rowOffset = 0
+    this.detailOffset = 0
+    this.resetChoice()
+    this.pressedGesture = undefined
+    this.contentPressed = undefined
+    this.specialistPressed = undefined
+    this.bumpRevision()
+    const row = this.snapshot.rows.find(candidate => candidate.id === 'computer-use')
+    if (row !== undefined) this.openSpecialist(row)
   }
 
   /**
