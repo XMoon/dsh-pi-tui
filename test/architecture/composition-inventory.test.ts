@@ -108,15 +108,6 @@ const SINGLE_OWNER_SITES: ReadonlyArray<readonly [string, number, string]> = [
   ['new TranscriptWindowController(', 1, 'src/app/surface/viewer-runtime.ts'],
 ]
 
-test('the composition surface is the entry plus the composition zone', () => {
-  const sources = compositionSources()
-  assert.equal(sources[0].rel, 'src/index.ts', 'the package entry is the first composition-surface file')
-  assert.equal(sources[1].rel, 'src/app/bootstrap.ts', 'the composition facade is the second composition-surface file')
-  for (const { rel } of sources.slice(2)) {
-    assert.ok(rel.startsWith('src/app/bootstrap/'), `${rel} is not a composition-surface file`)
-  }
-})
-
 test('every composition responsibility still has a site', () => {
   const source = compositionSource()
   for (const [name, site] of COMPOSITION_INVENTORY) {

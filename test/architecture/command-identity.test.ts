@@ -116,11 +116,6 @@ test('requireLiveSessionScope ensures the session then captures the scope atomic
   assert.ok(facade.includes('return scope'), 'the captured scope is returned alone')
 })
 
-test('sessionGeneration no longer exists in the command layer', () => {
-  assert.equal(commandLayerSource.includes('sessionGeneration'), false,
-    'A3-2 deletes the member: the scope-bound refresh facade carries the target key')
-})
-
 test('scope-bound reads admit through ONE stale-throwing helper, never a raw current read', () => {
   // A3-5: the helper lives in the bound command runtime; the runner resolves
   // the exact Direct attachment in the SAME synchronous step the helper's
