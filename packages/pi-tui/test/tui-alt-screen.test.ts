@@ -1188,13 +1188,13 @@ describe("TuiAltScreen", () => {
 		tui.stop();
 	});
 
-	it("does not emit Kitty graphics commands or OSC 133 zones in iTerm2", async () => {
+	it("emits iTerm2 OSC 1337 pixels and no Kitty commands (X080)", async () => {
 		setCapabilities({ images: "iterm2", trueColor: true, hyperlinks: true });
 		try {
 			const terminal = new RecordingTerminal(20, 3);
 			const tui = new TuiAltScreen(terminal);
 			tui.addChild({
-				render: () => ["\x1b]133;B\x07\x1b]133;C\x07\x1b]133;A\x07content"],
+				render: () => ["content"],
 				invalidate: () => {},
 			});
 			tui.addChild(
@@ -1209,10 +1209,14 @@ describe("TuiAltScreen", () => {
 			tui.start();
 			await terminal.waitForRender();
 			tui.stop();
-			assert.ok(terminal.events.every((event) => event.type !== "write" || !event.data.includes("\x1b_G")));
-			assert.ok(terminal.events.every((event) => event.type !== "write" || !event.data.includes("\x1b]133;")));
-			assert.ok(terminal.events.every((event) => event.type !== "write" || !event.data.includes("\x1b]1337;File=")));
-			assert.ok(terminal.events.some((event) => event.type === "write" && event.data.includes("[Image:")));
+			const wire = terminal.events
+				.filter((event) => event.type === "write")
+				.map((event) => (event.type === "write" ? event.data : ""))
+				.join("");
+			assert.ok(!wire.includes("\x1b_G"), "no Kitty APC in the iTerm2 path");
+			assert.ok(!wire.includes("\x1b]133;"), "no OSC 133 zone markers in the iTerm2 path");
+			assert.ok(wire.includes("\x1b]1337;File="), "iTerm2 paints real OSC 1337 pixels");
+			assert.ok(!wire.includes("[Image:"), "no text fallback when the capability admits pixels");
 		} finally {
 			resetCapabilitiesCache();
 		}
@@ -1401,6 +1405,43 @@ describe("TuiAltScreen", () => {
 				terminal.getViewport().every((line) => !line.includes("MODAL")),
 				"the overlay text is gone from the screen",
 			);
+			tui.stop();
+		} finally {
+			resetCapabilitiesCache();
+		}
+	});
+
+	it("yields a Direct iTerm2 image block to an overlay inside AltScreen and restores it (X080)", async () => {
+		setCapabilities({ images: "iterm2", trueColor: true, hyperlinks: false });
+		try {
+			const terminal = new RecordingTerminal(20, 6);
+			const tui = new TuiAltScreen(terminal);
+			const anchorLine = "\x1b[2A\x1b]1337;File=inline=1;size=4;width=2;height=auto:AAAA\x07";
+			tui.addChild({ render: () => ["header", "", "", anchorLine, "tail"], invalidate: () => {} });
+			const wire = (): string =>
+				terminal.events
+					.filter((event): event is { type: "write"; data: string } => event.type === "write")
+					.map((event) => event.data)
+					.join("");
+			tui.start();
+			await terminal.waitForRender();
+			assert.ok(wire().includes("]1337;File="), "the image paints while nothing covers it");
+
+			// The overlay lands on the block's TOP row, not the anchor row.
+			terminal.events.length = 0;
+			const handle = tui.showOverlay({ render: () => ["MODAL"], invalidate: () => {} }, { row: 1, col: 0, width: 10 });
+			tui.renderNow();
+			await terminal.waitForRender();
+			const covered = wire();
+			assert.ok(!covered.includes("]1337;File="), "the covered block is not re-emitted in this frame");
+			assert.ok(covered.includes("MODAL"), "the overlay itself is painted");
+			assert.ok(terminal.getViewport().some((line) => line.includes("MODAL")), "the overlay text is readable");
+
+			handle.hide();
+			terminal.events.length = 0;
+			tui.renderNow();
+			await terminal.waitForRender();
+			assert.ok(wire().includes("]1337;File="), "the same image returns after close");
 			tui.stop();
 		} finally {
 			resetCapabilitiesCache();
@@ -4580,7 +4621,7 @@ describe("TuiAltScreen overlay text selection (X068)", () => {
 				.join("");
 		}
 
-		it("uses the instance Kitty protocol while preserving iTerm2 suppression and restore", async () => {
+		it("keeps the process capability while an instance Kitty override is active (X080)", async () => {
 			setCapabilities({ images: "iterm2", trueColor: true, hyperlinks: true });
 			registerKittyImageMetadata({ imageId: 777, columns: 2, rows: 2, widthPx: 10, heightPx: 10 });
 			try {
@@ -4590,7 +4631,7 @@ describe("TuiAltScreen overlay text selection (X068)", () => {
 				tui.addChild(anchor);
 				tui.start();
 				await terminal.waitForRender();
-				assert.strictEqual(getCapabilities().images, null, "the existing iTerm2 global suppression still runs");
+				assert.strictEqual(getCapabilities().images, "iterm2", "AltScreen no longer mutates the process capability");
 
 				terminal.events.length = 0;
 				anchor.show = false;
@@ -4600,7 +4641,7 @@ describe("TuiAltScreen overlay text selection (X068)", () => {
 				assert.ok(!wire.includes("\x1b[2J"), "the iTerm2 whole-screen branch is not used");
 
 				tui.stop();
-				assert.strictEqual(getCapabilities().images, "iterm2", "the existing iTerm2 restore lifecycle still runs");
+				assert.strictEqual(getCapabilities().images, "iterm2", "the process capability remains unchanged after stop");
 			} finally {
 				resetCapabilitiesCache();
 			}

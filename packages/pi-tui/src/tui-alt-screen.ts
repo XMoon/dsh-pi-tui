@@ -29,9 +29,7 @@ import {
 	getKittyImagePlacementRows,
 	type ImageProtocol,
 	isImageLine,
-	setCapabilities,
 	type SixelScreenPort,
-	type TerminalCapabilities,
 } from "./terminal-image.ts";
 import {
 	type Component,
@@ -186,8 +184,7 @@ export interface TuiAltScreenOptions {
 	 * Zellij live-pane admission is still pending: whether pixels may actually
 	 * be painted stays the graphics handle's `canPaint()` decision, while the
 	 * screen's clear/redraw/release strategy must already be Kitty. The global
-	 * capability cache is never changed by this option; the existing iTerm2
-	 * suppression/restore lifecycle still applies. (dsh-pi-tui divergence X070.)
+	 * capability cache is never changed by this option. (dsh-pi-tui divergence X070.)
 	 */
 	imageProtocolOverride?: ImageProtocol | "sixel";
 	/**
@@ -310,7 +307,6 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	private imageProtocol: ImageProtocol | "sixel" = null;
 	/** Per-instance protocol selection; never mutates the process-wide cache. */
 	private readonly imageProtocolOverride?: ImageProtocol | "sixel";
-	private savedCapabilities?: TerminalCapabilities;
 	private readonly uploadedKittyImages = new Map<number, CachedKittyImage>();
 	/**
 	 * Per-row trusted SIXEL block height of the LAST painted frame (X074).
@@ -552,11 +548,6 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		const capabilities = getCapabilities();
 		this.imageProtocol = this.imageProtocolOverride !== undefined ? this.imageProtocolOverride : capabilities.images;
 		this.uploadedKittyImages.clear();
-		if (capabilities.images === "iterm2") {
-			this.savedCapabilities = capabilities;
-			setCapabilities({ ...capabilities, images: null });
-			this.invalidate();
-		}
 		this.lastDocument = [];
 		this.selectionAnchor = undefined;
 		this.selectionFocus = undefined;
@@ -640,10 +631,6 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			}
 			buffer += `\x1b[0m${ENABLE_AUTOWRAP}\r\n\x1b[?25h${END_SYNCHRONIZED_OUTPUT}`;
 			this.terminal.write(buffer);
-		}
-		if (this.savedCapabilities) {
-			setCapabilities(this.savedCapabilities);
-			this.savedCapabilities = undefined;
 		}
 	}
 

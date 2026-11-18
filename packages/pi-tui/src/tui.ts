@@ -791,6 +791,19 @@ export function compositeTuiLine(
  * not a placement. `U=1` is excluded: its pixels belong to the visible
  * placeholder cells, so a writer-side placement delete cannot remove it.
  */
+/** The cell rows one Direct iTerm2 (OSC 1337) inline image paints above and
+ *  including its anchor line. The fork `Image` renders `rows - 1` blank lines
+ *  followed by `<cursorUp><OSC 1337 payload>`, so the anchor's own prefix is
+ *  the only height authority. Returns undefined for every other line.
+ *  (dsh-pi-tui divergence X080.) */
+function iterm2ImageBlockRows(line: string): number | undefined {
+	if (!line.includes("\x1b]1337;File=")) return undefined;
+	const up = /^\x1b\[(\d{1,4})A/.exec(line)?.[1];
+	const offset = up === undefined ? 0 : Number.parseInt(up, 10);
+	if (!Number.isInteger(offset) || offset < 0 || offset > 4096) return undefined;
+	return offset + 1;
+}
+
 function nativeKittyBlock(
 	line: string,
 ): { rows: number; action: "p" | "T"; imageId: number | undefined; placementId: number | undefined } | undefined {
@@ -2231,6 +2244,31 @@ export abstract class TuiBase extends Container implements TUI {
 			}
 		}
 		this.preemptedKittyImageIds = preempted;
+		// Direct iTerm2 (OSC 1337) inline images paint their raster over the
+		// cells from the anchor upward, and `compositeTuiLine` keeps an image
+		// anchor instead of the overlay text on its row. A visible overlay that
+		// intersects the painted block therefore makes the WHOLE block yield this
+		// frame: the anchor is dropped (so no pixels are re-emitted) and every
+		// covered row becomes an empty base, letting the overlay composite
+		// normally. The owning component re-renders the same image on the next
+		// frame, so hiding the overlay restores it. (dsh-pi-tui divergence X080.)
+		if (rendered.length > 0 && getCapabilities().images === "iterm2") {
+			for (let row = viewportStart; row < result.length; row++) {
+				const rows = iterm2ImageBlockRows(result[row] ?? "");
+				if (rows === undefined) continue;
+				const first = row - viewportStart - (rows - 1);
+				const last = row - viewportStart;
+				const covered = rendered.some(
+					({ overlayLines, row: overlayRow }) =>
+						overlayLines.length > 0 && overlayRow <= last && overlayRow + overlayLines.length - 1 >= first,
+				);
+				if (!covered) continue;
+				for (let target = row - (rows - 1); target <= row; target++) {
+					if (target >= 0) result[target] = "";
+				}
+			}
+		}
+
 
 		// Composite each overlay
 		for (const { overlayLines, row, col, w } of rendered) {

@@ -444,3 +444,36 @@ test('the TSP mapper keeps a failed publication’s readable reason', () => {
   )
   assert.ok(mapped.text.includes('unknown visual ref'), `the failure reason is painted:\n${mapped.text}`)
 })
+
+// ── PR-4B: a newly admitted static-paint SVG rides the SAME official gate ──
+
+test('an SVG source using the new static paint attributes is blob-admitted over the same wire', async (t) => {
+  const life = testLifecycle(t)
+  const fixture = await createDirectTspFixture(life, {
+    deltas: ['PRD', '-SVG-4B'],
+    startup: { sessionId: SESSION_ID },
+    persistedBlankSessions: [{ id: SESSION_ID }],
+    nativeImages: true,
+  })
+  try {
+    // The PR-4B static subset: an inherited `color` resolved by exact
+    // `currentColor` paint, plus a bounded dash stroke.
+    const source = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 32">'
+      + '<g color="#3b82f6"><rect width="64" height="32" fill="currentColor"/>'
+      + '<path d="M4 28 L60 4" stroke="#ef4444" stroke-width="2" stroke-dasharray="4 2"/></g></svg>'
+    const args = { title: 'Static paint topology', description: 'Gateway -> App -> Database', svg: source }
+    const fact = svgFactFromArgs(args)
+    const expectedBlobId = createHash('sha256').update(Buffer.from(source, 'utf8')).digest('hex')
+    await appendTool(fixture, 'call-svg-4b', 'dsh_pi_tui_svg', args, svgContentBlocks(fact))
+    await waitFor('the SVG tool card is projected', () =>
+      wireNodes(fixture.pane.frames()).some(node => node.k === 'tool'), 30_000)
+    expandToolCards(fixture)
+    await waitFor('the pane received the admitted static-paint SVG blob', () =>
+      fixture.pane.blobIds().includes(expectedBlobId), 30_000)
+    await waitFor('the pane painted the image node with the admitted blob', () =>
+      imageCarriesBlob(fixture.pane.frames(), expectedBlobId), 30_000)
+  } finally {
+    // Bounded teardown window: the fixture disposes the app, pane and Host before the next case.
+    await fixture.settle()
+  }
+})

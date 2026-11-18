@@ -1087,12 +1087,12 @@ modal-pre-emption, exactly-once close and final-dispose rules.
   and `attachmentId`; one subscription, one idempotent unsubscribe, no second
   cache or read service. The workspace Viewer paints real pixels on Kitty and
   on Direct SIXEL once the terminal's own live DA1, cell-size and background
-  facts admit it. iTerm2 remains outside the Viewer/SVG pixel scope: the
-  AltScreen deliberately disables its image capability and its cursor-up
-  framing is outside the fork's ANSI width layer, so the iTerm2 workspace shows
-  the real metadata plus `Preview unavailable`; native iTerm2 workspace pixels
-  remain deferred to separate renderer/protocol work. Transcript thumbnails
-  keep their existing per-surface capability behavior.
+  facts admit it, and Direct iTerm2 paints through the fork's OSC 1337 `Image`
+  path (X080). Multiplexer panes and `PI_IMAGE_PROTOCOL=none` remain text-only;
+  AltScreen no longer mutates the process-wide iTerm2 capability. Transcript
+  SVG iTerm2 thumbnails may paint pixels but do not publish clickable
+  pixel-body geometry; the ordinary raster thumbnail keeps its legacy iTerm2
+  hit body, and the explicit View action remains the SVG viewer entry.
 
 ### 10.5 Session Workspace: the fourth leased screen
 

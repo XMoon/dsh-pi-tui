@@ -13,6 +13,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { resetCapabilitiesCache, setCapabilities } from '@xmoon76/pi-tui'
 import { SvgRasterLoader } from '../../src/client/media/svg/raster-loader.ts'
+import { SvgRasterFailure } from '../../src/client/media/svg/rasterize.ts'
 import { ImageWorkspacePanel } from '../../src/tui/components/media/image-workspace.ts'
 import { SvgViewerPanel, type SvgViewerSource } from '../../src/tui/components/media/svg-viewer.ts'
 import { admitSvg } from '../../src/domain/visual/svg-admission.ts'
@@ -650,18 +651,22 @@ test('a Direct SIXEL viewer paints the grant variant, keeps Source/Copy, and reu
   }
 })
 
-test('iTerm2 keeps the SVG Preview unavailable and starts no raster', () => {
+test('Direct iTerm2 paints the SVG Preview through OSC 1337 and keeps Source usable', async () => {
   capabilities('iterm2')
   try {
     const recorder = pendingLoader()
     const panel = panelOf({ loader: recorder.loader, rows: 24 })
     panel.setMaxRows(24)
+    const loading = panel.render(80)
+    assert.ok(loading.slice(1, -1).join('\n').includes('Rendering preview…'))
+    assert.equal(recorder.calls.length, 1, 'iTerm2 starts the admitted raster variant')
+    recorder.releaseNext()
+    await drain()
     const lines = panel.render(80)
-    assert.ok(lines.slice(1, -1).join('\n').includes('Preview unavailable'))
-    assert.equal(recorder.calls.length, 0, 'the excluded protocol reads/encodes nothing')
-    // Source stays fully usable.
+    assert.ok(lines.slice(1, -1).join('\n').includes('\x1b]1337;File='), 'iTerm2 paints OSC 1337 pixels')
+    assert.ok(!lines.slice(1, -1).join('\n').includes('Preview unavailable'))
     panel.handleInput('\t')
-    assert.ok(stripSgr(panel.render(80).slice(1, -1).join('\n')).includes('<svg'))
+    assert.ok(stripSgr(panel.render(80).slice(1, -1).join('\n')).includes('<svg'), 'Source stays usable')
     panel.dispose()
     recorder.loader.dispose()
   } finally {
@@ -684,6 +689,279 @@ test('a SIXEL viewer disposed before the variant settles never repaints or keeps
     await recorder.settleAll()
     await drain()
     assert.equal(renders, 0, 'a late settle never wakes the closed viewer')
+    recorder.loader.dispose()
+  } finally {
+    resetCapabilitiesCache()
+  }
+})
+
+// ── PR-4B: explicit retry of recoverable preview failures ─────────────────
+
+/** A loader whose raster settles with a caller-chosen failure or result. */
+function failingLoader(): {
+  loader: SvgRasterLoader
+  calls: Array<{ readonly source: string; readonly width: number }>
+  /** Fail the CURRENT request with this error (or resolve with this result). */
+  settleNext(outcome: { error: Error } | { base64?: string }): void
+  activeCount(): number
+} {
+  const calls: Array<{ readonly source: string; readonly width: number }> = []
+  const pending: Array<(outcome: { error: Error } | { base64?: string }) => void> = []
+  const loader = new SvgRasterLoader(async (source, options) => {
+    calls.push({ source, width: options.targetWidth })
+    return await new Promise((resolve, reject) => {
+      pending.push((outcome) => {
+        if ('error' in outcome) reject(outcome.error)
+        else resolve({
+          png: new Uint8Array(),
+          base64: outcome.base64 ?? TINY_PNG_BASE64,
+          widthPx: options.targetWidth,
+          heightPx: Math.max(1, Math.round(options.targetWidth / 2)),
+        })
+      })
+      options.signal.addEventListener('abort', () => reject(new Error('cancelled')), { once: true })
+    })
+  })
+  return {
+    loader,
+    calls,
+    settleNext: (outcome) => { pending.shift()?.(outcome) },
+    activeCount: () => pending.length,
+  }
+}
+
+// The REAL typed failures from the rasterizer: retry eligibility is a TYPE
+// fact (`SvgRasterFailure` + kind), not a message match.
+const timeoutFailure = (): Error => new SvgRasterFailure('timeout', 'SVG rasterization exceeded 3000 ms')
+const permanentFailure = (): Error => new SvgRasterFailure('invalid-output', 'SVG rasterizer produced an invalid PNG')
+
+test('a recoverable error paints the r retry segment, r rebuilds the variant exactly once', async () => {
+  capabilities('kitty')
+  try {
+    const recorder = failingLoader()
+    let renders = 0
+    const panel = panelOf({ loader: recorder.loader, requestRender: () => { renders += 1 } })
+    panel.setMaxRows(20)
+    panel.render(80)
+    assert.equal(recorder.activeCount(), 1)
+    recorder.settleNext({ error: timeoutFailure() })
+    await drain()
+    // The errored state paints the recoverable affordance.
+    const errored = panel.render(80)
+    const bar = stripSgr(errored.at(-1) ?? '')
+    assert.ok(bar.includes('r retry'), `the recoverable bar carries r retry:\n${bar}`)
+    // The keyboard path and the painted pointer path drive the SAME sink.
+    panel.handleInput('r')
+    await drain()
+    assert.equal(recorder.activeCount(), 1, 'one r issues exactly one new request')
+    assert.equal(recorder.calls.length, 2, 'the retry rebuilds the variant through load')
+    assert.equal(recorder.calls[1]!.width, recorder.calls[0]!.width, 'the retry keeps the SAME subscribed width')
+    // The rebuilt request shows the loading line first, then the ready image.
+    const loading = panel.render(80)
+    assert.ok(stripSgr(loading[1] ?? '').includes('Rendering preview'), loading[1] ?? '')
+    recorder.settleNext({ base64: TINY_PNG_BASE64 })
+    await drain()
+    const ready = panel.render(80)
+    assert.ok(stripSgr(ready.at(-1) ?? '').includes('Esc close'), ready.at(-1) ?? '')
+    // The ready bar no longer carries the retry affordance.
+    assert.ok(!stripSgr(ready.at(-1) ?? '').includes('r retry'), 'a ready preview drops the retry segment')
+    recorder.loader.dispose()
+  } finally {
+    resetCapabilitiesCache()
+  }
+})
+
+test('the painted r retry cell runs the same retry sink; close matches Esc; body stays inert', async () => {
+  capabilities('kitty')
+  try {
+    const recorder = failingLoader()
+    let closes = 0
+    const panel = panelOf({ rows: 20, loader: recorder.loader, onClose: () => { closes += 1 } })
+    panel.setMaxRows(20)
+    panel.render(80)
+    // The pointer geometry contract compares the LIVE terminal rows() against
+    // the painted grant, so the harness drives the panel at the SAME 20-row
+    // grant it painted (the workspace always sets maxRows from its own rows()).
+    recorder.settleNext({ error: timeoutFailure() })
+    await drain()
+    panel.render(80)
+    const barCells = (): { readonly retryStart: number; readonly closeStart: number } => {
+      const bar = stripSgr(panel.render(80).at(-1) ?? '')
+      return { retryStart: bar.indexOf('r retry'), closeStart: bar.indexOf('Esc close') }
+    }
+    const first = barCells()
+    assert.ok(first.retryStart >= 0 && first.closeStart >= 0)
+    // A press on Retry released over Close is a dropped gesture: no retry, no close.
+    panel.onCellPress(first.retryStart, 19)
+    panel.onCellClick(first.closeStart, 19)
+    assert.equal(recorder.calls.length, 1, 'the cross-cell gesture never fires')
+    assert.equal(closes, 0)
+    // Press+release on the painted Retry cell: the SAME single retry sink as `r`.
+    panel.onCellPress(first.retryStart, 19)
+    panel.onCellClick(first.retryStart, 19)
+    await drain()
+    assert.equal(recorder.calls.length, 2, 'the painted Retry cell issues the same single retry')
+    // A second failure re-arms the affordance: the errored terminal state may
+    // be retried again by the NEXT real key press.
+    recorder.settleNext({ error: timeoutFailure() })
+    await drain()
+    const second = barCells()
+    assert.ok(second.retryStart >= 0, 'the second failure re-paints the retry segment')
+    // The painted Close cell closes exactly like Esc.
+    panel.onCellPress(second.closeStart, 19)
+    panel.onCellClick(second.closeStart, 19)
+    assert.equal(closes, 1, 'the painted Close cell calls the ONE onClose owner')
+    recorder.loader.dispose()
+  } finally {
+    resetCapabilitiesCache()
+  }
+})
+
+test('a revoked preview capability hides Retry and never starts another raster', async () => {
+  capabilities('kitty')
+  try {
+    const recorder = failingLoader()
+    const graphicsState = { canPaint: true }
+    const graphics = {
+      mode: 'native',
+      canPaint: () => graphicsState.canPaint,
+      image: () => ({ render: () => [], invalidate: () => {}, dispose: () => {} }),
+      terminal: {} as never,
+      screen: {} as never,
+      observeScreen: () => {},
+      resample: () => {},
+      dispose: () => {},
+    } as unknown as ImageGraphics
+    const panel = panelOf({ loader: recorder.loader, graphics })
+    panel.setMaxRows(20)
+    panel.render(80)
+    recorder.settleNext({ error: timeoutFailure() })
+    await drain()
+    graphicsState.canPaint = false
+    const revoked = stripSgr(panel.render(80).at(-1) ?? '')
+    assert.ok(!revoked.includes('r retry'), `revoked capability has no Retry affordance:\n${revoked}`)
+    panel.handleInput('r')
+    await drain()
+    assert.equal(recorder.calls.length, 1, 'revoked capability never starts another raster')
+    recorder.loader.dispose()
+  } finally {
+    resetCapabilitiesCache()
+  }
+})
+
+test('a resize never advertises the old width Retry beside the new request', async () => {
+  capabilities('kitty')
+  try {
+    const recorder = failingLoader()
+    const panel = panelOf({ loader: recorder.loader })
+    panel.setMaxRows(20)
+    panel.render(60)
+    recorder.settleNext({ error: timeoutFailure() })
+    await drain()
+    assert.ok(stripSgr(panel.render(60).at(-1) ?? '').includes('r retry'), 'the A-width failure offers Retry')
+    const oldWidth = recorder.calls[0]!.width
+
+    // Resize to B: the frame must reconcile B BEFORE the bar/hits are derived.
+    const resized = panel.render(120)
+    const bar = stripSgr(resized.at(-1) ?? '')
+    assert.ok(!bar.includes('r retry'), `the B-width frame never advertises the A Retry:\n${bar}`)
+    assert.equal(recorder.calls.length, 2, 'the resize subscribes the B variant once')
+    assert.notEqual(recorder.calls[1]!.width, oldWidth, 'the new request is a different variant')
+    assert.ok(stripSgr(resized.slice(1, -1).join('\n')).includes('Rendering preview'), 'B is loading')
+
+    // A key press is a no-op for the released A variant: it cannot start a child.
+    panel.handleInput('r')
+    await drain()
+    assert.equal(recorder.calls.length, 2, 'r never retries the retired A variant')
+    recorder.loader.dispose()
+  } finally {
+    resetCapabilitiesCache()
+  }
+})
+
+test('a 1-2 row grant releases the variant, hides Retry and starts no child', async () => {
+  capabilities('kitty')
+  try {
+    const recorder = failingLoader()
+    const panel = panelOf({ loader: recorder.loader })
+    panel.setMaxRows(20)
+    panel.render(60)
+    recorder.settleNext({ error: timeoutFailure() })
+    await drain()
+    assert.ok(stripSgr(panel.render(60).at(-1) ?? '').includes('r retry'))
+
+    panel.setMaxRows(2)
+    const bar = stripSgr(panel.render(60).at(-1) ?? '')
+    assert.ok(!bar.includes('r retry'), `a 2-row grant offers no Retry:\n${bar}`)
+    panel.handleInput('r')
+    await drain()
+    assert.equal(recorder.calls.length, 1, 'the key cannot start a child for an unviewable variant')
+
+    // Restoring a real body grant subscribes a fresh visible variant.
+    panel.setMaxRows(10)
+    panel.render(60)
+    assert.equal(recorder.calls.length, 2, 'the restored grant re-subscribes exactly once')
+    assert.ok(!stripSgr(panel.render(60).at(-1) ?? '').includes('r retry'), 'the fresh variant is not retryable yet')
+    recorder.loader.dispose()
+  } finally {
+    resetCapabilitiesCache()
+  }
+})
+
+test('a permanent error and a loading variant give no Retry: r is a no-op on both', async () => {
+  capabilities('kitty')
+  try {
+    const recorder = failingLoader()
+    const panel = panelOf({ loader: recorder.loader })
+    panel.setMaxRows(20)
+    panel.render(80)
+    // While loading: no retry segment; r does not stack a second request.
+    const loading = panel.render(80)
+    assert.ok(!stripSgr(loading.at(-1) ?? '').includes('r retry'), 'a loading preview paints no retry segment')
+    panel.handleInput('r')
+    await drain()
+    assert.equal(recorder.calls.length, 1, 'r during loading never stacks a request')
+    // A permanent (non-retryable) failure: the bar degrades, r stays a no-op.
+    recorder.settleNext({ error: permanentFailure() })
+    await drain()
+    const errored = panel.render(80)
+    const bar = stripSgr(errored.at(-1) ?? '')
+    assert.ok(!bar.includes('r retry'), `a permanent error paints no retry segment:\n${bar}`)
+    assert.ok(bar.includes('Esc close'), bar)
+    panel.handleInput('r')
+    await drain()
+    assert.equal(recorder.calls.length, 1, 'r on a permanent error never re-reads or respawns')
+    recorder.loader.dispose()
+  } finally {
+    resetCapabilitiesCache()
+  }
+})
+
+test('retry state survives a Source page visit and dies with the viewer dispose', async () => {
+  capabilities('kitty')
+  try {
+    const recorder = failingLoader()
+    const panel = panelOf({ loader: recorder.loader })
+    panel.setMaxRows(20)
+    panel.render(80)
+    recorder.settleNext({ error: timeoutFailure() })
+    await drain()
+    // Switching to Source hides the Retry affordance and refuses `r`.
+    panel.handleInput('\t')
+    const sourceBar = stripSgr(panel.render(80).at(-1) ?? '')
+    assert.ok(!sourceBar.includes('r retry'), `the Source page never offers retry:\n${sourceBar}`)
+    panel.handleInput('r')
+    await drain()
+    assert.equal(recorder.calls.length, 1, 'r on the Source page is refused')
+    // Back to Preview: the errored variant still offers its retry.
+    panel.handleInput('\t')
+    const previewBar = stripSgr(panel.render(80).at(-1) ?? '')
+    assert.ok(previewBar.includes('r retry'), previewBar)
+    // Disposing the viewer releases the errored variant; a later retry rebuilds nothing.
+    panel.dispose()
+    panel.handleInput('r')
+    await drain()
+    assert.equal(recorder.calls.length, 1, 'a disposed viewer never rebuilds a variant')
     recorder.loader.dispose()
   } finally {
     resetCapabilitiesCache()

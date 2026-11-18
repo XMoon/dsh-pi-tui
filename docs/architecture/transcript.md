@@ -1442,12 +1442,15 @@ unsubscribed variant (`releaseUnused`) — a thumbnail variant other rows still
 watch is never dropped. The target width is derived from the real content grant
 (columns, rows and the admitted viewBox ratio inside the existing 2048px /
 4M-pixel budget), never from a fixed size and never by upscaling the thumbnail.
-Preview pixels render on Kitty and on Direct SIXEL once the terminal's own
-live DA1, cell-size and background facts admit it; iTerm2 remains intentionally
-outside the Viewer/SVG pixel scope. Without a usable protocol the page says
-`Preview unavailable` while Source and Copy remain fully usable. A Direct SIXEL
-thumbnail's clickable body is the Screen-committed footprint read at hit time,
-never the component's render-time candidate.
+Preview pixels render on Kitty, on Direct SIXEL once the terminal's own live
+DA1, cell-size and background facts admit it, and on Direct iTerm2 through the
+fork's OSC 1337 `Image` path (X080). Multiplexer panes and `PI_IMAGE_PROTOCOL=none`
+remain text-only. Without a usable protocol the page says `Preview unavailable`
+while Source and Copy remain fully usable. A Direct SIXEL thumbnail's clickable
+body is the Screen-committed footprint read at hit time, never the component's
+render-time candidate; SVG iTerm2 thumbnail pixels are intentionally
+non-clickable because OSC 1337 has no last-committed geometry authority in that
+surface, while the ordinary raster thumbnail keeps its legacy iTerm2 hit body.
 
 The isolated raster child runs on Linux under the verified virtual-memory cap.
 On macOS the tested finite `RLIMIT_AS` / `RLIMIT_DATA` settings returned
@@ -1675,13 +1678,14 @@ independent occurrences with independent fold state.
   stale scope is never authorized against the replacement session.
 - **Protocol scope.** The leased AltScreen renders real pixels
   through Kitty and through Direct SIXEL after the terminal's own live DA1,
-  cell-size and background observations admit it. The pinned AltScreen disables
-  the iTerm2 image capability and its cursor-up framing is outside the fork's
-  ANSI width layer, so the iTerm2 workspace shows the metadata plus
-  `Preview unavailable`; native iTerm2 workspace pixels are deferred to
-  separate renderer/protocol work. Transcript thumbnails keep their per-surface
-  capability behavior; on Kitty and Direct SIXEL both their JPEG/WebP bodies
-  and the Viewer use the SAME bounded derivative above.
+  cell-size and background observations admit it, or through Direct iTerm2's
+  OSC 1337 `Image` path (X080). The pinned AltScreen no longer mutates the
+  process-wide iTerm2 capability. Multiplexer panes and
+  `PI_IMAGE_PROTOCOL=none` remain text-only. Transcript SVG iTerm2 thumbnail
+  pixels are painted without clickable pixel-body geometry; the explicit View
+  action remains the viewer entry. On Kitty and Direct SIXEL both JPEG/WebP
+  bodies and the Viewer use the SAME bounded derivative above; Direct iTerm2
+  carries the original MIME bytes through OSC 1337.
 
 Authority: `TuiApp` (occurrence projection, last-painted hit classifier, leased
 image workspace), `ImageThumbnail` (info/control/body geometry),

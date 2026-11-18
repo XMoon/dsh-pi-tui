@@ -247,6 +247,8 @@ export const SVG_VIEWER_CHORDS = {
   switchPage: { keys: ['tab'], label: viewerKeyLabel('tab') },
   /** Copy the RAW SVG source (available on both pages). */
   copy: { keys: ['c'], label: viewerKeyLabel('c') },
+  /** Retry the preview after a transient raster failure (recoverable errors only). */
+  retry: { keys: ['r'], label: viewerKeyLabel('r') },
   /** Close the Viewer and restore the transcript it was opened from. */
   close: { keys: ['escape'], label: viewerKeyLabel('escape') },
   scrollUp: { keys: ['up'], label: '↑' },

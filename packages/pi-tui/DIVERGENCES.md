@@ -91,8 +91,8 @@
 
 ## Summary
 
-- Records: 80
-- Statuses: `ABSORBED_UPSTREAM`: 4, `ACTIVE`: 63, `MOVED_TO_HOST`: 3, `REMOVED_UNUSED`: 6, `SUPERSEDED`: 4
+- Records: 81
+- Statuses: `ABSORBED_UPSTREAM`: 4, `ACTIVE`: 64, `MOVED_TO_HOST`: 3, `REMOVED_UNUSED`: 6, `SUPERSEDED`: 4
 
 | ID | Status | Risk | Categories | Upstream equivalence |
 | --- | --- | --- | --- | --- |
@@ -176,6 +176,7 @@
 | X077 | ACTIVE | MEDIUM | BUGFIX_MISSING_UPSTREAM | NO |
 | X078 | ACTIVE | HIGH | BUGFIX_MISSING_UPSTREAM | NO |
 | X079 | ACTIVE | MEDIUM | BUGFIX_MISSING_UPSTREAM | NO |
+| X080 | ACTIVE | HIGH | BUGFIX_MISSING_UPSTREAM | NO |
 
 ## Divergences
 
@@ -5950,8 +5951,8 @@ Image-7C admits a managed Native Kitty handle for a Zellij pane when its live a=
 
 - TuiAltScreenOptions.imageProtocolOverride?: ImageProtocol — optional per-instance protocol selection.
 - TuiAltScreen.beforeTerminalStart() uses imageProtocolOverride when supplied, otherwise the existing getCapabilities().images answer; the global capability cache is never mutated.
-- The existing iTerm2 suppression/restore lifecycle still runs from the actual getCapabilities() answer: an iterm2 process capability is temporarily changed to images:null for the Alt lifetime and restored at stop even when the instance override is kitty.
-- No option means byte-for-byte upstream protocol behavior; the tmux virtual and legacy iTerm2 paths keep their existing protocol selection.
+- AltScreen never mutates the process-wide capability cache; Direct iTerm2 remains available through the X080 fork contract.
+- No option means the existing per-instance protocol behavior remains; tmux virtual and legacy protocol paths keep their own selection.
 
 #### Dependency map
 
@@ -5977,14 +5978,14 @@ Image-7C admits a managed Native Kitty handle for a Zellij pane when its live a=
 - Audit note: Absent option = existing behavior.
 
 **Behavioral coupling**
-- With imageProtocolOverride 'kitty', an image-anchor change uses the Kitty placement-delete path (deleteAllKittyPlacements) and Alt stop uses the Kitty global remove path that the facade scopes to its own ids; no 2J branch and no global delete reaches the physical terminal.
-- Without the option, null/iterm2/kitty behavior is unchanged.
-- When the process capability is iterm2, the existing temporary images:null suppression and stop restore still occur even with a kitty instance override.
-- Audit note: Guarded by packages/pi-tui/test/tui-alt-screen.test.ts (X070 group) and the host Zellij delayed-OK integration cases.
+- With imageProtocolOverride kitty, an image-anchor change uses the Kitty placement-delete path and Alt stop releases the managed ids; no 2J branch or global delete reaches the physical terminal.
+- Without the option, imageProtocol is latched from the process-wide capability snapshot; the option never mutates that snapshot.
+- Direct iTerm2 capability lifetime and OSC 1337 emission are owned by X080.
+- Audit note: Guarded by packages/pi-tui/test/tui-alt-screen.test.ts (X070 group), the host Zellij delayed-OK integration cases and X080 wire tests.
 
 #### Guarding tests
 
-- packages/pi-tui/test/tui-alt-screen.test.ts: X070 — a kitty instance override emits Kitty placement cleanup while the iTerm2 global suppression/restore still runs; no override keeps the static null behavior and never touches the process capability.
+- packages/pi-tui/test/tui-alt-screen.test.ts: X070 — a kitty instance override emits Kitty placement cleanup while the process capability remains unchanged; no override keeps the static capability behavior.
 - test/integration/kitty-zellij-screen.test.ts: a delayed Zellij OK with fork images null/iterm2 enters Alt first, then paints; Alt image removal emits an own-id placement delete, Alt stop releases the own id, no global delete/2J/foreign id is emitted, repeated Main↔Alt entries stay managed, and a denied live query stays payload-free.
 
 #### Upstream comparison
@@ -5996,7 +5997,7 @@ Image-7C admits a managed Native Kitty handle for a Zellij pane when its live a=
 - src/tui-alt-screen.ts
 - Relevant issues/PRs:
 - None recorded; issue/PR state was not used as semantic proof.
-- Remaining semantic delta: Upstream TuiAltScreen always derives imageProtocol from the process-wide getCapabilities().images snapshot and has no per-instance protocol option. The fork adds one optional readonly override used only for the instance's clear/redraw/release strategy, while preserving the existing global iTerm2 suppression/restore lifecycle and all default behavior.
+- Remaining semantic delta: Upstream TuiAltScreen always derives imageProtocol from the process-wide getCapabilities().images snapshot and has no per-instance protocol option. The fork adds one optional readonly override used only for the instance clear/redraw/release strategy; the global capability cache is never mutated.
 
 #### Retirement conditions
 
@@ -6013,7 +6014,7 @@ Image-7C admits a managed Native Kitty handle for a Zellij pane when its live a=
 #### Audit record
 
 - Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
-- Notes: Owner-approved RFL-001 scope extension after a real Alt ghost-placement defect: Zellij live OK can exceed the static fork capability, so the Alt screen needs an instance-level protocol value from the one managed graphics handle. Confirmed against the pinned v1.1.0 tree that TuiAltScreen has no such option and that host-only global cache mutation would affect unrelated consumers.
+- Notes: Owner-approved RFL-001 scope extension after a real Alt ghost-placement defect: Zellij live OK can exceed the static fork capability, so the Alt screen needs an instance-level protocol value from the one managed graphics handle. Direct iTerm2 capability lifetime was subsequently moved into X080.
 
 ### X071 — Passive DA1 SIXEL observation exposed to the host capability candidate
 
@@ -6827,3 +6828,91 @@ The select list records the row identity a mouse press started on, and a synthes
 
 - Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
 - Notes: Added by PR-4 R6 (stale autocomplete completion). The mounted probe reproduced the old completion being applied after an effective wheel; the fork unit regression fails on the previous code and the boundary control keeps the existing same-cell contract.
+
+### X080 — Direct iTerm2 OSC 1337 remains available inside AltScreen
+
+- Status: `ACTIVE`
+- Category: `BUGFIX_MISSING_UPSTREAM`
+- Risk: `HIGH`
+- Files: `src/tui-alt-screen.ts`, `src/tui.ts`
+- Last audited: `2026-11-18`
+- Baseline compared: `earendil-works/pi@f9a26365568127461c47a07a37dcb42c140a3ac5`
+
+#### Why it exists
+
+The fork suppressed the process-wide iTerm2 image capability whenever AltScreen started, then restored it on stop. That made the existing Image OSC 1337 path unavailable in every leased Viewer and caused stale capability state to cross the screen boundary. Direct iTerm2 now keeps its authoritative capability unchanged across AltScreen entry/exit so host callers can explicitly admit the protocol. A visible overlay that intersects an iTerm2 image block must also win the frame: the image yields while covered and returns after close, so overlay text is never painted over by pixels.
+
+#### Changed surface
+
+- TuiAltScreen.beforeTerminalStart no longer replaces getCapabilities().images="iterm2" with null.
+- TuiAltScreen.afterTerminalStop no longer restores a saved process-wide capability snapshot; AltScreen never mutates that cache.
+- The root ImageViewer, SvgViewer and SvgThumbnail admit effective protocol="iterm2" through the existing fork Image OSC 1337 renderer.
+- SVG thumbnail iTerm2 pixel rows remain non-clickable because the component has no committed physical geometry authority; View/Copy actions remain available.
+- PI_IMAGE_PROTOCOL=none still creates no graphics owner and paints truthful text fallback with no OSC 1337 bytes.
+- TuiBase.compositeOverlays preempts a Direct iTerm2 OSC 1337 image block whose painted rows are intersected by a visible overlay: the anchor is dropped and every covered row becomes an empty base so the overlay text is readable; the owning component re-emits the same image on the next frame after the overlay closes.
+
+#### Dependency map
+
+**Vendor internal**
+- X080 owns two fork behaviors: AltScreen iTerm2 capability lifetime (src/tui-alt-screen.ts) and TuiBase.compositeOverlays iTerm2 image-block preemption (src/tui.ts); Kitty and SIXEL ownership stays with X077/X074.
+- The single process-wide capability cache remains the fork terminal-image authority; no second detector or cache was added.
+- TuiBase.compositeOverlays (src/tui.ts) iTerm2 block preemption
+- Audit note: X080 owns TWO fork hunks: the AltScreen capability-lifetime change in src/tui-alt-screen.ts and the Direct iTerm2 overlay-block preemption in src/tui.ts. Kitty upload/placement and SIXEL screen ownership remain X077/X074 territory and are unchanged.
+
+**Inheritance / structural**
+- TuiAltScreen remains the only fork AltScreen implementation and keeps the existing imageProtocolOverride precedence.
+- Audit note: No subclass or sibling fork consumer relies on savedCapabilities.
+
+**Host**
+- Host image workspace callers receive the same ImageGraphics/terminal surface; only Direct iTerm2 is newly paintable inside the existing workspace.
+- Audit note: No Host API or attachment quota changed.
+
+**Public / extension**
+- None found (audited).
+- Audit note: AltScreen capability lifetime is not part of the public extension surface.
+
+**Behavioral coupling**
+- Direct iTerm2 emits OSC 1337 Image bytes inside AltScreen when the static capability is retained; the fork Image path handles cursor-up placement without the old process-wide suppression.
+- PI_IMAGE_PROTOCOL=none remains text-only and the root SVG/Image viewer gates fail closed when no protocol is admitted.
+- The root Retry affordance and sink re-check live preview permission, so capability revocation cannot expose Retry or start another raster.
+- A visible overlay intersecting the rows of a Direct iTerm2 inline image makes the whole block yield that frame (anchor dropped, covered rows cleared) and the image is re-emitted when the overlay closes, so overlay text is never covered by pixels.
+- Audit note: Unit/fork wire tests and root viewer tests guard the protocol, live-permission and overlay-preemption behavior. On the installed tarball a real iTerm2 verifies the Regular SVG thumbnail, the fullscreen OSC 1337 Preview at 100x30/44x20/30x10/80x24, Tab to Source, CSI-u Escape back to the transcript, Copy of the exact source, the raster ImageViewer with its Esc return, the PI_IMAGE_PROTOCOL=none text fallback, the kitty mismatch negative, an overlay over a painted image that is readable while the image yields and restores on close, and a stale click after the image left the viewport. A tmux 3.8 run verifies the multiplexer text-only negative, long Source scrolling and session-switch release. Evidence lives outside repository docs.
+
+#### Guarding tests
+
+- packages/pi-tui/test/tui-alt-screen.test.ts: X080 — iTerm2 emits OSC 1337 and does not emit Kitty/OSC133 zone commands.
+- packages/pi-tui/test/tui-alt-screen.test.ts: X080 — AltScreen leaves the process capability unchanged across an instance Kitty override.
+- packages/pi-tui/test/tui-render.test.ts: X080 — a visible overlay preempts a covered Direct iTerm2 image block and the image returns after close.
+- test/client/svg-viewer.test.ts: live capability revocation hides Retry and starts no new raster.
+- test/client/transcript-image-viewer.test.ts: Direct iTerm2 preserves original JPEG MIME and exact OSC 1337 payload bytes.
+- packages/pi-tui/test/tui-alt-screen.test.ts: X080 — an AltScreen overlay preempts a covered Direct iTerm2 image block and the image is re-emitted after close.
+
+#### Upstream comparison
+
+- Baseline: `earendil-works/pi@f9a26365568127461c47a07a37dcb42c140a3ac5`
+- Semantic equivalence: `NO`
+- Reference snapshot: `earendil-works/pi@f9a26365568127461c47a07a37dcb42c140a3ac5`
+- Relevant upstream files:
+- packages/tui/src/tui-alt-screen.ts
+- packages/tui/src/tui.ts
+- Relevant issues/PRs:
+- None recorded; issue/PR state was not used as semantic proof.
+- Remaining semantic delta: Pinned upstream f9a26365568127461c47a07a37dcb42c140a3ac5 suppresses the process-wide iTerm2 capability while AltScreen is active (savedCapabilities + setCapabilities({...images: null}) in beforeTerminalStart, restore in afterTerminalStop). The fork had inherited and relied on that suppression for an older workspace restriction; X080 removes it, keeps the process capability stable and guards the real Direct iTerm2 OSC 1337 contract in the vendored source plus root consumers. The fork additionally preempts a Direct iTerm2 image block whose painted rows a visible overlay intersects: the anchor yields the frame and the image returns on close, so upstream has no equivalent overlay-vs-image compositing rule.
+
+#### Retirement conditions
+
+- Retire only if upstream introduces BOTH an equivalent iTerm2 capability-lifetime contract AND an equivalent overlay-block preemption for inline iTerm2 images, or the product deliberately removes Direct iTerm2 workspace support with an explicit Owner decision.
+- Retirement must rerun the X080 fork wire tests (capability lifetime + overlay preemption) and the real iTerm2 qualification matrix.
+
+#### Replacement mapping
+
+- None recorded.
+
+#### Retirement evidence
+
+- None recorded.
+
+#### Audit record
+
+- Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
+- Notes: Audited against pinned upstream f9a26365568127461c47a07a37dcb42c140a3ac5, which contains the old iTerm2 suppression/save/restore behavior; X080 is therefore a real fork divergence. Root/fork tests pass, and the installed-tarball real-iTerm2 matrix passes for the Regular SVG thumbnail, the fullscreen OSC 1337 Preview at 100x30/44x20/30x10, Tab to Source, and CSI-u Escape back to the transcript. Physical qualification evidence is recorded outside repository docs.

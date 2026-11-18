@@ -10,7 +10,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import { resetCapabilitiesCache, setCapabilities, visibleWidth } from '@xmoon76/pi-tui'
-import { ImageThumbnail, NARROW_WIDTH_THRESHOLD } from '../../src/tui/components/media/image-thumbnail.ts'
+import { ImageThumbnail } from '../../src/tui/components/media/image-thumbnail.ts'
 import { ImageCache } from '../../src/client/media/image/cache.ts'
 import { ImageLoader } from '../../src/client/media/image/loader.ts'
 import {
@@ -67,14 +67,40 @@ test('an unsupported terminal renders the text fallback (tmux/unknown)', () => {
   assert.ok(lines[0]!.includes('800×600'), `fallback carries dimensions: ${lines[0]}`)
 })
 
-test('a narrow terminal falls back to text even with kitty support', () => {
+test('a sub-42 grant still paints pixels with kitty support (PR-4B narrow fit)', async () => {
   resetCapabilitiesCache()
   setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
-  const loader = loaderOf(new Uint8Array([1]))
+  const loader = loaderOf(new Uint8Array([0x89, 0x50, 0x4e, 0x47]))
   loader.load(REF)
   const component = new ImageThumbnail(REF, loader, THEME, () => {})
-  const lines = component.render(NARROW_WIDTH_THRESHOLD - 1)
-  assert.ok(lines[0]!.includes('🖼️ '), `narrow fallback line: ${lines[0]}`)
+  // The old 42-cell blanket ban is gone: the placement adapts through
+  // maxWidthCells = min(MAX_IMAGE_WIDTH, width - 2) and the REAL painted
+  // footprint decides the hit, so a 41-column grant paints its identity row
+  // plus a real anchored Kitty APC body. The async read settles between the
+  // two frames (the same drives-the-load-then-repaints contract as at 80).
+  component.render(41)
+  await new Promise(resolve => setTimeout(resolve, 30))
+  const lines = component.render(41)
+  assert.ok(lines.length >= 2, `narrow render paints the info row plus a body:\n${lines.join('\n')}`)
+  assert.ok(lines[0]!.includes('🖼️ '), `info row first: ${lines[0]}`)
+  assert.ok(/^\x1b_G/.test(lines[1] ?? ''), 'the body starts with an anchored Kitty APC placement')
+  const body = component.paintedImageBody(41)
+  assert.ok(body !== undefined && body.rows > 0 && body.endCol > 0 && body.endCol <= 39,
+    `the painted body is real and inside the width-2 margins: ${JSON.stringify(body)}`)
+})
+
+test('a 1..2 column grant keeps the info-only row and never paints pixels', () => {
+  resetCapabilitiesCache()
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  const loader = loaderOf(new Uint8Array([0x89, 0x50, 0x4e, 0x47]))
+  loader.load(REF)
+  for (const width of [1, 2]) {
+    const component = new ImageThumbnail(REF, loader, THEME, () => {})
+    const lines = component.render(width)
+    assert.equal(lines.length, 1, `width ${width}: one info row`)
+    assert.ok(lines[0]!.includes('🖼️ '), `width ${width}: ${lines[0]}`)
+    assert.equal(component.paintedImageBody(width), undefined, `width ${width}: no pixel body`)
+  }
 })
 
 test('an idle ref triggers the load and renders the fallback meanwhile', () => {
@@ -669,10 +695,10 @@ test('a collapsed preview re-derives its payload after invalidation (no retained
   assert.equal(conversions, 2)
 })
 
-test('narrow Kitty and unknown/tmux never READ or CONVERT a real JPEG/WebP', async () => {
-  for (const images of ['kitty', null] as const) {
+test('unknown/tmux and a 1..2-column grant never READ or CONVERT a real JPEG/WebP; 3 columns may', async () => {
+  for (const images of [null, 2] as const) {
     resetCapabilitiesCache()
-    setCapabilities({ images, trueColor: true, hyperlinks: false })
+    setCapabilities({ images: images === 2 ? 'kitty' : images, trueColor: true, hyperlinks: false })
     let reads = 0
     let conversions = 0
     const loader = new ImageLoader(
@@ -680,7 +706,10 @@ test('narrow Kitty and unknown/tmux never READ or CONVERT a real JPEG/WebP', asy
       new ImageCache(),
       async () => { conversions += 1; return { base64: '', width: 1, height: 1, byteLength: 0 } },
     )
-    const width = images === 'kitty' ? NARROW_WIDTH_THRESHOLD - 1 : 80
+    // PR-4B: the no-read guarantee belongs to the states that can never paint
+    // pixels — no protocol, and a grant below the 2-cell margin budget. A 3+
+    // column Kitty grant is a REAL pixel budget and may read/convert.
+    const width = images === 2 ? 2 : 80
     for (const ref of [JPEG_REF, WEBP_REF]) {
       const component = new ImageThumbnail(ref, loader, THEME, () => {})
       const lines = component.render(width)
@@ -693,10 +722,24 @@ test('narrow Kitty and unknown/tmux never READ or CONVERT a real JPEG/WebP', asy
     assert.equal(reads, 0, `no attachment read for ${refsLabel(images)}`)
     assert.equal(conversions, 0, `no conversion for ${refsLabel(images)}`)
   }
+  // The positive narrow case: a 3-column Kitty grant starts the read and the
+  // derived preview (the old blanket ban is gone).
+  resetCapabilitiesCache()
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  let reads = 0
+  const loader = new ImageLoader(
+    async () => { reads += 1; return { ref: {}, data: SAMPLE_JPEG } },
+    new ImageCache(),
+    async () => ({ base64: SAMPLE_PNG.toString('base64'), width: 1, height: 1, byteLength: SAMPLE_PNG.length }),
+  )
+  const component = new ImageThumbnail(JPEG_REF, loader, THEME, () => {})
+  component.render(3)
+  await new Promise(resolve => setTimeout(resolve, 30))
+  assert.equal(reads, 1, 'a 3-column Kitty grant spends the read it can display')
 })
 
-function refsLabel(images: 'kitty' | null): string {
-  return images === 'kitty' ? 'narrow Kitty' : 'unknown/tmux'
+function refsLabel(images: 'kitty' | null | 2): string {
+  return images === 2 ? '2-column Kitty' : 'unknown/tmux'
 }
 
 test('iTerm2 WebP keeps the original OSC 1337 payload and never converts', async () => {
@@ -868,16 +911,19 @@ test('a GIF fallback with a long name is clamped to the granted width', async ()
   component.render(60)
   await new Promise((resolve) => setTimeout(resolve, 25))
 
-  // Widths at or above NARROW_WIDTH_THRESHOLD take the two-row branch; below it
-  // the existing narrow-terminal contract paints one identity row.
-  for (const width of [60, 44, NARROW_WIDTH_THRESHOLD]) {
+  // PR-4B: every paintable width takes the two-row branch (identity row plus
+  // fallback); the old narrow ban is gone, and 3 columns is the smallest
+  // grant with a real pixel budget after the 2-cell margins.
+  for (const width of [60, 44, 42, 3]) {
     const lines = component.render(width)
     assert.equal(lines.length, 2, `width ${width}: identity row plus fallback, never a wrapped extra row`)
     // The fallback row is the one this branch owns, and the legacy path clamped
     // it with `truncateToWidth`. (The identity row's own clamp is pre-existing
     // behaviour outside this branch — the screen truncates defensively.)
     const fallback = lines[1]!
-    assert.ok(fallback.includes('[Image:'), `width ${width}: the fallback row is second`)
+    // At a 3-column grant the clamp necessarily reduces the fallback to its
+    // ellipsis; from 42 columns up the whole `[Image: …` label fits.
+    if (width >= 42) assert.ok(fallback.includes('[Image:'), `width ${width}: the fallback row is second`)
     assert.ok(
       visibleWidth(fallback) <= width,
       `width ${width}: the fallback stays inside the grant (got ${visibleWidth(fallback)})`,
@@ -1148,8 +1194,8 @@ test('a collapsed or narrow SIXEL occurrence performs no attachment read', () =>
   const narrow = new ImageThumbnail(
     REF, narrowLoader, THEME, () => {}, undefined, undefined, undefined, graphics,
   )
-  narrow.render(NARROW_WIDTH_THRESHOLD - 1)
-  assert.equal(narrowLoader.get(REF).state, 'idle', 'a narrow terminal never starts the read')
+  narrow.render(2)
+  assert.equal(narrowLoader.get(REF).state, 'idle', 'a 1..2-column grant never starts the read')
 
   collapsed = false
   collapsedComponent.render(80)

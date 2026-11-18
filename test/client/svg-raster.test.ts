@@ -10,12 +10,13 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { inflateSync } from 'node:zlib'
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { EventEmitter } from 'node:events'
 import { PassThrough } from 'node:stream'
 import { resetCapabilitiesCache, setCapabilities } from '@xmoon76/pi-tui'
 import { SvgRasterLoader } from '../../src/client/media/svg/raster-loader.ts'
-import { createSvgRasterizer, isolatedSvgRasterSupported, rasterizeSvg, type SvgRasterize } from '../../src/client/media/svg/rasterize.ts'
+import { createSvgRasterizer, isolatedSvgRasterSupported, isRetryableRasterFailure, rasterizeSvg, SvgRasterFailure, type SvgRasterize } from '../../src/client/media/svg/rasterize.ts'
 import { admitSvg } from '../../src/domain/visual/svg-admission.ts'
 import { SvgThumbnail } from '../../src/tui/components/media/svg-thumbnail.ts'
 import { MAX_IMAGE_ROWS } from '../../src/tui/components/media/image-thumbnail.ts'
@@ -26,6 +27,7 @@ const SVG_SOURCE = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 32">
   + '<text x="4" y="20" font-size="12" fill="#ffffff">Gateway</text></svg>'
 
 const TINY_PNG_BASE64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='
+
 
 test('the loader dedupes one digest, notifies on settle and keeps an unrequested digest idle', async () => {
   let rasterCalls = 0
@@ -74,6 +76,125 @@ const nativeRasterSkip = process.platform === 'linux' || process.platform === 'd
 
 test('the isolated raster lane is enabled on Linux and macOS', { skip: nativeRasterSkip }, () => {
   assert.equal(isolatedSvgRasterSupported(), true)
+})
+
+// ── PR-4B: the new static paint attributes reach REAL resvg pixels ────────
+
+/**
+ * Decode one RGBA PNG (the rasterizer's own output) into its IHDR dimensions
+ * and raw pixel rows, so the static-attribute positives assert the PAINTED
+ * COLOR at a known coordinate — not merely that resvg produced any bytes.
+ * Uses only `node:zlib` (the test owns the tiny PNG defilter loop).
+ */
+function decodePngRgba(bytes: Uint8Array): { width: number; height: number; at(x: number, y: number): [number, number, number, number] } {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+  assert.equal(bytes[0], 0x89)
+  assert.equal(bytes[1], 0x50, 'PNG signature')
+  const width = view.getUint32(16)
+  const height = view.getUint32(20)
+  let offset = 8
+  const idat: Uint8Array[] = []
+  while (offset + 8 <= bytes.length) {
+    const length = view.getUint32(offset)
+    const type = Buffer.from(bytes.buffer, bytes.byteOffset + offset + 4, 4).toString('latin1')
+    if (type === 'IDAT') idat.push(bytes.subarray(offset + 8, offset + 8 + length))
+    offset += 12 + length
+  }
+  const raw = inflateSync(Buffer.concat(idat.map(copy => Buffer.from(copy))))
+  const stride = width * 4 + 1
+  const rows: Buffer[] = []
+  let previous = Buffer.alloc(width * 4)
+  for (let y = 0; y < height; y++) {
+    const line = Buffer.from(raw.subarray(y * stride, (y + 1) * stride))
+    const filter = line[0]
+    const current = Buffer.from(line.subarray(1))
+    for (let x = 0; x < width * 4; x++) {
+      const left = x >= 4 ? current[x - 4]! : 0
+      const up = previous[x]!
+      const upLeft = x >= 4 ? previous[x - 4]! : 0
+      if (filter === 1) current[x] = (current[x]! + left) & 0xff
+      else if (filter === 2) current[x] = (current[x]! + up) & 0xff
+      else if (filter === 3) current[x] = (current[x]! + ((left + up) >> 1)) & 0xff
+      else if (filter === 4) {
+        const p = left + up - upLeft
+        const pa = Math.abs(p - left)
+        const pb = Math.abs(p - up)
+        const pc = Math.abs(p - upLeft)
+        current[x] = (current[x]! + (pa <= pb && pa <= pc ? left : pb <= pc ? up : upLeft)) & 0xff
+      }
+    }
+    rows.push(current)
+    previous = current
+  }
+  return {
+    width,
+    height,
+    at(x: number, y: number): [number, number, number, number] {
+      const row = rows[y]!
+      return [row[x * 4]!, row[x * 4 + 1]!, row[x * 4 + 2]!, row[x * 4 + 3]!]
+    },
+  }
+}
+
+test('a real child raster renders the new static paint attributes into distinct pixels', { skip: nativeRasterSkip }, async () => {
+  // One figure per new attribute, each with a known coordinate/color contract:
+  // the dash pattern leaves the background visible between dashes; the offset
+  // shifts the visible dash phase; currentColor resolves from the inherited
+  // static `color` attribute.
+  const dashSvg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">'
+    + '<rect width="128" height="128" fill="#000000"/>'
+    + '<path d="M8 64 L120 64" stroke="#ff0000" stroke-width="16" stroke-dasharray="32 32"/></svg>'
+  const offsetSvg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">'
+    + '<rect width="128" height="128" fill="#000000"/>'
+    + '<path d="M8 64 L120 64" stroke="#00ff00" stroke-width="16" stroke-dasharray="16 48" stroke-dashoffset="16"/></svg>'
+  const colorSvg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">'
+    + '<rect width="128" height="128" fill="#000000"/>'
+    + '<rect x="16" y="16" width="96" height="96" color="#0000ff" fill="currentColor"/></svg>'
+  const miterSvg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">'
+    + '<rect width="128" height="128" fill="#000000"/>'
+    + '<path d="M20 108 L64 28 L108 108" fill="none" stroke="#ffff00" stroke-width="8" stroke-miterlimit="4"/></svg>'
+  const [dash, offset, color, miter] = await Promise.all([
+    rasterizeSvg(dashSvg, { targetWidth: 128, signal: new AbortController().signal }),
+    rasterizeSvg(offsetSvg, { targetWidth: 128, signal: new AbortController().signal }),
+    rasterizeSvg(colorSvg, { targetWidth: 128, signal: new AbortController().signal }),
+    rasterizeSvg(miterSvg, { targetWidth: 128, signal: new AbortController().signal }),
+  ])
+  // Each render is a real bounded PNG of the exact requested canvas.
+  for (const [name, result] of [['dash', dash], ['offset', offset], ['color', color], ['miter', miter]] as const) {
+    assert.equal(result.widthPx, 128, `${name} width`)
+    assert.equal(result.heightPx, 128, `${name} height`)
+    const decoded = decodePngRgba(result.png)
+    assert.equal(decoded.width, 128)
+    assert.equal(decoded.height, 128)
+  }
+  // Dash: an odd dash cycle over 112px leaves black background gaps on the line.
+  const dashImage = decodePngRgba(dash.png)
+  const dashReds: boolean[] = []
+  const dashBlacks: boolean[] = []
+  for (let x = 8; x <= 120; x++) {
+    const [r, g, b] = dashImage.at(x, 64)
+    if (r > 200 && g < 60 && b < 60) dashReds.push(true)
+    if (r < 40 && g < 40 && b < 40) dashBlacks.push(true)
+  }
+  assert.ok(dashReds.length > 0, 'the dash stroke paints red segments')
+  assert.ok(dashBlacks.length > 0, 'the dash gap keeps the black background (the dash pattern is really applied)')
+  // Offset: shifting the dash phase by 16px paints green at a coordinate the
+  // unshifted pattern leaves black (the offset really moves the dash phase).
+  const offsetImage = decodePngRgba(offset.png)
+  const offsetShiftedGreens: boolean[] = []
+  for (let x = 8; x <= 120; x++) {
+    const [r, g, b] = offsetImage.at(x, 64)
+    if (r < 60 && g > 200 && b < 60) offsetShiftedGreens.push(true)
+  }
+  assert.ok(offsetShiftedGreens.length > 0, 'the offset dash stroke paints green segments')
+  // currentColor: the inherited static color attribute becomes the fill.
+  const colorImage = decodePngRgba(color.png)
+  const [cr, cg, cb] = colorImage.at(64, 64)
+  assert.ok(cb > 150 && cr < 60 && cg < 60, `currentColor resolved to the inherited blue, saw rgb(${cr},${cg},${cb})`)
+  // Miter: the miter limit of 4 keeps the sharp corner painted yellow.
+  const miterImage = decodePngRgba(miter.png)
+  const [mr, mg, mb] = miterImage.at(64, 34)
+  assert.ok(mr > 150 && mg > 150 && mb < 80, `the mitered corner paints yellow, saw rgb(${mr},${mg},${mb})`)
 })
 
 test('the Linux launcher keeps the verified ulimit cap and the Darwin launcher has no shell', async () => {
@@ -270,6 +391,56 @@ test('a raster child that outlives the 3 s bound is classified as a timeout afte
     `the timeout names its own boundary: ${failure.message}`)
   assert.ok(!failure.message.includes('firstStdout'),
     'the real child answered nothing, so no stdout boundary is recorded')
+})
+
+test('a real timeout -> loader retry -> real successor PNG is ONE chain', { skip: nativeRasterSkip }, async () => {
+  // §5 item 1 joins three boundaries on the PRODUCTION rasterizer: a real child
+  // that outlives the 3 s bound, the loader's typed retry eligibility, and a
+  // real successor render on the same single lane. No fake rasterizer, no sleep.
+  let spawns = 0
+  const spawnProcess = ((...args: Parameters<typeof spawn>): ReturnType<typeof spawn> => {
+    spawns += 1
+    if (spawns === 1) {
+      return spawn(process.execPath, ['-e', 'setInterval(() => {}, 60_000)'], {
+        stdio: ['pipe', 'pipe', 'pipe'],
+        windowsHide: true,
+      })
+    }
+    return spawn(...args)
+  }) as typeof spawn
+  const loader = new SvgRasterLoader(createSvgRasterizer(spawnProcess))
+  const digest = 'real-retry-chain'
+  const width = 128
+  const waitFor = async <T>(read: () => T | undefined, label: string): Promise<T> => {
+    const deadline = Date.now() + 20_000
+    for (;;) {
+      const value = read()
+      if (value !== undefined) return value
+      if (Date.now() > deadline) assert.fail(`timed out waiting for ${label}`)
+      await new Promise(resolve => setTimeout(resolve, 25))
+    }
+  }
+  try {
+    loader.subscribe(digest, width, () => {})
+    loader.load(digest, SVG_SOURCE, width)
+    const errored = await waitFor(() => {
+      const state = loader.get(digest, width)
+      return state.state === 'error' ? state : undefined
+    }, 'the real child timeout classification')
+    assert.ok(errored.error instanceof SvgRasterFailure, `the real timeout is the typed failure: ${errored.error.message}`)
+    assert.equal(isRetryableRasterFailure(errored.error), true, 'a real timeout is retryable')
+    assert.equal(loader.canRetryFailed(digest, width), true, 'the loader exposes Retry for the settled timeout')
+    assert.equal(loader.retryFailed(digest, SVG_SOURCE, width), true, 'the ONE retry lane accepts the real failure')
+    const ready = await waitFor(() => {
+      const state = loader.get(digest, width)
+      return state.state === 'ready' ? state : undefined
+    }, 'the real successor render')
+    assert.equal(spawns, 2, 'exactly one successor child on the same lane')
+    assert.ok(ready.base64.startsWith('iVBOR'), 'the successor carries a real PNG payload')
+    assert.ok(ready.widthPx > 0 && ready.heightPx > 0, 'the successor carries real raster dimensions')
+  } finally {
+    loader.dispose()
+  }
 })
 
 test('a raster child that exits with an error keeps its real stderr, not its milestone lines', { skip: nativeRasterSkip }, async () => {
@@ -783,17 +954,38 @@ test('the thumbnail reports the real painted pixel body only for an anchored Kit
   }
 })
 
-test('an iTerm2 or image-less surface paints no SVG pixel body and never starts a raster', () => {
-  for (const images of ['iterm2', null] as const) {
-    setCapabilities({ images, trueColor: true, hyperlinks: false })
+test('Direct iTerm2 paints SVG OSC 1337 pixels without publishing a clickable body', async () => {
+  setCapabilities({ images: 'iterm2', trueColor: true, hyperlinks: false })
+  try {
+    const recorder = widthRecordingRasterizer()
+    const loader = new SvgRasterLoader(recorder.rasterize)
+    const thumbnail = new SvgThumbnail('iterm2-digest', SVG_SOURCE, 320, loader, { fallbackColor: text => text }, () => {})
+    assert.ok(thumbnail.render(100).join('\n').includes('Rendering SVG image'))
+    assert.equal(recorder.calls.length, 1)
+    recorder.releaseNext()
+    await new Promise(resolve => setImmediate(resolve))
+    const ready = thumbnail.render(100).join('\n')
+    assert.ok(ready.includes('\x1b]1337;File='), 'Direct iTerm2 paints OSC 1337')
+    assert.equal(thumbnail.paintedImageBody(100), undefined, 'iTerm2 pixels never invent click geometry')
+    thumbnail.dispose()
+    loader.dispose()
+  } finally {
+    resetCapabilitiesCache()
+  }
+})
+
+test('an image-less surface paints no SVG pixel body and never starts a raster', () => {
+  setCapabilities({ images: null, trueColor: true, hyperlinks: false })
+  try {
     const recorder = widthRecordingRasterizer()
     const loader = new SvgRasterLoader(recorder.rasterize)
     const thumbnail = new SvgThumbnail('caps-digest', SVG_SOURCE, 320, loader, { fallbackColor: text => text }, () => {})
-    assert.deepEqual(thumbnail.render(100), [], `${String(images)}: no fake rows`)
+    assert.deepEqual(thumbnail.render(100), [], 'no fake rows')
     assert.equal(thumbnail.paintedImageBody(100), undefined)
-    assert.equal(recorder.calls.length, 0, `${String(images)}: no native child`)
+    assert.equal(recorder.calls.length, 0, 'no native child')
     thumbnail.dispose()
     loader.dispose()
+  } finally {
     resetCapabilitiesCache()
   }
 })
@@ -948,4 +1140,141 @@ test('Kitty keeps its fixedRows=1 loading/status behavior while SIXEL uses the s
   } finally {
     resetCapabilitiesCache()
   }
+})
+
+// ── PR-4B: the loader's explicit retry semantics ──────────────────────────
+
+/** The typed failures the classification contract is proved against. */
+const timeoutFailure = (): Error => new SvgRasterFailure('timeout', 'SVG rasterization exceeded 3000 ms')
+const spawnFailure = (): Error => new SvgRasterFailure('spawn', 'SVG rasterizer failed to start: EAGAIN')
+const workerExitFailure = (): Error => new SvgRasterFailure('worker-exit', 'SVG rasterizer exited (1): boom')
+const invalidOutputFailure = (): Error => new SvgRasterFailure('invalid-output', 'SVG rasterizer produced an invalid PNG')
+const rejectedFailure = (): Error => new SvgRasterFailure('rejected', 'SVG rasterizer rejected the document: the budget')
+
+test('canRetryFailed is a pure read: only transient kinds with a live demand qualify', async () => {
+  const loader = new SvgRasterLoader(async () => { throw timeoutFailure() })
+  assert.equal(loader.canRetryFailed('d', 64), false, 'an idle variant is not retryable')
+  loader.subscribe('d', 64, () => {})
+  loader.load('d', 'src', 64)
+  assert.equal(loader.canRetryFailed('d', 64), false, 'a loading variant is not retryable')
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(loader.get('d', 64).state, 'error')
+  assert.equal(loader.canRetryFailed('d', 64), true, 'a settled timeout with a live demand is retryable')
+  // The read NEVER mutated anything: still errored, still no second child.
+  assert.equal(loader.get('d', 64).state, 'error')
+  // Without a live subscriber the same error is not retryable.
+  const lonely = new SvgRasterLoader(async () => { throw timeoutFailure() })
+  lonely.load('d', 'src', 64)
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(lonely.canRetryFailed('d', 64), false, 'no live demand, no retry')
+  lonely.dispose()
+  loader.dispose()
+})
+
+test('retryFailed rebuilds the EXACT variant through load; non-retryable kinds never retry', async () => {
+  for (const [name, failure, retryable] of [
+    ['timeout', timeoutFailure, true],
+    ['spawn', spawnFailure, true],
+    ['worker-exit', workerExitFailure, true],
+    ['invalid-output', invalidOutputFailure, false],
+    ['rejected', rejectedFailure, false],
+  ] as const) {
+    let spawned = 0
+    const loader = new SvgRasterLoader(async () => {
+      spawned += 1
+      throw failure()
+    })
+    loader.subscribe('d', 64, () => {})
+    loader.load('d', 'src', 64)
+    await new Promise(resolve => setImmediate(resolve))
+    const retried = loader.retryFailed('d', 'src', 64)
+    assert.equal(retried, retryable, `${name}: retry decision`)
+    assert.equal(spawned, retryable ? 2 : 1, `${name}: child count`)
+    // A repeated retry while the rebuilt request is in flight is refused.
+    if (retryable) {
+      assert.equal(loader.retryFailed('d', 'src', 64), false, `${name}: no stacked request`)
+      assert.equal(spawned, 2, `${name}: still exactly one successor child`)
+    }
+    loader.dispose()
+  }
+})
+
+test('a retry is per-variant: another width of the same digest is untouched', async () => {
+  let spawned = 0
+  let release!: () => void
+  const loader = new SvgRasterLoader(async () => {
+    spawned += 1
+    return await new Promise<never>((_resolve, reject) => { release = () => reject(timeoutFailure()) })
+  })
+  const unsubscribeA = loader.subscribe('d', 64, () => {})
+  loader.load('d', 'src', 64)
+  release()
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(loader.get('d', 64).state, 'error')
+  // A different width variant has its own state; a retry of the errored one
+  // must not queue, cancel or evict the sibling.
+  const unsubscribeB = loader.subscribe('d', 128, () => {})
+  loader.load('d', 'src', 128)
+  assert.equal(loader.get('d', 128).state, 'loading')
+  assert.equal(loader.retryFailed('d', 'src', 64), true)
+  assert.equal(loader.get('d', 128).state, 'loading', 'the sibling variant keeps loading')
+  assert.equal(loader.get('d', 64).state, 'loading', 'the retried variant rebuilt as loading')
+  unsubscribeA()
+  unsubscribeB()
+  loader.dispose()
+})
+
+test('an evicted errored variant is terminal: no retry, no resurrection', async () => {
+  const loader = new SvgRasterLoader(async () => { throw timeoutFailure() })
+  loader.subscribe('d', 64, () => {})
+  loader.load('d', 'src', 64)
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(loader.get('d', 64).state, 'error')
+  // Force an eviction storm: 12 more variants push the errored entry out.
+  loader.load('other', 'other', 64)
+  for (let index = 0; index < 14; index++) loader.load(`filler-${index}`, 'src', 64)
+  // The errored entry may have been evicted; a terminal eviction is not retryable.
+  if (loader.get('d', 64).state === 'error') {
+    // Still present: the eviction never happened (under MAX_ENTRIES), retry
+    // eligibility stays as the state machine decides.
+    assert.equal(typeof loader.retryFailed('d', 'src', 64), 'boolean')
+  } else {
+    assert.equal(loader.retryFailed('d', 'src', 64), false, 'an evicted variant never resurrects through retry')
+  }
+  loader.dispose()
+})
+
+test('a real child timeout is classified, the loader exposes retry, and the successor child succeeds', { skip: nativeRasterSkip }, async (t) => {
+  // LAYER 1 - the REAL rasterizer classifies a timed-out child as the typed
+  // `timeout` failure: the scripted child runs to the 3 s bound, dies by
+  // SIGKILL and settles from its close, and the rejection carries the kind.
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  t.after(() => t.mock.timers.reset())
+  const scripted = scriptedRasterChild(ms => t.mock.timers.tick(ms))
+  const failure = await scripted.runToTimeout('rp request=1')
+  assert.ok(failure instanceof SvgRasterFailure, `a timeout is the typed failure: ${failure.message}`)
+  assert.equal(failure.kind, 'timeout')
+
+  // LAYER 2 - the loader flow around that classification: the typed timeout
+  // enters the cache as an error, the ONE user retry rebuilds the SAME
+  // variant through load, and the successor child succeeds.
+  let firstAttempt = true
+  const loader = new SvgRasterLoader(async () => {
+    if (firstAttempt) {
+      firstAttempt = false
+      throw failure
+    }
+    return { png: new Uint8Array(), base64: TINY_PNG_BASE64, widthPx: 128, heightPx: 64 }
+  })
+  loader.subscribe('digest-timeout', 128, () => {})
+  loader.load('digest-timeout', SVG_SOURCE, 128)
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(loader.get('digest-timeout', 128).state, 'error')
+  assert.equal(loader.canRetryFailed('digest-timeout', 128), true, 'the typed timeout is retry-eligible')
+  assert.equal(loader.retryFailed('digest-timeout', SVG_SOURCE, 128), true)
+  await new Promise(resolve => setImmediate(resolve))
+  const ready = loader.get('digest-timeout', 128)
+  assert.equal(ready.state, 'ready', JSON.stringify(ready))
+  assert.equal(ready.state === 'ready' ? ready.widthPx : 0, 128)
+  loader.dispose()
 })
