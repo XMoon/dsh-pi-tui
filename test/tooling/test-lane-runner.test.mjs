@@ -13,7 +13,9 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep, win32 } fr
 import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 
-import { parseConcurrency, sanitizeTestEnvironment } from '../../scripts/run-test-lane.mjs'
+import { orderWeightedProductFiles, parseConcurrency, sanitizeTestEnvironment } from '../../scripts/run-test-lane.mjs'
+import { resolveLane } from '../../scripts/test-discovery.mjs'
+import { LANES } from '../../scripts/test-lanes.mjs'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
 import {
   isExecuting, killStillExecuting, readPidRecords, startTimeOf, waitForNoExecuting,
@@ -307,6 +309,65 @@ test('a malformed concurrency is a FAILURE, not a silent default', () => {
   assert.throws(() => parseConcurrency(['--test-concurrency=zero']), /whole number/u)
   assert.throws(() => parseConcurrency(['--test-concurrency=0']), /at least 1/u)
   assert.throws(() => parseConcurrency(['--test-concurrency=-1']), /whole number/u)
+})
+
+// ---------------------------------------------------------------------------
+// P2-B: scheduling HINTS must never become test-discovery authority.
+// Node's own shard=index%total still selects the files at each position.
+// ---------------------------------------------------------------------------
+
+test('weighted product scheduling preserves every real product file in native shards', () => {
+  const lane = LANES.product
+  const files = resolveLane(join(ROOT, 'test'), lane.patterns, lane.suffixes, lane.exclude ?? [])
+  assert.ok(files.length > 0)
+  for (const total of [2, 3, 4]) {
+    const planned = orderWeightedProductFiles(files, total)
+    assert.deepEqual([...planned].sort(), files, `native ${total}-way sharding must keep the complete lane`)
+    assert.deepEqual(orderWeightedProductFiles(files, total), planned, 'the plan must be deterministic')
+    for (let slot = 0; slot < total; slot += 1) {
+      const nativeFiles = planned.filter((_, index) => index % total === slot)
+      assert.equal(nativeFiles.length, Math.ceil((files.length - slot) / total),
+        `shard ${slot + 1}/${total} must retain its native index-modulo capacity`)
+    }
+  }
+  assert.notDeepEqual(orderWeightedProductFiles(files, 4), files,
+    'the experiment must actually reorder product tests on this checkout')
+  assert.deepEqual(orderWeightedProductFiles(files, 1), files,
+    'one shard must preserve the original discovered order')
+  assert.deepEqual(orderWeightedProductFiles(files, 128), files,
+    'native shard totals above the profiled CI range must retain the sorted order')
+})
+
+test('weighted interleaving preserves native slots when hinted bins have unequal capacities', () => {
+  const files = [
+    'app/a-new.test.ts',
+    'app/b-new.test.ts',
+    'app/c-new.test.ts',
+    'app/d-new.test.ts',
+    'app/e-new.test.ts',
+    'app/settings-workspace-visual.test.ts',
+    'integration/cli-session-launcher.test.ts',
+    'integration/kitty-zellij-screen.test.ts',
+    'integration/tern-tsp-headless-commands.test.ts',
+  ]
+  const planned = orderWeightedProductFiles(files, 4)
+  assert.deepEqual(planned, [
+    'app/settings-workspace-visual.test.ts',
+    'integration/kitty-zellij-screen.test.ts',
+    'integration/cli-session-launcher.test.ts',
+    'integration/tern-tsp-headless-commands.test.ts',
+    'app/d-new.test.ts',
+    'app/c-new.test.ts',
+    'app/b-new.test.ts',
+    'app/a-new.test.ts',
+    'app/e-new.test.ts',
+  ], 'unequal final bin lengths must not shift any earlier native shard positions')
+  const withoutLargestHint = files.filter(file => file !== 'app/settings-workspace-visual.test.ts')
+  const changed = orderWeightedProductFiles(withoutLargestHint, 4)
+  assert.deepEqual([...changed].sort(), withoutLargestHint,
+    'removing a previously hinted file must never require updating discovery')
+  assert.ok(changed.includes('app/e-new.test.ts'),
+    'new unprofiled files must stay in the native partition')
 })
 
 test('the lane child never inherits the developer terminal identity or ambient module paths', () => {
