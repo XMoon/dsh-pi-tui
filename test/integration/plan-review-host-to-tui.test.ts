@@ -164,8 +164,11 @@ async function startHarness(t: Parameters<typeof startS4D3Application>[0]): Prom
   // THE OFFICIAL ANSWER OBSERVER. The real Host `userQuestions` service of this
   // composition is patched on its own INSTANCE: the unbound original is saved
   // and called with `apply(this, args)`, so the production path is unchanged and
-  // only the settlement it produces is recorded. A duplicate answer or a second
-  // ask therefore shows up here even when it produces no second tool result.
+  // only the settlement it produces is recorded. This proves the EXACT official
+  // Answer content (labels and feedback) — it does NOT count answer attempts:
+  // a settled promise resolves once however many times it is observed, so a
+  // re-entrant submit is proven by the seat closing plus the absence of a second
+  // ask/tool result, never by this list's length.
   const asks: AskSettlement[] = []
   const questionService = app.host.ctx.get('userQuestions') as {
     ask(this: unknown, ...args: unknown[]): Promise<{ answers: readonly { id: string; selected: readonly string[]; custom?: string }[] }>
@@ -346,6 +349,17 @@ test('the official exit_plan_mode review approves through the mounted Question s
   assert.ok(off !== undefined, 'a plan/mode write follows the approve result')
   assert.equal(off.active, false, 'the FIRST plan/mode after the approve result is the exit')
 
+  // The following accepted step must have STARTED before the trace is read:
+  // waiting only for the mode write would leave a window where the exit is
+  // committed but its step has not started yet.
+  await app.waitFor(
+    () => harness.boundaries().some((entry, index, all) =>
+      entry.type === 'step/start'
+      && all.slice(0, index).some(prior => prior.type === 'plan/mode' && prior.active === false)),
+    'the accepted step after the exit started',
+    PROJECTION_READY_TIMEOUT_MS,
+  )
+
   // The boundary trace proves the exact ordering AND the projection value at
   // each boundary: active through the tool result and through the reviewing
   // step's own end, false from the exiting mode write through the next step.
@@ -509,14 +523,20 @@ test('an ordinary ask_user_question keeps the generic Question/Review flow and a
   assert.deepEqual(harness.asks(), [{ answer: { answers: [{ id: 'fr8-generic', selected: ['Proceed'] }] } }],
     'the official ask resolved with the chosen option')
 
-  // A repeated Enter after the settlement must not write a second answer, ask a
-  // second question, or produce a second official tool result.
+  // A repeated Enter after the settlement must not re-open the settled question
+  // or produce a second official call/result. The settled question CARD stays in
+  // the transcript by contract, so the closed SEAT is proven by the answer
+  // summary the seat paints — not by the absence of the question text. (The
+  // settlement list is NOT an attempt counter: a settled promise observes once.)
+  assert.match(app.view(), /Question Continue the qualification\? \[ok\]/u,
+    'the settled question paints its answered summary instead of the form')
+  assert.doesNotMatch(app.view(), /\[1\] Proceed|> Proceed/u, 'the settled form is no longer the live seat')
   app.vt.sendInput('\r')
 
   await app.settle(80) // bounded observation window for a negative fact
-  assert.equal(harness.asks().length, 1, 'a repeated Enter writes no second official ask settlement')
   assert.equal(harness.events().filter(event => event.type === 'tool/result').length, 1,
     'the settled call produces exactly one tool result')
   assert.equal(harness.events().filter(event => event.type === 'tool/call').length, 1,
     'a repeated Enter issues no second official call')
+  assert.equal(harness.asks().length, 1, 'exactly one official ask was ever issued')
 })

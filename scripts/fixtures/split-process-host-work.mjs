@@ -1750,27 +1750,24 @@ export async function apply(ctx) {
   // writes nothing and creates no second Team service.
   if (scenario === 'team-board') {
     const recordTeamProjection = (sessionId) => {
-      try {
-        const agent = ctx.agents.get(sessionId)
-        if (agent === undefined) return
-        const projections = ctx.get('sessionProjections')
-        const state = projections?.stateOf(agent.session, 'agentTeam')
-        if (state === undefined) return
-        record('team-projection', {
-          sessionId: String(sessionId),
-          enabled: state.enabled,
-          tasks: (state.tasks ?? []).map(task => ({
-            id: task.id,
-            revision: task.revision,
-            subject: task.subject,
-            status: task.status,
-            ownerName: task.ownerName,
-          })),
-        })
-      } catch {
-        // A projection read that fails is simply not recorded; the durable
-        // team/task event stays the write authority.
-      }
+      const agent = ctx.agents.get(sessionId)
+      // A Session that is already gone is an honest absence, not a failure: the
+      // observer records nothing and the durable team/task event stays the write
+      // authority. A LIVE Session with no readable projection THROWS — a
+      // swallowed read error would let the case treat a broken read as a board.
+      if (agent === undefined) return
+      const state = ctx.get('sessionProjections').stateOf(agent.session, 'agentTeam')
+      record('team-projection', {
+        sessionId: String(sessionId),
+        enabled: state.enabled,
+        tasks: (state.tasks ?? []).map(task => ({
+          id: task.id,
+          revision: task.revision,
+          subject: task.subject,
+          status: task.status,
+          ownerName: task.ownerName,
+        })),
+      })
     }
     ctx.effect(() => ctx.on('session/event', (session, event) => {
       if (event?.type !== 'team/task' && event?.type !== 'team/mode') return

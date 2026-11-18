@@ -320,9 +320,11 @@ test('a Team-Off Session keeps the durable board but a different Session never b
     secondProjections.stateOf(second.session, 'agentTeam') as AgentTeamProjection
   await app.waitFor(() => Array.isArray(secondBoard()?.tasks), 'the second Session board is readable')
   assert.deepEqual(secondBoard().tasks, [], 'the second Session owns an EMPTY board')
-  // The official projection omits `enabled` until a team/mode write exists, so
-  // an absent flag is the "no Team selection recorded" state, never "on".
-  assert.notEqual(secondBoard().enabled, true, 'the second Session has no enabled Team selection')
+  // HONEST LIMIT: the `agentTeam` projection omits `enabled` until a team/mode
+  // write exists, so an absent flag means "no Team selection recorded for this
+  // Session" — it is not a fabricated `false`. The official Team SERVICE is the
+  // readback that the second Session really is OFF.
+  assert.notEqual(secondBoard().enabled, true, 'the second Session has no enabled Team selection in its projection')
   assert.equal(harness.team.isEnabled(second), false, 'the official Team service reads the second Session as OFF')
 
   await harness.typeLine('/tasks')

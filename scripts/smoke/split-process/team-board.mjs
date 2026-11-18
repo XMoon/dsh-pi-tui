@@ -179,6 +179,7 @@ export async function runTeamBoard(context) {
       event => event.kind === 'team-projection' && event.sessionId === session
         && event.tasks?.some(task => task.id === updated.id && task.revision === updated.revision),
       'FR8 official agentTeam projection carries the updated task')
+
     const projectedTask = projected.tasks.find(task => task.id === updated.id)
     assert(projectedTask.subject === SUBJECT, `FR8 the projection subject: ${JSON.stringify(projectedTask)}`)
     assert(projectedTask.status === 'in_progress', 'FR8 the projection status is in progress')
@@ -244,10 +245,14 @@ export async function runTeamBoard(context) {
     const secondPage = await frameOf(client)
     assert(!secondPage.includes(SUBJECT), 'FR8 the first Session\'s shared task never leaks into another Session')
     assert(!secondPage.includes('in_progress'), 'FR8 the second Session paints no shared task status row')
+    // HONEST LIMIT: the official projection observer records only on a Team
+    // WRITE, and this Session writes none, so it carries no positive proof that
+    // the second Session's projection is empty. The negative above is the
+    // PAINTED page of that exact Session; the projection must not CONTRADICT it.
     const secondProjection = readC1WorkEvents(workRoot)
       .filter(event => event.kind === 'team-projection' && event.sessionId === second).at(-1)
     assert(secondProjection === undefined || secondProjection.tasks.length === 0,
-      `FR8 the second Session owns no shared task: ${JSON.stringify(secondProjection)}`)
+      `FR8 the second Session's observed projection never carries a shared task: ${JSON.stringify(secondProjection)}`)
     const secondEvents = hostSessionEvents(dshHome, second)
     assert(hostUserTexts(secondEvents).some(text => text.includes('fr8-team-board-second')),
       'FR8 the second Session owns its own durable prompt')
