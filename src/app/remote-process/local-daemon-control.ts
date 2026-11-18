@@ -1468,7 +1468,11 @@ async function runDarwinUninstall(profile: DaemonControlProfile, deps: DaemonCon
     }
     assertNotAborted(deps.signal)
     try {
-      const expectedPid = running && liveHost && pre.record !== undefined ? pre.record.hostPid : undefined
+      // Pass the live Host PID whenever one exists, not only when the job was
+      // already running at snapshot time: an external kickstart can turn a
+      // loaded-but-not-running job into a different process before the adapter
+      // re-inspects it, and that process must never be booted out.
+      const expectedPid = liveHost && pre.record !== undefined ? pre.record.hostPid : undefined
       await uninstallLaunchdUnit(pre.launchdFacts, pre.launchdUnit, launchdDepsOf(deps), expectedPid)
       if (running && liveHost && pre.record !== undefined) {
         await waitForHostStopped(pre.record, loadedService?.pid ?? pre.record.hostPid, deps)

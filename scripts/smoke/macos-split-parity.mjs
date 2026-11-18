@@ -75,6 +75,7 @@ import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { inspectSplitCandidate, createSplitSmokeProfile } from '../lib/split-smoke-profile.mjs'
+import { cleanupTrackedLaunchdResource } from '../lib/launchd-smoke-cleanup.mjs'
 import { SplitSmokeAssertionError } from '../lib/split-smoke-diagnostics.mjs'
 import { hostSessionEvents, hostSessionLogCount, hostSessionHeader, waitForHostSessionHeader } from '../lib/split-smoke-sessions.mjs'
 
@@ -2337,6 +2338,17 @@ async function runD4LaunchdScene({ installation, workRoot, report, start, projec
     report.d4lLabels.push({ label: nextLabel, plistPath: nextPath })
     report.d4l = { label: nextLabel, plistPath: nextPath }
   }
+  const recordPlistIdentity = (targetLabel, targetPath) => {
+    const tracked = report.d4lLabels.find(item => item.label === targetLabel && item.plistPath === targetPath)
+    if (tracked === undefined) return
+    const info = lstatSync(targetPath)
+    assert(info.isFile() && !info.isSymbolicLink(), `D4L: ${targetLabel} must be a regular plist for cleanup ownership`)
+    tracked.identity = {
+      dev: String(info.dev),
+      ino: String(info.ino),
+      sha256: createHash('sha256').update(readFileSync(targetPath)).digest('hex'),
+    }
+  }
   track(label, plistPath)
   const daemon = (args, extraEnv = {}) => runDaemonCommand(installation, args, extraEnv)
   const daemonOk = (args, name) => {
@@ -2378,6 +2390,7 @@ async function runD4LaunchdScene({ installation, workRoot, report, start, projec
   assert(plistStat.isFile() && !plistStat.isSymbolicLink() && (plistStat.mode & 0o777) === 0o600,
     `L02: the plist must be a regular 0600 file, saw mode ${OCT(plistStat.mode)}`)
   const plistText = readFileSync(plistPath, 'utf8')
+  recordPlistIdentity(label, plistPath)
   const lint = spawnSync('plutil', ['-lint', plistPath], { encoding: 'utf8', timeout: 15_000 })
   assert(lint.status === 0, `L02: plutil -lint rejected the plist: ${lint.stderr.slice(-500)}`)
   assert(plistText.includes('<key>RunAtLoad</key>\n  <false/>') && plistText.includes('<key>KeepAlive</key>\n  <false/>'),
@@ -2431,6 +2444,7 @@ async function runD4LaunchdScene({ installation, workRoot, report, start, projec
     'L02-NEG symlink: install must refuse and preserve the symlink')
   unlinkSync(plistPath)
   writeFileSync(plistPath, plistText, { mode: 0o600 })
+  recordPlistIdentity(label, plistPath)
   const foreignLogDir = join(workRoot, 'd4l-foreign-logs')
   mkdirSync(foreignLogDir, { recursive: true, mode: 0o700 })
   const foreignPlist = join(workRoot, 'd4l-foreign.plist')
@@ -2462,6 +2476,7 @@ async function runD4LaunchdScene({ installation, workRoot, report, start, projec
   // independent Host.
   const l03Install = daemonOk(['install'], 'L03 install')
   assert(l03Install.fields.unit === label && existsSync(plistPath), 'L03: the reinstall did not create the owned plist')
+  recordPlistIdentity(label, plistPath)
 
   // ── L04 negative: a loaded foreign same-Label job + kickstart ────────────
   const foreignBootstrap2 = runLaunchctlCommand(['bootstrap', `gui/${String(uid)}`, foreignPlist])
@@ -2629,6 +2644,7 @@ async function runD4LaunchdScene({ installation, workRoot, report, start, projec
     assert(secondInstall.status === 0,
       `L09-PROFILE: the second profile install exited ${String(secondInstall.status)}: ${secondInstall.stderr.slice(-700)}`)
     assert(existsSync(secondPath), 'L09-PROFILE: the second profile install wrote no plist')
+    recordPlistIdentity(secondLabel, secondPath)
     assert(readFileSync(plistPath, 'utf8') === firstPlistBefore,
       'L09-PROFILE: the second profile install must not touch the first profile plist')
     const secondStatus = daemon(['status'], { DSH_HOME: secondDshHome })
@@ -2688,39 +2704,62 @@ async function cleanup({ workRoot, report }) {
     }
   }
   // 1b. Remove ONLY this run's profile-scoped LaunchAgent labels and plists.
-  //     The D4L stage tracks the exact label/path; an unexpected target is
-  //     reported and preserved rather than guessed at.
+  //     A path/label string is not ownership: cleanup re-proves the recorded
+  //     file (dev,ino,content), the loaded job's canonical source and the final
+  //     identity before unlink. Anything unproven is reported and preserved.
   if (Array.isArray(report.d4lLabels)) {
     const launchAgentsRoot = join(homedir(), 'Library', 'LaunchAgents')
+    let removed = 0
+    let preserved = 0
+    const readIdentity = path => {
+      try {
+        const info = lstatSync(path)
+        if (!info.isFile() || info.isSymbolicLink()) throw new Error('the tracked plist is not a regular file')
+        return { dev: String(info.dev), ino: String(info.ino), sha256: createHash('sha256').update(readFileSync(path)).digest('hex') }
+      } catch (error) {
+        // A genuinely absent path is already clean; a symlink/directory/
+        // unreadable replacement is NOT: preserve it and report, never unlink.
+        if (error?.code === 'ENOENT') return undefined
+        throw error
+      }
+    }
+    const cleanupIo = {
+      print: async label => launchctlJobPrint(label),
+      bootout: async label => runLaunchctlCommand(['bootout', `gui/${String(process.getuid())}/${label}`]),
+      readIdentity: async path => readIdentity(path),
+      realpath: async path => realpathSync(path),
+      unlink: async path => unlinkSync(path),
+      sleep,
+      maxWaitAttempts: 50,
+      pollMs: 100,
+    }
     for (const tracked of report.d4lLabels) {
       if (typeof tracked?.label !== 'string' || typeof tracked?.plistPath !== 'string') {
         errors.push('D4L cleanup: malformed tracked launchd label')
+        preserved += 1
         continue
       }
       if (dirname(tracked.plistPath) !== launchAgentsRoot
         || basename(tracked.plistPath) !== `${tracked.label}.plist`
         || !tracked.label.startsWith(`${LAUNCHD_LABEL_PREFIX}.`)) {
         errors.push(`D4L cleanup: refusing an unexpected launchd target ${tracked.plistPath}`)
+        preserved += 1
         continue
       }
-      const bootout = runLaunchctlCommand(['bootout', `gui/${String(process.getuid())}/${tracked.label}`])
-      if (bootout.status !== 0 && bootout.status !== 3) {
-        errors.push(`D4L cleanup: launchctl bootout exited ${String(bootout.status)} for ${tracked.label}`)
-      }
-      // Never unlink the plist while the manager may still hold the job.
-      let unloaded = false
-      for (let attempt = 0; attempt < 50; attempt += 1) {
-        if (launchctlJobPrint(tracked.label).status === 113) { unloaded = true; break }
-        await sleep(100)
-      }
-      if (!unloaded) errors.push(`D4L cleanup: the launchd job did not leave the domain: ${tracked.label}`)
-      if (existsSync(tracked.plistPath)) {
-        try { unlinkSync(tracked.plistPath) } catch (error) {
-          errors.push(`D4L cleanup: plist removal failed: ${error instanceof Error ? error.message : String(error)}`)
+      try {
+        const result = await cleanupTrackedLaunchdResource(tracked, cleanupIo)
+        if (result.action === 'removed') removed += 1
+        else if (result.action === 'absent') { /* the scene already removed it */ }
+        else {
+          errors.push(`D4L cleanup: ${tracked.label}: ${result.reason}; preserving`)
+          preserved += 1
         }
+      } catch (error) {
+        errors.push(`D4L cleanup: ${tracked.label}: ${error instanceof Error ? error.message : String(error)}; preserving`)
+        preserved += 1
       }
     }
-    report.d4lCleanup = { labels: report.d4lLabels.length, launchAgentsRoot }
+    report.d4lCleanup = { labels: report.d4lLabels.length, launchAgentsRoot, removed, preserved }
   }
   // 2. Only processes whose CURRENT process table row still names THIS work
   //    root and an owned role. A saved bare pid is never an identity: every
