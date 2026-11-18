@@ -23,6 +23,12 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { LlmAdapter, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { foldGoal, goalTextOf } from '../../src/domain/status/derive-goal.ts'
 import { startS4D3Application, type S4D3Application } from '../support/application-fixture.ts'
+import { skippedInstallationReason } from '../support/optional-bundle-fixture.ts'
+
+// The provisioned official DSH rc.3 base installation is the production
+// prerequisite of every case here: without it the shared fixture reports
+// BLOCKED_ENV, and the case is SKIPPED — never recorded as an L6 pass.
+const skip = skippedInstallationReason([])
 
 const OBJECTIVE = '完成 FR8 目标 🎯 并核查 long objective text 在短终端上仍保留完整的尾部标记 GOAL_TAIL_END_XYZ'
 const EDITED = '改为新的目标 🚀 edited objective tail EDIT_TAIL_END'
@@ -65,7 +71,7 @@ async function typeLine(app: S4D3Application, line: string): Promise<void> {
   await app.settle(60) // bounded observation window for a negative fact
 }
 
-test('the official /goal create, pause, edit and clear each reach the current Dock as the durable goal/change fact', async t => {
+test('the official /goal create, pause, edit and clear each reach the current Dock as the durable goal/change fact', { skip }, async t => {
   const adapter = new BasicAdapter()
   const app = await startS4D3Application(t, {
     bundles: [],
@@ -130,7 +136,7 @@ test('the official /goal create, pause, edit and clear each reach the current Do
   assert.equal(app.agent(), agent, 'every command ran on the same live Session')
 })
 
-test('the Dock truncates at the terminal width, never at a fixed objective length', async t => {
+test('the Dock truncates at the terminal width, never at a fixed objective length', { skip }, async t => {
   const adapter = new BasicAdapter()
   const app = await startS4D3Application(t, {
     bundles: [],
@@ -165,7 +171,7 @@ test('the Dock truncates at the terminal width, never at a fixed objective lengt
   await app.waitFor(() => goalLine(app.view()) === full, 'the widened Dock paints the whole durable objective')
 })
 
-test('a completed goal hides the Dock badge while the durable record stays', async t => {
+test('a completed goal hides the Dock badge while the durable record stays', { skip }, async t => {
   const adapter = new BasicAdapter()
   const app = await startS4D3Application(t, {
     bundles: [],

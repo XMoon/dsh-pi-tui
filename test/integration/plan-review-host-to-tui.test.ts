@@ -27,6 +27,12 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { createUserMessage, LlmAdapter, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { TuiApp } from '../../src/tui-app.ts'
 import { startS4D3Application, type S4D3Application } from '../support/application-fixture.ts'
+import { skippedInstallationReason } from '../support/optional-bundle-fixture.ts'
+
+// The provisioned official DSH rc.3 base installation is the production
+// prerequisite of every case here: without it the shared fixture reports
+// BLOCKED_ENV, and the case is SKIPPED — never recorded as an L6 pass.
+const skip = skippedInstallationReason([])
 
 const PLAN = '# FR8 official plan\n- 检查真实 Host\n- 保存会话事实\n\nFR8_PLAN_TAIL_END'
 const APPROVED_RESULT = 'Plan approved — plan mode exited; carry out the plan starting with your next step.'
@@ -300,7 +306,7 @@ function planModeAfter(harness: Harness, index: number): { readonly active: bool
   return undefined
 }
 
-test('the official exit_plan_mode review approves through the mounted Question seat and exits plan mode only at the next accepted pre-step', async t => {
+test('the official exit_plan_mode review approves through the mounted Question seat and exits plan mode only at the next accepted pre-step', { skip }, async t => {
   const harness = await startHarness(t)
   const { app, adapter, agent } = harness
   assert.equal(harness.plan().active, false, 'a fresh Root Session starts outside plan mode')
@@ -418,7 +424,7 @@ test('the official exit_plan_mode review approves through the mounted Question s
   assert.equal(app.agent(), agent, 'the review stayed on the same live Session')
 })
 
-test('a Keep planning answer keeps plan mode active and returns the feedback text through the official tool error', async t => {
+test('a Keep planning answer keeps plan mode active and returns the feedback text through the official tool error', { skip }, async t => {
   const harness = await startHarness(t)
   const { app, adapter, agent } = harness
   await enterPlanMode(harness)
@@ -469,7 +475,7 @@ test('a Keep planning answer keeps plan mode active and returns the feedback tex
   }], 'the official ask resolved with the official Keep label and the authored feedback')
 })
 
-test('a dismissed review concludes the turn with approved:false and never writes a plan exit', async t => {
+test('a dismissed review concludes the turn with approved:false and never writes a plan exit', { skip }, async t => {
   const harness = await startHarness(t)
   const { app, adapter, agent } = harness
   await enterPlanMode(harness)
@@ -512,7 +518,7 @@ test('a dismissed review concludes the turn with approved:false and never writes
   assert.doesNotMatch(app.view(), /Approve plan/u, 'the seat is really gone')
 })
 
-test('an ordinary ask_user_question keeps the generic Question/Review flow and a repeated Enter writes exactly one answer', async t => {
+test('an ordinary ask_user_question keeps the generic Question/Review flow and a repeated Enter writes exactly one answer', { skip }, async t => {
   const admissions = observeAnswerAdmissions()
   t.after(() => { admissions.dispose() })
   const harness = await startHarness(t)

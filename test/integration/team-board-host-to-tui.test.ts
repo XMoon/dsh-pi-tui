@@ -25,6 +25,12 @@ import test from 'node:test'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { createUserMessage, LlmAdapter, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { startS4D3Application, type S4D3Application } from '../support/application-fixture.ts'
+import { skippedInstallationReason } from '../support/optional-bundle-fixture.ts'
+
+// The provisioned official DSH rc.3 base installation is the production
+// prerequisite of every case here: without it the shared fixture reports
+// BLOCKED_ENV, and the case is SKIPPED — never recorded as an L6 pass.
+const skip = skippedInstallationReason([])
 
 const SUBJECT = 'FR8_BOARD_TASK'
 const DESCRIPTION = 'FR8 official task projection'
@@ -191,7 +197,7 @@ async function runToolTurn(harness: Harness, script: ToolScript, prompt: string)
   await harness.app.waitFor(() => harness.toolResult(script.callId) !== undefined, `the ${script.name} tool result`)
 }
 
-test('the official team_task_create/update projection renders on the mounted Team page', async t => {
+test('the official team_task_create/update projection renders on the mounted Team page', { skip }, async t => {
   const harness = await startHarness(t)
   const { app, agent } = harness
   assert.equal(harness.team.isEnabled(agent), false, 'a fresh Root Session starts with Team OFF')
@@ -271,7 +277,7 @@ test('the official team_task_create/update projection renders on the mounted Tea
   assert.equal(app.agent(), agent, 'the board stayed on the same live Session')
 })
 
-test('a Team-Off Session keeps the durable board but a different Session never borrows it', async t => {
+test('a Team-Off Session keeps the durable board but a different Session never borrows it', { skip }, async t => {
   const harness = await startHarness(t)
   const { app, agent, secondProjections } = harness
   await enableTeamThroughModelPicker(harness)

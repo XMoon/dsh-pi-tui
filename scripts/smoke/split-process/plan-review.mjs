@@ -179,18 +179,24 @@ export async function runPlanReview(context) {
     assert(approvedText.includes('Plan approved'), `FR8 the official approve result: ${JSON.stringify(approvedText)}`)
 
     // The plan exit lands only in the NEXT accepted pre-step, AFTER the result.
-    const eventsAfterApprove = hostSessionEvents(dshHome, sessionA)
-    const resultIndex = eventsAfterApprove.findIndex(event =>
+    // WAIT for that later event of the same Session instead of reading a fresh
+    // snapshot: the exit is committed by a SUBSEQUENT accepted pre-step, so a
+    // slower Host would otherwise fail on correct behaviour.
+    const resultIndex = hostSessionEvents(dshHome, sessionA).findIndex(event =>
       event.type === 'tool/result' && event.data?.message?.toolCallId === callA.data.callId)
+    assert(resultIndex >= 0, 'FR8 the approve result is in the durable log')
+    await waitForHostSessionEventAfter(dshHome, sessionA, resultIndex + 1,
+      event => event.type === 'plan/mode' && event.data?.active === false,
+      'FR8 durable plan mode off after the approve result')
+    const eventsAfterApprove = hostSessionEvents(dshHome, sessionA)
     const offIndex = eventsAfterApprove.findIndex((event, index) =>
       index > resultIndex && event.type === 'plan/mode' && event.data?.active === false)
-    assert(resultIndex >= 0, 'FR8 the approve result is in the durable log')
     assert(offIndex > resultIndex, 'FR8 plan mode off is committed AFTER the approve result')
     assert(eventsAfterApprove.slice(resultIndex, offIndex).some(event => event.type === 'step/end'),
       'FR8 a step boundary separates the approve result from the mode write')
-    assert(lastPlanMode(hostSessionEvents(dshHome, sessionA)) === false,
+    assert(lastPlanMode(eventsAfterApprove) === false,
       'FR8 the LAST durable plan/mode of Session A is false')
-    assert(hostSessionEvents(dshHome, sessionA).filter(event => event.type === 'tool/result').length === 1,
+    assert(eventsAfterApprove.filter(event => event.type === 'tool/result').length === 1,
       'FR8 the reviewed call settled exactly once')
     // The user-visible settled state agrees with the durable facts.
     await waitForScreen(client, 'Plan approved', 'FR8 the approved tool result is painted')
