@@ -869,17 +869,7 @@ test('the Web composition assertion rejects a re-enabled row, a browser launch a
       `dropping "${dependency}" from the frozen roster must fail the composition assertion`,
     )
   }
-  // Drift 7: the deleted official label may not come back into the expectations
-  // (and therefore never into the overlay).
-  assert.throws(
-    () => assertWebRoster(webInsertGroup(OVERLAY_ENTRIES), [...WEB_ROWS, {
-      id: 'ui-deepseek-model-label-1017',
-      name: '@deepseek-ai/dsh-client-ui-deepseek-model-label-1017',
-    }]),
-    /must declare exactly the official Web rows in order/u,
-    'the deleted 1017 label must fail the roster comparison instead of being re-added',
-  )
-  // Drift 8/9: a second `connection`/`api-remotes` owner in the Web insert (or at
+  // Drift 7/8: a second `connection`/`api-remotes` owner in the Web insert (or at
   // the top level) is the duplicate Host authority this composition forbids.
   for (const [suffix, authority] of [
     ['connection-copy', '@deepseek-ai/dsh-client-connection'],

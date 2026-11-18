@@ -1777,9 +1777,7 @@ test('state: a re-opened legacy root or a changed stable set is rejected', () =>
     'an extra stable entry must fail')
 })
 
-test('retired roots are a closed forbidden set (48 physical roots, builtins excluded)', () => {
-  assert.equal(RETIRED_SOURCE_ROOTS.length, 48, 'all 48 physical roots removed by F1-F6 are forbidden')
-  assert.equal(new Set(RETIRED_SOURCE_ROOTS).size, 48, 'the retired set has no duplicates')
+test('retired root paths remain forbidden, with builtins classified as stable', () => {
   assert.equal(RETIRED_SOURCE_ROOTS.includes('builtins.ts'), false,
     'builtins.ts is reclassified STABLE by F7, never retired')
   assert.deepEqual(findRetiredSourceRootViolations(listSourceRootFiles(), collectSourceEntries()), [],

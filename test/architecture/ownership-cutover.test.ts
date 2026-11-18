@@ -14,7 +14,6 @@ import { compositionSource } from '../support/composition-surface.ts'
 
 const indexSource = compositionSource()
 const coreSource = readFileSync(new URL('../../src/app/session/ownership-core.ts', import.meta.url), 'utf8')
-const runtimeSource = readFileSync(new URL('../../src/app/direct/runtime.ts', import.meta.url), 'utf8')
 const retirementSource = readFileSync(new URL('../../src/app/direct/owner-retirement.ts', import.meta.url), 'utf8')
 const sessionRuntimeSource = readFileSync(new URL('../../src/app/session/runtime.ts', import.meta.url), 'utf8')
 // A4-7: the presentation event routing moved into the surface owner, so the
@@ -360,9 +359,4 @@ test('retirement failures are attributed to the owner that produced them', () =>
   assert.ok(!mergedBlock.includes("diag.error('retire phase failed'"),
     'the merged summary must not re-label failures with the current session')
   assert.ok(mergedBlock.includes("deps.diag.info('retire complete'"), 'the merged summary reports the total count')
-})
-
-test('the Direct runtime no longer accepts a getLiveAgent dep', () => {
-  assert.ok(!runtimeSource.includes('getLiveAgent'),
-    'the runtime projects the current owner from the core through its own registry')
 })

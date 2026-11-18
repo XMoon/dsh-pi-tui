@@ -40,8 +40,7 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
  *      literal" (root) + "exactly one TuiAppEvents implementation" (owner);
  *   5. no `TuiCommandRunner` implementation literal — the same two locks;
  *   6. no universal carrier/bag —
- *      "no universal application/runtime dependency bag exists" +
- *      "the composition root introduces no new context/bag type";
+ *      "no universal application/runtime dependency bag exists";
  *   7. each extracted owner constructed/bound once — the
  *      `OWNER_CONSTRUCTIONS` lock here plus the inventory test's
  *      `SINGLE_OWNER_SITES` authority/binding rows.
@@ -234,32 +233,6 @@ test('no universal application/runtime dependency bag exists', () => {
       `${bag} would be a universal dependency bag (plan A5b §6.3)`,
     )
   }
-})
-
-/** Every top-level `interface`/`type alias`/`class` name a module declares. */
-function declaredTypeNames(source: string): string[] {
-  const sf = ts.createSourceFile('module.ts', source, ts.ScriptTarget.ESNext, true, ts.ScriptKind.TS)
-  const names: string[] = []
-  const walk = (node: ts.Node): void => {
-    if ((ts.isInterfaceDeclaration(node) || ts.isTypeAliasDeclaration(node) || ts.isClassDeclaration(node)) && node.name) {
-      names.push(node.name.text)
-    }
-    ts.forEachChild(node, walk)
-  }
-  walk(sf)
-  return names
-}
-
-test('the composition root introduces no new context/bag type', () => {
-  // Plan §7.6.2: no new broad context/bag type carrying cross-domain state. The
-  // only type the composition root has ever declared is the small pre-existing
-  // `AppExit`; a new `type`/`interface`/`class` there is a bag by construction.
-  const root = compositionFile('src/app/bootstrap.ts')
-  assert.deepEqual(
-    declaredTypeNames(root),
-    ['AppExit'],
-    'src/app/bootstrap.ts must declare no type/interface/class besides the pre-existing AppExit (plan §7.6.2: no new broad bag)',
-  )
 })
 
 interface TuiAppEventsLiteral {

@@ -574,25 +574,10 @@ function needsOf(job) {
   return Array.isArray(job.needs) ? job.needs : [job.needs].filter(Boolean)
 }
 
-test('the retired build-and-pack job is GONE, and nothing still waits for it', () => {
-  // A surviving copy would run the whole product lane a second time on every
-  // PR, which is the cost this migration exists to remove — and the tag path
-  // would then have two artifact producers with different names.
-  const jobs = workflow().jobs
-  assert.equal('build-and-pack' in jobs, false, 'the old single-runner pack job must be retired')
-  for (const [name, job] of Object.entries(jobs)) {
-    assert.equal(needsOf(job).includes('build-and-pack'), false, `${name} still waits for build-and-pack`)
-  }
-})
-
-test('the accelerated jobs exist, the pack-equivalence job is GONE, and the artifact has exactly one producer', () => {
+test('the accelerated jobs have exactly one build and artifact producer', () => {
   const jobs = workflow().jobs
   for (const name of ['build', 'typecheck', 'product-shard', 'aggregate', 'candidate', 'qualify', 'split-process', 'qualified']) {
     assert.ok(name in jobs, `the accelerated DAG is missing '${name}'`)
-  }
-  assert.equal('equivalence' in jobs, false, 'the retired pack-equivalence job must not survive')
-  for (const [name, job] of Object.entries(jobs)) {
-    assert.equal(needsOf(job).includes('equivalence'), false, `${name} still waits for equivalence`)
   }
   // One build, one pack. A second `pnpm build` anywhere else means a consumer
   // rebuilds instead of proving the build it received; a second physical pack

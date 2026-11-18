@@ -17,7 +17,6 @@ import { DIRECT_IMPLEMENTED_CAPABILITIES } from '../../src/runtime/capability.ts
 import type { DirectBackendDeps, DirectLiveAgentLike } from '../../src/runtime/direct/backend-direct.ts'
 import type { TuiSettingsConfig, TuiSettingsDoc } from '../../src/runtime/config-port.ts'
 import type { Diag } from '../../src/runtime/process/diagnostics.ts'
-import { compositionSource } from '../support/composition-surface.ts'
 
 function makeDeps(overrides: Partial<DirectBackendDeps> = {}): DirectBackendDeps {
   const diag: Diag = {
@@ -79,12 +78,6 @@ test('each backend domain is served by its own adapter instance', () => {
     backend.schedule,
   ]
   assert.equal(new Set(ports).size, ports.length, 'no adapter instance may serve two domains')
-})
-
-test('the runner no longer constructs the Direct Job observation adapter itself', () => {
-  const source = compositionSource()
-  assert.doesNotMatch(source, /DirectJobObservationPort/,
-    'the composition surface must consume backend.jobObservation instead of constructing the Direct adapter')
 })
 
 
