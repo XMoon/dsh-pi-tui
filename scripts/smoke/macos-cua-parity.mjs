@@ -776,6 +776,27 @@ function sendMouseClick(session, row, col, label) {
  * body. A pointer click on the painted disclosure marker is the same user
  * action, not a second transcript owner.
  */
+
+/**
+ * Answer ONE official approval Question in the real pane by its OWN painted
+ * states: select the option whose row paints `optionText`, wait for the
+ * painted review seat, then submit. Every step re-reads the visible screen,
+ * so a stale frame can never drive the keys.
+ */
+async function answerApprovalQuestion(session, optionText, label) {
+  const selectFrame = await waitFor(() => {
+    const frame = tmuxCapture(session, `${label} select`)
+    return frame.includes(optionText) ? frame : undefined
+  }, `${label} the option row is painted`, 20_000)
+  const index = /\[1\]/u.test(selectFrame) && optionText.includes('Allow') ? '1'
+    : /\[2\]/u.test(selectFrame) && optionText.includes('Deny') ? '2' : undefined
+  assert(index !== undefined, `${label}: the painted Question offers no ${optionText} option row`)
+  sendNamedKey(session, index, `${label} select`)
+  await waitFor(() => tmuxCapture(session, `${label} review`).includes('Review your answer before submit'),
+    `${label} the review seat is painted`, 10_000)
+  sendNamedKey(session, 'Enter', `${label} submit`)
+}
+
 async function expandNestedToolCard(session, needle, label) {
   const frame = tmuxCapture(session, `${label} before expand`)
   const lines = frame.split('\n')
@@ -1595,12 +1616,7 @@ async function sceneSplit({ installation, workRoot, report, textEditPid }) {
   // earlier. The submit is gated on the CURRENT frame still owning the
   // Question review/answer state: select only on a painted option row, and
   // submit only on a painted Submit row, re-reading the frame between keys.
-  const paintedQuestion = () => tmuxCapture(tui, 'Split consent state')
-    .includes('Allow computer use')
-  await waitFor(paintedQuestion, 'Split consent Question still painted before the answer', 10_000)
-  const frameBeforeKeys = tmuxCapture(tui, 'Split consent pre-answer')
-  assert(frameBeforeKeys.includes('[1] Allow for this session'),
-    'Split consent: the painted Question lost its option row before the answer (aborted ask); re-run the lane')
+  await answerApprovalQuestion(tui, 'Allow for this session', 'Split consent answer')
   // The pending Question must still be paintable when the answer is sent: an
   // aborted ask (the flow left the seat before the submit) settles isError
   // 'aborted before the user answered' and is an operator-timing failure, not
