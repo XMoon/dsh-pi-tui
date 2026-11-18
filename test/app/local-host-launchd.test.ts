@@ -16,7 +16,7 @@ import { spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, realpathSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test, { type TestContext } from 'node:test'
-import { testLifecycle } from '../support/temp-lifecycle.ts'
+import { testLifecycle, type TestLifecycle } from '../support/temp-lifecycle.ts'
 import {
   assertLaunchdFileDefinition,
   buildLaunchdLabel,
@@ -54,6 +54,7 @@ function exited(code: number, stdout = '', stderr = ''): LaunchctlResult {
 }
 
 interface Fixture {
+  readonly lifecycle: TestLifecycle
   readonly root: string
   readonly accountHome: string
   readonly dshHome: string
@@ -65,7 +66,8 @@ interface Fixture {
 }
 
 function fixture(t: TestContext): Fixture {
-  const root = testLifecycle(t).tempDir('launchd-adapter-')
+  const lifecycle = testLifecycle(t)
+  const root = lifecycle.tempDir('launchd-adapter-')
   const accountHome = join(root, 'account-home')
   const dshHome = join(root, 'dsh-home')
   const profileDir = join(root, 'profiles', 'pi-tui')
@@ -93,7 +95,7 @@ function fixture(t: TestContext): Fixture {
     scopeDir: scope.dir,
     profileIdentity: profileIdentityDigest(scope.profileRealpath),
   }
-  return { root, accountHome, dshHome, profileDir, packageRoot, anchor, scope, facts }
+  return { lifecycle, root, accountHome, dshHome, profileDir, packageRoot, anchor, scope, facts }
 }
 
 function depsOf(fx: Fixture, overrides: Partial<LaunchdAdapterDeps> = {}): LaunchdAdapterDeps {
@@ -431,6 +433,76 @@ test('install fails closed when the user GUI domain is unavailable', { skip: NAT
 })
 
 // ── start / stop / uninstall ownership ─────────────────────────────────────
+
+test('install rolls back its own new plist when post-install verification fails', { skip: NATIVE_PLIST_DECODER_SKIP }, async t => {
+  const fx = fixture(t)
+  const deps = depsOf(fx, {
+    verifyInstalledUnit: () => {
+      throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'forced post-install verification failure')
+    },
+  })
+  await assert.rejects(
+    installLaunchdUnit(fx.facts, deps),
+    (error: unknown) => error instanceof LocalScopeError && error.code === 'HOST_MANAGER_UNIT_CONFLICT',
+  )
+  assert.equal(existsSync(plistPathOf(fx)), false, 'a failed new install must not leave an unverified plist behind')
+})
+
+test('install preserves a changed replacement when post-install verification fails', { skip: NATIVE_PLIST_DECODER_SKIP }, async t => {
+  const fx = fixture(t)
+  const path = plistPathOf(fx)
+  const deps = depsOf(fx, {
+    verifyInstalledUnit: () => {
+      writeFileSync(path, 'foreign replacement\n', { mode: 0o600 })
+      throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'forced post-install verification failure')
+    },
+  })
+  await assert.rejects(
+    installLaunchdUnit(fx.facts, deps),
+    (error: unknown) => error instanceof LocalScopeError && /preserving/u.test(error.message),
+  )
+  assert.equal(readFileSync(path, 'utf8'), 'foreign replacement\n', 'a changed replacement is never unlinked')
+})
+
+test('existing FIFO log sinks are refused promptly with bounded evidence', { skip: NATIVE_PLIST_DECODER_SKIP }, t => {
+  const moduleUrl = new URL('../../src/app/remote-process/local-host-launchd.ts', import.meta.url).href
+  const probe = (path: string): { readonly status: number | null; readonly stdout: string; readonly stderr: string; readonly timedOut: boolean } => {
+    const script = [
+      `import { ensureLaunchdLogFile } from ${JSON.stringify(moduleUrl)}`,
+      "try { ensureLaunchdLogFile(process.env.LAUNCHD_LOG_PROBE); console.log('OK') }",
+      "catch (error) { console.log(error.code ?? error.message) }",
+    ].join('\n')
+    const result = spawnSync(process.execPath, ['--import', 'tsx', '-e', script], {
+      encoding: 'utf8',
+      timeout: 5_000,
+      env: { ...process.env, LAUNCHD_LOG_PROBE: path },
+    })
+    return {
+      status: result.status,
+      stdout: result.stdout,
+      stderr: result.stderr,
+      timedOut: (result.error as NodeJS.ErrnoException | undefined)?.code === 'ETIMEDOUT',
+    }
+  }
+  const fx = fixture(t)
+  const logs = launchdLogPaths(fx.facts.scopeDir)
+  for (const [name, path] of [['stdout', logs.stdout], ['stderr', logs.stderr]] as const) {
+    if (existsSync(path)) unlinkSync(path)
+    const made = spawnSync('mkfifo', [path])
+    assert.equal(made.status, 0, `could not create the ${name} FIFO`)
+    const result = probe(path)
+    assert.equal(result.timedOut, false, `the ${name} FIFO open must not block`)
+    assert.equal(result.status, 0, `the ${name} FIFO probe must complete: ${result.stderr}`)
+    assert.match(result.stdout, /HOST_MANAGER_START_FAILED/u, `the ${name} FIFO must be refused as a non-regular sink`)
+  }
+  const regular = launchdLogPaths(fixture(t).facts.scopeDir)
+  writeFileSync(regular.stdout, 'keep me\n', { mode: 0o600 })
+  const result = probe(regular.stdout)
+  assert.equal(result.timedOut, false)
+  assert.equal(result.status, 0)
+  assert.match(result.stdout, /^OK$/mu)
+  assert.equal(readFileSync(regular.stdout, 'utf8'), 'keep me\n', 'an existing regular log is never truncated')
+})
 
 test('start bootstraps then kickstarts exactly once and prepares private 0600 logs', { skip: NATIVE_PLIST_DECODER_SKIP }, async t => {
   const fx = fixture(t)
@@ -925,6 +997,33 @@ test('a public managed start uses the installed LaunchAgent instead of the detac
   assert.equal(existsSync(join(scope.dir, 'host.log')), false, 'the managed public start must never spawn the detached Host fallback')
 })
 
+/** Remove only this test run's verified plist/job. A loaded process is
+ *  stopped only when its current PID and fixed facts match the captured
+ *  child; a changed/unproven identity is preserved, never raw-signalled. */
+async function cleanupNativeLaunchdTest(
+  facts: LaunchdUnitFacts,
+  deps: LaunchdAdapterDeps,
+  expectedPid: number | undefined,
+): Promise<void> {
+  const inspected = inspectOwnedLaunchdUnit(facts, deps)
+  if (inspected.kind === 'none') return
+  const unit = inspected.unit
+  const observed = await inspectLaunchdService(unit, deps)
+  if (observed.kind === 'unknown') {
+    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'native test cleanup: the launched job state is unknown; preserving it')
+  }
+  if (observed.kind === 'loaded') {
+    if (observed.service.pid !== undefined) {
+      if (expectedPid === undefined || observed.service.pid !== expectedPid || !launchdServiceMatches(facts, unit, observed.service)) {
+        throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'native test cleanup: the loaded job process identity is not proven; preserving it')
+      }
+    } else if (observed.service.state !== 'not running') {
+      throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'native test cleanup: the job is starting without a PID; preserving it')
+    }
+  }
+  await uninstallLaunchdUnit(facts, unit, deps, observed.kind === 'loaded' ? observed.service.pid : expectedPid)
+}
+
 // ── native launchd (macOS only) ────────────────────────────────────────────
 
 /** A real GUI domain is required for the native lifecycle; otherwise the test
@@ -934,6 +1033,70 @@ function nativeDomainAvailable(): boolean {
   const outcome = spawnSync('/bin/launchctl', ['print', `gui/${String(UID)}`], { encoding: 'utf8', timeout: 10_000 })
   return outcome.status === 0
 }
+
+test('native test cleanup refuses a loaded job whose PID is not the captured child', { skip: NATIVE_PLIST_DECODER_SKIP }, async t => {
+  const fx = fixture(t)
+  const launchctl = fakeLaunchctl(fx, { loaded: false })
+  const deps = depsOf(fx, { launchctl: launchctl.run })
+  await installLaunchdUnit(fx.facts, deps)
+  launchctl.job.loaded = true
+  launchctl.job.state = 'running'
+  launchctl.job.pid = 9999
+  await assert.rejects(
+    cleanupNativeLaunchdTest(fx.facts, deps, 4242),
+    (error: unknown) => error instanceof LocalScopeError && error.code === 'HOST_MANAGER_UNIT_CONFLICT',
+  )
+  assert.equal(launchctl.calls.some(args => args[0] === 'bootout'), false, 'a changed PID is never booted out or raw-signalled')
+  assert.equal(existsSync(plistPathOf(fx)), true, 'the plist is preserved when cleanup cannot prove the PID')
+})
+
+test('native test cleanup refuses a running job without a captured PID', { skip: NATIVE_PLIST_DECODER_SKIP }, async t => {
+  const fx = fixture(t)
+  const launchctl = fakeLaunchctl(fx, { loaded: false })
+  const deps = depsOf(fx, { launchctl: launchctl.run })
+  await installLaunchdUnit(fx.facts, deps)
+  launchctl.job.loaded = true
+  launchctl.job.state = 'running'
+  launchctl.job.pid = 4242
+  await assert.rejects(
+    cleanupNativeLaunchdTest(fx.facts, deps, undefined),
+    (error: unknown) => error instanceof LocalScopeError && error.code === 'HOST_MANAGER_UNIT_CONFLICT',
+  )
+  assert.equal(launchctl.calls.some(args => args[0] === 'bootout'), false)
+})
+
+test('native test cleanup bootouts the exact captured PID and removes its plist', { skip: NATIVE_PLIST_DECODER_SKIP }, async t => {
+  const fx = fixture(t)
+  const launchctl = fakeLaunchctl(fx, { loaded: false })
+  const deps = depsOf(fx, { launchctl: launchctl.run, sleep: async () => {}, now: () => 0 })
+  await installLaunchdUnit(fx.facts, deps)
+  launchctl.job.loaded = true
+  launchctl.job.state = 'running'
+  launchctl.job.pid = 4242
+  await cleanupNativeLaunchdTest(fx.facts, deps, 4242)
+  assert.equal(launchctl.calls.some(args => args[0] === 'bootout'), true)
+  assert.equal(existsSync(plistPathOf(fx)), false)
+})
+
+test('native test cleanup preserves the plist when bootout fails', { skip: NATIVE_PLIST_DECODER_SKIP }, async t => {
+  const fx = fixture(t)
+  const launchctl = fakeLaunchctl(fx, { loaded: false })
+  const deps = depsOf(fx, { launchctl: launchctl.run, sleep: async () => {}, now: () => 0 })
+  await installLaunchdUnit(fx.facts, deps)
+  launchctl.job.loaded = true
+  launchctl.job.state = 'running'
+  launchctl.job.pid = 4242
+  const failing = depsOf(fx, {
+    launchctl: async args => args[0] === 'bootout' ? exited(1, '', 'bootout failed') : await launchctl.run(args),
+    sleep: async () => {},
+    now: () => 0,
+  })
+  await assert.rejects(
+    cleanupNativeLaunchdTest(fx.facts, failing, 4242),
+    (error: unknown) => error instanceof LocalScopeError && /bootout failed/u.test(error.message),
+  )
+  assert.equal(existsSync(plistPathOf(fx)), true, 'a failed bootout preserves the job definition')
+})
 
 test('native launchd bootstrap/kickstart/bootout runs the real foreground entry', { skip: process.platform !== 'darwin' ? 'the native launchd lifecycle requires macOS' : (nativeDomainAvailable() ? false : 'BLOCKED_ENV: the user GUI launchd domain is unavailable') }, async t => {
   const fx = fixture(t)
@@ -950,19 +1113,15 @@ test('native launchd bootstrap/kickstart/bootout runs the real foreground entry'
   const facts: LaunchdUnitFacts = { ...fx.facts, hostEntryPath: child }
   const deps = depsOf(fx)
   let cleanupPid: number | undefined
-  t.after(async () => {
-    // Only this test's private label and process are cleaned up.
+  fx.lifecycle.defer(async () => {
+    // Only this test's private label and process are cleaned up. The captured
+    // PID is accepted only while the loaded job still proves it; a changed or
+    // unproven identity is preserved and fails the test, never raw-signalled.
     try {
-      const inspected = inspectOwnedLaunchdUnit(facts, deps)
-      if (inspected.kind === 'owned') {
-        // Real bounded timers for native cleanup: a removed job settles on the
-        // first observation, and a genuinely stuck job fails within the window.
-        await stopLaunchdService(facts, inspected.unit, deps)
-        unlinkSync(inspected.unit.filePath)
-      }
-    } catch { /* already removed or never loaded */ }
-    if (cleanupPid !== undefined) {
-      try { process.kill(cleanupPid, 'SIGKILL') } catch { /* already gone */ }
+      await cleanupNativeLaunchdTest(facts, deps, cleanupPid)
+    } catch (error) {
+      t.diagnostic(`native launchd cleanup did not quiesce: ${error instanceof Error ? error.message : String(error)}`)
+      throw error
     }
   })
   const installed = await installLaunchdUnit(facts, deps)

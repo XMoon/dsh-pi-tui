@@ -26,6 +26,7 @@ import {
   closeSync,
   constants,
   fchmodSync,
+  fstatSync,
   fsyncSync,
   linkSync,
   lstatSync,
@@ -147,6 +148,9 @@ export interface LaunchdAdapterDeps {
   readonly stopTimeoutMs?: number
   readonly now?: () => number
   readonly sleep?: (ms: number) => Promise<void>
+  /** Test seam for a post-link ownership/decoder failure; production uses the
+   *  real native inspection. */
+  readonly verifyInstalledUnit?: (facts: LaunchdUnitFacts) => LaunchdUnitInspection
 }
 
 /** The result of one explicit LaunchAgent install. */
@@ -794,11 +798,27 @@ async function assertLaunchdDomain(deps: LaunchdAdapterDeps): Promise<void> {
 
 /** Create a NEW private log file without truncating an existing one. The
  *  creation mode is 0600; an existing user file is opened append-only and its
- *  mode is never changed. */
-function ensureLaunchdLogFile(path: string): void {
+ *  mode is never changed. A non-regular entry (FIFO, socket, device,
+ *  directory) is refused before a blocking write-only FIFO open; O_NONBLOCK
+ *  and the post-open fstat close the preflight/open race. */
+export function ensureLaunchdLogFile(path: string): void {
+  let before: Stats | undefined
+  try {
+    before = lstatSync(path)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      throw new LocalScopeError('HOST_MANAGER_START_FAILED', 'launchd: the private log path is not accessible', error)
+    }
+  }
+  if (before !== undefined && !before.isFile()) {
+    throw new LocalScopeError('HOST_MANAGER_START_FAILED', 'launchd: the private log path is not a regular file')
+  }
   let fd: number | undefined
   try {
-    fd = openSync(path, constants.O_WRONLY | constants.O_CREAT | constants.O_APPEND | constants.O_NOFOLLOW, 0o600)
+    fd = openSync(path, constants.O_WRONLY | constants.O_CREAT | constants.O_APPEND | constants.O_NOFOLLOW | constants.O_NONBLOCK, 0o600)
+    if (!fstatSync(fd).isFile()) {
+      throw new LocalScopeError('HOST_MANAGER_START_FAILED', 'launchd: the private log path is not a regular file')
+    }
     closeSync(fd)
     fd = undefined
   } catch (error) {
@@ -819,12 +839,18 @@ function ensureLaunchdLogFiles(facts: LaunchdUnitFacts): void {
   ensureLaunchdLogFile(logs.stderr)
 }
 
+interface CreatedLaunchdFile {
+  readonly created: boolean
+  readonly filePath: string
+  readonly identity?: { readonly dev: number; readonly ino: number; readonly content: string }
+}
+
 /** Write one NEW plist atomically; an existing file is preserved untouched. */
 function installLaunchdFile(options: {
   readonly dir: string
   readonly label: string
   readonly content: string
-}): { readonly created: boolean } {
+}): CreatedLaunchdFile {
   const finalPath = join(options.dir, `${options.label}.plist`)
   const tempPath = join(options.dir, `.${options.label}.${String(process.pid)}.${randomUUID()}.tmp`)
   let fd: number | undefined
@@ -856,7 +882,47 @@ function installLaunchdFile(options: {
   } finally {
     try { unlinkSync(tempPath) } catch { /* the temp file may already be gone */ }
   }
-  return { created }
+  if (!created) return { created: false, filePath: finalPath }
+  // Capture THIS call's published identity before any verification. A later
+  // verifier failure may remove the file only while all three still match.
+  const stat = statSync(finalPath)
+  const published = readFileSync(finalPath, 'utf8')
+  if (!stat.isFile() || published !== options.content) {
+    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'launchd: the newly created plist changed before verification; preserving it')
+  }
+  return { created: true, filePath: finalPath, identity: { dev: stat.dev, ino: stat.ino, content: published } }
+}
+
+/** Remove ONLY this call's newly published plist after a failed post-link
+ *  verification. A changed/foreign replacement is preserved; an unreadable or
+ *  unremovable file reports the combined failure instead of hiding it. */
+function rollbackNewLaunchdFile(installed: CreatedLaunchdFile, error: unknown): never {
+  if (!installed.created || installed.identity === undefined) throw error
+  let stat: Stats
+  try {
+    stat = lstatSync(installed.filePath)
+  } catch (inspectError) {
+    if ((inspectError as NodeJS.ErrnoException).code === 'ENOENT') throw error
+    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'launchd: post-install verification failed and the new plist could not be re-inspected; preserving it', inspectError)
+  }
+  if (!stat.isFile() || stat.dev !== installed.identity.dev || stat.ino !== installed.identity.ino) {
+    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'launchd: post-install verification failed but the new plist was replaced; preserving the replacement', error)
+  }
+  let current: string
+  try {
+    current = readFileSync(installed.filePath, 'utf8')
+  } catch (readError) {
+    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'launchd: post-install verification failed and the new plist could not be read; preserving it', readError)
+  }
+  if (current !== installed.identity.content) {
+    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'launchd: post-install verification failed but the new plist content changed; preserving it', error)
+  }
+  try {
+    unlinkSync(installed.filePath)
+  } catch (unlinkError) {
+    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'launchd: post-install verification failed and the new plist could not be removed; preserving it', unlinkError)
+  }
+  throw error
 }
 
 /**
@@ -905,15 +971,21 @@ export async function installLaunchdUnit(
     return { label, filePath: existing.unit.filePath, created: false }
   }
   const content = renderLaunchdPlist(facts)
-  const created = installLaunchdFile({ dir, label, content }).created
-  const verified = inspectOwnedLaunchdUnit(facts, deps)
-  if (verified.kind !== 'owned') {
-    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'launchd: the installed profile plist could not be confirmed')
+  const installed = installLaunchdFile({ dir, label, content })
+  try {
+    const verify = deps.verifyInstalledUnit ?? ((current: LaunchdUnitFacts) => inspectOwnedLaunchdUnit(current, deps))
+    const verified = verify(facts)
+    if (verified.kind !== 'owned') {
+      throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'launchd: the installed profile plist could not be confirmed')
+    }
+    if (verified.unit.installBuild !== facts.buildId) {
+      throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'launchd: the installed profile plist belongs to another installed build')
+    }
+    return { label, filePath: verified.unit.filePath, created: installed.created }
+  } catch (error) {
+    if (installed.created) rollbackNewLaunchdFile(installed, error)
+    throw error
   }
-  if (verified.unit.installBuild !== facts.buildId) {
-    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'launchd: the installed profile plist belongs to another installed build')
-  }
-  return { label, filePath: verified.unit.filePath, created }
 }
 
 /** Issue one kickstart for a verified job. */
