@@ -22398,6 +22398,20 @@ export class TuiApp {
         const rendered = this.renderVisualChildBody(card, child, width, indent, bodyExpanded)
         regions.push({ sourceKey: transcriptSearchSourceKey({ kind: 'subcall-field', subCallIds: path, field: 'result' }), anchorRow: resultStart, rowStart: resultStart, rowEnd: resultStart + rendered, enumerable: false })
         rows += rendered
+      } else if (toolRowProjectsImages(child)) {
+        const resultStart = row + rows
+        // The TSP result-image contract, projected on the legacy surface: the
+        // frozen identity rows (`imageIdentityText` — payload-free name ·
+        // W×H · bytes + the read state) and NO bytes render here. The native
+        // image node stays the TSP pane's capability; this row keeps the
+        // attachment identity legible on every surface.
+        const identityLines = toolRowImageBlocks(child)
+          .map(block => imageIdentityText(block.attachment))
+        regions.push({ sourceKey: transcriptSearchSourceKey({ kind: 'subcall-field', subCallIds: path, field: 'result' }), anchorRow: resultStart, rowStart: resultStart, rowEnd: resultStart + identityLines.length, enumerable: false })
+        for (const line of identityLines) {
+          card.addChild(new Text(truncateToWidth(`${pad}  ${color.textDim(sanitizedPhysicalLine(line))}`, width, '…'), 0, 0))
+          rows += 1
+        }
       } else if (child.result !== '') {
         const resultStart = row + rows
         // A captured terminal sub-call stdout keeps whitelisted SGR; every
@@ -30427,6 +30441,7 @@ export class TuiApp {
 }
 
 // Style helpers from the terminal theme runtime's token functions.
+import { imageIdentityText, toolRowImageBlocks, toolRowProjectsImages } from './tui/tsp/transcript-view.ts'
 import { color } from './tui/theme/runtime.ts'
 
 /**

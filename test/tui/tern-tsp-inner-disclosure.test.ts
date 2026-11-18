@@ -18,7 +18,10 @@ import {
   transcriptView,
   transcriptViewForPreset,
   visibleTranscriptMembers,
+  toolRowImageBlocks,
+  toolRowProjectsImages,
 } from '../../src/tui/tsp/transcript-view.ts'
+import { imageIdentityText } from '../../src/tui/tsp/transcript-view.ts'
 
 const T0 = 1_700_000_000_000
 const WINDOW = { mode: 'latest', hasNewer: false } as const
@@ -1276,4 +1279,42 @@ test('a long Relay closed body is not a visible image/context member', () => {
     innerDisclosure: { ...innerDisclosure, expandedContextRowOwners: new Set([relay]) },
   }, keys)
   assert.equal(opened.has(relay), true, 'opening the exact owner grants the body')
+})
+
+test('a PTC screenshot child paints the TSP image identity rows on the legacy surface', () => {
+  const rootCallId = 'root-shot'
+  const subCallId = 'child-shot'
+  const attachment = {
+    attachmentId: 'att-1',
+    mediaType: 'image/png',
+    bytes: 1234,
+    width: 673,
+    height: 439,
+    name: 'cua-blank.txt.png',
+  }
+  const messages = folder([
+    ev('turn/start', { turn: 1 }, 0), user(1, 'capture the window'),
+    toolCall(2, rootCallId, 'run_code', '{}'),
+    ev('tool/ptc-dispatch-start', {
+      rootCallId: ToolCallId(rootCallId), parentCallId: ToolCallId(rootCallId), subCallId,
+      name: 'cua', arguments: { method: 'screenshot' },
+    }, 3),
+    toolResult(4, rootCallId, 'program complete'),
+    ev('tool/ptc-dispatch', {
+      rootCallId: ToolCallId(rootCallId), parentCallId: ToolCallId(rootCallId), subCallId,
+      name: 'cua', arguments: { method: 'screenshot' }, isError: false,
+      content: [
+        { type: 'text', text: '{"pixelWidth":673,"pixelHeight":439}' },
+        { type: 'image', attachment },
+      ],
+    }, 5),
+    ev('turn/end', { turn: 1, reason: { kind: 'completed' } }, 6),
+  ]).messages()
+  const parent = toolRows(messages)[0]!
+  const child = parent.subCalls?.[0]
+  assert.ok(child !== undefined)
+  assert.equal(toolRowProjectsImages(child), true, 'the settled child carries a projectable image')
+  const blocks = toolRowImageBlocks(child)
+  assert.equal(blocks.length, 1)
+  assert.match(imageIdentityText(blocks[0]!.attachment), /\[IMAGE\] .*673×439/u)
 })
