@@ -833,4 +833,3 @@ test('an unavailable authority paints the reason and offers no Confirm', async t
     }
   }
 })
-
