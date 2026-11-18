@@ -15,7 +15,7 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { chmodSync, linkSync, lstatSync, mkdirSync, readdirSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, linkSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { closeSync, openSync } from 'node:fs'
 import { connect, createServer } from 'node:net'
 import { join } from 'node:path'
@@ -216,20 +216,38 @@ async function bindRawServerAtPublicPath(
   if (IS_DARWIN) {
     const paths = darwinAcpSocketPaths(scope, process.getuid?.() as number)
     mkdirSync(join(paths.privateRoot, '.acp-priv'), { recursive: true, mode: 0o700 })
-    await new Promise<void>((resolveListen, rejectListen) => {
-      server.once('error', rejectListen)
-      server.listen(paths.privateBindPath, () => { server.off('error', rejectListen); resolveListen() })
-    })
-    chmodSync(paths.privateBindPath, 0o600)
-    linkSync(paths.privateBindPath, paths.publicPath)
-    unlinkSync(paths.privateBindPath)
-    return { close: () => new Promise<void>(resolveClose => server.close(() => resolveClose())) }
+    let bindIno: number | undefined
+    try {
+      await new Promise<void>((resolveListen, rejectListen) => {
+        server.once('error', rejectListen)
+        server.listen(paths.privateBindPath, () => { server.off('error', rejectListen); resolveListen() })
+      })
+      bindIno = lstatSync(paths.privateBindPath).ino
+      chmodSync(paths.privateBindPath, 0o600)
+      linkSync(paths.privateBindPath, paths.publicPath)
+      unlinkSync(paths.privateBindPath)
+      return { close: () => new Promise<void>(resolveClose => server.close(() => resolveClose())) }
+    } catch (error) {
+      // A failed post-listen publication must settle the live server and remove
+      // ONLY the inode this helper published; a foreign public path survives.
+      if (server.listening) await new Promise<void>(resolveClose => server.close(() => resolveClose()))
+      if (bindIno !== undefined && pathExists(paths.publicPath)) {
+        try { if (lstatSync(paths.publicPath).ino === bindIno) unlinkSync(paths.publicPath) } catch {}
+      }
+      try { rmSync(paths.privateBindPath, { force: true }) } catch {}
+      throw error
+    }
   }
   const dirFd = openSync(scope.dir, 'r')
-  await new Promise<void>((resolveListen, rejectListen) => {
-    server.once('error', rejectListen)
-    server.listen(`/proc/self/fd/${String(dirFd)}/acp.sock`, () => { server.off('error', rejectListen); resolveListen() })
-  })
+  try {
+    await new Promise<void>((resolveListen, rejectListen) => {
+      server.once('error', rejectListen)
+      server.listen(`/proc/self/fd/${String(dirFd)}/acp.sock`, () => { server.off('error', rejectListen); resolveListen() })
+    })
+  } catch (error) {
+    closeSync(dirFd)
+    throw error
+  }
   return {
     close: async () => {
       await new Promise<void>(resolveClose => server.close(() => resolveClose()))
@@ -582,6 +600,42 @@ test('a regular file or a symlink at the socket path is refused without being de
     )
     assert.equal(lstatSync(endpoint.privateRoot).mode & 0o777, 0o755,
       'the existing non-private root mode must not be rewritten')
+  }
+})
+
+test('a post-listen publish failure settles the raw server and preserves a foreign public path', async t => {
+  const dir = testLifecycle(t).tempDir('acp-scope-')
+  const scope = makeScope(dir)
+  ownDarwinRoot(t, scope)
+  const publicPath = publicSocketPath(scope)
+  if (IS_DARWIN) {
+    // The private bind/listen succeeds, then the hard-link publication meets a
+    // foreign public file: the helper must close its server, settle the private
+    // name, and leave the foreign file byte-identical.
+    writeFileSync(publicPath, 'FOREIGN-RAW-PUBLISH')
+    await assert.rejects(bindRawServerAtPublicPath(scope, socket => socket.destroy()))
+    assert.equal(readFileSync(publicPath, 'utf8'), 'FOREIGN-RAW-PUBLISH',
+      'the failed publish must not overwrite the foreign public path')
+    const paths = darwinAcpSocketPaths(scope, process.getuid?.() as number)
+    assert.equal(pathExists(paths.privateBindPath), false, 'the failed publish must settle the private bind name')
+    return
+  }
+  // Linux: a live owner of the logical path makes the helper's /proc-fd listen
+  // fail; the helper must close the scope directory fd it opened.
+  const blocker = createServer(socket => socket.destroy())
+  await new Promise<void>((resolveListen, rejectListen) => {
+    blocker.once('error', rejectListen)
+    blocker.listen(publicPath, () => { blocker.off('error', rejectListen); resolveListen() })
+  })
+  const openScopeFds = () => readdirSync('/proc/self/fd').filter(entry => {
+    try { return realpathSync(`/proc/self/fd/${entry}`) === realpathSync(dir) } catch { return false }
+  })
+  const before = openScopeFds().length
+  try {
+    await assert.rejects(bindRawServerAtPublicPath(scope, socket => socket.destroy()))
+    assert.equal(openScopeFds().length, before, 'the failed raw bind must close its scope directory fd')
+  } finally {
+    await new Promise<void>(resolveClose => blocker.close(() => resolveClose()))
   }
 })
 

@@ -461,6 +461,51 @@ function alive(pid) {
   try { process.kill(pid, 0); return true } catch (error) { return error.code === 'EPERM' }
 }
 
+/** The kernel start time of one pid: the identity a bare numeric pid does not carry. */
+function kernelStartTime(pid) {
+  const result = spawnSync('ps', ['-o', 'lstart=', '-p', String(pid)], { encoding: 'utf8', timeout: 15_000 })
+  if (result.error !== undefined || result.status !== 0) return undefined
+  const value = result.stdout.trim()
+  return value === '' ? undefined : value
+}
+
+/** Assert a guard refuses; the guard itself must never signal before refusing. */
+function assertThrows(fn, label) {
+  let threw = false
+  try { fn() } catch { threw = true }
+  assert(threw, `${label}: the identity guard did not refuse`)
+}
+
+/**
+ * Prove a CAPTURED Host record is still the live, run-owned Host before a
+ * destructive signal: the registry must still name the same instance and pid,
+ * the kernel start time must be unchanged, and the current process table row
+ * must carry THIS run root and the Host role. Throws on gone/different/unknown
+ * and never signals.
+ */
+function verifyCapturedHost(dshHome, workRoot, captured, label) {
+  const registry = readRegistry(dshHome)
+  if (registry === undefined) {
+    throw new SplitSmokeAssertionError(`${label}: the Host registry is gone; refusing to signal pid ${String(captured.hostPid)}`)
+  }
+  if (registry.record.instanceId !== captured.instanceId || registry.record.hostPid !== captured.hostPid) {
+    throw new SplitSmokeAssertionError(
+      `${label}: the registry now names instance ${String(registry.record.instanceId)}/pid ${String(registry.record.hostPid)}; `
+      + `refusing to signal pid ${String(captured.hostPid)}`,
+    )
+  }
+  const row = processTable().find(candidate => candidate.pid === captured.hostPid)
+  if (row === undefined || roleOf(row) !== 'host' || !row.command.includes(workRoot)) {
+    throw new SplitSmokeAssertionError(`${label}: pid ${String(captured.hostPid)} is not the live run-owned Host; refusing to signal`)
+  }
+  const currentStart = kernelStartTime(captured.hostPid)
+  if (currentStart === undefined || currentStart !== captured.lstart) {
+    throw new SplitSmokeAssertionError(
+      `${label}: the kernel start time of pid ${String(captured.hostPid)} changed or is unreadable; refusing to signal`,
+    )
+  }
+}
+
 function descendantsOf(rootPid) {
   const rows = processTable()
   const children = new Map()
@@ -1401,18 +1446,33 @@ function assertAcpAccess(response, expected, label) {
 
 /** Bind a raw server at the endpoint the way another owner would (private bind -> hard link). */
 async function bindForeignAcpEndpoint(endpoint) {
-  mkdirSync(join(endpoint.privateRoot, '.acp-priv'), { recursive: true, mode: 0o700 })
+  const privateDir = join(endpoint.privateRoot, '.acp-priv')
+  mkdirSync(privateDir, { recursive: true, mode: 0o700 })
   const server = createServer(socket => socket.destroy())
-  await new Promise((resolveListen, rejectListen) => {
-    server.once('error', rejectListen)
-    server.listen(endpoint.privateBindPath, () => { server.off('error', rejectListen); resolveListen() })
-  })
-  chmodSync(endpoint.privateBindPath, 0o600)
-  linkSync(endpoint.privateBindPath, endpoint.publicPath)
-  unlinkSync(endpoint.privateBindPath)
-  return {
-    server,
-    close: () => new Promise(resolveClose => server.close(() => resolveClose())),
+  let bindIno
+  try {
+    await new Promise((resolveListen, rejectListen) => {
+      server.once('error', rejectListen)
+      server.listen(endpoint.privateBindPath, () => { server.off('error', rejectListen); resolveListen() })
+    })
+    bindIno = lstatSync(endpoint.privateBindPath).ino
+    chmodSync(endpoint.privateBindPath, 0o600)
+    linkSync(endpoint.privateBindPath, endpoint.publicPath)
+    unlinkSync(endpoint.privateBindPath)
+    return {
+      server,
+      close: () => new Promise(resolveClose => server.close(() => resolveClose())),
+    }
+  } catch (error) {
+    // Settle every resource this helper acquired: close the in-process server
+    // (the enclosing scene never received it), then remove ONLY the inode this
+    // helper published, never a pre-existing foreign public file.
+    if (server.listening) await new Promise(resolveClose => server.close(() => resolveClose()))
+    if (bindIno !== undefined && existsSync(endpoint.publicPath)) {
+      try { if (lstatSync(endpoint.publicPath).ino === bindIno) unlinkSync(endpoint.publicPath) } catch { /* gone */ }
+    }
+    try { rmSync(endpoint.privateBindPath, { force: true }) } catch { /* gone */ }
+    throw error
   }
 }
 
@@ -1455,6 +1515,21 @@ function readHeldTurnEvents(root) {
       return []
     }
   })
+}
+
+/**
+ * Run one held-turn witness with the release barrier removed, and GUARANTEE the
+ * Host turn is released again even when an assertion throws mid-flight. The
+ * success path writes the barrier itself after the teardown fence; the finally
+ * only restores it when the witness failed before that point.
+ */
+async function withHeldTurnBarrier(barrier, body) {
+  rmSync(barrier, { force: true })
+  try {
+    return await body()
+  } finally {
+    if (!existsSync(barrier)) writeFileSync(barrier, 'release\n', { mode: 0o600 })
+  }
 }
 
 /**
@@ -1861,66 +1936,79 @@ async function runD2AcpScene({ installation, workRoot, report, start, projectA, 
   // match the NEW held event by Session and sequence, not by prompt substring.
   const heldCountBefore = readHeldTurnEvents(heldTurnRoot)
     .filter(event => event.kind === 'long-turn-held' && event.sessionId === sessionB).length
-  rmSync(releaseBarrier, { force: true })
-  sendKeys(tuiB, heldText, 'M07 held TUI turn on the ACP-attached Session')
-  let held
-  const heldDeadline = Date.now() + TIMEOUTS.turn
-  while (Date.now() < heldDeadline) {
-    const heldEvents = readHeldTurnEvents(heldTurnRoot)
-      .filter(event => event.kind === 'long-turn-held' && event.sessionId === sessionB)
-    held = heldEvents.length > heldCountBefore ? heldEvents.at(-1) : undefined
-    if (held !== undefined) break
-    await sleep(100)
+  // Failure-path self-check for the interruption guard: a witness that throws
+  // after the barrier is removed must still release the held Host turn.
+  let interruptionCaught = false
+  try {
+    await withHeldTurnBarrier(releaseBarrier, async () => {
+      throw new SplitSmokeAssertionError('M07 interruption self-check')
+    })
+  } catch {
+    interruptionCaught = true
   }
-  assert(held !== undefined,
-    'M07 Host-admitted TUI turn is held: the fixture recorded no NEW long-turn-held event for the Session; '
-    + `before=${String(heldCountBefore)}; now=${String(readHeldTurnEvents(heldTurnRoot)
-      .filter(event => event.kind === 'long-turn-held' && event.sessionId === sessionB).length)}`)
-  assert(typeof held.sessionId === 'string' && Number.isInteger(held.attempt),
-    'M07: the held-turn fixture must name the Session and attempt')
-  connDisconnect.close()
-  await connDisconnect.closed
-  // Host-observable teardown fence: the local close above is only THIS process's
-  // FIN. A fresh resume of the same Session succeeds only after the Host has
-  // released the disconnected View's claim, so the model barrier is released
-  // strictly after the Host-side teardown decision, never before it.
-  const teardownFence = await openAcp('M07 teardown fence')
-  await teardownFence.initialize(1)
-  const fenceDeadline = Date.now() + TIMEOUTS.turn
-  let fenceResult
-  let fenceAttempts = 0
-  while (Date.now() < fenceDeadline) {
-    fenceAttempts += 1
-    fenceResult = await teardownFence.request(2, 'session/resume', { sessionId: sessionB, cwd: acpWorkspaceReal })
-    if (isEmptyAcpResult(fenceResult)) break
-    const fenceCode = fenceResult?.error?.data?.code
-    assert(fenceCode === 'LOCAL_ACP_VIEW_ALREADY_ATTACHED',
-      `M07 teardown fence: the Host answered the resume with ${JSON.stringify(fenceResult?.error ?? fenceResult?.result)} instead of releasing the old View`)
-    await sleep(100)
-  }
-  assert(isEmptyAcpResult(fenceResult),
-    `M07: the Host never released the disconnected View before the barrier release (attempts=${String(fenceAttempts)})`)
-  teardownFence.close()
-  await teardownFence.closed
-  writeFileSync(releaseBarrier, 'release\n', { mode: 0o600 })
-  await waitFor(() => readHeldTurnEvents(heldTurnRoot).some(event =>
-    event.kind === 'long-turn-released' && event.sessionId === held.sessionId && event.attempt === held.attempt),
-  'M07 held TUI turn released after the ACP disconnect', TIMEOUTS.turn)
-  const heldIndex = await waitFor(() => {
-    const events = hostSessionEvents(dshHome, sessionB)
-    if (events === undefined) return undefined
-    const index = events.findIndex(event => event.type === 'user/message' && JSON.stringify(event).includes(heldText))
-    return index < 0 ? undefined : index
-  }, 'M07 held TUI prompt is durable on the official Session', TIMEOUTS.turn)
-  await waitFor(() => {
-    const events = hostSessionEvents(dshHome, sessionB)
-    if (events === undefined) return undefined
-    const rest = events.slice(heldIndex + 1)
-    return rest.some(event => event.type === 'assistant/message' && JSON.stringify(event).includes('long-turn answer'))
-      && rest.some(event => event.type === 'turn/end') ? events : undefined
-  }, 'M07 held TUI turn settles after the ACP disconnect', TIMEOUTS.turn)
-  assert(tmuxSessionExists(tuiB) && tmuxCapture(tuiB, 'M07 TUI frame after the disconnect').includes(heldText),
-    'M07: the TUI must still show its held same-Session work after the ACP View disconnect')
+  assert(interruptionCaught && existsSync(releaseBarrier),
+    'M07: an interrupted held-turn witness must still release the barrier')
+  await withHeldTurnBarrier(releaseBarrier, async () => {
+    sendKeys(tuiB, heldText, 'M07 held TUI turn on the ACP-attached Session')
+    let held
+    const heldDeadline = Date.now() + TIMEOUTS.turn
+    while (Date.now() < heldDeadline) {
+      const heldEvents = readHeldTurnEvents(heldTurnRoot)
+        .filter(event => event.kind === 'long-turn-held' && event.sessionId === sessionB)
+      held = heldEvents.length > heldCountBefore ? heldEvents.at(-1) : undefined
+      if (held !== undefined) break
+      await sleep(100)
+    }
+    assert(held !== undefined,
+      'M07 Host-admitted TUI turn is held: the fixture recorded no NEW long-turn-held event for the Session; '
+      + `before=${String(heldCountBefore)}; now=${String(readHeldTurnEvents(heldTurnRoot)
+        .filter(event => event.kind === 'long-turn-held' && event.sessionId === sessionB).length)}`)
+    assert(typeof held.sessionId === 'string' && Number.isInteger(held.attempt),
+      'M07: the held-turn fixture must name the Session and attempt')
+    connDisconnect.close()
+    await connDisconnect.closed
+    // Host-observable teardown fence: the local close above is only THIS process's
+    // FIN. A fresh resume of the same Session succeeds only after the Host has
+    // released the disconnected View's claim, so the model barrier is released
+    // strictly after the Host-side teardown decision, never before it.
+    const teardownFence = await openAcp('M07 teardown fence')
+    await teardownFence.initialize(1)
+    const fenceDeadline = Date.now() + TIMEOUTS.turn
+    let fenceResult
+    let fenceAttempts = 0
+    while (Date.now() < fenceDeadline) {
+      fenceAttempts += 1
+      fenceResult = await teardownFence.request(2, 'session/resume', { sessionId: sessionB, cwd: acpWorkspaceReal })
+      if (isEmptyAcpResult(fenceResult)) break
+      const fenceCode = fenceResult?.error?.data?.code
+      assert(fenceCode === 'LOCAL_ACP_VIEW_ALREADY_ATTACHED',
+        `M07 teardown fence: the Host answered the resume with ${JSON.stringify(fenceResult?.error ?? fenceResult?.result)} instead of releasing the old View`)
+      await sleep(100)
+    }
+    assert(isEmptyAcpResult(fenceResult),
+      `M07: the Host never released the disconnected View before the barrier release (attempts=${String(fenceAttempts)})`)
+    teardownFence.close()
+    await teardownFence.closed
+    writeFileSync(releaseBarrier, 'release\n', { mode: 0o600 })
+    await waitFor(() => readHeldTurnEvents(heldTurnRoot).some(event =>
+      event.kind === 'long-turn-released' && event.sessionId === held.sessionId && event.attempt === held.attempt),
+    'M07 held TUI turn released after the ACP disconnect', TIMEOUTS.turn)
+    const heldIndex = await waitFor(() => {
+      const events = hostSessionEvents(dshHome, sessionB)
+      if (events === undefined) return undefined
+      const index = events.findIndex(event => event.type === 'user/message' && JSON.stringify(event).includes(heldText))
+      return index < 0 ? undefined : index
+    }, 'M07 held TUI prompt is durable on the official Session', TIMEOUTS.turn)
+    await waitFor(() => {
+      const events = hostSessionEvents(dshHome, sessionB)
+      if (events === undefined) return undefined
+      const rest = events.slice(heldIndex + 1)
+      return rest.some(event => event.type === 'assistant/message' && JSON.stringify(event).includes('long-turn answer'))
+        && rest.some(event => event.type === 'turn/end') ? events : undefined
+    }, 'M07 held TUI turn settles after the ACP disconnect', TIMEOUTS.turn)
+    assert(tmuxSessionExists(tuiB) && tmuxCapture(tuiB, 'M07 TUI frame after the disconnect').includes(heldText),
+      'M07: the TUI must still show its held same-Session work after the ACP View disconnect')
+  })
   sendKeys(tuiB, '/exit', 'M07 exit the Session-B TUI')
   await waitFor(() => (!tmuxSessionExists(tuiB) ? true : undefined), 'M07 Session-B TUI exits', TIMEOUTS.exit)
   const hostAfterPrompt = requireHost('M07 host')
@@ -2076,11 +2164,34 @@ async function runD2AcpScene({ installation, workRoot, report, start, projectA, 
   await peer3.dispose()
   const startAfterStop = daemonStart('M10 cold start after the graceful stop')
   const killedHost = requireHost('M10 SIGKILL host')
+  const killedHostStart = kernelStartTime(killedHost.hostPid)
+  assert(killedHostStart !== undefined, 'M10: the SIGKILL target must expose a kernel start time')
+  const killedHostIdentity = { instanceId: killedHost.instanceId, hostPid: killedHost.hostPid, lstart: killedHostStart }
   assert(startAfterStop.instance === killedHost.instanceId.slice(0, 8), 'M10: the cold start reported a different instance')
   const peer4 = await startPeer('M10 SIGKILL peer')
   await setAcp(peer4, true, 'M10 enable before SIGKILL')
   const beforeKill = await waitEndpoint('M10 enable before SIGKILL')
-  process.kill(killedHost.hostPid, 'SIGKILL')
+  // Negative controls run against the REAL verifier before the destructive
+  // signal: a mismatched registry/PID must leave a live decoy alone, and a
+  // changed kernel start time must leave the real Host alone. Only a fully
+  // verified captured identity reaches process.kill.
+  const decoy = spawn('sleep', ['30'], { stdio: 'ignore' })
+  try {
+    assertThrows(
+      () => verifyCapturedHost(dshHome, workRoot, { ...killedHostIdentity, hostPid: decoy.pid, instanceId: 'not-this-instance' }, 'M10 registry negative control'),
+      'M10 registry negative control',
+    )
+    assert(alive(decoy.pid), 'M10: a mismatched identity must receive zero signals')
+  } finally {
+    try { decoy.kill('SIGTERM') } catch { /* already gone */ }
+  }
+  assertThrows(
+    () => verifyCapturedHost(dshHome, workRoot, { ...killedHostIdentity, lstart: 'a different kernel start time' }, 'M10 start-time negative control'),
+    'M10 start-time negative control',
+  )
+  assert(alive(killedHostIdentity.hostPid), 'M10: a changed kernel start time must receive zero signals')
+  verifyCapturedHost(dshHome, workRoot, killedHostIdentity, 'M10 SIGKILL')
+  process.kill(killedHostIdentity.hostPid, 'SIGKILL')
   await waitFor(() => (!alive(killedHost.hostPid) ? true : undefined),
     'M10 SIGKILLed Host is reaped', TIMEOUTS.process)
   const stale = lstatFacts(endpoint.publicPath)
@@ -2129,7 +2240,7 @@ async function runD2AcpScene({ installation, workRoot, report, start, projectA, 
 
 // ── cleanup ────────────────────────────────────────────────────────────────
 
-async function cleanup({ workRoot, installation, hostPid, report }) {
+async function cleanup({ workRoot, report }) {
   const errors = []
   // 1. The private tmux server (only this run's sessions).
   if (TMUX_SOCKET !== '') {
@@ -2138,27 +2249,24 @@ async function cleanup({ workRoot, installation, hostPid, report }) {
       errors.push(`tmux kill-server exited ${String(kill.status)}`)
     }
   }
-  // 2. Only processes whose command line names THIS work root: the published
-  //    Host first (SIGTERM is its own owner), then any surviving Clients.
-  const owned = ownedProcessRows(workRoot).filter(row => roleOf(row) !== undefined)
-  const targets = [
-    ...(typeof hostPid === 'number' ? [{ pid: hostPid, command: 'published Host' }] : []),
-    ...owned.filter(row => alive(row.pid)).map(row => ({ pid: row.pid, command: row.command })),
-  ]
-  for (const target of targets) {
-    try { process.kill(target.pid, 'SIGTERM') } catch { /* already gone */ }
+  // 2. Only processes whose CURRENT process table row still names THIS work
+  //    root and an owned role. A saved bare pid is never an identity: every
+  //    signal re-reads the table and refuses a recycled or foreign pid.
+  const ownedTargets = () => ownedProcessRows(workRoot).filter(row => roleOf(row) !== undefined)
+  const signalIfStillOwned = (target, signal) => {
+    const row = processTable().find(candidate => candidate.pid === target.pid)
+    if (row === undefined || roleOf(row) === undefined || !row.command.includes(workRoot)) return
+    try { process.kill(target.pid, signal) } catch { /* already gone */ }
   }
+  for (const target of ownedTargets()) signalIfStillOwned(target, 'SIGTERM')
   const deadline = Date.now() + 10_000
   while (Date.now() < deadline) {
-    if (targets.every(target => !alive(target.pid))) break
+    if (ownedTargets().length === 0) break
     await sleep(120)
   }
-  for (const target of targets) {
-    if (!alive(target.pid)) continue
-    try { process.kill(target.pid, 'SIGKILL') } catch { /* gone */ }
-  }
+  for (const target of ownedTargets()) signalIfStillOwned(target, 'SIGKILL')
   await sleep(250)
-  const survivors = targets.filter(target => alive(target.pid))
+  const survivors = ownedTargets()
   if (survivors.length > 0) {
     report.notQuiesced = { survivors: survivors.map(target => target.pid), workRoot }
     errors.push(`NOT_QUIESCED: ${String(survivors.length)} owned process(es) survived cleanup`)
@@ -2230,7 +2338,6 @@ async function main(explicitPath) {
     rows: [],
   }
   let installation
-  let hostPid
   let failures = []
   try {
     installation = createSplitSmokeProfile({
@@ -2243,8 +2350,7 @@ async function main(explicitPath) {
       profileDir: installation.profileDir,
       dshVersion: candidate.targetDshVersion,
     }
-    const scene = await runScene({ installation, workRoot, report })
-    hostPid = scene.hostPid
+    await runScene({ installation, workRoot, report })
     report.status = 'PASS'
   } catch (error) {
     report.status = 'FAIL'
@@ -2252,7 +2358,7 @@ async function main(explicitPath) {
     failures.push(report.error)
   } finally {
     if (installation !== undefined) {
-      const cleanupErrors = await cleanup({ workRoot, installation, hostPid, report })
+      const cleanupErrors = await cleanup({ workRoot, report })
       failures = [...failures, ...cleanupErrors]
       report.cleanup = cleanupErrors.length === 0 ? 'QUIESCED' : 'FAILED'
     } else if (!KEEP) {
