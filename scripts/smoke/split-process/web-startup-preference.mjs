@@ -146,6 +146,22 @@ export async function runWebStartupPreference(context) {
     return peer.waitFor(entry => entry.op === 'web-access' && entry.requestId === requestId,
       `${label} web-access`, 300_000)
   }
+  /**
+   * PR2: a VISIBLE transcript row is not the acceptance settlement. The
+   * Composer stays frozen with the submitted draft until the Host acceptance
+   * releases it, and a gesture sent inside that window is consumed by the
+   * hold. Wait for the REAL accepted clear (the draft leaving the Composer)
+   * before the next TUI command, bounded so a never-released hold fails.
+   */
+  const waitForComposerRelease = async (tui, text, label, timeoutMs = 60_000) => {
+    const deadline = Date.now() + timeoutMs
+    while (Date.now() < deadline) {
+      const composer = await tui.composerText()
+      if (composer !== undefined && !composer.includes(text)) return
+      await sleep(50)
+    }
+    throw new SplitSmokeAssertionError(`${label}: the Composer never released the submitted draft`)
+  }
   const assertToggle = (record, expected, label) => {
     assert(record.ok === true, `${label}: the private Web access call failed: ${JSON.stringify(record.errorCode ?? null)}`)
     assert(record.status?.state === expected,
@@ -219,6 +235,9 @@ export async function runWebStartupPreference(context) {
     // The TUI keeps working on the serving Host.
     tui.send('pc-06 tui works\r')
     await tui.waitForScreen('pc-06 tui works', 'PC-06 TUI prompt')
+    // The next gesture is a second `/web`; it must not land inside the
+    // submission hold that is still keeping this draft in the Composer.
+    await waitForComposerRelease(tui, 'pc-06 tui works', 'PC-06 TUI prompt accepted')
     trace('t74-web-tui-enable', {
       index: serving.index,
       graphEntries: serving.graphEntries,
