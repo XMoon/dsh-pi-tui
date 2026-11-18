@@ -1073,6 +1073,36 @@ test('the authenticated ACP status observation accepts only this Host instance a
   }
 })
 
+test('a status body that fails after the headers is an unprovable undefined, never a rejection', async t => {
+  const value = fixture(t)
+  const scope = scopeFor(value)
+  const record = linuxRecordFor(scope)
+  const server = createHttpServer((_request, response) => {
+    // Valid 200 + the exact media/cache headers, then a truncated body and a
+    // destroyed socket: the read fails mid-stream AFTER the headers.
+    response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+    response.write('{"schema":1,"instanceId":"')
+    response.destroy()
+  })
+  try {
+    await new Promise<void>((resolve, rejectListen) => {
+      server.once('error', rejectListen)
+      server.listen(0, '127.0.0.1', () => resolve())
+    })
+    const origin = `http://127.0.0.1:${String((server.address() as AddressInfo).port)}`
+    const hostRecord = { ...record, origin }
+    const verified = { record: hostRecord, cookie: 'dsh_session=fixture-cookie', identity: hostRecord }
+    // The observer MUST resolve `undefined` (the CLI's `acp=unavailable`
+    // classification) instead of rejecting into the management result and
+    // replacing the original status/stderr/exit code.
+    await assert.doesNotReject(observeAuthenticatedLocalAcpStatus(verified))
+    assert.equal(await observeAuthenticatedLocalAcpStatus(verified), undefined)
+  } finally {
+    await new Promise<void>(resolve => server.close(() => resolve()))
+    cleanup(value.root)
+  }
+})
+
 test('expected-instance handoff attaches only the exact authenticated Host and never spawns a Host', async t => {
   const value = fixture(t)
   let identity: LocalInstanceRecord | undefined

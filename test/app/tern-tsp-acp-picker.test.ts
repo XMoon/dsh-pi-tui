@@ -315,3 +315,46 @@ test('a settled action result is painted INSIDE the native picker', async t => {
     && items(h.pane).every(row => row.id !== 'acp-notice'))
   assert.equal(items(h.pane).some(row => row.id === 'acp-notice'), false)
 })
+
+/** One minimal request spy for an interleaving open. */
+function interleaveRequest(actions: Array<AcpAccessActionId>, status: AcpAccessStatus): AcpAccessRequest {
+  return {
+    isCurrent: () => true,
+    readStatus: async (): Promise<AcpAccessReadOutcome> => ({ kind: 'status', status }),
+    act: (action) => { actions.push(action) },
+    runOwned: (label, task, runOptions) =>
+      runOwned(label, task, { ...runOptions, diag: silentDiag }),
+  }
+}
+
+test('/acp and /web are exclusive siblings: each open retires the other picker', async t => {
+  const h = await mounted(t)
+  assert.ok(h.renderer.webPresentation, 'the pane exposes the native /web presenter too')
+  const webActions: Array<AcpAccessActionId> = []
+  const webHandle = h.renderer.webPresentation.open(interleaveRequest(webActions, { state: 'enabled' }))
+  await waitUntil('web picker mounted', () => pickerNode(h.pane, 'web-') !== undefined)
+  assert.equal(webHandle.isDisposed(), false)
+  const acpActions: Array<AcpAccessActionId> = []
+  const acpHandle = h.renderer.acpPresentation!.open(interleaveRequest(acpActions, { state: 'enabled' }))
+  await waitUntil('acp picker mounted', () => pickerNode(h.pane, A) !== undefined)
+  assert.equal(webHandle.isDisposed(), true, 'opening /acp retired the open /web picker')
+  assert.equal(pickerNode(h.pane, 'web-'), undefined, 'no web picker frame survives')
+  // Capture the /acp picker's REAL frame ids: the retired panel's stale event
+  // must be refused by its admission even when replayed at the exact node.
+  const stalePickerId = picker(h.pane)!.id
+  const staleActionId = actionBase(h.pane, 'disable')
+  assert.ok(staleActionId !== undefined)
+  // And back: /web retires /acp the same way.
+  const webHandle2 = h.renderer.webPresentation.open(interleaveRequest(webActions, { state: 'enabled' }))
+  await waitUntil('web picker remounted', () => pickerNode(h.pane, 'web-') !== undefined)
+  assert.equal(acpHandle.isDisposed(), true, 'opening /web retired the open /acp picker')
+  assert.equal(pickerNode(h.pane, A), undefined)
+  // The retired /acp panel owns no event targets: its own stale action, sent
+  // against the exact node id it once painted, never reaches a writer.
+  sendAction(h.pane, staleActionId, undefined, stalePickerId)
+  // reason: a REFUSED event emits no frame, so this bounded window is the only
+  // observation that the retired panel produced no command intent.
+  await settle()
+  assert.deepEqual(acpActions, [], 'the retired /acp picker never writes')
+  assert.deepEqual(webActions, [], 'the retired /acp picker cannot drive /web either')
+})

@@ -148,8 +148,19 @@ export async function observeAuthenticatedLocalAcpStatus(
     await discard(response)
     return undefined
   }
-  const text = await readBoundedBody(response)
-  if (text === undefined) return undefined
+  // The response has been accepted; from here the body phase can still fail
+  // (a mid-stream socket error, the timeout firing during the read, an
+  // oversized body whose cancel rejects). Every such failure is the same
+  // unprovable `undefined` — it must NEVER reject into the caller's
+  // management result and replace the original status/stderr/exit code.
+  let text: string
+  try {
+    const body = await readBoundedBody(response)
+    if (body === undefined) return undefined
+    text = body
+  } catch {
+    return undefined
+  }
   let value: unknown
   try {
     value = JSON.parse(text) as unknown

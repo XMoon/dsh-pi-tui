@@ -1820,11 +1820,12 @@ test('the built-in command decomposition preserves the exact primary set and reg
   const ALIASES = new Set(['quit', 'status', 'statusline', 'resume', 'subagents', 'image', 'rename'])
   // The built-in primaries, in their frozen registration order. `/web` is the
   // M5-W PR-C Split-Client control entry and registers immediately after
-  // Settings.
+  // Settings; `/acp` is the PO-5E Split-Client ACP quick control and
+  // registers immediately after `/web`.
   assert.deepEqual(
     services.registered.filter(name => !ALIASES.has(name)),
     [
-      'exit', 'reload-client', 'settings', 'web', 'footer', 'display', 'focus', 'sessions', 'skill', 'reload', 'model',
+      'exit', 'reload-client', 'settings', 'web', 'acp', 'footer', 'display', 'focus', 'sessions', 'skill', 'reload', 'model',
       'new', 'tasks', 'queue', 'schedule', 'plugins', 'yolo', 'preset', 'search', 'title', 'copy', 'attach', 'view-image',
       'export', 'transcript', 'deliverables', 'fork', 'rewind', 'login', 'logout', 'help', 'keybindings',
     ],
@@ -1835,6 +1836,7 @@ test('the built-in command decomposition preserves the exact primary set and reg
     'reload-client',
     'settings', 'status',
     'web',
+    'acp',
     'footer', 'statusline',
     'display', 'focus',
     'sessions', 'resume',

@@ -430,8 +430,48 @@ test('the PiTui menu is pointer-reachable on the fullscreen alt-screen surface',
   assert.deepEqual(h.actions, ['enable'], 'closing the menu never undoes an accepted mutation')
 })
 
-test('the real /acp command reopens after Esc and a second open re-reads once', async t => {
+test('an external overlay teardown while the read is pending retires the menu and never reopens', async t => {
   const vt = new VirtualTerminal(120, 40)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  lifecycle.started.add(app)
+  t.after(() => { lifecycle.disposeAll() })
+  let releaseRead: (() => void) | undefined
+  const gated = new Promise<AcpAccessReadOutcome>(resolveGate => {
+    releaseRead = () => resolveGate({ kind: 'status', status: { state: 'enabled' } })
+  })
+  const presentation = pituiAcpAccessPresentation(app)
+  const handle = presentation.open({
+    isCurrent: () => true,
+    readStatus: () => gated,
+    act: () => assert.fail('a torn-down menu must never reach a write'),
+    runOwned: (label, task, options) => {
+      void label
+      void Promise.resolve().then(() => task()).then(
+        value => options.onResult?.(value),
+        error => options.onError?.(error),
+      )
+    },
+  })
+  await settleMenu(vt)
+  assert.match(view(vt), /Loading ACP status/u, 'the loading projection is mounted while the read runs')
+  assert.equal(app.overlayGraphState().handles, 1)
+  // A non-Esc teardown path (the fullscreen screen swap) hides the overlay
+  // while the read is still in flight.
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  assert.equal(app.overlayGraphState().handles, 0, 'the swap removed the overlay')
+  assert.equal(handle.isDisposed(), true, 'the presenter learned the surface is gone')
+  // The read settles AFTER the teardown: repainting must NOT reopen an overlay.
+  releaseRead!()
+  await settleMenu(vt)
+  await vt.waitForRender()
+  assert.equal(app.overlayGraphState().handles, 0, 'a late settled read must not reopen the overlay')
+  assert.doesNotMatch(view(vt), /Status: enabled/u)
+  assert.equal(handle.isDisposed(), true)
+})
+
+test('the real /acp command reopens after Esc and a second open re-reads once', async t => {  const vt = new VirtualTerminal(120, 40)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
   lifecycle.started.add(app)

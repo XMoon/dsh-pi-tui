@@ -148,6 +148,13 @@ export function pituiAcpAccessPresentation(app: TuiApp): AcpAccessPresentation {
     open: (request: AcpAccessRequest) => {
       let disposed = false
       let closer: (() => void) | undefined
+      /**
+       * The overlay generation the CURRENT projection belongs to. Every `show`
+       * bumps it; an overlay's teardown notification belongs to the projection
+       * that was mounted at its epoch, so a deliberate replace is told apart
+       * from an exit.
+       */
+      let epoch = 0
       /** Close the mounted overlay (the caller then opens the next one). */
       const retire = (): void => {
         const close = closer
@@ -157,16 +164,30 @@ export function pituiAcpAccessPresentation(app: TuiApp): AcpAccessPresentation {
       /** Mount one projection after retiring the previous one. */
       const show = (rows: SettingItem[], act: (value: string) => void): void => {
         if (disposed) return
+        const mine = ++epoch
         retire()
-        closer = app.openSettings(
+        const mounted = app.openSettings(
           rows,
           (_id, value) => { act(value) },
           () => {
             // Esc / ctrl+c: the menu is gone and this presentation is retired.
+            if (closer === mounted) closer = undefined
+            disposed = true
+          },
+          () => {
+            // The teardown hook fires EXACTLY ONCE for every hide path. A
+            // replaced older projection was retired by THIS presenter's own
+            // `show` (its epoch moved on): that is not an exit. Any hide of
+            // the CURRENT projection that Esc did not cause — a fullscreen
+            // screen swap, an owning teardown — has removed the surface, so
+            // the presentation is retired too and a late read/action
+            // settlement can never reopen an overlay.
+            if (mine !== epoch) return
             closer = undefined
             disposed = true
           },
         )
+        closer = mounted
       }
       let current: AcpAccessReadOutcome | undefined
       const menu = (outcome: AcpAccessReadOutcome, notice?: AcpAccessNotice): void => {
