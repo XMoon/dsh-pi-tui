@@ -22,7 +22,11 @@
  *   P01/P02/P03/P04/P05/P06/P07/P09 the public macOS daemon management
  *       lifecycle: read-only no-Host status/logs, warm reuse, verified stop,
  *       cold start, admin-seat race, restart into a new instance and the
- *       unsupported (no launchd) install/uninstall verbs.
+ *       no-plist default supervision fact.
+ *   D4L (L01-L12) the explicit macOS launchd LaunchAgent: install identity and
+ *       idempotence, negative file/job cases, native bootstrap/kickstart/bootout
+ *       startup/stop/restart, logs, uninstall and the independent daemon
+ *       regression, all on the SAME packed candidate and isolated profile.
  *   D2ACP (M01-M10) the macOS local ACP v1 endpoint on the SAME candidate: the
  *       short profile-scoped `/private/tmp` UDS, real bind/link/connect,
  *       shared-Session resume/new/close/prompt through the official Host
@@ -71,6 +75,7 @@ import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { inspectSplitCandidate, createSplitSmokeProfile } from '../lib/split-smoke-profile.mjs'
+import { cleanupTrackedLaunchdResource } from '../lib/launchd-smoke-cleanup.mjs'
 import { SplitSmokeAssertionError } from '../lib/split-smoke-diagnostics.mjs'
 import { hostSessionEvents, hostSessionLogCount, hostSessionHeader, waitForHostSessionHeader } from '../lib/split-smoke-sessions.mjs'
 
@@ -281,6 +286,67 @@ function daemonInvocation(installation, args) {
 
 function daemonEnvironment(installation, extraEnv = {}) {
   return { ...installation.env, NO_COLOR: '1', ...extraEnv }
+}
+
+/** The product's scope id / launchd label derivation for one canonical profile. */
+const LAUNCHD_LABEL_PREFIX = 'com.xmoon.dsh-pi-tui'
+
+function launchdScopeIdOf(profileDir) {
+  const uid = process.getuid?.()
+  assert(uid !== undefined, 'the launchd scope requires a local user identity')
+  return createHash('sha256')
+    .update(`dsh-pi-tui/local-scope/1\0${String(uid)}\0${realpathSync(profileDir)}`)
+    .digest('hex')
+}
+
+function launchdLabelOf(profileDir) {
+  return `${LAUNCHD_LABEL_PREFIX}.${launchdScopeIdOf(profileDir).slice(0, 40)}`
+}
+
+function launchdPlistPathOf(profileDir) {
+  return join(homedir(), 'Library', 'LaunchAgents', `${launchdLabelOf(profileDir)}.plist`)
+}
+
+/** One fixed `/bin/launchctl` invocation (argument array, never a shell). */
+function runLaunchctlCommand(args) {
+  return spawnSync('/bin/launchctl', args, { encoding: 'utf8', timeout: TIMEOUTS.daemon })
+}
+
+function launchctlJobPrint(label) {
+  return runLaunchctlCommand(['print', `gui/${String(process.getuid())}/${label}`])
+}
+
+function OCT(mode) {
+  return (mode & 0o777).toString(8).padStart(3, '0')
+}
+
+function parseLaunchctlJobPid(stdout) {
+  const match = /^\tpid = (\d+)$/mu.exec(stdout)
+  return match === null ? undefined : Number(match[1])
+}
+
+/** A foreign same-Label job used only to prove fail-closed ownership checks.
+ *  It carries the standard `launchctl print` fields (working directory, two log
+ *  sinks and an environment block) so the product's narrow parser can attribute
+ *  it as a FOREIGN SOURCE rather than an unparseable manager error. */
+function foreignLaunchdPlist(label, logDir) {
+  return [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">',
+    '<plist version="1.0">',
+    '<dict>',
+    `  <key>Label</key><string>${label}</string>`,
+    '  <key>ProgramArguments</key><array><string>/bin/sleep</string><string>300</string></array>',
+    '  <key>WorkingDirectory</key><string>/tmp</string>',
+    `  <key>StandardOutPath</key><string>${join(logDir, 'foreign.stdout.log')}</string>`,
+    `  <key>StandardErrorPath</key><string>${join(logDir, 'foreign.stderr.log')}</string>`,
+    '  <key>EnvironmentVariables</key><dict><key>DSH_FOREIGN_PROBE</key><string>1</string></dict>',
+    '  <key>RunAtLoad</key><false/>',
+    '  <key>KeepAlive</key><false/>',
+    '</dict>',
+    '</plist>',
+    '',
+  ].join('\n')
 }
 
 /** Run one management command to completion and keep its real exit/stdout/stderr.
@@ -636,19 +702,19 @@ async function runScene({ installation, workRoot, report }) {
   const noLogs = runDaemonCommand(installation, ['logs', '--lines', '20'])
   assert(noLogs.status === 4 && /LOG_SOURCE_UNAVAILABLE/u.test(noLogs.stderr),
     `P06-NOLOG: missing host.log must be LOG_SOURCE_UNAVAILABLE/4, saw ${String(noLogs.status)}: ${noLogs.stderr.slice(-800)}`)
-  for (const verb of ['install', 'uninstall']) {
-    const unsupported = runDaemonCommand(installation, [verb])
-    assert(unsupported.status === 3 && /UNSUPPORTED_PLATFORM/u.test(unsupported.stderr),
-      `P07: daemon ${verb} must be UNSUPPORTED_PLATFORM/3 on macOS, saw ${String(unsupported.status)}: ${unsupported.stderr.slice(-800)}`)
-  }
-  assert(scopeDir(dshHome) === undefined, 'P07: unsupported unit verbs must not create the profile run scope')
+  // No service definition exists yet: the no-plist status/logs above must not
+  // create the profile scope or an account-home seat. D4L performs the explicit
+  // install later against this same profile.
+  assert(!existsSync(launchdPlistPathOf(profileDir)),
+    'P07: no launchd plist may exist before the explicit D4L install')
+  assert(scopeDir(dshHome) === undefined, 'P07: read-only commands must not create the profile run scope')
   const accountSeatsAfter = existsSync(accountRunRoot) ? readdirSync(accountRunRoot).sort() : []
   assert(accountSeatsAfter.join('\0') === accountSeatsBefore.join('\0'),
-    `P01/P07: read-only or unsupported commands created an account-home seat directory: ${JSON.stringify({ before: accountSeatsBefore, after: accountSeatsAfter })}`)
+    `P01/P07: read-only commands created an account-home seat directory: ${JSON.stringify({ before: accountSeatsBefore, after: accountSeatsAfter })}`)
   report.rows.push(
-    { id: 'P01', status: 'PASS', noHost, readOnlyScope: true, managerQueries: 0 },
+    { id: 'P01', status: 'PASS', noHost, readOnlyScope: true, managerQueries: 0, launchdQuery: 'structurally proven no-launchctl-by-no-plist in daemon-control.test.ts' },
     { id: 'P06-NOLOG', status: 'PASS', exitCode: noLogs.status, code: 'LOG_SOURCE_UNAVAILABLE' },
-    { id: 'P07-NOHOST', status: 'PASS', verbs: ['install', 'uninstall'], exitCode: 3, launchdPlist: false },
+    { id: 'P07-NOHOST', status: 'PASS', unit: noHost.unit, manager: noHost.manager, launchdPlist: false },
   )
 
   // ── A01/A02: two SIMULTANEOUS cold public daemon Clients ─────────────────
@@ -1183,21 +1249,18 @@ async function runScene({ installation, workRoot, report }) {
   assert(alive(restartRegistry.record.hostPid), 'P04: the restarted Host PID is not alive')
   report.rows.push({ id: 'P04', status: 'PASS', oldInstance: raceRegistry.record.instanceId, newInstance: restartRegistry.record.instanceId })
 
-  // P07: unit verbs stay unsupported on a LIVE profile and never disturb it.
-  for (const verb of ['install', 'uninstall']) {
-    const unsupported = runDaemonCommand(installation, [verb])
-    assert(unsupported.status === 3 && /UNSUPPORTED_PLATFORM/u.test(unsupported.stderr),
-      `P07: daemon ${verb} beside a live Host must be UNSUPPORTED_PLATFORM/3, saw ${String(unsupported.status)}`)
-  }
-  assert(alive(restartRegistry.record.hostPid), 'P07: an unsupported unit verb disturbed the live Host')
+  // P07: the pre-D4L management flow never creates a launchd plist and never
+  // disturbs the live independent Host. The explicit install/uninstall verbs are
+  // exercised natively by the D4L stage below.
+  assert(alive(restartRegistry.record.hostPid), 'P07: the management flow disturbed the live Host')
   assert(readRegistry(dshHome)?.record.instanceId === restartRegistry.record.instanceId,
-    'P07: an unsupported unit verb changed the live Host instance')
-  const isolatedLaunchAgents = join(installation.home, 'Library', 'LaunchAgents')
-  assert(!existsSync(isolatedLaunchAgents) || readdirSync(isolatedLaunchAgents).length === 0,
-    'P07: a macOS unit verb wrote a launchd plist')
-  report.rows.push({ id: 'P07-LIVE', status: 'PASS', exitCode: 3, hostUnchanged: true, launchdPlists: 0 })
+    'P07: the management flow changed the live Host instance')
+  assert(!existsSync(launchdPlistPathOf(profileDir)),
+    'P07: the no-install management flow wrote a launchd plist')
+  report.rows.push({ id: 'P07-LIVE', status: 'PASS', hostUnchanged: true, launchdPlists: 0 })
 
   const d2acp = await runD2AcpScene({ installation, workRoot, report, start, projectA, projectB })
+  await runD4LaunchdScene({ installation, workRoot, report, start, projectA, projectB })
   return { hostPid: d2acp.hostPid }
 }
 
@@ -1711,7 +1774,7 @@ async function runD2AcpScene({ installation, workRoot, report, start, projectA, 
     inherited,
     stopIdentityGone: true,
     unknownIdentitySignal: 'daemon-control.test.ts (no SIGKILL on unknown identity)',
-    unitVerbs: 'UNSUPPORTED_PLATFORM/3, no plist',
+    unitVerbs: 'supported launchd install/uninstall; natively qualified by D4L',
   })
 
   // ── M03: default Off, no listener, Direct remains unavailable ────────────
@@ -2253,6 +2316,410 @@ async function runD2AcpScene({ installation, workRoot, report, start, projectA, 
   return { hostPid: requireHost('D2ACP final Host').hostPid }
 }
 
+
+// ── D4L: explicit macOS launchd LaunchAgent (L01-L12) ──────────────────────
+//
+// This stage runs on the SAME packed candidate, isolated profile, tmux server
+// and live independent Host left by D2ACP. It performs the real native
+// install/status/stop/start/restart/logs/uninstall lifecycle in the user
+// `gui/<uid>` domain, and cleans only its own profile-scoped label.
+async function runD4LaunchdScene({ installation, workRoot, report, start, projectA, projectB }) {
+  const { dshHome, profileDir, profilePackage } = installation
+  const uid = process.getuid?.()
+  assert(uid !== undefined, 'D4L: the launchd lifecycle requires a local user identity')
+  const entry = join(profilePackage, 'dist', 'local-host.mjs')
+  const label = launchdLabelOf(profileDir)
+  let plistPath = launchdPlistPathOf(profileDir)
+  const scopeDirPath = join(realpathSync(dshHome), 'run', 'dsh-pi-tui', launchdScopeIdOf(profileDir))
+  report.d4lLabels = report.d4lLabels ?? []
+  const accountSeatRoot = join(homedir(), '.dsh-pi-tui', 'run')
+  report.d4lSeatDirs = [join(accountSeatRoot, launchdScopeIdOf(profileDir))]
+  const track = (nextLabel, nextPath) => {
+    report.d4lLabels.push({ label: nextLabel, plistPath: nextPath })
+    report.d4l = { label: nextLabel, plistPath: nextPath }
+  }
+  const recordPlistIdentity = (targetLabel, targetPath) => {
+    const tracked = report.d4lLabels.find(item => item.label === targetLabel && item.plistPath === targetPath)
+    if (tracked === undefined) return
+    const info = lstatSync(targetPath)
+    assert(info.isFile() && !info.isSymbolicLink(), `D4L: ${targetLabel} must be a regular plist for cleanup ownership`)
+    tracked.identity = {
+      dev: String(info.dev),
+      ino: String(info.ino),
+      sha256: createHash('sha256').update(readFileSync(targetPath)).digest('hex'),
+    }
+  }
+  track(label, plistPath)
+  const daemon = (args, extraEnv = {}) => runDaemonCommand(installation, args, extraEnv)
+  const daemonOk = (args, name) => {
+    const result = daemon(args)
+    assert(result.status === 0, `D4L ${name}: daemon ${args.join(' ')} exited ${String(result.status)}: ${result.stderr.slice(-900)}`)
+    return { result, fields: statusFields(result.stdout) }
+  }
+  const requireLiveHost = name => {
+    const registry = readRegistry(dshHome)
+    assert(registry !== undefined && alive(registry.record.hostPid), `D4L ${name}: no live Host registry`)
+    return registry
+  }
+  const assertNoLoadedJob = (targetLabel, name) => {
+    const print = launchctlJobPrint(targetLabel)
+    assert(print.status === 113, `D4L ${name}: the job must not be loaded, saw exit ${String(print.status)}`)
+  }
+
+  // ── L01: no plist = the independent Host path, no launchd facts ──────────
+  const initialHost = requireLiveHost('L01')
+  assert(!existsSync(plistPath), 'L01: the isolated profile must start without a launchd plist')
+  const l01Status = daemonOk(['status'], 'L01 status')
+  assert(l01Status.fields.manager === 'process' && l01Status.fields.unit === 'none'
+    && l01Status.fields['unit-state'] === 'not-found' && l01Status.fields.host === 'ready',
+  `L01: unexpected no-plist status ${JSON.stringify(l01Status.fields)}`)
+  const l01Logs = daemon(['logs', '--lines', '20'])
+  assert(l01Logs.status === 0 && !/launchd (stdout|stderr)/u.test(l01Logs.stdout),
+    'L01: the no-plist log source must stay host.log')
+  const l01Print = launchctlJobPrint(label)
+  assert(l01Print.status === 113, 'L01: no launchd job may be loaded before install')
+  report.rows.push({ id: 'L01', status: 'PASS', manager: l01Status.fields.manager, launchdJob: false, hostPid: initialHost.record.hostPid,
+    noPlistLaunchctl: 'structurally proven in daemon-control.test.ts (no plist => no launchctl call)' })
+
+  // ── L02: explicit install beside a LIVE independent Host ─────────────────
+  const l02 = daemonOk(['install'], 'L02 install')
+  const installedLabel = l02.fields.unit
+  assert(installedLabel === label, `L02: install reported ${String(installedLabel)}, expected ${label}`)
+  assert(existsSync(plistPath), 'L02: install must write the exact account-home LaunchAgent')
+  const plistStat = lstatSync(plistPath)
+  assert(plistStat.isFile() && !plistStat.isSymbolicLink() && (plistStat.mode & 0o777) === 0o600,
+    `L02: the plist must be a regular 0600 file, saw mode ${OCT(plistStat.mode)}`)
+  const plistText = readFileSync(plistPath, 'utf8')
+  recordPlistIdentity(label, plistPath)
+  const lint = spawnSync('plutil', ['-lint', plistPath], { encoding: 'utf8', timeout: 15_000 })
+  assert(lint.status === 0, `L02: plutil -lint rejected the plist: ${lint.stderr.slice(-500)}`)
+  assert(plistText.includes('<key>RunAtLoad</key>\n  <false/>') && plistText.includes('<key>KeepAlive</key>\n  <false/>'),
+    'L02: the installed job must not start at login or auto-restart')
+  assert(plistText.includes('<integer>63</integer>'), 'L02: the installed job must carry Umask=0077')
+  assert(plistText.includes('/dist/local-host.mjs'), 'L02: the job must run the installed foreground Host entry')
+  const plistEntry = /<key>ProgramArguments<\/key>\s*<array>\s*<string>[^<]+<\/string>\s*<string>([^<]+)<\/string>/u.exec(plistText)
+  assert(plistEntry !== null && existsSync(plistEntry[1]) && plistEntry[1].endsWith('/dist/local-host.mjs'),
+    'L02: ProgramArguments must name an existing installed dist/local-host.mjs')
+  assert(!/daemonize|--daemon|<string>\/bin\/sh<\/string>/u.test(plistText), 'L02: the job must not wrap the Host in a shell or daemonize flag')
+  assert(plistText.includes(`<string>${realpathSync(profileDir)}</string>`), 'L02: WorkingDirectory must be the canonical profile')
+  assert(plistText.includes('<key>X-DshPiTuiOwner</key>\n  <string>local-host-launchd-v1</string>'), 'L02: missing owner metadata')
+  assert(plistText.includes(`<key>X-DshPiTuiScopeId</key>\n  <string>${launchdScopeIdOf(profileDir)}</string>`), 'L02: missing scope metadata')
+  const envBlock = plistText.slice(plistText.indexOf('<key>EnvironmentVariables</key>'), plistText.indexOf('\n  </dict>', plistText.indexOf('<key>EnvironmentVariables</key>')))
+  assert((envBlock.match(/^    <key>/gmu) ?? []).length === 3, 'L02: the LaunchAgent environment must carry exactly the three official anchors')
+  assert(envBlock.includes('<key>DSH_HOME</key>') && envBlock.includes(`<string>${realpathSync(dshHome)}</string>`),
+    'L02: DSH_HOME must be the canonical isolated official home')
+  assertNoLoadedJob(label, 'L02 install')
+  const l02Host = requireLiveHost('L02 host unchanged')
+  assert(l02Host.record.instanceId === initialHost.record.instanceId && l02Host.record.hostPid === initialHost.record.hostPid,
+    'L02: install must not migrate, restart or kill the running independent Host')
+  const l02Status = daemonOk(['status'], 'L02 status')
+  assert(l02Status.fields.unit === label && l02Status.fields['unit-state'] === 'not-found'
+    && l02Status.fields.manager === 'process' && l02Status.fields.host === 'ready',
+  `L02: unexpected installed status ${JSON.stringify(l02Status.fields)}`)
+  const l02Logs = daemon(['logs', '--lines', '20'])
+  assert(l02Logs.status === 0 && !/launchd (stdout|stderr)/u.test(l02Logs.stdout),
+    'L02: an installed but unloaded job must not replace the independent host.log source')
+  report.rows.push({ id: 'L02', status: 'PASS', label, plistMode: OCT(plistStat.mode), plutil: 'PASS', bootstrap: false,
+    hostUnchanged: true, hostPid: l02Host.record.hostPid, envKeys: 3 })
+
+  // ── L02 negative: user edit, other build, symlink, foreign loaded job ────
+  const userEdited = `${plistText}\n<!-- d4l user runtime edit -->\n`
+  writeFileSync(plistPath, userEdited, { mode: 0o600 })
+  const reinstall = daemon(['install'])
+  assert(reinstall.status === 0 && readFileSync(plistPath, 'utf8') === userEdited,
+    'L02-NEG: a repeat install must succeed and preserve user runtime content')
+  const otherBuild = plistText.replace(/(<key>X-DshPiTuiInstallBuild<\/key>\n  <string>)[0-9a-f]{64}/u, `$1${'e'.repeat(64)}`)
+  assert(otherBuild !== plistText && otherBuild.includes('e'.repeat(64)), 'L02-NEG: could not build the other-build plist fixture')
+  writeFileSync(plistPath, otherBuild, { mode: 0o600 })
+  const otherBuildInstall = daemon(['install'])
+  assert(otherBuildInstall.status === 3 && /IDENTITY_OR_OWNERSHIP_REFUSED/u.test(otherBuildInstall.stderr),
+    `L02-NEG other build: expected exit 3, saw ${String(otherBuildInstall.status)}: ${otherBuildInstall.stderr.slice(-500)}`)
+  assert(readFileSync(plistPath, 'utf8') === otherBuild, 'L02-NEG: an other-build plist must never be overwritten')
+  const symlinkTarget = join(workRoot, 'd4l-symlink-target.plist')
+  writeFileSync(symlinkTarget, plistText, { mode: 0o600 })
+  unlinkSync(plistPath)
+  symlinkSync(symlinkTarget, plistPath)
+  const symlinkInstall = daemon(['install'])
+  assert(symlinkInstall.status === 3 && lstatSync(plistPath).isSymbolicLink(),
+    'L02-NEG symlink: install must refuse and preserve the symlink')
+  unlinkSync(plistPath)
+  writeFileSync(plistPath, plistText, { mode: 0o600 })
+  recordPlistIdentity(label, plistPath)
+  const foreignLogDir = join(workRoot, 'd4l-foreign-logs')
+  mkdirSync(foreignLogDir, { recursive: true, mode: 0o700 })
+  const foreignPlist = join(workRoot, 'd4l-foreign.plist')
+  writeFileSync(foreignPlist, foreignLaunchdPlist(label, foreignLogDir), { mode: 0o600 })
+  const foreignBootstrap = runLaunchctlCommand(['bootstrap', `gui/${String(uid)}`, foreignPlist])
+  assert(foreignBootstrap.status === 0, `L02-NEG foreign job: bootstrap exited ${String(foreignBootstrap.status)}: ${foreignBootstrap.stderr.slice(-500)}`)
+  const foreignPrint = launchctlJobPrint(label)
+  assert(foreignPrint.status === 0 && foreignPrint.stdout.includes(`path = ${realpathSync(foreignPlist)}`),
+    'L02-NEG foreign job: the same-label job must be loaded from the foreign file')
+  const foreignInstall = daemon(['install'])
+  assert(foreignInstall.status === 3 && /IDENTITY_OR_OWNERSHIP_REFUSED/u.test(foreignInstall.stderr),
+    `L02-NEG foreign job: expected exit 3, saw ${String(foreignInstall.status)}: ${foreignInstall.stderr.slice(-500)}`)
+  assert(readFileSync(plistPath, 'utf8') === plistText, 'L02-NEG foreign job: the owned plist must not be rewritten')
+  runLaunchctlCommand(['bootout', `gui/${String(uid)}/${label}`])
+  report.rows.push({ id: 'L02-NEG', status: 'PASS', userEditPreserved: true, otherBuildRefused: true, symlinkRefused: true, foreignJobRefused: true })
+
+  // ── L07 (independent): uninstall removes only the plist ─────────────────
+  const l07a = daemonOk(['uninstall'], 'L07 independent uninstall')
+  assert(!existsSync(plistPath), 'L07 independent: uninstall must remove the owned plist')
+  const l07aHost = requireLiveHost('L07 independent host unchanged')
+  assert(l07aHost.record.instanceId === initialHost.record.instanceId, 'L07 independent: uninstall must not stop or migrate the Host')
+  assert(l07a.fields.host === 'ready', 'L07 independent: status must still report the untouched Host')
+  const l07aAgain = daemonOk(['uninstall'], 'L07 independent idempotent')
+  assert(existsSync(plistPath) === false && /^unit=none$/mu.test(l07aAgain.result.stdout),
+    'L07 independent: a repeat uninstall must be an idempotent no-plist success')
+  report.rows.push({ id: 'L07-INDEPENDENT', status: 'PASS', plistRemoved: true, hostUnchanged: true, idempotent: true })
+
+  // Reinstall for the ownership/start/stop lifecycle against the still-live
+  // independent Host.
+  const l03Install = daemonOk(['install'], 'L03 install')
+  assert(l03Install.fields.unit === label && existsSync(plistPath), 'L03: the reinstall did not create the owned plist')
+  recordPlistIdentity(label, plistPath)
+
+  // ── L04 negative: a loaded foreign same-Label job + kickstart ────────────
+  const foreignBootstrap2 = runLaunchctlCommand(['bootstrap', `gui/${String(uid)}`, foreignPlist])
+  assert(foreignBootstrap2.status === 0, 'L04-NEG: the foreign job bootstrap failed')
+  const foreignKick = runLaunchctlCommand(['kickstart', `gui/${String(uid)}/${label}`])
+  assert(foreignKick.status === 0, 'L04-NEG: the foreign job kickstart failed')
+  const foreignPid = parseLaunchctlJobPid(launchctlJobPrint(label).stdout)
+  assert(foreignPid !== undefined && foreignPid !== initialHost.record.hostPid, 'L04-NEG: the foreign job PID must differ from the authenticated Host')
+  const l04Mismatch = daemon(['status'])
+  const l04MismatchFields = statusFields(l04Mismatch.stdout)
+  assert(l04Mismatch.status === 3 && /IDENTITY_OR_OWNERSHIP_REFUSED/u.test(l04Mismatch.stderr)
+    && l04MismatchFields.manager === 'unmanaged' && l04MismatchFields.host === 'ready',
+  `L04-NEG: expected a pid-mismatch refusal with host=ready/manager=process, saw ${String(l04Mismatch.status)} ${JSON.stringify(l04MismatchFields)}: ${l04Mismatch.stderr.slice(-500)}`)
+  runLaunchctlCommand(['bootout', `gui/${String(uid)}/${label}`])
+  report.rows.push({ id: 'L04-NEG1', status: 'PASS', foreignPid, hostPid: initialHost.record.hostPid, manager: l04MismatchFields.manager })
+
+  // ── stop the independent Host while the owned plist is installed ────────
+  const independentStop = daemonOk(['stop'], 'L05 independent stop')
+  assert(/^host=stopped$/mu.test(independentStop.result.stdout), 'L05 independent: stop did not report a stopped Host')
+  assert(!alive(initialHost.record.hostPid), 'L05 independent: the original Host identity is still alive')
+  assert(existsSync(plistPath), 'L05 independent: stop must not remove the installed plist')
+  assertNoLoadedJob(label, 'L05 independent stop')
+  report.rows.push({ id: 'L05-INDEPENDENT', status: 'PASS', hostPid: initialHost.record.hostPid, plistKept: true })
+
+  // ── L04 negative: loaded but NOT started is never Ready/launchd ─────────
+  const ownBootstrap = runLaunchctlCommand(['bootstrap', `gui/${String(uid)}`, plistPath])
+  assert(ownBootstrap.status === 0, 'L04-NEG2: bootstrapping the owned plist failed')
+  const loadedNotStarted = daemon(['status'])
+  const loadedNotStartedFields = statusFields(loadedNotStarted.stdout)
+  assert(loadedNotStarted.status === 0 && loadedNotStartedFields.host === 'stopped'
+    && loadedNotStartedFields['unit-state'] === 'not-running' && loadedNotStartedFields.manager === 'unmanaged',
+  `L04-NEG2: a loaded not-running job must not be ready/launchd, saw ${String(loadedNotStarted.status)} ${JSON.stringify(loadedNotStartedFields)}`)
+  const loadedLogs = daemon(['logs', '--lines', '20'])
+  assert(loadedLogs.status === 4 && /LOG_SOURCE_UNAVAILABLE/u.test(loadedLogs.stderr),
+    `L08-NEG: a loaded not-started job without launchd log output must be LOG_SOURCE_UNAVAILABLE/4, saw ${String(loadedLogs.status)}`)
+  runLaunchctlCommand(['bootout', `gui/${String(uid)}/${label}`])
+  // A manual bootstrap must not leave launchd-created log sinks behind that
+  // would bypass the product's private 0600 pre-creation on the managed start.
+  for (const staleLog of [join(scopeDirPath, 'launchd.stdout.log'), join(scopeDirPath, 'launchd.stderr.log')]) {
+    if (existsSync(staleLog)) unlinkSync(staleLog)
+  }
+  report.rows.push({ id: 'L04-NEG2', status: 'PASS', unitState: loadedNotStartedFields['unit-state'], host: loadedNotStartedFields.host, manager: loadedNotStartedFields.manager, logs: 'LOG_SOURCE_UNAVAILABLE/4' })
+  report.rows.push({ id: 'L08-NEG', status: 'PASS', exitCode: loadedLogs.status, code: 'LOG_SOURCE_UNAVAILABLE', loadedNotStartedJob: true })
+
+  // ── L03 negative: a foreign loaded job is a hard start refusal ─────────
+  const foreignBootstrap3 = runLaunchctlCommand(['bootstrap', `gui/${String(uid)}`, foreignPlist])
+  assert(foreignBootstrap3.status === 0, 'L03-NEG: the foreign job bootstrap failed')
+  const refusedStart = daemon(['start'])
+  assert(refusedStart.status === 3 && /IDENTITY_OR_OWNERSHIP_REFUSED/u.test(refusedStart.stderr),
+    `L03-NEG: start beside a foreign same-Label job must fail closed, saw ${String(refusedStart.status)}: ${refusedStart.stderr.slice(-700)}`)
+  assert(readRegistry(dshHome) === undefined || !alive(readRegistry(dshHome).record.hostPid),
+    'L03-NEG: a refused manager start must not detach-spawn a second Host')
+  runLaunchctlCommand(['bootout', `gui/${String(uid)}/${label}`])
+  report.rows.push({ id: 'L03-NEG', status: 'PASS', exitCode: refusedStart.status, detachedFallback: false })
+
+  // ── L03: start through launchd, the SAME foreground Host entry ──────────
+  const l03Start = daemonOk(['start'], 'L03 start')
+  const startedHost = requireLiveHost('L03 started host')
+  assert(l03Start.fields.host === 'ready' && l03Start.fields.manager === 'launchd'
+    && l03Start.fields['unit-state'] === 'running' && l03Start.fields.unit === label
+    && l03Start.fields['user-manager'] === 'available',
+  `L03: unexpected launchd start status ${JSON.stringify(l03Start.fields)}`)
+  const startedPrint = launchctlJobPrint(label)
+  assert(startedPrint.status === 0, 'L03: the launchd job is not loaded after start')
+  assert(startedPrint.stdout.includes(`path = ${realpathSync(plistPath)}`), 'L03: the loaded job source is not the exact plist')
+  const launchdPid = parseLaunchctlJobPid(startedPrint.stdout)
+  assert(launchdPid !== undefined, 'L03: launchctl print reported no real job PID')
+  assert(l03Start.fields.pid === String(launchdPid), 'L03: status PID is not the launchd job PID')
+  assert(startedHost.record.hostPid === launchdPid, 'L03: the authenticated Host is not the launchd job process')
+  assert(startedHost.record.instanceId !== initialHost.record.instanceId, 'L03: the launchd start reused the stopped independent instance')
+  const psRow = processTable().find(row => row.pid === launchdPid)
+  assert(psRow !== undefined && (psRow.command.includes(entry) || psRow.command.includes(realpathSync(entry))),
+    `L03: the launchd PID is not the installed foreground Host entry: ${String(psRow?.command)}`)
+  assert(psRow.ppid === 1, `L03: the launchd Host must be re-parented to launchd (pid 1), saw ppid ${String(psRow.ppid)}`)
+  const startedStatus = daemonOk(['status'], 'L03 status')
+  assert(startedStatus.fields.pid === String(launchdPid) && startedStatus.fields.instance === startedHost.record.instanceId.slice(0, 8),
+    'L03: status did not report the launchd Host identity')
+  const stdoutLog = join(scopeDirPath, 'launchd.stdout.log')
+  const stderrLog = join(scopeDirPath, 'launchd.stderr.log')
+  await waitFor(() => (
+    (existsSync(stdoutLog) && statSync(stdoutLog).size > 0)
+      || (existsSync(stderrLog) && statSync(stderrLog).size > 0)
+      ? true
+      : undefined
+  ), 'D4L launchd log output', TIMEOUTS.daemon)
+  assert(stdoutLog !== stderrLog && existsSync(stderrLog), 'L03: the two launchd log sinks must be independent files')
+  const stdoutStat = lstatSync(stdoutLog)
+  const stderrStat = lstatSync(stderrLog)
+  assert((stdoutStat.mode & 0o777) === 0o600 && (stderrStat.mode & 0o777) === 0o600,
+    `L08: launchd log sinks must be private 0600, saw ${OCT(stdoutStat.mode)}/${OCT(stderrStat.mode)}`)
+  const launchdLogs = daemonOk(['logs', '--lines', '200'], 'L08 logs')
+  assert(/\[dsh-pi-tui daemon: launchd (stdout|stderr)\]/u.test(launchdLogs.result.stdout)
+    && !/token=\S|connectUrl=\S/iu.test(launchdLogs.result.stdout),
+  'L08: managed logs must identify the launchd source and stay sanitized')
+  report.rows.push({ id: 'L03', status: 'PASS', label, launchdPid, hostPid: startedHost.record.hostPid,
+    instanceId: startedHost.record.instanceId, foregroundEntry: true, ppid: psRow.ppid })
+  report.rows.push({ id: 'L04', status: 'PASS', unit: label, unitState: startedStatus.fields['unit-state'],
+    manager: startedStatus.fields.manager, launchdPid, authenticatedPid: startedHost.record.hostPid,
+    negatives: ['L04-NEG1 foreign PID', 'L04-NEG2 loaded-not-started'] })
+  report.rows.push({ id: 'L08', status: 'PASS', source: 'launchd.stdout.log/launchd.stderr.log', stdoutMode: OCT(stdoutStat.mode), stderrMode: OCT(stderrStat.mode), sanitized: true })
+
+  // Second real Client reuses the launchd Host.
+  const beforeSecondClient = requireLiveHost('L03 second client')
+  const secondClient = start({ name: 'd4l-second-client', cwd: projectB, installation, backend: 'daemon' })
+  await waitPainted(secondClient, 'D4L second Client paint')
+  await waitComposer(secondClient, 'D4L second Client composer')
+  const afterSecondClient = requireLiveHost('L03 second client reuse')
+  assert(afterSecondClient.record.instanceId === beforeSecondClient.record.instanceId,
+    'L03: a second Client created or replaced the Host')
+  const warmStart = daemonOk(['start'], 'L03 warm start')
+  assert(warmStart.fields.instance === beforeSecondClient.record.instanceId.slice(0, 8),
+    'L03: a warm daemon start did not reuse the launchd Host')
+  const warmPid = parseLaunchctlJobPid(launchctlJobPrint(label).stdout)
+  assert(warmPid === launchdPid, 'L03: a warm start changed the launchd job PID')
+  sendKeys(secondClient, '/exit', 'D4L second Client exit')
+  await waitFor(() => (!tmuxSessionExists(secondClient) ? true : undefined), 'D4L second Client exit', TIMEOUTS.exit)
+  const afterClientExit = requireLiveHost('L09 client exit')
+  assert(afterClientExit.record.instanceId === beforeSecondClient.record.instanceId && alive(afterClientExit.record.hostPid),
+    'L09-CLIENT: the launchd Host must survive its last Client exit')
+  report.rows.push({ id: 'L09-CLIENT', status: 'PASS', instanceId: beforeSecondClient.record.instanceId, secondClient: true, warmStartReused: true, hostSurvivedClientExit: true })
+
+  // ── L06: restart = verified bootout + bootstrap/kickstart + new instance ─
+  const restart = daemonOk(['restart'], 'L06 restart')
+  assert(/^previous=/mu.test(restart.result.stdout), 'L06: restart did not report the previous instance')
+  const restartedHost = requireLiveHost('L06 restarted host')
+  assert(restartedHost.record.instanceId !== beforeSecondClient.record.instanceId, 'L06: restart reused the old instance')
+  assert(!alive(launchdPid), 'L06: the old launchd Host process is still alive')
+  const restartedPrint = launchctlJobPrint(label)
+  const restartedPid = parseLaunchctlJobPid(restartedPrint.stdout)
+  assert(restartedPid !== undefined && restartedPid === restartedHost.record.hostPid && restartedPid !== launchdPid,
+    'L06: the restart did not produce a new launchd job PID matching the new authenticated Host')
+  assert(restartedHost.record.hostPid !== beforeSecondClient.record.hostPid, 'L06: the restarted Host kept the old PID')
+  const liveHostsAfterRestart = ownedRoles(workRoot).hosts.filter(candidate => alive(candidate.pid))
+  assert(liveHostsAfterRestart.length === 1, `L06: expected exactly ONE live Host after restart, saw ${String(liveHostsAfterRestart.length)}`)
+  report.rows.push({ id: 'L06', status: 'PASS', previous: beforeSecondClient.record.instanceId, instanceId: restartedHost.record.instanceId,
+    oldPidGone: true, newLaunchdPid: restartedPid, singleHost: true })
+
+  // ── L05: stop through the verified launchd service only ─────────────────
+  const stopLaunchd = daemonOk(['stop'], 'L05 stop')
+  assert(/^host=stopped$/mu.test(stopLaunchd.result.stdout), 'L05: stop did not report a stopped Host')
+  await waitFor(() => (!alive(restartedPid) ? true : undefined), 'D4L launchd Host exit', TIMEOUTS.process)
+  assert(!alive(restartedHost.record.hostPid), 'L05: the launchd Host process is still alive after stop')
+  assert(launchctlJobPrint(label).status === 113, 'L05: the verified job must be gone after stop')
+  const registryAfterLaunchdStop = readRegistry(dshHome)
+  assert(registryAfterLaunchdStop === undefined || registryAfterLaunchdStop.record.instanceId !== restartedHost.record.instanceId,
+    'L05: the stopped Host registry still claims the old instance')
+  report.rows.push({ id: 'L05', status: 'PASS', hostPid: restartedHost.record.hostPid, kernelIdentityGone: true, jobRemoved: true })
+
+  // A stopped launchd job leaves two possible historical sources (retained
+  // launchd streams and an earlier host.log) and no live authority proving the
+  // most recent one. `logs` must fail closed instead of returning either file.
+  const postStopLogs = daemon(['logs', '--lines', '20'])
+  assert(postStopLogs.status === 4 && /LOG_SOURCE_UNAVAILABLE/u.test(postStopLogs.stderr)
+    && !/retained launchd stdout|stale host\.log/u.test(postStopLogs.stdout),
+  `L08-POSTSTOP: a stopped launchd job must not guess a log source, saw exit ${String(postStopLogs.status)}: ${postStopLogs.stderr.slice(-500)}`)
+  report.rows.push({ id: 'L08-POSTSTOP', status: 'PASS', code: 'LOG_SOURCE_UNAVAILABLE', staleHostLogIgnored: true })
+
+  // ── L09 (second profile install isolation, best-effort native) ──────────
+  let secondProfileEvidence
+  try {
+    const secondDshHome = join(workRoot, 'd4l-second-dsh-home')
+    mkdirSync(join(secondDshHome, 'profiles'), { recursive: true, mode: 0o700 })
+    const secondProfileDir = join(secondDshHome, 'profiles', 'pi-tui')
+    const clone = spawnSync('cp', ['-cR', profileDir, secondProfileDir], { encoding: 'utf8', timeout: TIMEOUTS.daemon })
+    const copy = clone.status === 0 ? clone : spawnSync('cp', ['-R', profileDir, secondProfileDir], { encoding: 'utf8', timeout: TIMEOUTS.daemon })
+    assert(copy.status === 0, `L09-PROFILE: the second profile copy failed: ${copy.stderr.slice(-500)}`)
+    const secondLabel = launchdLabelOf(secondProfileDir)
+    const secondPath = launchdPlistPathOf(secondProfileDir)
+    assert(secondLabel !== label, 'L09-PROFILE: two canonical profiles must not share one launchd label')
+    track(secondLabel, secondPath)
+    report.d4lSeatDirs.push(join(homedir(), '.dsh-pi-tui', 'run', launchdScopeIdOf(secondProfileDir)))
+    const firstPlistBefore = readFileSync(plistPath, 'utf8')
+    const secondInstall = daemon(['install'], { DSH_HOME: secondDshHome })
+    assert(secondInstall.status === 0,
+      `L09-PROFILE: the second profile install exited ${String(secondInstall.status)}: ${secondInstall.stderr.slice(-700)}`)
+    assert(existsSync(secondPath), 'L09-PROFILE: the second profile install wrote no plist')
+    recordPlistIdentity(secondLabel, secondPath)
+    assert(readFileSync(plistPath, 'utf8') === firstPlistBefore,
+      'L09-PROFILE: the second profile install must not touch the first profile plist')
+    const secondStatus = daemon(['status'], { DSH_HOME: secondDshHome })
+    const secondFields = statusFields(secondStatus.stdout)
+    assert(secondStatus.status === 0 && secondFields.unit === secondLabel && secondFields.host === 'stopped',
+      `L09-PROFILE: unexpected second profile status ${String(secondStatus.status)} ${JSON.stringify(secondFields)}`)
+    const secondUninstall = daemon(['uninstall'], { DSH_HOME: secondDshHome })
+    assert(secondUninstall.status === 0 && !existsSync(secondPath), 'L09-PROFILE: the second profile uninstall did not remove its own plist')
+    assert(readFileSync(plistPath, 'utf8') === firstPlistBefore,
+      'L09-PROFILE: the second profile uninstall touched the first profile plist')
+    secondProfileEvidence = { secondLabel, isolated: true, unit: secondFields.unit }
+    report.rows.push({ id: 'L09-PROFILE', status: 'PASS', firstLabel: label, secondLabel, isolatedInstall: true, isolatedUninstall: true })
+  } catch (error) {
+    secondProfileEvidence = { error: error instanceof Error ? error.message : String(error) }
+    report.rows.push({ id: 'L09-PROFILE', status: 'NOT_VERIFIED', reason: error instanceof Error ? error.message : String(error), secondProfileAttempted: true })
+  }
+
+  // ── L07: uninstall removes a LOADED job + plist and keeps the logs ───────
+  // Start the launchd Host again after the second-profile block so the
+  // production uninstall path really boots out a loaded, authenticated job.
+  const l07Start = daemonOk(['start'], 'L07 uninstall start')
+  assert(l07Start.fields.manager === 'launchd' && l07Start.fields.host === 'ready',
+    `L07: the pre-uninstall start did not produce a launchd Host: ${JSON.stringify(l07Start.fields)}`)
+  const l07Host = requireLiveHost('L07 uninstall host')
+  const l07Print = launchctlJobPrint(label)
+  const l07Pid = parseLaunchctlJobPid(l07Print.stdout)
+  assert(l07Print.status === 0 && l07Pid !== undefined && l07Pid === l07Host.record.hostPid,
+    'L07: the job must be loaded and running the authenticated Host before uninstall')
+  const l07 = daemonOk(['uninstall'], 'L07 launchd uninstall')
+  assert(!existsSync(plistPath), 'L07: uninstall did not remove the owned plist')
+  assert(launchctlJobPrint(label).status === 113, 'L07: uninstall left the verified job loaded')
+  assert(!alive(l07Host.record.hostPid), 'L07: uninstall did not stop the loaded launchd Host')
+  assert(existsSync(stdoutLog) && existsSync(stderrLog), 'L07: uninstall must retain the private launchd logs')
+  const l07Again = daemonOk(['uninstall'], 'L07 idempotent')
+  assert(/^unit=none$/mu.test(l07Again.result.stdout), 'L07: a repeat uninstall must be an idempotent no-plist success')
+  report.rows.push({ id: 'L07', status: 'PASS', plistRemoved: true, jobRemoved: true, loadedJobStopped: true, hostPidGone: true, logsRetained: true, idempotent: true })
+
+  // After uninstall the plist is gone but the retained launchd streams still
+  // exist beside an older independent host.log; the source is unprovable.
+  const postUninstallLogs = daemon(['logs', '--lines', '20'])
+  assert(postUninstallLogs.status === 4 && /LOG_SOURCE_UNAVAILABLE/u.test(postUninstallLogs.stderr)
+    && !/retained launchd stdout|stale host\.log/u.test(postUninstallLogs.stdout),
+  `L08-UNINSTALL: a removed plist with retained streams must not guess a log source, saw exit ${String(postUninstallLogs.status)}: ${postUninstallLogs.stderr.slice(-500)}`)
+  report.rows.push({ id: 'L08-UNINSTALL', status: 'PASS', code: 'LOG_SOURCE_UNAVAILABLE', staleHostLogIgnored: true })
+
+  // ── L12: the independent daemon is still the default afterward ──────────
+  const legacyStart = daemonOk(['start'], 'L12 legacy start')
+  assert(legacyStart.fields.manager === 'process' && legacyStart.fields.unit === 'none' && legacyStart.fields.host === 'ready',
+    `L12: post-uninstall start did not use the independent daemon: ${JSON.stringify(legacyStart.fields)}`)
+  const legacyHost = requireLiveHost('L12 legacy host')
+  const legacyPrint = launchctlJobPrint(label)
+  assert(legacyPrint.status === 113, 'L12: the independent daemon must not create a launchd job')
+  const legacyStop = daemonOk(['stop'], 'L12 legacy stop')
+  assert(/^host=stopped$/mu.test(legacyStop.result.stdout), 'L12: the independent daemon did not stop')
+  report.rows.push({ id: 'L12', status: 'PASS', manager: legacyStart.fields.manager, unit: legacyStart.fields.unit, hostPid: legacyHost.record.hostPid,
+    directDefault: 'A01/A02/P01-P09 on the same packed candidate', legacyDaemon: 'detached start/stop after uninstall' })
+
+  report.rows.push({ id: 'L10', status: 'PASS', plutil: 'PASS', launchd: ['print', 'bootstrap', 'kickstart', 'bootout'],
+    negative: ['foreign-job', 'pid-mismatch', 'loaded-not-started', 'symlink', 'other-build', 'user-edit'],
+    cleanup: 'the lane cleanup boots out only this profile label and removes only its own plist' })
+  report.rows.push({ id: 'L11', status: 'NOT_VERIFIED', lane: 'linux',
+    note: 'Linux systemd no-unit/installed-unit/manager-error and the selected M11 L6 cases cannot execute on this macOS lane; the Linux CI/Product lanes and the selected split-process smoke remain the authority for L11.' })
+  report.d4lSecondProfile = secondProfileEvidence
+  return { label, secondProfileEvidence }
+}
+
 // ── cleanup ────────────────────────────────────────────────────────────────
 
 async function cleanup({ workRoot, report }) {
@@ -2264,6 +2731,70 @@ async function cleanup({ workRoot, report }) {
       errors.push(`tmux kill-server exited ${String(kill.status)}`)
     }
   }
+  // 1b. Remove ONLY this run's profile-scoped LaunchAgent labels and plists.
+  //     A path/label string is not ownership: cleanup re-proves the recorded
+  //     file (dev,ino,content), the loaded job's canonical source and the final
+  //     identity before unlink. Anything unproven is reported and preserved.
+  if (Array.isArray(report.d4lLabels)) {
+    const launchAgentsRoot = join(homedir(), 'Library', 'LaunchAgents')
+    let removed = 0
+    let preserved = 0
+    const readIdentity = path => {
+      try {
+        const info = lstatSync(path)
+        if (!info.isFile() || info.isSymbolicLink()) throw new Error('the tracked plist is not a regular file')
+        return { dev: String(info.dev), ino: String(info.ino), sha256: createHash('sha256').update(readFileSync(path)).digest('hex') }
+      } catch (error) {
+        // A genuinely absent path is already clean; a symlink/directory/
+        // unreadable replacement is NOT: preserve it and report, never unlink.
+        if (error?.code === 'ENOENT') return undefined
+        throw error
+      }
+    }
+    const cleanupIo = {
+      print: async label => launchctlJobPrint(label),
+      bootout: async label => runLaunchctlCommand(['bootout', `gui/${String(process.getuid())}/${label}`]),
+      readIdentity: async path => readIdentity(path),
+      realpath: async path => realpathSync(path),
+      unlink: async path => unlinkSync(path),
+      sleep,
+      maxWaitAttempts: 50,
+      pollMs: 100,
+    }
+    for (const tracked of report.d4lLabels) {
+      if (typeof tracked?.label !== 'string' || typeof tracked?.plistPath !== 'string') {
+        errors.push('D4L cleanup: malformed tracked launchd label')
+        preserved += 1
+        continue
+      }
+      if (dirname(tracked.plistPath) !== launchAgentsRoot
+        || basename(tracked.plistPath) !== `${tracked.label}.plist`
+        || !tracked.label.startsWith(`${LAUNCHD_LABEL_PREFIX}.`)) {
+        errors.push(`D4L cleanup: refusing an unexpected launchd target ${tracked.plistPath}`)
+        preserved += 1
+        continue
+      }
+      try {
+        const result = await cleanupTrackedLaunchdResource(tracked, cleanupIo)
+        if (result.action === 'removed') removed += 1
+        else if (result.action === 'absent') { /* the scene already removed it */ }
+        else {
+          errors.push(`D4L cleanup: ${tracked.label}: ${result.reason}; preserving`)
+          preserved += 1
+        }
+      } catch (error) {
+        errors.push(`D4L cleanup: ${tracked.label}: ${error instanceof Error ? error.message : String(error)}; preserving`)
+        preserved += 1
+      }
+    }
+    report.d4lCleanup = { labels: report.d4lLabels.length, launchAgentsRoot, removed, preserved }
+    if (preserved > 0 || errors.some(message => message.startsWith('D4L cleanup:'))) {
+      report.notQuiesced = { ...(report.notQuiesced ?? {}), launchd: report.d4lCleanup, workRoot }
+      errors.push('NOT_QUIESCED: preserved launchd resource(s) still depend on this work root')
+    }
+  }
+  const launchdCleanupFailed = (report.d4lCleanup?.preserved ?? 0) > 0
+    || errors.some(message => message.startsWith('D4L cleanup:'))
   // 2. Only processes whose CURRENT process table row still names THIS work
   //    root and an owned role. A saved bare pid is never an identity: every
   //    signal re-reads the table and refuses a recycled or foreign pid.
@@ -2283,7 +2814,7 @@ async function cleanup({ workRoot, report }) {
   await sleep(250)
   const survivors = ownedTargets()
   if (survivors.length > 0) {
-    report.notQuiesced = { survivors: survivors.map(target => target.pid), workRoot }
+    report.notQuiesced = { ...(report.notQuiesced ?? {}), survivors: survivors.map(target => target.pid), workRoot }
     errors.push(`NOT_QUIESCED: ${String(survivors.length)} owned process(es) survived cleanup`)
     return errors
   }
@@ -2310,7 +2841,7 @@ async function cleanup({ workRoot, report }) {
   }
   // The Host seat under the real account home is the smoke's own scope; after
   // every owned process is gone it is safe to remove this run's directory.
-  if (typeof report.globalSeatDir === 'string') {
+  if (!launchdCleanupFailed && typeof report.globalSeatDir === 'string') {
     const seatDir = report.globalSeatDir
     if (dirname(seatDir) !== join(homedir(), '.dsh-pi-tui', 'run')) {
       errors.push(`refusing to remove an unexpected global seat directory: ${seatDir}`)
@@ -2320,8 +2851,24 @@ async function cleanup({ workRoot, report }) {
       }
     }
   }
+  // 2b. Remove ONLY the profile-scoped account-home seat directories this D4L
+  //     run created; each entry must be a direct child of the account run root.
+  if (!launchdCleanupFailed && Array.isArray(report.d4lSeatDirs)) {
+    const accountSeatRoot = join(homedir(), '.dsh-pi-tui', 'run')
+    for (const seatDir of report.d4lSeatDirs) {
+      if (typeof seatDir !== 'string' || dirname(seatDir) !== accountSeatRoot) {
+        errors.push(`D4L cleanup: refusing an unexpected seat directory ${String(seatDir)}`)
+        continue
+      }
+      if (existsSync(seatDir)) {
+        try { rmSync(seatDir, { recursive: true, force: true }) } catch (error) {
+          errors.push(`D4L cleanup: seat directory removal failed: ${error instanceof Error ? error.message : String(error)}`)
+        }
+      }
+    }
+  }
   // 3. Remove the private work root only after every owned process is gone.
-  if (!KEEP) {
+  if (!KEEP && !launchdCleanupFailed) {
     try { rmSync(workRoot, { recursive: true, force: true }) } catch (error) {
       errors.push(`work root removal failed: ${error instanceof Error ? error.message : String(error)}`)
     }
