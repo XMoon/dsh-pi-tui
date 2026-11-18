@@ -22,7 +22,8 @@
  */
 
 import assert from 'node:assert/strict'
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
+import { once } from 'node:events'
 import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
@@ -143,7 +144,6 @@ test('the real pinned dsh launcher forwards the PR2 Session grammar to tuiStartu
 
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-cli-launcher-home-')
-  const profileDir = join(home, 'profiles', PROFILE)
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     DSH_HOME: home,
@@ -157,21 +157,28 @@ test('the real pinned dsh launcher forwards the PR2 Session grammar to tuiStartu
   delete env.SPLIT_PROCESS_CLIENT_MODE
   delete env.SPLIT_PROCESS_CLIENT_SESSION
 
-  // Install THIS worktree's built bundle into a private profile with the real
-  // `dsh plugin` entry (no hand-written profile files).
   const resolveAt = performance.now()
   const launcher = resolveLauncher(home, env)
   t.diagnostic(`P3-A2 resolve launcher: ${(performance.now() - resolveAt).toFixed(1)} ms`)
-  const installAt = performance.now()
-  const install = spawnSync(launcher.command, [...launcher.prefix, 'plugin', '--profile', PROFILE, '--', 'add', `link:${ROOT}`], {
-    cwd: ROOT,
-    env,
-    encoding: 'utf8',
-    timeout: 180_000,
-  })
-  t.diagnostic(`P3-A2 install profile: ${(performance.now() - installAt).toFixed(1)} ms`)
-  assert.equal(install.status, 0, `dsh plugin failed to install the candidate into the isolated profile:\n${install.stdout}\n${install.stderr}`)
-  assert.ok(existsSync(profileDir), 'the real launcher must create the isolated profile directory')
+
+  // Each actual CLI launch owns a separate DSH_HOME. Seven concurrent real
+  // processes must never share the session/workspace authorities they may
+  // create during boot; the same real plugin installer prepares every home.
+  const prepareHome = (): { home: string; env: NodeJS.ProcessEnv } => {
+    const caseHome = life.tempDir('dsh-cli-launcher-case-')
+    const caseEnv: NodeJS.ProcessEnv = { ...env, DSH_HOME: caseHome }
+    const install = spawnSync(launcher.command, [...launcher.prefix, 'plugin', '--profile', PROFILE, '--', 'add', `link:${ROOT}`], {
+      cwd: ROOT,
+      env: caseEnv,
+      encoding: 'utf8',
+      timeout: 180_000,
+    })
+    assert.equal(install.status, 0,
+      `dsh plugin failed to install the candidate into the isolated profile:\n${install.stdout}\n${install.stderr}`)
+    assert.ok(existsSync(join(caseHome, 'profiles', PROFILE)),
+      'the real launcher must create the isolated profile directory')
+    return { home: caseHome, env: caseEnv }
+  }
 
   // The probe overlay: an EXTRA patch row after the profile layer.
   const probePath = join(home, 'cli-launch-probe.mjs')
@@ -185,17 +192,31 @@ test('the real pinned dsh launcher forwards the PR2 Session grammar to tuiStartu
     '',
   ].join('\n'))
 
-  const run = (args: readonly string[]): { readonly status: number | null; readonly output: string } => {
+  const run = async (
+    args: readonly string[],
+    caseEnv: NodeJS.ProcessEnv,
+  ): Promise<{ readonly status: number | null; readonly output: string }> => {
     const invocationAt = performance.now()
-    const result = spawnSync(launcher.command, [...launcher.prefix, '--profile', PROFILE, '--patch', patchPath, ...args], {
+    const child = spawn(launcher.command, [...launcher.prefix, '--profile', PROFILE, '--patch', patchPath, ...args], {
       cwd: ROOT,
-      env,
-      encoding: 'utf8',
-      timeout: 120_000,
+      env: caseEnv,
+      stdio: ['ignore', 'pipe', 'pipe'],
     })
-    t.diagnostic(`P3-A2 invoke ${JSON.stringify(args)}: ${(performance.now() - invocationAt).toFixed(1)} ms`)
-    assert.equal(result.error, undefined, `dsh could not start: ${result.error?.message ?? ''}`)
-    return { status: result.status, output: `${result.stdout ?? ''}${result.stderr ?? ''}` }
+    let stdout = ''
+    let stderr = ''
+    child.stdout.setEncoding('utf8')
+    child.stderr.setEncoding('utf8')
+    child.stdout.on('data', (chunk: string) => { stdout += chunk })
+    child.stderr.on('data', (chunk: string) => { stderr += chunk })
+    const deadline = setTimeout(() => child.kill('SIGKILL'), 120_000)
+    try {
+      const [status, signal] = await once(child, 'close')
+      assert.equal(signal, null, `dsh CLI was terminated for ${JSON.stringify(args)}`)
+      t.diagnostic(`P3-A2 invoke ${JSON.stringify(args)}: ${(performance.now() - invocationAt).toFixed(1)} ms`)
+      return { status, output: `${stdout}${stderr}` }
+    } finally {
+      clearTimeout(deadline)
+    }
   }
 
   const cases: ReadonlyArray<{
@@ -210,11 +231,20 @@ test('the real pinned dsh launcher forwards the PR2 Session grammar to tuiStartu
     { args: ['--session', 'mysql', '--preset', 'p'], expected: { sessionLaunch: { kind: 'lookup', query: 'mysql' }, presetId: 'p' } },
   ]
 
-  for (const { args, expected } of cases) {
-    const result = run(args)
-    assert.equal(result.status, 0, `the real launcher must exit 0 for ${args.join(' ')}:\n${result.output}`)
-    assert.deepEqual(probeRecord(result.output), expected,
-      `the real launcher must forward ${args.join(' ')} verbatim to tuiStartup:\n${result.output}`)
+  const prepared = cases.map(testCase => ({ ...testCase, isolated: prepareHome() }))
+  // Three is the bounded parallelism of this one test: every process gets
+  // independent Host persistence, and the real CLI still parses every argv.
+  for (let offset = 0; offset < prepared.length; offset += 3) {
+    const results = await Promise.all(prepared.slice(offset, offset + 3).map(async ({ args, expected, isolated }) => ({
+      args,
+      expected,
+      result: await run(args, isolated.env),
+    })))
+    for (const { args, expected, result } of results) {
+      assert.equal(result.status, 0, `the real launcher must exit 0 for ${args.join(' ')}:\n${result.output}`)
+      assert.deepEqual(probeRecord(result.output), expected,
+        `the real launcher must forward ${args.join(' ')} verbatim to tuiStartup:\n${result.output}`)
+    }
   }
 
   // The conflict must fail inside the app command action, BEFORE the startup
@@ -222,6 +252,7 @@ test('the real pinned dsh launcher forwards the PR2 Session grammar to tuiStartu
   // Session/Workspace write. Existence alone is not enough: a pre-existing
   // durable file must not be MODIFIED either, so the snapshot records the
   // content digest and stat identity of every entry under the two authorities.
+  const conflictHome = prepareHome()
   const durable = (): string => {
     const entries: string[] = []
     const visit = (path: string): void => {
@@ -238,12 +269,12 @@ test('the real pinned dsh launcher forwards the PR2 Session grammar to tuiStartu
       const digest = createHash('sha256').update(readFileSync(path)).digest('hex')
       entries.push(`${path} file ${String(stat.size)} ${String(stat.mtimeMs)} ${digest}`)
     }
-    visit(join(home, 'sessions'))
-    visit(join(home, 'storages', 'workspace.json'))
+    visit(join(conflictHome.home, 'sessions'))
+    visit(join(conflictHome.home, 'storages', 'workspace.json'))
     return entries.join('\n')
   }
   const before = durable()
-  const conflict = run(['--session', '-c'])
+  const conflict = await run(['--session', '-c'], conflictHome.env)
   assert.equal(conflict.status, 1, `the --session/--continue conflict must exit nonzero:\n${conflict.output}`)
   assert.equal(probeRecord(conflict.output), undefined, 'the conflict must not publish tuiStartup')
   assert.match(conflict.output, /--session and --continue are mutually exclusive/u)
