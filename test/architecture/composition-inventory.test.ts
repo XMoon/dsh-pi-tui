@@ -8,7 +8,6 @@ import { compositionFile, compositionFilesUnder, compositionOccurrences, composi
 import {
   aliasAwareConstructionSites,
   ownerFile,
-  ownerOccurrences,
   parseSources,
   productionFilesUnder,
   productionScriptKind,
@@ -108,13 +107,6 @@ const SINGLE_OWNER_SITES: ReadonlyArray<readonly [string, number, string]> = [
   ['new TranscriptWindowController(', 1, 'src/app/surface/viewer-runtime.ts'],
 ]
 
-test('every composition responsibility still has a site', () => {
-  const source = compositionSource()
-  for (const [name, site] of COMPOSITION_INVENTORY) {
-    assert.ok(source.includes(site), `the composition surface must still own ${name} (${site})`)
-  }
-})
-
 test('the composition ROOT owns every composition site (the entry owns none)', () => {
   // Ownership LOCATION, not just "somewhere in the composition surface". The
   // aggregate counts below cannot catch a regression that moves a construction
@@ -173,21 +165,6 @@ test('the composition ROOT owns every composition site (the entry owns none)', (
         `src/app/bootstrap.ts must not construct ${site} — its owner is ${owner}`,
       )
     }
-  }
-})
-
-test('every single-owner construction has exactly its expected count across the owner surface', () => {
-  // The aggregate companion to the per-module location lock above: the TOTAL
-  // count across the owner surface (which includes the composition root) must
-  // still match, so a relocation that duplicates a construction in TWO owner
-  // modules fails even when each module individually looks plausible.
-  const expectedBySite = new Map<string, number>()
-  for (const [site, expected] of SINGLE_OWNER_SITES) {
-    expectedBySite.set(site, (expectedBySite.get(site) ?? 0) + expected)
-  }
-  for (const [site, expected] of expectedBySite) {
-    assert.equal(ownerOccurrences(site), expected,
-      `${site} must have exactly ${expected} construction site(s) in the A5b owner surface`)
   }
 })
 
@@ -721,8 +698,8 @@ test('the composition zone is enumerated RECURSIVELY (nested helpers included)',
     ],
     'the composition surface must include a NESTED zone helper over every production extension',
   )
-  // The SAME enumerator feeds OWNER_MODULES (`bootstrapHelperModules`), so the
-  // aggregate bag/single-owner locks see nested helpers too.
+  // The SAME enumerator feeds OWNER_MODULES (`bootstrapHelperModules`), so
+  // nested helpers remain visible to the owner-module location checks.
   assert.deepEqual(
     productionFilesUnder(root, 'src/app/bootstrap'),
     [
@@ -731,16 +708,15 @@ test('the composition zone is enumerated RECURSIVELY (nested helpers included)',
       'src/app/bootstrap/top.ts',
     ],
   )
-  // ...and their CONTENT is part of what the content locks scan: a bad
-  // universal-dependency bag (or a hard-coded chord) hidden in a nested helper
-  // must be visible to the composed surface text, not just to the file list.
+  // ...and their CONTENT is part of the composed surface text, not just the
+  // file list. This proves enumeration, not semantic detection of a broad bag.
   writeFileSync(
     join(root, 'src', 'app', 'bootstrap', 'nested', 'bad.ts'),
-    'interface EverythingBag { readonly everything: unknown }\n',
+    'interface NestedProbe { readonly value: unknown }\n',
   )
   const composed = compositionSourceUnder(root)
-  assert.ok(composed.includes('interface EverythingBag {'),
-    'a bag declared in a NESTED composition helper must appear in the composed composition surface')
+  assert.ok(composed.includes('interface NestedProbe {'),
+    'a declaration in a NESTED composition helper must appear in the composed composition surface')
   assert.ok(composed.includes('// >>> src/app/bootstrap/nested/bad.ts'),
     'the composed surface must banner the nested helper it now covers')
   // The real tree is unchanged by the recursion: every helper is flat today

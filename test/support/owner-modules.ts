@@ -34,11 +34,10 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
  * This list is NOT the whole owner inventory: the A2/A4 owners under
  * `app/session` (ownership core, scope, commit order, subject, owner access) and
  * `app/direct` keep their own locks. They are deliberately absent here because
- * `ownerSource()`/`ownerOccurrences()` are the A5b *single-owner* aggregate, and
- * folding the earlier owners in would count their factory DECLARATIONS
- * (`export function bindSessionRuntime(`) as competing constructions. A
- * duplicate of an A5b single-owner site in one of those modules is still caught:
- * {@link productionSources} scans the whole production tree for it.
+ * this is the A5b owner-module inventory, not the whole production tree.
+ * Factory declarations in earlier owners are not construction sites;
+ * `composition-inventory.test.ts` checks actual constructors and calls across
+ * the whole production tree through {@link productionSources}.
  *
  * A5b locks care about two different facts and must not conflate them:
  *
@@ -98,8 +97,8 @@ export function productionFilesUnder(root: string, dir: string): string[] {
 /**
  * Every `src/app/bootstrap/**` composition helper, sorted deterministically. The
  * zone is directory-defined (plan §7), so a new helper — at ANY depth — joins the
- * aggregate owner surface automatically instead of escaping its bag/single-owner
- * locks.
+ * aggregate owner surface automatically instead of escaping owner-module
+ * enumeration and location checks.
  */
 function bootstrapHelperModules(): OwnerModule[] {
   return productionFilesUnder(ROOT, BOOTSTRAP_ZONE)
@@ -113,9 +112,9 @@ export const OWNER_MODULES: readonly OwnerModule[] = [
   // TS2: the composition zone is `src/app/bootstrap.ts` + every
   // `src/app/bootstrap/**` wiring helper. The helper list is read from disk (the
   // zone is defined by DIRECTORY, plan §7), so a newly extracted helper is
-  // covered by the aggregate `ownerSource()`/`ownerOccurrences()` locks — the
-  // "no universal dependency bag in the composition zone" invariant (plan §20)
-  // fails for a bag declared in ANY bootstrap module.
+  // covered by the zone and owner-location checks. The prohibition on a
+  // universal dependency bag is a semantic architecture contract, not a
+  // type-name blacklist.
   ...bootstrapHelperModules(),
   // A4-6 / A5b-6: the mounted-surface owner; the A5b-6 closure moved the
   // Task-Center jobs-read retention policy into it (plan §7.6.2), so its
@@ -124,8 +123,7 @@ export const OWNER_MODULES: readonly OwnerModule[] = [
   // TS3: the surface's independent application-level owners. The aggregate
   // remains the ONE `createSurfaceRuntime()` entry; each sub-owner owns its own
   // state and disposal hook, and the aggregate
-  // `ownerSource()`/`ownerOccurrences()` locks (bag detection, exact
-  // single-owner counts) now cover them too.
+  // owner-location and whole-production-tree construction checks cover them.
   { rel: 'src/app/surface/notification-runtime.ts', role: 'owner' },
   { rel: 'src/app/surface/extension-runtime.ts', role: 'owner' },
   { rel: 'src/app/surface/plugin-manager-runtime.ts', role: 'owner' },
@@ -166,11 +164,6 @@ export function ownerSources(): Array<OwnerModule & { source: string }> {
 /** The owner-surface contents joined with file banners. */
 export function ownerSource(): string {
   return ownerSources().map(({ rel, source }) => `// >>> ${rel}\n${source}`).join('\n')
-}
-
-/** Total occurrences of one literal across the owner surface. */
-export function ownerOccurrences(literal: string): number {
-  return ownerSources().reduce((total, { source }) => total + source.split(literal).length - 1, 0)
 }
 
 /** The source of one owner-surface module. Throws when it is not listed. */

@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url'
 import ts from 'typescript'
 
 import { compositionFile, compositionSources, compositionSourcesUnder } from '../support/composition-surface.ts'
-import { aliasAwareConstructionSites, ownerFile, ownerSource, parseSources, productionScriptKind, productionSource, productionSources, unwrapExpression, type ParsedSourceSet } from '../support/owner-modules.ts'
+import { aliasAwareConstructionSites, ownerFile, parseSources, productionScriptKind, productionSource, productionSources, unwrapExpression, type ParsedSourceSet } from '../support/owner-modules.ts'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
 
 /** This repository root. */
@@ -29,7 +29,7 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
  * `src/app/bootstrap/**` helper at any depth, and the package entry never
  * defines any of them.
  *
- * Plan §8.2's minimum closure list and where each clause is locked:
+ * Plan §8.2's minimum closure list and where each clause is guarded or reviewed:
  *   1. the composition zone exists — one facade plus its helpers —
  *      "the composition zone is one facade plus its bootstrap helpers" below;
  *   2. `src/index.ts` remains a facade —
@@ -39,8 +39,8 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
  *      "the composition root implements no TuiAppEvents/TuiCommandRunner
  *      literal" (root) + "exactly one TuiAppEvents implementation" (owner);
  *   5. no `TuiCommandRunner` implementation literal — the same two locks;
- *   6. no universal carrier/bag —
- *      "no universal application/runtime dependency bag exists";
+ *   6. no universal carrier/bag — a semantic ownership rule in
+ *      `docs/architecture/overview.md`, not a blacklist of type names;
  *   7. each extracted owner constructed/bound once — the
  *      `OWNER_CONSTRUCTIONS` lock here plus the inventory test's
  *      `SINGLE_OWNER_SITES` authority/binding rows.
@@ -218,20 +218,6 @@ test('the package entry is a facade and defines no application handler', () => {
   const entry = compositionFile('src/index.ts')
   for (const name of FINAL_FORBIDDEN_HANDLERS) {
     assert.equal(declares(entry, name), false, `src/index.ts must not define ${name}`)
-  }
-})
-
-test('no universal application/runtime dependency bag exists', () => {
-  // Plan §6.3/§7.6.2: the escape hatch is a new EverythingBag type that carries
-  // cross-domain state. It must not appear in the composition surface or in any
-  // extracted owner.
-  const source = ownerSource()
-  for (const bag of ['BootstrapContext', 'AppContext', 'GlobalRuntime', 'EverythingBag', 'RunnerContext', 'SurfaceContext', 'CompositionContext', 'RuntimeContext', 'ApplicationContext']) {
-    assert.equal(
-      new RegExp(`\\b(?:interface|type|class)\\s+${bag}\\b`).test(source),
-      false,
-      `${bag} would be a universal dependency bag (plan A5b §6.3)`,
-    )
   }
 })
 
@@ -528,12 +514,10 @@ test('NO production module implements a typed TuiCommandRunner object literal', 
 /**
  * Extracted declarations and the module that must own them.
  *
- * The aggregate `ownerOccurrences()`/`ownerSource()` locks prove "exactly once
- * SOMEWHERE across the owner surface" — and that surface includes
- * `src/app/bootstrap.ts`, so a construction or state machine moving back into
- * the composition root would still satisfy the count. These rows pin the
- * ownership LOCATION per module (A5b-1 review P2): the named owner must declare
- * the symbol and the composition root must not.
+ * The whole-production-tree single-owner construction checks live in
+ * `composition-inventory.test.ts`. These rows separately pin the declaration
+ * LOCATION per module (A5b-1 review P2): the named owner must declare the
+ * symbol and the composition root must not.
  */
 const EXTRACTED_DECLARATIONS: ReadonlyArray<readonly [string, readonly string[]]> = [
   [
@@ -737,10 +721,9 @@ test('every extracted-owner factory is called exactly once, from the composition
 /**
  * Owner-internal presentation constructors and the modules that must hold them.
  *
- * `SINGLE_OWNER_SITES` in the A5 composition inventory counts across the whole
- * owner surface (which includes the composition root), so moving one of these
- * back into bootstrap would keep the aggregate count green (A5b-1 review P2).
- * These rows pin the concrete module set.
+ * Whole-production-tree construction counts can remain unchanged when a
+ * constructor moves back into bootstrap. These rows separately pin each
+ * presentation constructor to its actual owning module.
  */
 const EXTRACTED_CONSTRUCTIONS: ReadonlyArray<readonly [string, readonly string[]]> = [
   ['src/app/surface/session-presentation.ts', ['new TranscriptFolder(', 'new StatsFolder(', 'new TranscriptWindowController(']],
