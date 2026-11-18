@@ -1421,7 +1421,7 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
     tui,
     dshHome,
     sessionId: consent.sessionId,
-    prompt: `Run exactly this in run_code: const app = await tools.cua({ method: 'getApp', params: { selector: '${String(textEditPid)}' } }); const windows = await tools.cua({ method: 'listWindows', params: { appHandle: app.appHandle } }); const window = windows.find(item => String(item.title ?? '').includes('cua-blank')); if (!window) throw new Error('the controlled TextEdit window was not found'); await tools.cua({ method: 'show', params: { appHandle: app.appHandle, windowId: window.windowId } }); await tools.cua({ method: 'activate', params: { appHandle: app.appHandle } }); await tools.cua({ method: 'typeText', params: { appHandle: app.appHandle, windowId: window.windowId, text: '${marker}' } }); const tree = await tools.cua({ method: 'getState', params: { appHandle: app.appHandle, windowId: window.windowId } }); return JSON.stringify(tree).includes('${marker}') ? 'MARKER_PRESENT' : 'MARKER_MISSING'`,
+    prompt: `Run exactly this in run_code: const app = await tools.cua({ method: 'getApp', params: { selector: '${String(textEditPid)}' } }); const windows = await tools.cua({ method: 'listWindows', params: { appHandle: app.appHandle } }); const window = windows.find(item => String(item.title ?? '').includes('cua-blank')); if (!window) throw new Error('the controlled TextEdit window was not found'); await tools.cua({ method: 'show', params: { appHandle: app.appHandle, windowId: window.windowId } }); await tools.cua({ method: 'activate', params: { appHandle: app.appHandle } }); await app.typeText('${marker}'); const tree = await app.getState(); return JSON.stringify(tree).includes('${marker}') ? 'MARKER_PRESENT' : 'MARKER_MISSING'`,
     label: 'MAC09-08 controlled input',
     method: 'typeText',
     timeoutMs: TIMEOUTS.turn,
@@ -1465,6 +1465,12 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
   const activateParams = dispatchParams(activateDispatch)
   assert(typeDispatch !== undefined && typeParams?.text === marker,
     'MAC09-08: the official typeText argument is not the exact random marker')
+  // The provider's declared keyboard scope is app-level (rc.3 capabilities:
+  // keyboard: ["app"]) — typeText routes through the FOCUSED recipient of the
+  // approved appHandle; the windowId params the protocol schema marks optional
+  // are rejected with INVALID_ARGUMENT. The chain stays: show/activate bind
+  // the controlled window, typeText/getState use the app object returned by
+  // the approved getApp.
   assert(typeof typeParams?.appHandle === 'string' && typeParams.appHandle === controlledHandle
     && stateParams?.appHandle === controlledHandle
     && showParams?.appHandle === controlledHandle
@@ -1472,14 +1478,11 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
     && dispatchParams(listWindowsDispatch)?.appHandle === controlledHandle,
     'MAC09-08: listWindows/show/typeText/getState do not use the exact approved getApp handle')
   const controlledInputWindow = Array.isArray(controlledWindows)
-    ? controlledWindows.find(window => window?.windowId === typeParams?.windowId
+    ? controlledWindows.find(window => window?.windowId === showParams?.windowId
       && String(window?.title ?? '').includes('cua-blank'))
     : undefined
   assert(controlledInputWindow !== undefined,
-    'MAC09-08: typeText windowId is not this run\'s controlled cua-blank listWindows result')
-  assert(typeof typeParams?.windowId === 'number' && typeParams.windowId === stateParams?.windowId
-    && showParams?.windowId === typeParams.windowId,
-    'MAC09-08: show/typeText/getState do not target the same controlled window id')
+    'MAC09-08: show windowId is not this run\'s controlled cua-blank listWindows result')
   const markerResult = await waitFor(() => cuaResults(eventsOf(dshHome, input.sessionId), 0)
     .find(result => result.rootCallId === input.dispatch.rootCallId
       && dispatchMethod(result) === 'getState'
