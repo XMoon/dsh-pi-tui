@@ -57,6 +57,10 @@ import {
   createWorkspaceObjectHandler,
 } from './local-workspace-object.ts'
 import {
+  LOCAL_ACP_STATUS_ROUTE,
+  createLocalAcpStatusHandler,
+} from './local-acp-status.ts'
+import {
   assertRecordedHostKernelIdentityCurrent,
   buildHostInstanceRecord,
   cleanupOwnedFiles,
@@ -1038,8 +1042,9 @@ interface HostWebServerService {
 
 interface PublishedLocalHost {
   readonly identity: LocalInstanceRecord
-  /** Release BOTH entry-owned exact routes (identity echo and the read-only
-   *  workspace-object observation) before the official shutdown runs. */
+  /** Release ALL entry-owned exact routes (identity echo, the read-only
+   *  workspace-object observation and the read-only ACP status observation)
+   *  before the official shutdown runs. */
   unregisterRoutes(): Promise<void>
 }
 
@@ -1053,6 +1058,7 @@ async function publishLocalHost(
   scope: LocalScope,
   hostIdentity: HostProcessIdentity,
   seat: ProcessSeat,
+  acpController: AcpControlController,
 ): Promise<PublishedLocalHost> {
   const connection = context.get('connection') as unknown as HostConnectionService | undefined
   if (connection === undefined || typeof connection.authenticatedUrl !== 'function' || typeof connection.fetch?.register !== 'function') {
@@ -1101,6 +1107,7 @@ async function publishLocalHost(
   writeLaunchMaterial(scope, identity, { schema: 1, instanceId, connectUrl })
   let unregisterIdentity: (() => Promise<void>) | undefined
   let unregisterWorkspaceObject: (() => Promise<void>) | undefined
+  let unregisterAcpStatus: (() => Promise<void>) | undefined
   try {
     unregisterIdentity = connection.fetch.register({
       path: '/api/pi-tui.local-host',
@@ -1122,7 +1129,16 @@ async function publishLocalHost(
       requestBody: 'buffered',
       fetch: createWorkspaceObjectHandler(instanceId),
     })
-    // Admission runs before the exact routes; this proves both routes sit
+    // PO-5D: the read-only ACP status observation joins the SAME official
+    // Owner-only admission and publication lifetime. It answers the ONE live
+    // controller read and never mutates, caches or reflects a path.
+    unregisterAcpStatus = connection.fetch.register({
+      path: LOCAL_ACP_STATUS_ROUTE,
+      methods: ['GET'],
+      requestBody: 'buffered',
+      fetch: createLocalAcpStatusHandler(instanceId, acpController),
+    })
+    // Admission runs before the exact routes; this proves every route sits
     // behind the official Connection owner rather than a bare webserver
     // handler.
     await waitForRefusal(`${origin}/api/pi-tui.local-host`)
@@ -1131,6 +1147,7 @@ async function publishLocalHost(
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ instanceId, path: scope.profileRealpath }),
     })
+    await waitForRefusal(`${origin}${LOCAL_ACP_STATUS_ROUTE}`)
     // The READY commit re-proves BOTH authorities immediately before the
     // registry becomes discoverable: the kernel process identity is still the
     // one this Host captured, and the singleton seat is still held. A replaced
@@ -1147,6 +1164,11 @@ async function publishLocalHost(
     }
   } catch (error) {
     try {
+      await unregisterAcpStatus?.()
+    } catch {
+      // The registry was never committed; cleanup continues below.
+    }
+    try {
       await unregisterWorkspaceObject?.()
     } catch {
       // The registry was never committed; cleanup continues below.
@@ -1162,6 +1184,7 @@ async function publishLocalHost(
   return {
     identity,
     async unregisterRoutes(): Promise<void> {
+      await unregisterAcpStatus?.()
       await unregisterWorkspaceObject?.()
       await unregisterIdentity?.()
     },
@@ -1480,7 +1503,7 @@ async function runLocalHostEntryOwned(options: LocalHostEntryOptions, scratchOwn
         return
       }
 
-      const publishedHost = await publishLocalHost(handle.ctx, scope, hostProcessIdentity, seat)
+      const publishedHost = await publishLocalHost(handle.ctx, scope, hostProcessIdentity, seat, acpController)
       published = publishedHost
       registration = publishedHost
       // The exit backstop removes only this instance's files; SIGKILL leaves

@@ -52,6 +52,7 @@ import type {
   LinuxLocalInstanceRecord,
   LocalInstanceRecord,
 } from '../../src/app/remote-process/local-discovery.ts'
+import { darwinAcpSocketPaths } from '../../src/app/remote-process/local-acp-listener.ts'
 import type { DarwinKernelProcessIdentity, KernelObservation } from '../../src/runtime/native-process/identity.ts'
 
 const DARWIN_SKIP = process.platform !== 'darwin' ? 'the launchd manager uses the macOS native plist decoder' : false
@@ -407,7 +408,10 @@ test('status with no Host and no unit reports stopped and never queries the mana
   const fx = fixture(t)
   const systemctl = unitSystemctl(join(fx.unitDir, fx.unitName))
   assert.equal(existsSync(fx.scope.dir), false, 'the fixture must start without a run directory')
-  const result = await runDaemonControl({ verb: 'status' }, fx.profile, depsOf(fx, { systemctl: systemctl.run }))
+  const result = await runDaemonControl({ verb: 'status' }, fx.profile, depsOf(fx, {
+    systemctl: systemctl.run,
+    observeAcpStatus: async () => { throw new Error('no authenticated Host may be asked for its ACP state') },
+  }))
   assertCode(result, 0)
   assert.match(result.stdout, /^profile=pi-tui$/mu)
   assert.match(result.stdout, /^manager=unmanaged$/mu)
@@ -416,8 +420,115 @@ test('status with no Host and no unit reports stopped and never queries the mana
   assert.match(result.stdout, /^unit=none$/mu)
   assert.match(result.stdout, /^unit-state=not-found$/mu)
   assert.match(result.stdout, /^compatibility=none$/mu)
+  assert.match(result.stdout, /^acp=unavailable$/mu, 'no live Host can never prove the ACP listener state')
+  assert.doesNotMatch(result.stdout, /^acp-socket=/mu, 'an unproven ACP state prints no endpoint')
   assert.equal(existsSync(fx.scope.dir), false, 'status must never create the scope run directory')
   assert.deepEqual(systemctl.calls, [], 'no installed unit means NO systemctl call at all')
+})
+
+test('status reports an enabled live ACP listener and the Linux logical socket', async t => {
+  const fx = fixture(t)
+  const record = recordOf(fx.scope)
+  const observed: Array<{ readonly cookie: string; readonly instanceId: string }> = []
+  const result = await runDaemonControl({ verb: 'status' }, fx.profile, depsOf(fx, {
+    readRecord: () => record,
+    inspectProcess: () => 'alive',
+    authenticate: async () => ({ record, cookie: 'signed-cookie', identity: record }),
+    observeAcpStatus: async verified => {
+      observed.push({ cookie: verified.cookie, instanceId: verified.identity.instanceId })
+      return { state: 'enabled' }
+    },
+  }))
+  assertCode(result, 0)
+  assert.match(result.stdout, /^host=ready$/mu)
+  assert.match(result.stdout, /^acp=enabled$/mu)
+  const socket = join(fx.scope.dir, 'acp.sock')
+  assert.ok(
+    result.stdout.split('\n').includes(`acp-socket=${socket}`),
+    `the enabled listener prints its public logical socket:\n${result.stdout}`,
+  )
+  assert.deepEqual(observed, [{ cookie: 'signed-cookie', instanceId: record.instanceId }],
+    'the observation uses the SAME authenticated Host/cookie exactly once')
+  assert.doesNotMatch(result.stderr, /acp/u)
+})
+
+test('status reports a disabled listener with no endpoint', async t => {
+  const fx = fixture(t)
+  const record = recordOf(fx.scope)
+  const result = await runDaemonControl({ verb: 'status' }, fx.profile, depsOf(fx, {
+    readRecord: () => record,
+    inspectProcess: () => 'alive',
+    authenticate: async () => ({ record, cookie: 'c', identity: record }),
+    observeAcpStatus: async () => ({ state: 'disabled' }),
+  }))
+  assertCode(result, 0)
+  assert.match(result.stdout, /^acp=disabled$/mu)
+  assert.doesNotMatch(result.stdout, /^acp-socket=/mu, 'only an enabled listener exposes an endpoint')
+})
+
+test('status maps changing, unavailable and an unreadable observation to unavailable', async t => {
+  const fx = fixture(t)
+  for (const observation of [
+    { state: 'changing' as const },
+    { state: 'unavailable' as const, reason: 'listener is closing' },
+    undefined,
+  ]) {
+    const record = recordOf(fx.scope)
+    const result = await runDaemonControl({ verb: 'status' }, fx.profile, depsOf(fx, {
+      readRecord: () => record,
+      inspectProcess: () => 'alive',
+      authenticate: async () => ({ record, cookie: 'c', identity: record }),
+      observeAcpStatus: async () => observation,
+    }))
+    assertCode(result, 0)
+    assert.match(result.stdout, /^host=ready$/mu, 'the ACP failure never changes the Host verdict')
+    assert.match(result.stdout, /^acp=unavailable$/mu, `an unprovable state is never reported as disabled: ${JSON.stringify(observation)}`)
+    assert.doesNotMatch(result.stdout, /^acp-socket=/mu)
+  }
+})
+
+test('status derives the Darwin public endpoint from the frozen path helper', async t => {
+  const fx = fixture(t)
+  const record = darwinRecordOf(fx.scope)
+  const result = await runDaemonControl({ verb: 'status' }, fx.profile, darwinDepsOf(fx, {
+    readRecord: () => record,
+    inspectProcess: () => 'alive',
+    authenticate: async () => ({ record, cookie: 'c', identity: record }),
+    launchctl: async () => { throw new Error('an independent Host needs no launchctl query') },
+    observeAcpStatus: async () => ({ state: 'enabled' }),
+  }))
+  assertCode(result, 0)
+  const expected = darwinAcpSocketPaths(fx.scope, UID).publicPath
+  assert.ok(result.stdout.split('\n').includes(`acp-socket=${expected}`),
+    `the Darwin enabled listener prints the public logical endpoint:\n${result.stdout}`)
+  assert.ok(expected.startsWith('/private/tmp/dpt-'), 'the example is the frozen public Darwin path')
+})
+
+test('the status formatter keeps the pre-ACP bytes and prints the ACP fields only when supplied', () => {
+  const base = {
+    profile: 'pi-tui',
+    manager: 'process' as const,
+    userManager: 'not-checked' as const,
+    host: 'ready' as const,
+    unit: 'none' as const,
+    unitState: 'not-found' as const,
+    compatibility: 'compatible' as const,
+    pid: 4242,
+    instance: 'abcdef12',
+  }
+  assert.equal(
+    formatDaemonStatus(base),
+    'profile=pi-tui\nmanager=process\nuser-manager=not-checked\nhost=ready\nunit=none\nunit-state=not-found\ncompatibility=compatible\npid=4242\ninstance=abcdef12\n',
+    'an observation without the optional ACP fields is byte-identical to the pre-ACP output',
+  )
+  assert.equal(
+    formatDaemonStatus({ ...base, acp: 'disabled' }),
+    'profile=pi-tui\nmanager=process\nuser-manager=not-checked\nhost=ready\nunit=none\nunit-state=not-found\ncompatibility=compatible\npid=4242\ninstance=abcdef12\nacp=disabled\n',
+  )
+  assert.equal(
+    formatDaemonStatus({ ...base, acp: 'enabled', acpSocket: '/home/user/.dsh/run/dsh-pi-tui/scope/acp.sock' }),
+    'profile=pi-tui\nmanager=process\nuser-manager=not-checked\nhost=ready\nunit=none\nunit-state=not-found\ncompatibility=compatible\npid=4242\ninstance=abcdef12\nacp=enabled\nacp-socket=/home/user/.dsh/run/dsh-pi-tui/scope/acp.sock\n',
+  )
 })
 
 test('an active unit without an authenticated Host reports starting, never ready', async t => {

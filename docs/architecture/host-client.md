@@ -304,11 +304,11 @@ the kernel seat where one is required.
   `fetch`/`createWebSocket` and `streamBaseUrl`. `ownsHost`, in-process
   RPC/openStream bridges, custom Bearer/Basic auth and any second business RPC
   are prohibited. The private routes behind the official `/api` Owner admission
-  are read-only: the GET identity echo and the POST workspace-object
-  observation, which returns only the current Host instance's own
-  `(device, inode)` for one bounded absolute directory path. Neither carries a
-  Session, Workspace registration, file content, write, shutdown, approval or
-  version-switch operation.
+  are read-only: the GET identity echo, the GET ACP status observation and the
+  POST workspace-object observation, which returns only the current Host
+  instance's own `(device, inode)` for one bounded absolute directory path. None
+  carries a Session, Workspace registration, file content, write, shutdown,
+  approval or version-switch operation.
 - **Secret boundary.** The launch token lives only in the Host process and its
   `launch.json` (a new file is written 0600 with an atomic same-directory
   rename); the Client keeps its own Cookie in memory only. Neither token,
@@ -601,7 +601,16 @@ stdout/stderr.
   run the official authenticated `/connect` handshake. Its stable `key=value`
   block carries `profile`, `manager`, `user-manager`, `host`, `unit`,
   `unit-state` and `compatibility` (plus a bounded `pid`/`instance` while one
-  is live). With no installed service definition the command issues NO manager query and
+  is live). When the authenticated Host is `ready`, `status` also makes ONE
+  read-only observation through the Owner-only `/api/pi-tui.acp-status` route
+  and appends `acp=enabled|disabled|unavailable`; `acp-socket=<absolute public
+  logical path>` is appended ONLY when that same Host's ACP controller proves
+  the listener `enabled`. Every other outcome (no Host, an
+  unauthenticated/unreadable/incompatible Host, a failed, invalid or
+  foreign-instance response, `changing` or a Host-reported `unavailable`)
+  prints `acp=unavailable` and never a guessed `disabled`. The ACP observation
+  never changes the manager/Host verdict, stderr or exit code, and none of the
+  other management verbs performs it. With no installed service definition the command issues NO manager query and
   reports `user-manager=not-checked`; `user-manager=available|error` only
   describes the real manager query (`systemctl show` or `launchctl print`) of an
   installed service definition, and no absence is inferred or reported as
@@ -804,9 +813,31 @@ profile's independent `autoStart` preference enables it (see below).
   physical locations. An external advanced peer derives the local address from
   the official profile scope and UID and is still not authorized by a computed
   string: only a real `connect` + ACP `initialize` against the live Host counts.
-  There is no endpoint-discovery command, Remote field or TUI page; the strict
-  `piTuiAcpAccess` status vocabulary remains `{state}` /
-  `{state:'unavailable',reason}` and never carries a path or token.
+  The strict `piTuiAcpAccess` status vocabulary remains `{state}` /
+  `{state:'unavailable',reason}` and never carries a path or token, and there is
+  no Remote field or TUI page for the endpoint. The ONE headless discovery
+  surface is `daemon status` (see Daemon management commands): a proven
+  `enabled` listener appends `acp=enabled` plus `acp-socket=<absolute public
+  logical path>` — the already-public same-UID UDS contract endpoint only, never
+  a Cookie, Host URL or private bind name — while `disabled` and every
+  unprovable state print no path. A user directory long enough to hit
+  `sun_path` does not change the printed logical endpoint: clients keep using
+  the existing `/proc/self/fd/<scopeDirFd>/acp.sock` short alias, and the output
+  path is never used to rebind or migrate the socket.
+
+- **One read-only status observation for the management CLI.** The SAME Host
+  publication registers ONE Owner-only authenticated
+  `GET /api/pi-tui.acp-status` under the official Connection owner, with the
+  same admission and publication lifetime as the identity echo and the
+  workspace-object observation. It answers `{schema:1, instanceId, status}` from
+  exactly ONE `controller.getStatus()` call with `application/json` and
+  `cache-control: no-store`, and never mutates, caches or reflects a
+  path/token. The `daemon status` reader accepts only HTTP 200, those exact
+  media/cache headers, a bounded body (≤1024 bytes), `schema=1`, the SAME
+  authenticated `instanceId` and the existing strict status DTO; everything
+  else becomes the CLI's `unavailable`. It is not an ACP service, creates no
+  controller and returns no path itself; the CLI derives the public endpoint
+  from the authenticated profile scope.
 
 - **One owner, one scope, two independent control facts.** A single
   Host-entry-owned runtime controller is the ONLY socket owner per Host profile.

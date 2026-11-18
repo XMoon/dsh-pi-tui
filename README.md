@@ -180,7 +180,7 @@ dsh --profile pi-tui daemon start      # Host 尚未运行时
 dsh --profile pi-tui daemon restart    # Host 已运行且配置已变更时
 ```
 
-基础 Daemon 无需先 `daemon install`；`restart` 会中断进行中的 Turn/Job。`daemon status` 返回 `host=ready` **不等于 ACP 已监听**；请以实际 Socket 连接和成功的 ACP `initialize` 确认，失败时检查 `dsh --profile pi-tui daemon logs --lines 200`。
+基础 Daemon 无需先 `daemon install`；`restart` 会中断进行中的 Turn/Job。`daemon status` 会以 `acp=enabled|disabled|unavailable` 报告已认证 Host 的 Listener 状态，且仅当 `acp=enabled` 时输出 `acp-socket` 端点；`host=ready` 本身**不等于 ACP 已监听**，`acp=unavailable` 表示无法证明（例如 Host 未运行、转换中或读取失败），不能当作已关闭。仍应以实际 Socket 连接和成功的 ACP `initialize` 确认，失败时检查 `dsh --profile pi-tui daemon logs --lines 200`。
 
 **端点发现。** `scopeId` 是以 `dsh-pi-tui/local-scope/1`、十进制 UID、Profile `realpath` 组成、由 NUL 分隔后计算的 SHA256。Linux 为 `<DSH_HOME>/run/dsh-pi-tui/<scopeId>/acp.sock`；macOS 为 `/private/tmp/dpt-<uid>-<scopeId 前 40 位十六进制字符>/acp.sock`。Socket 权限为 `0600`，产品新建的私有目录为 `0700`。
 

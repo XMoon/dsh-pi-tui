@@ -79,6 +79,8 @@ import {
   type LaunchctlRunner,
   type OwnedLaunchdUnit,
 } from './local-host-launchd.ts'
+import { darwinAcpSocketPaths } from './local-acp-listener.ts'
+import { observeAuthenticatedLocalAcpStatus } from './local-acp-status.ts'
 
 /** The public management verbs (the fixed M6-2C set). */
 export type DaemonControlVerb = 'status' | 'start' | 'stop' | 'restart' | 'logs' | 'install' | 'uninstall'
@@ -195,6 +197,17 @@ export interface DaemonControlStatus {
   readonly compatibility: DaemonCompatibility
   readonly pid?: number
   readonly instance?: string
+  /**
+   * The live ACP listener state read from the authenticated Host. ABSENT on the
+   * six other management verbs (they share this formatter but never consume the
+   * ACP observation), so their byte output is unchanged.
+   */
+  readonly acp?: 'enabled' | 'disabled' | 'unavailable'
+  /**
+   * The public logical UDS endpoint. Present ONLY when {@link acp} is `enabled`
+   * and the derived path is one safe `key=value` line.
+   */
+  readonly acpSocket?: string
 }
 
 /** Injectable OS/discovery seams; production omits every one of them. */
@@ -226,6 +239,12 @@ export interface DaemonControlDeps {
   /** Explicit Darwin launchd command seam for structural tests; production
    *  uses `/bin/launchctl`. */
   readonly launchctl?: LaunchctlRunner
+  /**
+   * PO-5D: the ONE narrow seam for the authenticated read-only ACP status
+   * observation. Consumed ONLY by `status`; every other verb never issues the
+   * request.
+   */
+  readonly observeAcpStatus?: typeof observeAuthenticatedLocalAcpStatus
 }
 
 /** One internal snapshot shared by the read-only status and the pre-flight checks. */
@@ -727,6 +746,8 @@ export function formatDaemonStatus(status: DaemonControlStatus): string {
   ]
   if (status.pid !== undefined) lines.push(`pid=${String(status.pid)}`)
   if (status.instance !== undefined) lines.push(`instance=${status.instance}`)
+  if (status.acp !== undefined) lines.push(`acp=${status.acp}`)
+  if (status.acpSocket !== undefined) lines.push(`acp-socket=${status.acpSocket}`)
   return `${lines.join('\n')}\n`
 }
 
@@ -1111,12 +1132,58 @@ async function stopDarwinFromSnapshot(snapshot: Snapshot, deps: DaemonControlDep
   // No live Host and no loaded job: already stopped (idempotent no-op).
 }
 
+/** The truthful ACP facts appended by `status`. */
+interface ObservedAcpFacts {
+  readonly acp: 'enabled' | 'disabled' | 'unavailable'
+  readonly acpSocket?: string
+}
+
+/**
+ * The public logical UDS endpoint of this profile scope (never the macOS private
+ * bind name). The value is a single safe `key=value` line or it is omitted: a
+ * malformed path is never sanitized into a fake connectable address.
+ */
+function acpSocketPathOf(scope: LocalScope, deps: DaemonControlDeps): string | undefined {
+  const path = platformOf(deps) === 'darwin'
+    ? darwinAcpSocketPaths(scope, uidOf(deps)).publicPath
+    : join(scope.dir, 'acp.sock')
+  if (!path.startsWith('/') || /[\u0000-\u001f\u007f]/u.test(path)) return undefined
+  return path
+}
+
+/**
+ * Derive the `acp` field from the ONE authenticated read-only observation. Only
+ * an authenticated `host=ready` snapshot is read at all; every unprovable
+ * outcome is `unavailable` and NEVER a guessed `disabled`. The ACP facts never
+ * change the original exit code, stderr or manager/Host classification.
+ */
+async function observeAcpFacts(snapshot: Snapshot, deps: DaemonControlDeps): Promise<ObservedAcpFacts> {
+  if (snapshot.authenticated === undefined || snapshot.status.host !== 'ready') {
+    return { acp: 'unavailable' }
+  }
+  const observe = deps.observeAcpStatus ?? observeAuthenticatedLocalAcpStatus
+  const status = await observe(snapshot.authenticated)
+  if (status === undefined) return { acp: 'unavailable' }
+  switch (status.state) {
+    case 'enabled': {
+      const socket = acpSocketPathOf(snapshot.scope, deps)
+      return socket === undefined ? { acp: 'enabled' } : { acp: 'enabled', acpSocket: socket }
+    }
+    case 'disabled':
+      return { acp: 'disabled' }
+    case 'changing':
+    case 'unavailable':
+      return { acp: 'unavailable' }
+  }
+}
+
 /** The `status` handler. */
 async function runStatus(profile: DaemonControlProfile, deps: DaemonControlDeps): Promise<DaemonControlResult> {
   const scope = inspectScope(profile, deps)
   const snapshot = await readSnapshot(profile, deps, scope)
   const stderr = snapshot.failure === undefined ? '' : formatDaemonControlError(snapshot.failure)
-  return { code: snapshot.exitCode, stdout: formatDaemonStatus(snapshot.status), stderr }
+  const acp = await observeAcpFacts(snapshot, deps)
+  return { code: snapshot.exitCode, stdout: formatDaemonStatus({ ...snapshot.status, ...acp }), stderr }
 }
 
 /** The `start` handler. */

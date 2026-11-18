@@ -183,7 +183,7 @@ dsh --profile pi-tui daemon start      # if no Host is running
 dsh --profile pi-tui daemon restart    # if the Host runs and the preference changed
 ```
 
-The basic daemon does not need `daemon install`; `restart` interrupts in-flight Turns/Jobs. `host=ready` from `daemon status` **does not prove ACP is listening**. Verify a real socket connection and successful ACP `initialize`; inspect `dsh --profile pi-tui daemon logs --lines 200` on failure.
+The basic daemon does not need `daemon install`; `restart` interrupts in-flight Turns/Jobs. `daemon status` reports the authenticated Host's listener as `acp=enabled|disabled|unavailable`, and prints `acp-socket` only when `acp=enabled`. `host=ready` **does not by itself prove ACP is listening**, and `acp=unavailable` means the state could not be proven (for example, no Host, a transition in flight or a failed read) — never treat it as disabled. Still verify a real socket connection and successful ACP `initialize`; inspect `dsh --profile pi-tui daemon logs --lines 200` on failure.
 
 **Endpoint discovery.** `scopeId` is SHA256 of `dsh-pi-tui/local-scope/1`, decimal UID and Profile `realpath`, separated by NUL bytes. Linux uses `<DSH_HOME>/run/dsh-pi-tui/<scopeId>/acp.sock`; macOS uses `/private/tmp/dpt-<uid>-<first 40 hex characters of scopeId>/acp.sock`. The socket has mode `0600` and newly created private directories are `0700`.
 
