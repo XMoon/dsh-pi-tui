@@ -1874,12 +1874,34 @@ async function runD2AcpScene({ installation, workRoot, report, start, projectA, 
   }
   assert(held !== undefined,
     'M07 Host-admitted TUI turn is held: the fixture recorded no NEW long-turn-held event for the Session; '
-    + `held=${String(heldCountBefore)}; events=${JSON.stringify(readHeldTurnEvents(heldTurnRoot).slice(-4))}; `
-    + `frame=${tmuxCapture(tuiB, 'M07 held-turn debug frame').replace(/[\u0000-\u001f\u007f]/gu, ' ').slice(-900)}`)
+    + `before=${String(heldCountBefore)}; now=${String(readHeldTurnEvents(heldTurnRoot)
+      .filter(event => event.kind === 'long-turn-held' && event.sessionId === sessionB).length)}`)
   assert(typeof held.sessionId === 'string' && Number.isInteger(held.attempt),
     'M07: the held-turn fixture must name the Session and attempt')
   connDisconnect.close()
   await connDisconnect.closed
+  // Host-observable teardown fence: the local close above is only THIS process's
+  // FIN. A fresh resume of the same Session succeeds only after the Host has
+  // released the disconnected View's claim, so the model barrier is released
+  // strictly after the Host-side teardown decision, never before it.
+  const teardownFence = await openAcp('M07 teardown fence')
+  await teardownFence.initialize(1)
+  const fenceDeadline = Date.now() + TIMEOUTS.turn
+  let fenceResult
+  let fenceAttempts = 0
+  while (Date.now() < fenceDeadline) {
+    fenceAttempts += 1
+    fenceResult = await teardownFence.request(2, 'session/resume', { sessionId: sessionB, cwd: acpWorkspaceReal })
+    if (isEmptyAcpResult(fenceResult)) break
+    const fenceCode = fenceResult?.error?.data?.code
+    assert(fenceCode === 'LOCAL_ACP_VIEW_ALREADY_ATTACHED',
+      `M07 teardown fence: the Host answered the resume with ${JSON.stringify(fenceResult?.error ?? fenceResult?.result)} instead of releasing the old View`)
+    await sleep(100)
+  }
+  assert(isEmptyAcpResult(fenceResult),
+    `M07: the Host never released the disconnected View before the barrier release (attempts=${String(fenceAttempts)})`)
+  teardownFence.close()
+  await teardownFence.closed
   writeFileSync(releaseBarrier, 'release\n', { mode: 0o600 })
   await waitFor(() => readHeldTurnEvents(heldTurnRoot).some(event =>
     event.kind === 'long-turn-released' && event.sessionId === held.sessionId && event.attempt === held.attempt),
@@ -1912,6 +1934,7 @@ async function runD2AcpScene({ installation, workRoot, report, start, projectA, 
     ownUpdatesOnly: true,
     disconnectSameSessionTuiTurnSettled: true,
     hostAdmittedTurnHeldAtDisconnect: true,
+    hostObservableViewTeardownFence: true,
     releasedAfterDisconnect: true,
     modelRoute: 'existing Host-workload held-turn fixture',
   })
