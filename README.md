@@ -163,7 +163,9 @@ dsh --profile pi-tui --continue            # 继续当前 Host Workspace 中最�
 
 ACP v1 是可选的 **Host-owned Unix socket** 入口，仅供同一操作系统用户的本机客户端连接；不提供 TCP/HTTP 监听或第二个 Host。此能力自 **0.5.7** 版本起支持。
 
-**无需启动 TUI 即可配置。** 在安装好的 `pi-tui` Profile 的**用户** `cordis.patch.yml`（通常为 `<DSH_HOME>/profiles/pi-tui/cordis.patch.yml`）中添加以下条目，若已存在相同 `id` 则只修改其值。保留文件的其他内容，不要修改包内 patch：
+**在 TUI 设置中开启。** 打开 `/settings → General → Start ACP automatically`，开启并保存后，ACP 将在**下一次 Host 冷启动**时自动启用；需要立即启用当前 Host 的 ACP Listener，则进入 `/settings → Tools → ACP Server` 开启。两项设置相互独立：保存自动启动偏好不会立即改变运行时状态，运行时开启也不会更改下次启动的偏好。ACP 默认关闭。
+
+**Headless（无需 TUI）。** 在已安装 `pi-tui` Profile 的**用户** `cordis.patch.yml`（通常为 `<DSH_HOME>/profiles/pi-tui/cordis.patch.yml`）中添加以下条目，若已存在相同 `id` 则只修改其值。保留文件的其他内容，不要修改包内 patch：
 
 ```yaml
 - id: pi-tui-acp-preferences
@@ -171,7 +173,7 @@ ACP v1 是可选的 **Host-owned Unix socket** 入口，仅供同一操作系统
     autoStart: true
 ```
 
-默认值为 `false`；持久配置只在**下一次 Host 冷启动**生效。TUI 也提供 `/settings → General → Start ACP automatically`（保存下次启动的偏好）和 `/settings → Tools → ACP Server`（切换当前运行时）。Headless 主机用公开管理命令启动或应用配置：
+保存上述配置后，在 Headless 主机上使用公开管理命令启动 Host，或重启已有 Host 使配置生效：
 
 ```sh
 dsh --profile pi-tui daemon start      # Host 尚未运行时
