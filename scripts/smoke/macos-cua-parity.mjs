@@ -881,7 +881,10 @@ function dispatchParams(dispatch) {
 function dispatchErrorCode(result) {
   const text = JSON.stringify(result?.content ?? result ?? '')
   const match = /"code"\s*:\s*"([A-Z0-9_]+)"/u.exec(text)
-  return match?.[1]
+  if (match !== null) return match[1]
+  // The official PTC error settles as a text block: `Error: <CODE>: <message>`.
+  const textMatch = /\bError:\s*([A-Z][A-Z0-9_]+):/u.exec(dispatchContentText(result))
+  return textMatch?.[1]
 }
 
 function dispatchContentText(result) {
