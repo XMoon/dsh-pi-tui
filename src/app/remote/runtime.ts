@@ -18,6 +18,7 @@ import { RemoteSessionPolicyPort } from '../../runtime/remote/session-policy-rem
 import { RemoteTeamModePort } from '../../runtime/remote/team-mode-remote.ts'
 import { RemoteTeamBoardReadPort } from '../../runtime/remote/team-board-read-remote.ts'
 import { RemoteMcpServerPort } from '../../runtime/remote/mcp-server-remote.ts'
+import { RemoteCuaAccessPort, type RemoteCuaAccessNamespace } from '../../runtime/remote/cua-access-remote.ts'
 import { RemoteSessionArchive } from '../../runtime/remote/session-archive-remote.ts'
 import { RemoteSessionMarkdown } from '../../runtime/remote/session-markdown-remote.ts'
 import { createRemoteBackend } from '../../runtime/remote/backend-remote.ts'
@@ -244,6 +245,15 @@ export async function createRemoteBackendRuntime(
           remote: { mcpManager: options.runtime.remote.mcpManager },
           connection: { generation: options.runtime.connection.generation },
         }),
+        // PR-5/MAC-09 v2: the official generated `cuaAccess` namespace over
+        // the SAME Connection generation source. The official generated
+        // contribution is mounted by the Client domain composition; a Host
+        // without the loaded bundle or a missing namespace is a truthful
+        // unavailable, never a Direct fallback or a fabricated denial.
+        cuaAccess: new RemoteCuaAccessPort(
+          (options.runtime.remote as unknown as { cuaAccess?: RemoteCuaAccessNamespace }).cuaAccess,
+          options.runtime.connection.generation,
+        ),
       }),
       semantics,
       dispose,

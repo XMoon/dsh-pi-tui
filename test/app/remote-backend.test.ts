@@ -42,6 +42,7 @@ test('the Remote backend advertises exactly its implemented capabilities', () =>
     teamMode: {} as RemoteBackendParts['teamMode'],
     teamBoard: {} as RemoteBackendParts['teamBoard'],
     mcpServers: {} as RemoteBackendParts['mcpServers'],
+    cuaAccess: {} as RemoteBackendParts['cuaAccess'],
   }
   const backend = createRemoteBackend(parts)
   assert.equal(backend.kind, 'remote')
@@ -61,6 +62,8 @@ test('the Remote backend advertises exactly its implemented capabilities', () =>
     'FR1: the required Team mode port is the very adapter handed in')
   assert.equal(backend.teamBoard, parts.teamBoard,
     'FR2: the required read-only Team board port is the very adapter handed in')
+  assert.equal(backend.cuaAccess, parts.cuaAccess,
+    'PR-5/MAC-09 v2: the required CUA access port is the very adapter handed in')
 })
 
 test('BackendKind accepts remote while Direct stays the production default', () => {

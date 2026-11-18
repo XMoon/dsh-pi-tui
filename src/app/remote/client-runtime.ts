@@ -51,6 +51,7 @@ import workspaceFilesRemote from '@deepseek-ai/dsh-api-workspace-files/remote'
 import workspaceRemote from '@deepseek-ai/dsh-api-workspace-controller/remote'
 import scheduleRemote from '@deepseek-ai/dsh-schedule/remote'
 import agentTeamsRemote from '@deepseek-ai/dsh-agent-team/remote'
+import cuaRemote from '@deepseek-ai/dsh-cua/remote'
 import { PI_TUI_CLIENT_CONTRIBUTION } from '../../runtime/remote/pi-tui-remote-contribution.ts'
 import { mergeCause } from './dispose-cause.ts'
 
@@ -372,6 +373,10 @@ export const REMOTE_CONTRIBUTIONS = [
   // mounts the ONE Team service; this contribution only publishes its
   // Root-only `agentTeams/setEnabled` Remote face to the authenticated Client.
   agentTeamsRemote,
+  // PR-5/MAC-09 v2: the official generated `cuaAccess` Remote face
+  // (system/applications/PTC/requests). The Host provider remains the only
+  // permission authority; this contribution only publishes its Client face.
+  cuaRemote,
 ] as const
 
 /**
@@ -399,6 +404,7 @@ export const REMOTE_CONTRIBUTION_SPECIFIERS = [
   '@deepseek-ai/dsh-api-workspace-controller/remote',
   '@deepseek-ai/dsh-schedule/remote',
   '@deepseek-ai/dsh-agent-team/remote',
+  '@deepseek-ai/dsh-cua/remote',
 ] as const
 
 /** The official Client-side modules and generated `/remote` contributions one

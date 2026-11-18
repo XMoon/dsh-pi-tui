@@ -50,6 +50,7 @@ import { DirectSessionPolicyPort } from './session-policy-direct.ts'
 import { DirectTeamModePort } from './team-mode-direct.ts'
 import { DirectTeamBoardReadPort } from './team-board-read-direct.ts'
 import { DirectMcpServerPort } from './mcp-server-direct.ts'
+import { DirectCuaAccessPort } from './cua-access-direct.ts'
 import type { WebAccessPort, WebAccessStatus, WebAccessUrl } from '../web-access-port.ts'
 import type { AcpAccessPort, AcpAccessStatus } from '../acp-access-port.ts'
 
@@ -161,6 +162,7 @@ export function createDirectRuntimeBackend(deps: DirectBackendDeps): Backend {
   // configuration-source read is bound to the SAME identity so a source
   // verdict can never be mixed with another generation's roster.
   const mcpServers = new DirectMcpServerPort(deps.ctx)
+  const cuaAccess = new DirectCuaAccessPort(deps.ctx)
   return createDirectBackend(
     new DirectSubagentPort(deps.ctx),
     new DirectSessionReader(deps.ctx, deps.liveResolvers, deps.modelSelections),
@@ -236,5 +238,6 @@ export function createDirectRuntimeBackend(deps: DirectBackendDeps): Backend {
     // The adapter owns no fleet: watch/probe/restart forward to `ctx.mcpManager`
     // and every settlement is generation-bound.
     mcpServers,
+    cuaAccess,
   )
 }

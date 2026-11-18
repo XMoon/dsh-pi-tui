@@ -47,6 +47,7 @@ import type { SessionPolicyPort } from '../session-policy-port.ts'
 import type { TeamModePort } from '../team-mode-port.ts'
 import type { TeamBoardReadPort } from '../team-board-read-port.ts'
 import type { McpServerPort } from '../mcp-server-port.ts'
+import type { CuaAccessPort } from '../cua-access-port.ts'
 
 /** Every semantic port the Remote backend serves (one adapter each). */
 export interface RemoteBackendParts {
@@ -90,6 +91,9 @@ export interface RemoteBackendParts {
   readonly teamBoard: TeamBoardReadPort
   /** The official generated `mcpManager` roster/probe/restart adapter (FR3). */
   readonly mcpServers: McpServerPort
+  /** The official generated `cuaAccess` permission/application adapter
+   *  (PR-5/MAC-09 v2), generation-fenced on the same Connection. */
+  readonly cuaAccess: CuaAccessPort
 }
 
 /** Assemble the experimental Remote `Backend` from its proven adapters. */

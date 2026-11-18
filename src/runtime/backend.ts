@@ -37,6 +37,7 @@ import type { SessionPolicyPort } from './session-policy-port.ts'
 import type { TeamModePort } from './team-mode-port.ts'
 import type { TeamBoardReadPort } from './team-board-read-port.ts'
 import type { McpServerPort } from './mcp-server-port.ts'
+import type { CuaAccessPort } from './cua-access-port.ts'
 
 /** The transport backends the TUI can run on. `direct` remains the
  * production/default; `remote` is the experimental M3-3B assembly that can be
@@ -130,6 +131,11 @@ export interface Backend {
    *  roster/probe/restart. The Host stays the only fleet and status authority;
    *  the configuration-source keys ride `config.mcpServerSources`. */
   readonly mcpServers: McpServerPort
+  /** The official Computer Use provider's permission/application access port
+   *  (PR-5/MAC-09 v2). Direct resolves the live Host `cuaAccess` service;
+   *  Remote consumes the official generated namespace. Absence is a definite
+   *  unavailable, never a fabricated denied or Ready state. */
+  readonly cuaAccess: CuaAccessPort
 }
 
 /** Assemble the Direct backend: in-process adapters over `ctx.*` services.
@@ -162,6 +168,7 @@ export function createDirectBackend(
   teamMode: TeamModePort,
   teamBoard: TeamBoardReadPort,
   mcpServers: McpServerPort,
+  cuaAccess: CuaAccessPort,
 ): Backend {
   return {
     kind: 'direct',
@@ -192,5 +199,6 @@ export function createDirectBackend(
     teamMode,
     teamBoard,
     mcpServers,
+    cuaAccess,
   }
 }
