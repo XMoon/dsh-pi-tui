@@ -2691,6 +2691,14 @@ async function runD4LaunchdScene({ installation, workRoot, report, start, projec
   assert(/^unit=none$/mu.test(l07Again.result.stdout), 'L07: a repeat uninstall must be an idempotent no-plist success')
   report.rows.push({ id: 'L07', status: 'PASS', plistRemoved: true, jobRemoved: true, loadedJobStopped: true, hostPidGone: true, logsRetained: true, idempotent: true })
 
+  // After uninstall the plist is gone but the retained launchd streams still
+  // exist beside an older independent host.log; the source is unprovable.
+  const postUninstallLogs = daemon(['logs', '--lines', '20'])
+  assert(postUninstallLogs.status === 4 && /LOG_SOURCE_UNAVAILABLE/u.test(postUninstallLogs.stderr)
+    && !/retained launchd stdout|stale host\.log/u.test(postUninstallLogs.stdout),
+  `L08-UNINSTALL: a removed plist with retained streams must not guess a log source, saw exit ${String(postUninstallLogs.status)}: ${postUninstallLogs.stderr.slice(-500)}`)
+  report.rows.push({ id: 'L08-UNINSTALL', status: 'PASS', code: 'LOG_SOURCE_UNAVAILABLE', staleHostLogIgnored: true })
+
   // ── L12: the independent daemon is still the default afterward ──────────
   const legacyStart = daemonOk(['start'], 'L12 legacy start')
   assert(legacyStart.fields.manager === 'process' && legacyStart.fields.unit === 'none' && legacyStart.fields.host === 'ready',

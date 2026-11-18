@@ -550,15 +550,19 @@ supported Daemon platform in this contract.
   (a user-edited `RunAtLoad=true` can run a modified program during bootstrap);
   comments and harmless user runtime keys are preserved and never rewritten.
   `daemon uninstall` removes only that verified plist and, when the job is
-  loaded from it, `bootout`s only that verified job; it keeps the private logs,
-  Sessions, Workspace and credentials, and leaves a running independent Host
-  untouched.
+  loaded from it, `bootout`s only that verified job whose process identity is
+  proven by the authenticated Host record; a running/starting job without that
+  proof is refused. It keeps the private logs, Sessions, Workspace and
+  credentials, and leaves a running independent Host untouched.
 - **Stop/log ownership.** An independent Host writes its private `host.log` and
   has no periodic auto-restart (only an explicitly enabled manager restarts a
   supervised Host; the default macOS LaunchAgent does not). Host stop remains
   the Host's own `runProfile` shutdown owner; the manager only sends the OS
   signal (`systemctl stop` or a verified `launchctl bootout`), and a Client
-  exit/crash never stops the Host.
+  exit/crash never stops the Host. A running/starting launchd job without an
+  authenticated Host record has no proven process identity or exit proof:
+  `stop`/`restart`/`uninstall` never boot it out or replace it; only a
+  not-running, PID-less loaded definition is safe to unload.
 
 ### Daemon management commands
 
@@ -740,12 +744,13 @@ stdout/stderr.
   output is exit 4. On macOS a verified loaded LaunchAgent is the source:
   `daemon logs` reads its two private files (`launchd.stdout.log` and
   `launchd.stderr.log`) as separately bounded, separately labelled streams and
-  never pretends they are time-merged. After the launchd job is unloaded there
-  is no live authority proving whether the retained launchd streams or an older
-  `host.log` is the most recent Host: `daemon logs` returns
-  `LOG_SOURCE_UNAVAILABLE` and reads neither. A live independent Host keeps the
-  bounded/sanitized scope `host.log` tail; with no plist and no live Host,
-  `host.log` is the only remaining source. A stale log from another process is
+  never pretends they are time-merged. After the launchd job is unloaded, or
+  its plist was removed while retained launchd streams still exist, there is no
+  live authority proving whether those streams or an older `host.log` is the
+  most recent Host: `daemon logs` returns `LOG_SOURCE_UNAVAILABLE` and reads
+  neither. A live independent Host keeps the bounded/sanitized scope `host.log`
+  tail; with no plist, no live Host and no retained launchd stream, `host.log`
+  is the only remaining source. A stale log from another process is
   never presented as the current record. Output is bounded and
   best-effort
   sanitized (ANSI/control sequences, token/cookie/Authorization and

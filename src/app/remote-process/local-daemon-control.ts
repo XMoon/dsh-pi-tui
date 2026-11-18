@@ -1090,17 +1090,19 @@ async function stopDarwinFromSnapshot(snapshot: Snapshot, deps: DaemonControlDep
     await stopIndependentHost(snapshot, deps)
     return
   }
-  if (launchdUnit !== undefined && launchdFacts !== undefined && loaded !== undefined) {
-    if (loaded.state === 'running' || loaded.state === 'spawn scheduled' || loaded.state === 'not running') {
+  if (loaded !== undefined) {
+    if (launchdUnit === undefined || launchdFacts === undefined) {
+      throw new DaemonControlError('TRANSITION_UNCERTAIN', 'the launchd job facts are unavailable; refusing to change supervision')
+    }
+    // With no authenticated Host record, a running/starting job has no proven
+    // process identity or exit proof. Bootout/kill/new-start must fail closed;
+    // only a genuinely not-running, PID-less definition is safe to unload.
+    if (loaded.pid !== undefined || loaded.state === 'running' || loaded.state === 'spawn scheduled') {
+      throw new DaemonControlError('IDENTITY_OR_OWNERSHIP_REFUSED', 'the launchd job has a process but no authenticated Host record proves its identity; refusing to change supervision')
+    }
+    if (loaded.state === 'not running') {
       assertNotAborted(deps.signal)
-      const stopped = await stopLaunchdService(launchdFacts, launchdUnit, launchdDepsOf(deps))
-      if (stopped.stopped && record !== undefined && record.schema === 2) {
-        try {
-          await waitForHostStopped(record, record.hostPid, deps)
-        } catch (error) {
-          throw afterCommittedAction(toDaemonControlError(error), 'Host stop')
-        }
-      }
+      await stopLaunchdService(launchdFacts, launchdUnit, launchdDepsOf(deps))
       return
     }
     throw new DaemonControlError('TRANSITION_UNCERTAIN', `the launchd job is in an unconfirmed state (${loaded.state === '' ? 'unknown' : loaded.state}); refusing to change supervision`)
@@ -1466,6 +1468,9 @@ async function runDarwinUninstall(profile: DaemonControlProfile, deps: DaemonCon
     if (running && liveHost && pre.record !== undefined && loadedService?.pid !== pre.record.hostPid) {
       throw new DaemonControlError('IDENTITY_OR_OWNERSHIP_REFUSED', 'the launchd job PID is not the live Host; refusing to uninstall')
     }
+    if (running && !liveHost) {
+      throw new DaemonControlError('IDENTITY_OR_OWNERSHIP_REFUSED', 'the launchd job has a process but no authenticated Host record proves its identity; refusing to uninstall')
+    }
     assertNotAborted(deps.signal)
     try {
       // Pass the live Host PID whenever one exists, not only when the job was
@@ -1716,6 +1721,12 @@ async function runDarwinLogs(
       throw new DaemonControlError('LOG_SOURCE_UNAVAILABLE', 'no launchd Host log output is available for this profile')
     }
     return { code: 0, stdout: sections.join(''), stderr: LOG_SANITIZATION_NOTICE }
+  }
+  if (!liveHost && launchdUnit === undefined) {
+    const logs = launchdLogPaths(scope.dir)
+    if (existsSync(logs.stdout) || existsSync(logs.stderr)) {
+      throw new DaemonControlError('LOG_SOURCE_UNAVAILABLE', 'the last Host log source cannot be proven after the launchd plist was removed; read the retained launchd logs or host.log directly')
+    }
   }
   // No live launchd-managed Host: the independent Host (or the last stopped
   // independent Host) writes the scope host.log.

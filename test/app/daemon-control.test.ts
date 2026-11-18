@@ -1298,6 +1298,46 @@ test('darwin stop refuses a launchd PID that is not the live Host with zero boot
   assert.equal(launchctl.calls.some(args => args[0] === 'bootout'), false, 'a mismatched job is never booted out')
 })
 
+test('darwin stop refuses a loaded running job with no authenticated Host record with zero bootout', { skip: process.platform !== 'darwin' ? 'the Darwin admin seat requires macOS' : false }, async t => {
+  const fx = fixture(t)
+  writeOwnedLaunchd(fx)
+  const launchctl = fakeLaunchd(fx, { loaded: true, state: 'running', pid: 4242 })
+  const result = await runDaemonControl({ verb: 'stop' }, fx.profile, darwinDepsOf(fx, {
+    launchctl: launchctl.run,
+    readRecord: () => undefined,
+    inspectProcess: () => 'dead',
+  }))
+  assertCode(result, 3, /IDENTITY_OR_OWNERSHIP_REFUSED/u)
+  assert.equal(launchctl.calls.some(args => args[0] === 'bootout'), false, 'no record means no proven process identity; never bootout')
+})
+
+test('darwin stop refuses a spawn-scheduled job with no authenticated Host record with zero bootout', { skip: process.platform !== 'darwin' ? 'the Darwin admin seat requires macOS' : false }, async t => {
+  const fx = fixture(t)
+  writeOwnedLaunchd(fx)
+  const launchctl = fakeLaunchd(fx, { loaded: true, state: 'spawn scheduled', pid: undefined })
+  const result = await runDaemonControl({ verb: 'stop' }, fx.profile, darwinDepsOf(fx, {
+    launchctl: launchctl.run,
+    readRecord: () => undefined,
+    inspectProcess: () => 'dead',
+  }))
+  assertCode(result, 3, /IDENTITY_OR_OWNERSHIP_REFUSED/u)
+  assert.equal(launchctl.calls.some(args => args[0] === 'bootout'), false, 'a starting job without a record is never booted out')
+})
+
+test('darwin restart refuses a loaded running job with no authenticated Host record and never starts', { skip: process.platform !== 'darwin' ? 'the Darwin admin seat requires macOS' : false }, async t => {
+  const fx = fixture(t)
+  writeOwnedLaunchd(fx)
+  const launchctl = fakeLaunchd(fx, { loaded: true, state: 'running', pid: 4242 })
+  const result = await runDaemonControl({ verb: 'restart' }, fx.profile, darwinDepsOf(fx, {
+    launchctl: launchctl.run,
+    readRecord: () => undefined,
+    inspectProcess: () => 'dead',
+  }))
+  assertCode(result, 3, /IDENTITY_OR_OWNERSHIP_REFUSED/u)
+  assert.equal(launchctl.calls.some(args => args[0] === 'bootout' || args[0] === 'bootstrap' || args[0] === 'kickstart'), false,
+    'an unproven old process is never replaced by a new start')
+})
+
 test('darwin uninstall refuses a job that starts with another PID after the snapshot with zero bootout', { skip: process.platform !== 'darwin' ? 'the Darwin admin seat requires macOS' : false }, async t => {
   const fx = fixture(t)
   const record = darwinRecordOf(fx.scope)
@@ -1356,6 +1396,36 @@ test('darwin uninstall refuses a job that enters spawn scheduled without a PID a
   assertCode(result, 3, /IDENTITY_OR_OWNERSHIP_REFUSED|verifiable PID|unconfirmed/u)
   assert.equal(launchctl.calls.some(args => args[0] === 'bootout'), false, 'a spawn-scheduled job without a PID is never booted out')
   assert.equal(existsSync(launchdPlistPathOf(fx)), true, 'a refused uninstall keeps the owned plist')
+})
+
+test('darwin uninstall refuses a loaded running job with no authenticated Host record', { skip: process.platform !== 'darwin' ? 'the Darwin admin seat requires macOS' : false }, async t => {
+  const fx = fixture(t)
+  writeOwnedLaunchd(fx)
+  const launchctl = fakeLaunchd(fx, { loaded: true, state: 'running', pid: 4242 })
+  const result = await runDaemonControl({ verb: 'uninstall' }, fx.profile, darwinDepsOf(fx, {
+    launchctl: launchctl.run,
+    readRecord: () => undefined,
+    inspectProcess: () => 'dead',
+  }))
+  assertCode(result, 3, /IDENTITY_OR_OWNERSHIP_REFUSED/u)
+  assert.equal(launchctl.calls.some(args => args[0] === 'bootout'), false, 'no record means no proven process identity; never bootout')
+  assert.equal(existsSync(launchdPlistPathOf(fx)), true, 'a refused uninstall keeps the plist')
+})
+
+test('darwin uninstall removes a loaded not-running job with no authenticated Host record', { skip: process.platform !== 'darwin' ? 'the Darwin admin seat requires macOS' : false }, async t => {
+  const fx = fixture(t)
+  writeOwnedLaunchd(fx)
+  const launchctl = fakeLaunchd(fx, { loaded: true, state: 'not running', pid: undefined })
+  const result = await runDaemonControl({ verb: 'uninstall' }, fx.profile, darwinDepsOf(fx, {
+    launchctl: launchctl.run,
+    readRecord: () => undefined,
+    inspectProcess: () => 'dead',
+    sleep: async () => {},
+    now: () => 0,
+  }))
+  assertCode(result, 0)
+  assert.equal(existsSync(launchdPlistPathOf(fx)), false, 'a PID-less not-running definition is safe to remove')
+  assert.equal(launchctl.calls.some(args => args[0] === 'bootout'), true)
 })
 
 test('darwin restart stops the launchd job and starts a new instance through the public ensure', { skip: process.platform !== 'darwin' ? 'the Darwin admin seat requires macOS' : false }, async t => {
@@ -1555,6 +1625,29 @@ test('darwin logs refuses to guess a source after the launchd job stops', async 
   }))
   assertCode(result, 4, /LOG_SOURCE_UNAVAILABLE/u)
   assert.equal(hostLogReads, 0, 'a stopped launchd job has no provable current source; no file is read')
+})
+
+test('darwin logs refuses to guess after the launchd plist was uninstalled with retained streams', async t => {
+  const fx = fixture(t)
+  writeOwnedLaunchd(fx)
+  const facts = launchdFactsOf(fx)
+  const logs = launchdLogPaths(facts.scopeDir)
+  mkdirSync(facts.scopeDir, { recursive: true, mode: 0o700 })
+  writeFileSync(logs.stdout, 'retained launchd stream\\n', { mode: 0o600 })
+  unlinkSync(launchdPlistPathOf(fx))
+  const launchctl = fakeLaunchd(fx, { loaded: false })
+  let hostLogReads = 0
+  const result = await runDaemonControl({ verb: 'logs', lines: 20 }, fx.profile, darwinDepsOf(fx, {
+    launchctl: launchctl.run,
+    readRecord: () => undefined,
+    inspectProcess: () => 'dead',
+    hostLogTail: async () => {
+      hostLogReads += 1
+      return 'stale host.log\\n'
+    },
+  }))
+  assertCode(result, 4, /LOG_SOURCE_UNAVAILABLE/u)
+  assert.equal(hostLogReads, 0, 'a removed plist with retained launchd streams is unprovable; host.log is not read')
 })
 
 test('darwin stop signals the kernel-verified Host exactly once and waits for its identity to go', { skip: process.platform !== 'darwin' ? 'Darwin kernel seats require macOS' : false }, async t => {
