@@ -1072,7 +1072,8 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
   frame = await waitFrameMatching(tui, painted => painted.includes('Computer use')
     && /\[experimental\]/u.test(painted)
     && /Default listing\s+(Host default|Hidden)/u.test(painted)
-    && /Selected in profile\s+No/u.test(painted)
+    && /Installed\s+No/u.test(painted)
+    && painted.includes('Selected in profile')
     && painted.includes('Not live'), 'MAC09-01 CUA Details facts')
   const listedByDefaultObserved = /Default listing\s+(Host default|Hidden)/u.exec(frame)?.[1]
   assert(listedByDefaultObserved !== undefined,
