@@ -1519,7 +1519,7 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
     'MAC09-09 denied dispatch settles', TIMEOUTS.consent)
   assert(deniedResult.result.isError === true, 'MAC09-06: the denied application consent did not fail the dispatch')
   assert(dispatchErrorCode(deniedResult.result) === 'APP_ACCESS_DENIED',
-    `MAC09-06: the denied dispatch did not carry APP_ACCESS_DENIED: ${dispatchErrorCode(deniedResult.result) ?? 'unknown'}`)
+    `MAC09-06: the denied dispatch did not carry APP_ACCESS_DENIED: ${dispatchErrorCode(deniedResult.result) ?? 'unknown'} :: ${dispatchContentText(deniedResult.result).slice(0, 400)}`)
   const afterDeny = cuaResults(eventsOf(dshHome, deniedSession.sessionId), 0)
     .filter(item => item.rootCallId === deniedSession.dispatch.rootCallId)
     .filter(item => ['typeText', 'click', 'pressKey', 'paste'].includes(dispatchMethod(item)))
