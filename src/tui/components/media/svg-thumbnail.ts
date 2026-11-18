@@ -11,9 +11,10 @@
  * The component never awaits: it consults the raster loader synchronously and
  * asks it to fire the isolated conversion on first render; the loader's settle
  * notification invalidates the component, which repaints with the PNG. Inline
- * pixels are shown for Kitty and for Direct SIXEL (Image-8 / I8-2B); iTerm2 and
- * every other surface emit NO rows — the figure's description and source
- * availability remain the whole presentation.
+ * pixels are shown for Kitty and for Direct SIXEL (Image-8 / I8-2B) whenever
+ * the grant has a real pixel width after the component's 2-cell margins
+ * (PR-4B); iTerm2 and every other surface emit NO rows — the figure's
+ * description and source availability remain the whole presentation.
  *
  * `paintedImageBody()` reports the REAL pixel rows the last COMMITTED frame
  * painted, so a click can only open the viewer from pixels the user actually

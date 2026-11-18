@@ -9,6 +9,12 @@
 
 ### 新增
 
+- **SVG 支持静态描边样式与 `currentColor`。** SVG admission 白名单新增四个有确定渲染意义的静态属性:`stroke-dasharray`(1–32 个无单位非负数或 `none`)、`stroke-dashoffset`(单个有符号无单位数)、`stroke-miterlimit`(1–1000)与 `color`(固定色值);`fill`/`stroke`/`stop-color` 的**整值** `currentColor` 现在按文档内静态继承的 `color` 求值。相对单位、`<style>`/`<filter>`、外部引用、DOCTYPE、混合 token(如 `url(#g) currentColor`)与既有像素/字节预算全部维持原拒绝,原始 SVG 字节不重写。
+
+- **SVG Preview 可恢复失败支持一次显式 Retry。** 子进程超时、无法启动与非正常退出现在按类型分类;Preview 失败态在可恢复类别下显示 `r retry` 操作段,按 `r` 或点击画出的 Retry 段会精确重建当前 `(digest, 宽度)` 变体(单次按键恰好一个新请求,加载中按键被忽略,永不自动重试);超预算、无效输出、被拒绝与已淘汰变体保持不可重试。`Esc close` 行新增完整的鼠标点击 Close 段(仅此查看器)。
+
+- **图片/SVG 缩略图适配窄内容宽度。** 移除旧的 `<42` 列全禁用门槛:只要内容授权有实际像素宽度(>2 列)就按 `min(40, width-2)` 夹紧尝试真实绘制,3–41 列在 Kitty/SIXEL 许可下可显示像素;1–2 列仍不读字节、不发协议、不产生点击热区。信息行、折叠控制、View/Copy 动作与真实已画像素的点击范围语义不变,`>=42` 列的视觉与行数相对基线不退化。
+
 - **PiTui Settings 新增只读的 `Tools → MCP servers` 管理页。** Host 现在始终拥有唯一一个官方 MCP 管理器（Direct 默认即有，Split Host 在 `/web` 开/关/再开之间保持同一实例），TUI 在该页按官方顺序列出所有托管 Server，并显示官方状态（`Connected`、`Waiting credentials` 等）与来源（`Configured` / `Plugin-owned` / `Retained/removed` / `Unknown`）；`configured` 不会再被当成“来自配置”。可对单个 Server 执行 Probe（连接并列出工具，与清理结果分开呈现）和 Restart（一次显式 `y` 确认、只派发一次、不自动重试、不乐观显示 Connected）；未知 transport 显示 `Not exposed`，来源不能证实时显示 `Unknown`。该页只读：不写任何配置、不显示密钥。入口在 `/settings → Tools → MCP servers`，支持宽/中/窄与 44×8 布局、键鼠操作。
 - **可选的后台（Daemon）TUI 启动入口。** 设置 `DSH_PI_TUI_BACKEND=daemon`，或在 `/settings → General → Backend` 选择 `Daemon`（官方 Profile 配置项 `tui-startup.backend`）后，`dsh --profile pi-tui` 会在本地 Linux 上连接一个本地 Host，并用一个独立的真实 Client 打开 TUI；默认仍是原有的 Direct 进程内 TUI。选择只在下次冷启动生效，写入不会热切换当前进程或重启 Host；`DSH_PI_TUI_BACKEND` 只覆盖本次启动、不会写回 Profile，非法取值（空串、`wire-local` 等）会非零退出并给出稳定原因，绝不静默回退 Direct。Linux 上可用同一 `daemon` 子命令显式管理 Host：`status/start/stop/restart/logs/install/uninstall` 只作用于当前 `--profile`。基础 Daemon 是独立本地进程，普通启动不查询、不安装 systemd；`daemon install` 才显式为该 Profile 创建并验证 systemd `--user` unit（不 start/enable，保留用户编辑的 unit 内容与 drop-in），`daemon uninstall` 只移除该 unit 且不停止独立 Host。`ActiveState=active` 不作为 Ready，命令不会自动重启或改写用户服务，停止/重启会中断正在进行的 Turn。不同 install build 之间不自动热替换：`start`/`install`/`uninstall` 都会按冲突拒绝其他 build 的 unit，用户需在换包前用拥有该 build 的安装显式 `daemon uninstall`（需要服务托管时换包后重新 `install`），回滚同理；该链路要求同一 DSH 运行时，不承诺跨 DSH 数据 schema 的原地降级。
 

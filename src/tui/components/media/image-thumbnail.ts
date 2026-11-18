@@ -3,8 +3,9 @@
  *
  * Renders a durable attachment through the pi-tui `Image` component when
  * the terminal supports inline graphics (Kitty / iTerm2), and falls back to
- * a one-line text summary otherwise (unsupported terminal, tmux, narrow
- * terminal, still-loading, or a failed read — §17.1-§17.3).
+ * a one-line text summary otherwise (unsupported terminal, tmux, a grant
+ * with no pixel width after the component's 2-cell margins — 1..2 columns,
+ * still-loading, or a failed read — §17.1-§17.3).
  *
  * The INFO BAR (`🖼️ name · W×H · bytes`) is CONSTANT: it renders above the
  * image in every state, so an attachment is always identifiable. The image
