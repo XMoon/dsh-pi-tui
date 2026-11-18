@@ -355,6 +355,7 @@ test('a real timeout -> loader retry -> real successor PNG is ONE chain', { skip
   // previously had a separate test with another 3-second OS deadline.
   let spawns = 0
   let timeoutChild: ChildProcessWithoutNullStreams | undefined
+  let timeoutCloseElapsedMs: number | undefined
   const timeoutEvents: string[] = []
   const spawnProcess = ((...args: Parameters<typeof spawn>): ReturnType<typeof spawn> => {
     spawns += 1
@@ -364,9 +365,13 @@ test('a real timeout -> loader retry -> real successor PNG is ONE chain', { skip
         windowsHide: true,
       })
       timeoutChild = child
+      const childStartedAt = Date.now()
       timeoutEvents.push('spawn')
       child.on('exit', (code, signal) => timeoutEvents.push(`exit:${signal ?? code}`))
-      child.on('close', (code, signal) => timeoutEvents.push(`close:${signal ?? code}`))
+      child.on('close', (code, signal) => {
+        timeoutEvents.push(`close:${signal ?? code}`)
+        timeoutCloseElapsedMs = Date.now() - childStartedAt
+      })
       return child
     }
     return spawn(...args)
@@ -385,7 +390,6 @@ test('a real timeout -> loader retry -> real successor PNG is ONE chain', { skip
   }
   try {
     loader.subscribe(digest, width, () => {})
-    const started = Date.now()
     loader.load(digest, SVG_SOURCE, width)
     const errored = await waitFor(() => {
       const state = loader.get(digest, width)
@@ -394,9 +398,12 @@ test('a real timeout -> loader retry -> real successor PNG is ONE chain', { skip
     // A Loader error is only committed after its rasterizer Promise settles.
     // If the child has not really closed yet, this full-chain guard fails.
     timeoutEvents.push('classified')
-    const elapsed = Date.now() - started
     assert.deepEqual(timeoutEvents, ['spawn', 'exit:SIGKILL', 'close:SIGKILL', 'classified'],
       'the loader reports a timeout only after the real child close')
+    // Measure the real child, not the later Loader polling observation:
+    // CI scheduling can delay that observation after the child has closed.
+    const elapsed = timeoutCloseElapsedMs
+    assert.ok(elapsed !== undefined, 'the child close supplied the deadline measurement')
     assert.ok(elapsed >= 3000, 'the shared hard timeout really elapsed: ' + elapsed + ' ms')
     assert.ok(elapsed < 10_000, 'the failure is bounded by the raster budget, not a 30 s wait: ' + elapsed + ' ms')
     assert.equal(timeoutChild?.signalCode, 'SIGKILL', 'the child is gone before the loader reports error')
