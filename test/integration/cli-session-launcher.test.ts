@@ -159,13 +159,17 @@ test('the real pinned dsh launcher forwards the PR2 Session grammar to tuiStartu
 
   // Install THIS worktree's built bundle into a private profile with the real
   // `dsh plugin` entry (no hand-written profile files).
+  const resolveAt = performance.now()
   const launcher = resolveLauncher(home, env)
+  t.diagnostic(`P3-A2 resolve launcher: ${(performance.now() - resolveAt).toFixed(1)} ms`)
+  const installAt = performance.now()
   const install = spawnSync(launcher.command, [...launcher.prefix, 'plugin', '--profile', PROFILE, '--', 'add', `link:${ROOT}`], {
     cwd: ROOT,
     env,
     encoding: 'utf8',
     timeout: 180_000,
   })
+  t.diagnostic(`P3-A2 install profile: ${(performance.now() - installAt).toFixed(1)} ms`)
   assert.equal(install.status, 0, `dsh plugin failed to install the candidate into the isolated profile:\n${install.stdout}\n${install.stderr}`)
   assert.ok(existsSync(profileDir), 'the real launcher must create the isolated profile directory')
 
@@ -182,12 +186,14 @@ test('the real pinned dsh launcher forwards the PR2 Session grammar to tuiStartu
   ].join('\n'))
 
   const run = (args: readonly string[]): { readonly status: number | null; readonly output: string } => {
+    const invocationAt = performance.now()
     const result = spawnSync(launcher.command, [...launcher.prefix, '--profile', PROFILE, '--patch', patchPath, ...args], {
       cwd: ROOT,
       env,
       encoding: 'utf8',
       timeout: 120_000,
     })
+    t.diagnostic(`P3-A2 invoke ${JSON.stringify(args)}: ${(performance.now() - invocationAt).toFixed(1)} ms`)
     assert.equal(result.error, undefined, `dsh could not start: ${result.error?.message ?? ''}`)
     return { status: result.status, output: `${result.stdout ?? ''}${result.stderr ?? ''}` }
   }
