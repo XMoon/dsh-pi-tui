@@ -1,9 +1,10 @@
 /**
- * A2-2 ownership-cutover locks: the runner keeps NO local ownership authority,
- * the core is the single state owner, the current owner is published only
- * through the injected SessionOwnerAccess provider (Direct composition today,
- * Remote from M3-2) into the core slot, and no sessionId→Agent lookup
- * reconstructs currentness.
+ * Session ownership/currentness guards: publication flows through the
+ * injected SessionOwnerAccess provider and core; callers must not reconstruct
+ * authority from the Direct attachment or a sessionId→Agent lookup.
+ * State placement is specified by the concurrency contract and validated by
+ * composition uniqueness and executable lifecycle tests, not a frozen roster
+ * of historical Runner names or private core declarations.
  * @module @xmoon76/dsh-pi-tui/ownership-cutover.test
  */
 
@@ -13,7 +14,6 @@ import test from 'node:test'
 import { compositionSource } from '../support/composition-surface.ts'
 
 const indexSource = compositionSource()
-const coreSource = readFileSync(new URL('../../src/app/session/ownership-core.ts', import.meta.url), 'utf8')
 const retirementSource = readFileSync(new URL('../../src/app/direct/owner-retirement.ts', import.meta.url), 'utf8')
 const sessionRuntimeSource = readFileSync(new URL('../../src/app/session/runtime.ts', import.meta.url), 'utf8')
 // A4-7: the presentation event routing moved into the surface owner, so the
@@ -26,28 +26,6 @@ const routingSource = readFileSync(new URL('../../src/app/surface/event-routing.
 // OWNER modules explicitly (never a glob).
 const submissionControllerSource = readFileSync(new URL('../../src/app/submission/controller.ts', import.meta.url), 'utf8')
 const localShellSource = readFileSync(new URL('../../src/app/submission/user-shell.ts', import.meta.url), 'utf8')
-
-test('the runner keeps NO local ownership authority (A2-2 cutover)', () => {
-  assert.ok(!/\blet liveAgent\b/.test(indexSource), 'no local liveAgent declaration')
-  assert.ok(!/\blet liveHandle\b/.test(indexSource), 'no local liveHandle declaration')
-  assert.ok(!/\blet sessionGeneration\b/.test(indexSource), 'no local sessionGeneration storage')
-  assert.ok(!/\blet navigationEpoch\b/.test(indexSource), 'no local navigationEpoch storage')
-  assert.ok(!/^\s*liveAgent = /m.test(indexSource), 'no liveAgent assignment')
-  assert.ok(!/^\s*liveHandle = /m.test(indexSource), 'no liveHandle assignment')
-  assert.ok(!/const transitionGate = new SessionTransitionGate/.test(indexSource), 'no local gate instance')
-  assert.ok(!/const operationBarrier = new SessionOperationBarrier/.test(indexSource), 'no local barrier instance')
-  assert.ok(!/pendingOwnerReleases/.test(indexSource), 'no local release ledger')
-})
-
-test('the ownership core is the single state owner', () => {
-  assert.ok(coreSource.includes('let generation = 0'), 'the core owns the generation')
-  assert.ok(coreSource.includes('let currentOwner: SessionOwnerRef | undefined'), 'the core owns the owner slot')
-  assert.ok(coreSource.includes('let currentSessionId: string | undefined'), 'the core owns the session id')
-  assert.ok(coreSource.includes('let navigationEpoch = 0'), 'the core owns the navigation epoch')
-  assert.ok(coreSource.includes('new SessionTransitionGate()'), 'the core owns the gate')
-  assert.ok(coreSource.includes('new SessionOperationBarrier()'), 'the core owns the barrier')
-  assert.ok(coreSource.includes('const pendingOwnerReleases = new Map<string, Set<Promise<void>>>()'), 'the core owns the release ledger')
-})
 
 test('the current owner is published only through the injected SessionOwnerAccess provider into the core slot', () => {
   // ALL FOUR commit shapes publish inside the bound runtime, each resolving the
@@ -83,14 +61,6 @@ test('the current owner is published only through the injected SessionOwnerAcces
   // SAME accessor, never a stored second truth.
   assert.ok(indexSource.includes('const agentNow = (): Agent | undefined => directRuntime()?.owners.currentDirectAttachment()'),
     'the current attachment is a DERIVED registry projection')
-  // M3-4 PR1 removed the runner's last Direct owner-handle read
-  // (`handleNow`): the fatal catch now runs the ONE memoized retirement
-  // coordinator unconditionally (it covers parked owners and pending forks
-  // too), so no Direct-handle-based owner-presence gate remains.
-  assert.ok(!indexSource.includes('handleNow'),
-    'the runner keeps no Direct-handle-based owner-presence gate (the coordinator owns retirement)')
-  assert.ok(!indexSource.includes('currentOwnerPresentRef'),
-    'no Direct-handle owner-presence ref remains in the composition root')
 })
 
 /**
