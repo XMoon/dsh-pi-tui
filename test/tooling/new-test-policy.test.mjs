@@ -53,8 +53,12 @@ const BASELINE = JSON.parse(readFileSync(join(TEST_ROOT, 'tooling', 'new-test-po
 test('a fixed wait in a NEW test carries a stated reason', () => {
   const baseline = BASELINE.fixedWaits
   const offenders = []
+  // The support helper implementations are stable throughout this scan.
+  // Derive their names once rather than parsing the same support tree for
+  // every discovered test file.
+  const helpers = fixedWaitHelpers(join(TEST_ROOT, 'support'))
   for (const rel of discoverTestFiles(TEST_ROOT, ['.test.ts', '.test.mjs'])) {
-    const waits = fixedWaitsOf(rel, TEST_ROOT)
+    const waits = fixedWaitsOf(rel, TEST_ROOT, helpers)
     const allowed = baseline[rel] ?? 0
     if (waits.length > allowed) {
       offenders.push(`${rel}: ${waits.length} unreasoned fixed wait(s) (the baseline allows ${allowed})`)
