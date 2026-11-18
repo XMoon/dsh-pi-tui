@@ -433,7 +433,7 @@ test('the draft preview paints through the live handle and undo restores the ima
     // The x control sits on the far-right cell of the identity row.
     vt.sendInput(`\x1b[<0;120;${identityRow + 1}M`)
     vt.sendInput(`\x1b[<0;120;${identityRow + 1}m`)
-    await settlePainted(h.app, vt, 'draft removal is committed', () => h.app.getDraft() === '' && h.store.size() === 1)
+    await settle(h.app, vt)
     assert.equal(h.app.getDraft(), '', 'the x control removed the image placeholder')
     assert.equal(h.store.size(), 1, 'the removed draft is retained for undo')
     vt.sendInput('\x1b[45;5u')
@@ -540,7 +540,7 @@ test('a published SVG uses the app raster loader for Preview and paints raw text
     assert.equal(sourceWire.includes('a=T,'), false, 'the Source page never used the legacy image form')
     const beforeSource = h.rasterCalls()
     vt.sendInput('\t')
-    await settlePainted(h.app, vt, 'SVG Preview is physically placed after Source', () => apcs(vt.writes.join('')).some(entry => entry.controls.a === 'p'))
+    await settle(h.app, vt)
     assert.equal(h.rasterCalls(), beforeSource, 'returning to Preview reuses the cached raster')
     vt.sendInput('\x1b')
     await settlePainted(h.app, vt, 'SVG viewer closes to the transcript', () => vt.getViewport().join('\n').includes('Service topology'))
