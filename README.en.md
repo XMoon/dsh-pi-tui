@@ -164,7 +164,7 @@ If you edited the unit/plist/symlink/drop-in yourself: the product preserves tho
 
 ### Integrating a local ACP client (Linux / macOS)
 
-ACP v1 is an optional **Host-owned Unix socket** endpoint for local clients running as the same OS user; it is not TCP/HTTP or a second Host. It ships in the **unpublished 0.5.7 candidate** (paired with DSH `0.2.2-rc.3`), not in the published 0.5.6 release.
+ACP v1 is an optional **Host-owned Unix socket** endpoint for local clients running as the same OS user; it is not TCP/HTTP or a second Host. This capability is supported starting with **0.5.7**.
 
 **Configure without running a TUI.** In the installed `pi-tui` Profile's **user** `cordis.patch.yml` (normally `<DSH_HOME>/profiles/pi-tui/cordis.patch.yml`), add this row or update the existing row with the same `id`. Keep other entries intact and do not edit the patch bundled inside the npm package:
 
