@@ -910,9 +910,10 @@ export function darwinAcpSocketPaths(scope: LocalScope, uid: number): DarwinAcpS
  * Admit the trusted Darwin parent and create/reuse the ONE deterministic 0700
  * root of this profile scope. `/private/tmp` must be the OS-owned, root-owned
  * sticky directory the frozen endpoint contract relies on; the root itself must
- * be a real directory owned by this uid (a symlink, file or foreign-owned entry
- * is refused and never written through). The root is REUSED across ACP Off/On
- * and Host crashes — only this scope's root is ever touched.
+ * be a real directory owned by this uid (a symlink, file, foreign-owned entry or
+ * an EXISTING directory that is not 0700 is refused and never written through or
+ * silently repaired). The root is REUSED across ACP Off/On and Host crashes —
+ * only this scope's root is ever touched.
  */
 function ensureDarwinSocketRoot(privateRoot: string, uid: number): void {
   let parent: ReturnType<typeof lstatSync>
@@ -927,12 +928,14 @@ function ensureDarwinSocketRoot(privateRoot: string, uid: number): void {
       'local acp: the Darwin socket parent is not a root-owned sticky directory',
     )
   }
+  let created = true
   try {
     mkdirSync(privateRoot, { mode: 0o700 })
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
       throw new LocalAcpError('LOCAL_ACP_SOCKET_PATH_UNSUPPORTED', 'local acp: the Darwin endpoint root could not be created', error)
     }
+    created = false
   }
   const info = lstatSync(privateRoot)
   if (info.isSymbolicLink() || !info.isDirectory() || info.uid !== uid) {
@@ -941,10 +944,21 @@ function ensureDarwinSocketRoot(privateRoot: string, uid: number): void {
       'local acp: the Darwin endpoint root is not a private directory owned by this uid',
     )
   }
-  // This deterministic root belongs to this uid and profile; forcing its mode
-  // keeps the contract even after an umask or a manual change, and never touches
-  // a foreign path (the uid check above already rejected those).
-  chmodSync(privateRoot, 0o700)
+  if (created) {
+    // The endpoint contract is 0700 for the root THIS run just created; force it
+    // so the caller's umask can never weaken the mode.
+    chmodSync(privateRoot, 0o700)
+    return
+  }
+  // An EXISTING root must already be the private directory the contract names.
+  // It is never silently repaired: a non-private mode means the directory is not
+  // the one this contract created.
+  if ((info.mode & 0o777) !== 0o700) {
+    throw new LocalAcpError(
+      'LOCAL_ACP_UNSAFE_SOCKET',
+      'local acp: the existing Darwin endpoint root is not a 0700 directory owned by this uid',
+    )
+  }
 }
 
 /** A ≤500ms connect probe used only to distinguish an inert stale socket from a live one. */

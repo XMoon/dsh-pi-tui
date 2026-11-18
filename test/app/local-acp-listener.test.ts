@@ -743,6 +743,18 @@ test('Darwin: a symlink or regular file at the endpoint root is refused without 
     (error: unknown) => error instanceof LocalAcpError && error.code === 'LOCAL_ACP_UNSAFE_SOCKET',
   )
   assert.equal(lstatSync(endpoint.privateRoot).isFile(), true, 'the foreign file root must survive the refusal')
+
+  // An EXISTING same-UID root is never silently repaired: a non-private mode is a
+  // contract mismatch, not something this owner may chmod into shape.
+  rmSync(endpoint.privateRoot, { force: true })
+  mkdirSync(endpoint.privateRoot, { mode: 0o755 })
+  chmodSync(endpoint.privateRoot, 0o755)
+  await assert.rejects(
+    startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG }),
+    (error: unknown) => error instanceof LocalAcpError && error.code === 'LOCAL_ACP_UNSAFE_SOCKET',
+  )
+  assert.equal(lstatSync(endpoint.privateRoot).mode & 0o777, 0o755,
+    'the existing non-private root mode must not be rewritten')
 })
 
 test('cleanupSync removes only this listener own socket inode and is a no-op after close', async t => {

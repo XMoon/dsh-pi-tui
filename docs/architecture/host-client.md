@@ -751,8 +751,8 @@ profile's independent `autoStart` preference enables it (see below).
     the sticky bit; never `$TMPDIR`, `DSH_HOME` or the user home). The one
     deterministic root `dpt-<decimal-uid>-<scope40>` is created 0700 by the
     current UID and REUSED across ACP Off/On and Host crashes; an existing
-    symlink, non-directory or foreign-owned root is refused and never written
-    through. The server binds an owner-only private name under that root,
+    symlink, non-directory, foreign-owned root or an existing directory that is
+    not 0700 is refused and never written through or silently repaired. The server binds an owner-only private name under that root,
     forces it 0600, then publishes the same inode onto the public `acp.sock`
     with a kernel no-replace hard link and drops the private name. Both names
     must fit `sun_path[104]` including the trailing NUL; a pathname that cannot
