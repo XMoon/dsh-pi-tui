@@ -282,7 +282,7 @@ test('status treats a unit file the manager has not loaded as an installed but u
   assert.equal(existsSync(unit.path), true)
 })
 
-test('status reports an authenticated Host under a deactivating unit as uncertain, never success', { skip: process.platform !== 'linux' }, async t => {
+test('status reports an authenticated Host under a deactivating unit as uncertain, never success', { skip: process.platform !== 'linux' ? 'Linux systemd user-unit tests require Linux' : false }, async t => {
   const fx = fixture(t)
   const unit = writeOwnedUnit(fx)
   const record = recordOf(fx.scope)
@@ -942,7 +942,7 @@ test('darwin install and uninstall are unsupported before any unit, seat or scop
   assert.equal(existsSync(join(fx.accountHome, '.dsh-pi-tui')), false, 'an unsupported verb must not take the admin seat')
 })
 
-test('darwin stop signals the kernel-verified Host exactly once and waits for its identity to go', { skip: process.platform !== 'darwin' ? 'Darwin kernel identity and file seats require macOS' : false }, async t => {
+test('darwin stop signals the kernel-verified Host exactly once and waits for its identity to go', { skip: process.platform !== 'darwin' ? 'Darwin kernel seats require macOS' : false }, async t => {
   const fx = fixture(t)
   const record = darwinRecordOf(fx.scope)
   let alive = true
@@ -967,7 +967,7 @@ test('darwin stop signals the kernel-verified Host exactly once and waits for it
   assert.ok(kernelReads >= 2, 'the kernel identity is re-read after the handshake AND immediately before the signal')
 })
 
-test('darwin stop refuses a kernel identity that changed before the signal with zero signal', { skip: process.platform !== 'darwin' ? 'Darwin kernel identity and file seats require macOS' : false }, async t => {
+test('darwin stop refuses a kernel identity that changed before the signal with zero signal', { skip: process.platform !== 'darwin' ? 'Darwin kernel seats require macOS' : false }, async t => {
   const fx = fixture(t)
   const record = darwinRecordOf(fx.scope)
   let reads = 0
@@ -990,7 +990,7 @@ test('darwin stop refuses a kernel identity that changed before the signal with 
   assert.equal(signals, 0, 'a changed identity is never signalled')
 })
 
-test('darwin stop refuses an unreadable kernel identity with zero signal', { skip: process.platform !== 'darwin' ? 'Darwin kernel identity and file seats require macOS' : false }, async t => {
+test('darwin stop refuses an unreadable kernel identity with zero signal', { skip: process.platform !== 'darwin' ? 'Darwin kernel seats require macOS' : false }, async t => {
   const fx = fixture(t)
   const record = darwinRecordOf(fx.scope)
   let signals = 0
@@ -1005,7 +1005,7 @@ test('darwin stop refuses an unreadable kernel identity with zero signal', { ski
   assert.equal(signals, 0, 'an unreadable identity is not a kill permit')
 })
 
-test('darwin stop reports a committed-but-unconfirmed stop without a second signal', { skip: process.platform !== 'darwin' ? 'Darwin kernel identity and file seats require macOS' : false }, async t => {
+test('darwin stop reports a committed-but-unconfirmed stop without a second signal', { skip: process.platform !== 'darwin' ? 'Darwin kernel seats require macOS' : false }, async t => {
   const fx = fixture(t)
   const record = darwinRecordOf(fx.scope)
   let now = 0
@@ -1025,7 +1025,7 @@ test('darwin stop reports a committed-but-unconfirmed stop without a second sign
   assert.deepEqual(signals, ['SIGTERM'], 'the timeout never sends a second signal or SIGKILL')
 })
 
-test('darwin start cold-starts through the shared public ensure and a warm start reuses the same instance', { skip: process.platform !== 'darwin' ? 'Darwin kernel identity and file seats require macOS' : false }, async t => {
+test('darwin start cold-starts through the shared public ensure and a warm start reuses the same instance', { skip: process.platform !== 'darwin' ? 'Darwin kernel seats require macOS' : false }, async t => {
   const fx = fixture(t)
   let current: LocalInstanceRecord | undefined
   let ensured = 0
@@ -1057,7 +1057,7 @@ test('darwin start cold-starts through the shared public ensure and a warm start
   assert.match(warm.stdout, /^instance=11111111$/mu)
 })
 
-test('darwin restart proves the old kernel identity gone and returns a new instance', { skip: process.platform !== 'darwin' ? 'Darwin kernel identity and file seats require macOS' : false }, async t => {
+test('darwin restart proves the old kernel identity gone and returns a new instance', { skip: process.platform !== 'darwin' ? 'Darwin kernel seats require macOS' : false }, async t => {
   const fx = fixture(t)
   const oldRecord = darwinRecordOf(fx.scope)
   const newRecord = darwinRecordOf(fx.scope, {
@@ -1099,7 +1099,7 @@ test('darwin restart proves the old kernel identity gone and returns a new insta
   assert.equal(stopped, true)
 })
 
-test('darwin mutating verbs take the admin seat and another profile keeps its own seat', { skip: process.platform !== 'darwin' ? 'Darwin kernel identity and file seats require macOS' : false }, async t => {
+test('darwin mutating verbs take the admin seat and another profile keeps its own seat', { skip: process.platform !== 'darwin' ? 'Darwin kernel seats require macOS' : false }, async t => {
   const fx = fixture(t)
   const dir = darwinHostProfileSeatDir(fx.scope.scopeId, fx.accountHome)
   const seat = await bindDarwinKernelSeat(dir, fx.scope.scopeId, 'admin', 'DAEMON_CONTROL_BUSY')

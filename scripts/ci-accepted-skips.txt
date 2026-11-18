@@ -49,9 +49,3 @@ the macOS classifier requires the real libproc identity
 Darwin file seats require macOS
 Darwin schema 2 requires the real libproc identity
 the real Darwin detached fallback requires macOS
-
-# The macOS daemon management commands (PR-3) drive the schema-2 kernel
-# identity and the Darwin admin O_EXLOCK file seat. The real-kernel evidence is
-# recorded on the macOS product/smoke lanes; the Linux runner sees the platform
-# boundary skip and runs the whole Linux systemd side for real here.
-Darwin kernel identity and file seats require macOS
