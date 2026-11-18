@@ -6807,7 +6807,7 @@ The fork suppressed the process-wide iTerm2 image capability whenever AltScreen 
 - packages/tui/src/tui-alt-screen.ts
 - Relevant issues/PRs:
 - None recorded; issue/PR state was not used as semantic proof.
-- Remaining semantic delta: Upstream does not suppress the process-wide iTerm2 capability during AltScreen. The fork had added that suppression for an older workspace restriction; X079 removes it and guards the real Direct iTerm2 OSC 1337 contract in the vendored source plus root consumers.
+- Remaining semantic delta: Pinned upstream f9a26365568127461c47a07a37dcb42c140a3ac5 suppresses the process-wide iTerm2 capability while AltScreen is active (savedCapabilities + setCapabilities({...images: null}) in beforeTerminalStart, restore in afterTerminalStop). The fork had inherited and relied on that suppression for an older workspace restriction; X079 removes it, keeps the process capability stable and guards the real Direct iTerm2 OSC 1337 contract in the vendored source plus root consumers.
 
 #### Retirement conditions
 
@@ -6825,4 +6825,4 @@ The fork suppressed the process-wide iTerm2 image capability whenever AltScreen 
 #### Audit record
 
 - Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
-- Notes: Audited against pinned upstream f9a26365568127461c47a07a37dcb42c140a3ac5, which contains the old iTerm2 suppression/save/restore behavior. X079 is therefore a real fork divergence. Root/fork tests and Regular SVG iTerm2 evidence pass; final fullscreen Source/resize/Esc physical qualification remains NOT_VERIFIED and is recorded outside repository docs.
+- Notes: Audited against pinned upstream f9a26365568127461c47a07a37dcb42c140a3ac5, which contains the old iTerm2 suppression/save/restore behavior; X079 is therefore a real fork divergence. Root/fork tests pass, and the installed-tarball real-iTerm2 matrix passes for the Regular SVG thumbnail, the fullscreen OSC 1337 Preview at 100x30/44x20/30x10, Tab to Source, and CSI-u Escape back to the transcript. Physical qualification evidence is recorded outside repository docs.
