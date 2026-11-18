@@ -21,7 +21,7 @@
  * @module app/remote-process/local-host-launchd
  */
 
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import {
   closeSync,
   constants,
@@ -282,136 +282,72 @@ const UNSAFE_FIXED_KEYS = [
   'GroupName',
 ] as const
 
-interface PlistEntry {
-  readonly kind: 'string' | 'array' | 'dict' | 'true' | 'false' | 'integer'
-  readonly body: string
-}
-
-/** Read one key's value shape from an already comment-stripped plist. */
-function readPlistEntry(content: string, key: string, required: boolean): PlistEntry | undefined {
-  const escaped = key.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')
-  const pattern = new RegExp(`<key>${escaped}</key>\\s*`, 'gu')
-  const matches = [...content.matchAll(pattern)]
-  if (matches.length === 0) {
-    if (required) throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', `launchd: the plist has no ${key} value`)
-    return undefined
-  }
-  if (matches.length !== 1) {
-    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', `launchd: the plist has more than one ${key} value`)
-  }
-  const rest = content.slice((matches[0].index ?? 0) + matches[0][0].length)
-  if (rest.startsWith('<string>')) {
-    const end = rest.indexOf('</string>')
-    if (end < 0) throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', `launchd: ${key} is not a closed string`)
-    return { kind: 'string', body: rest.slice('<string>'.length, end) }
-  }
-  if (rest.startsWith('<array>')) {
-    const end = rest.indexOf('</array>')
-    if (end < 0) throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', `launchd: ${key} is not a closed array`)
-    return { kind: 'array', body: rest.slice('<array>'.length, end) }
-  }
-  if (rest.startsWith('<dict>')) {
-    const end = rest.indexOf('</dict>')
-    if (end < 0) throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', `launchd: ${key} is not a closed dictionary`)
-    return { kind: 'dict', body: rest.slice('<dict>'.length, end) }
-  }
-  if (rest.startsWith('<true/>')) return { kind: 'true', body: '' }
-  if (rest.startsWith('<false/>')) return { kind: 'false', body: '' }
-  if (rest.startsWith('<integer>')) {
-    const end = rest.indexOf('</integer>')
-    if (end < 0) throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', `launchd: ${key} is not a closed integer`)
-    return { kind: 'integer', body: rest.slice('<integer>'.length, end) }
-  }
-  throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', `launchd: ${key} has an unsupported value shape`)
-}
-
-function readFixedString(content: string, key: string): string {
-  const entry = readPlistEntry(content, key, true) as PlistEntry
-  if (entry.kind !== 'string') throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', `launchd: ${key} is not a string`)
-  return decodePlistValue(entry.body)
-}
-
-function readFixedArray(content: string, key: string): string[] {
-  const entry = readPlistEntry(content, key, true) as PlistEntry
-  if (entry.kind !== 'array') throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', `launchd: ${key} is not an array`)
-  const items = [...entry.body.matchAll(/<string>([\s\S]*?)<\/string>/gu)].map(match => decodePlistValue(match[1] as string))
-  const residual = entry.body.replace(/<string>[\s\S]*?<\/string>/gu, '').replace(/\s+/gu, '')
-  if (residual !== '') throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', `launchd: ${key} has a non-string element`)
-  return items
-}
-
-function readFixedDict(content: string, key: string): Map<string, string> {
-  const entry = readPlistEntry(content, key, true) as PlistEntry
-  if (entry.kind !== 'dict') throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', `launchd: ${key} is not a dictionary`)
-  const values = new Map<string, string>()
-  const pair = /<key>([\s\S]*?)<\/key>\s*<string>([\s\S]*?)<\/string>/gu
-  for (const match of entry.body.matchAll(pair)) {
-    const name = decodePlistValue(match[1] as string)
-    if (values.has(name)) throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', `launchd: ${key}.${name} is duplicated`)
-    values.set(name, decodePlistValue(match[2] as string))
-  }
-  const residual = entry.body.replace(pair, '').replace(/\s+/gu, '')
-  if (residual !== '') throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', `launchd: ${key} has a non-string value`)
-  return values
-}
-
-function readFixedInteger(content: string, key: string): number {
-  const entry = readPlistEntry(content, key, true) as PlistEntry
-  if (entry.kind !== 'integer' || !/^-?\d+$/u.test(entry.body.trim())) {
-    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', `launchd: ${key} is not an integer`)
-  }
-  return Number(entry.body.trim())
-}
-
 /**
  * Prove the installed plist's FIXED launch definition before `bootstrap`.
  *
- * A full byte comparison would reject harmless user runtime edits, which the
- * accepted contract preserves. A user-edited `RunAtLoad`, `KeepAlive`, program,
- * argument, working directory, log sink, environment, umask or known execution
- * trigger must never reach `bootstrap`: the native probe showed a
- * `RunAtLoad=true` job executes its program during bootstrap, before any
- * post-load check. Unknown non-trigger keys and comments remain user-owned.
+ * The native plist decoder is the authority for the top-level semantics: XML
+ * comments, character references, CDATA and tag whitespace all normalize to the
+ * same keys/values. A literal text scan could see an unsafe key as absent while
+ * launchd sees it present (and a `RunAtLoad=true` program executes during
+ * bootstrap, before a post-load check). The native JSON output is therefore
+ * validated here, with unsupported/undecodable input failing closed. Harmless
+ * user runtime keys and comments remain user-owned.
  */
 export function assertLaunchdFileDefinition(facts: LaunchdUnitFacts, content: string): void {
-  const cleaned = content.replace(/<!--[\s\S]*?-->/gu, '')
-  const label = buildLaunchdLabel(facts.scopeId)
-  // The canonical file uses only the five predefined entities. Numeric or
-  // custom entity references can decode a key/value into a different name that
-  // our literal key parser (and the launchd semantics) would not agree on;
-  // refuse that syntax entirely before any manager call.
-  const numericReference = /&#(?:[0-9]+|x[0-9a-f]+);/iu.test(cleaned)
-  const customEntity = /&(?!(?:amp|lt|gt|quot|apos);)[a-z][a-z0-9._-]*;/iu.test(cleaned)
-  if (numericReference || customEntity) {
-    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'launchd: the profile plist contains an unsupported XML entity spelling; refusing to bootstrap it')
-  }
-  const logs = launchdLogPaths(facts.scopeDir)
   const reject = (reason: string): never => {
     throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', `launchd: the profile plist has a changed fixed launch definition (${reason}); refusing to bootstrap it`)
   }
-  if (readFixedString(cleaned, 'Label') !== label) reject('Label')
-  const argv = readFixedArray(cleaned, 'ProgramArguments')
-  if (argv.length !== 2 || argv[0] !== facts.nodePath || argv[1] !== facts.hostEntryPath) reject('ProgramArguments')
-  if (readFixedString(cleaned, 'WorkingDirectory') !== facts.profileRealpath) reject('WorkingDirectory')
-  if (readFixedString(cleaned, 'StandardOutPath') !== logs.stdout) reject('StandardOutPath')
-  if (readFixedString(cleaned, 'StandardErrorPath') !== logs.stderr) reject('StandardErrorPath')
-  if (readFixedInteger(cleaned, 'Umask') !== LAUNCHD_UMASK) reject('Umask')
-  const env = readFixedDict(cleaned, 'EnvironmentVariables')
-  const expectedEnv: Readonly<Record<string, string>> = {
+  const decoded = spawnSync('/usr/bin/plutil', ['-convert', 'json', '-o', '-', '--', '-'], {
+    input: content,
+    encoding: 'utf8',
+    timeout: 5_000,
+    maxBuffer: 64 * 1024,
+  })
+  if (decoded.error !== undefined || decoded.status !== 0 || typeof decoded.stdout !== 'string' || decoded.stdout.trim() === '') {
+    return reject('the native plist decoder rejected the document')
+  }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(decoded.stdout)
+  } catch {
+    return reject('the native plist decoder did not produce JSON')
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return reject('the plist root is not a dictionary')
+  }
+  const root = parsed as Record<string, unknown>
+  const value = (key: string): unknown => {
+    if (!Object.hasOwn(root, key)) reject(key)
+    return root[key]
+  }
+  const text = (key: string): string => {
+    const candidate = value(key)
+    if (typeof candidate !== 'string') return reject(key)
+    return candidate
+  }
+  const logs = launchdLogPaths(facts.scopeDir)
+  if (text('Label') !== buildLaunchdLabel(facts.scopeId)) reject('Label')
+  const argv = value('ProgramArguments')
+  if (!Array.isArray(argv) || argv.length !== 2 || argv[0] !== facts.nodePath || argv[1] !== facts.hostEntryPath) reject('ProgramArguments')
+  if (text('WorkingDirectory') !== facts.profileRealpath) reject('WorkingDirectory')
+  if (text('StandardOutPath') !== logs.stdout) reject('StandardOutPath')
+  if (text('StandardErrorPath') !== logs.stderr) reject('StandardErrorPath')
+  if (value('Umask') !== LAUNCHD_UMASK) reject('Umask')
+  const environment = value('EnvironmentVariables')
+  if (environment === null || typeof environment !== 'object' || Array.isArray(environment)) reject('EnvironmentVariables')
+  const expectedEnvironment: Readonly<Record<string, string>> = {
     DSH_HOME: facts.dshHome,
     SPLIT_PROCESS_DSH_ANCHOR: facts.dshAnchor,
     SPLIT_PROCESS_PROFILE: facts.profile,
   }
-  const envKeys = [...env.keys()]
-  if (envKeys.length !== Object.keys(expectedEnv).length || envKeys.some(key => env.get(key) !== expectedEnv[key])) {
-    reject('EnvironmentVariables')
-  }
+  const env = environment as Record<string, unknown>
+  const envKeys = Object.keys(env)
+  if (envKeys.length !== 3 || envKeys.some(key => env[key] !== expectedEnvironment[key])) reject('EnvironmentVariables')
   for (const key of ['RunAtLoad', 'KeepAlive'] as const) {
-    const entry = readPlistEntry(cleaned, key, false)
-    if (entry !== undefined && entry.kind !== 'false') reject(key)
+    if (Object.hasOwn(root, key) && root[key] !== false) reject(key)
   }
   for (const key of UNSAFE_FIXED_KEYS) {
-    if (readPlistEntry(cleaned, key, false) !== undefined) reject(key)
+    if (Object.hasOwn(root, key)) reject(key)
   }
 }
 

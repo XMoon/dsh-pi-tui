@@ -222,6 +222,8 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')
 }
 
+const NATIVE_PLIST_DECODER_SKIP = process.platform !== 'darwin' ? 'the native plist decoder is macOS-only' : false
+
 // ── deterministic identity and plist rendering ─────────────────────────────
 
 test('the launchd label uses one fixed prefix and the first 40 scope characters', t => {
@@ -430,7 +432,7 @@ test('install fails closed when the user GUI domain is unavailable', async t => 
 
 // ── start / stop / uninstall ownership ─────────────────────────────────────
 
-test('start bootstraps then kickstarts exactly once and prepares private 0600 logs', async t => {
+test('start bootstraps then kickstarts exactly once and prepares private 0600 logs', { skip: NATIVE_PLIST_DECODER_SKIP }, async t => {
   const fx = fixture(t)
   const logs = launchdLogPaths(fx.facts.scopeDir)
   writeFileSync(logs.stdout, 'previous stdout\n', { mode: 0o600 })
@@ -451,7 +453,7 @@ test('start bootstraps then kickstarts exactly once and prepares private 0600 lo
   assert.equal(readFileSync(logs.stdout, 'utf8'), 'previous stdout\n', 'starting never truncates existing private logs')
 })
 
-test('start reuses a running job without bootstrap or kickstart', async t => {
+test('start reuses a running job without bootstrap or kickstart', { skip: NATIVE_PLIST_DECODER_SKIP }, async t => {
   const fx = fixture(t)
   const launchctl = fakeLaunchctl(fx, { loaded: false })
   const deps = depsOf(fx, { launchctl: launchctl.run })
@@ -465,7 +467,7 @@ test('start reuses a running job without bootstrap or kickstart', async t => {
   assert.deepEqual(launchctl.calls, [['print', `gui/${String(UID)}/${unit.label}`]])
 })
 
-test('start refuses a loaded job whose fixed facts differ from the installed plist', async t => {
+test('start refuses a loaded job whose fixed facts differ from the installed plist', { skip: NATIVE_PLIST_DECODER_SKIP }, async t => {
   const fx = fixture(t)
   const launchctl = fakeLaunchctl(fx, { loaded: false })
   const deps = depsOf(fx, { launchctl: launchctl.run })
@@ -483,7 +485,7 @@ test('start refuses a loaded job whose fixed facts differ from the installed pli
   assert.deepEqual(launchctl.calls, [['print', `gui/${String(UID)}/${unit.label}`]], 'a stale definition is never kickstarted')
 })
 
-test('start re-proves the plist identity after the async inspection and before bootstrap', async t => {
+test('start re-proves the plist identity after the async inspection and before bootstrap', { skip: NATIVE_PLIST_DECODER_SKIP }, async t => {
   const fx = fixture(t)
   const base = fakeLaunchctl(fx, { loaded: false })
   const deps = depsOf(fx, { launchctl: base.run })
@@ -506,7 +508,7 @@ test('start re-proves the plist identity after the async inspection and before b
   assert.equal(base.calls.some(args => args[0] === 'bootstrap' || args[0] === 'kickstart'), false, 'a plist changed after inspection is never bootstrapped')
 })
 
-test('start allows a comment-only plist edit and never rewrites the user bytes', async t => {
+test('start allows a comment-only plist edit and never rewrites the user bytes', { skip: NATIVE_PLIST_DECODER_SKIP }, async t => {
   const fx = fixture(t)
   const launchctl = fakeLaunchctl(fx, { loaded: false })
   const deps = depsOf(fx, { launchctl: launchctl.run })
@@ -525,7 +527,7 @@ test('start allows a comment-only plist edit and never rewrites the user bytes',
   assert.equal(readFileSync(installed.filePath, 'utf8'), edited, 'starting never rewrites the user file')
 })
 
-test('start refuses a RunAtLoad=true edit before any launchctl call', async t => {
+test('start refuses a RunAtLoad=true edit before any launchctl call', { skip: NATIVE_PLIST_DECODER_SKIP }, async t => {
   const fx = fixture(t)
   const launchctl = fakeLaunchctl(fx, { loaded: false })
   const deps = depsOf(fx, { launchctl: launchctl.run })
@@ -543,7 +545,7 @@ test('start refuses a RunAtLoad=true edit before any launchctl call', async t =>
   assert.deepEqual(launchctl.calls, [], 'a bootstrap trigger edit is refused before launchctl can execute it')
 })
 
-test('start refuses a changed ProgramArguments before any launchctl call', async t => {
+test('start refuses a changed ProgramArguments before any launchctl call', { skip: NATIVE_PLIST_DECODER_SKIP }, async t => {
   const fx = fixture(t)
   const launchctl = fakeLaunchctl(fx, { loaded: false })
   const deps = depsOf(fx, { launchctl: launchctl.run })
@@ -561,7 +563,7 @@ test('start refuses a changed ProgramArguments before any launchctl call', async
   assert.deepEqual(launchctl.calls, [], 'a changed program is refused before launchctl can execute it')
 })
 
-test('the fixed-definition reader keeps harmless edits and rejects execution triggers', t => {
+test('the fixed-definition reader keeps harmless edits and rejects execution triggers', { skip: NATIVE_PLIST_DECODER_SKIP }, t => {
   const fx = fixture(t)
   const canonical = renderLaunchdPlist(fx.facts)
   assert.doesNotThrow(() => assertLaunchdFileDefinition(fx.facts, `${canonical}\n<!-- comment -->\n`))
@@ -583,13 +585,20 @@ test('the fixed-definition reader keeps harmless edits and rejects execution tri
     ),
     (error: unknown) => error instanceof LocalScopeError && error.code === 'HOST_MANAGER_UNIT_CONFLICT',
   )
-  assert.throws(
-    () => assertLaunchdFileDefinition(
-      fx.facts,
-      canonical.replace('<key>RunAtLoad</key>', '<key>RunAtL&#111;ad</key>'),
-    ),
-    (error: unknown) => error instanceof LocalScopeError && error.code === 'HOST_MANAGER_UNIT_CONFLICT',
-  )
+  for (const [shape, key] of [
+    ['numeric character reference', '<key>RunAtL&#111;ad</key>'],
+    ['whitespace in the key tag', '<key >RunAtLoad</key>'],
+    ['CDATA key text', '<key><![CDATA[RunAtLoad]]></key>'],
+  ] as const) {
+    assert.throws(
+      () => assertLaunchdFileDefinition(
+        fx.facts,
+        canonical.replace('<key>RunAtLoad</key>\n  <false/>', `${key}\n  <true/>`),
+      ),
+      (error: unknown) => error instanceof LocalScopeError && error.code === 'HOST_MANAGER_UNIT_CONFLICT',
+      `${shape} must be decoded by the native parser and rejected as a launch trigger`,
+    )
+  }
 })
 
 test('stop boots out only a matched job, verifies removal and never signals twice', async t => {
