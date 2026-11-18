@@ -700,14 +700,29 @@ stdout/stderr.
 ### Host-owned local ACP v1 front door (Unix socket)
 
 Alongside the authenticated loopback carrier, the one Host process can open ONE
-bounded ACP v1 front door over a pathname Unix domain socket inside its own
-private profile scope: `<scope.dir>/acp.sock`. It is a Host-owned ingress owned by
-the same Host entry that already holds the kernel Host seat and the Ready
-commit; it is never a package export, a second Host, a second Agent/Session
-owner, a TCP/HTTP endpoint, or an ACP byte stream on the Host's stdout (the
-control records remain the only stdout format). The listener is **OPT-IN and
-default-OFF**: a new Split Host binds no socket unless the profile's independent
-`autoStart` preference enables it (see below).
+bounded ACP v1 front door over a pathname Unix domain socket on the ONE
+platform-specific physical endpoint of its canonical profile scope. It is a
+Host-owned ingress owned by the same Host entry that already holds the kernel
+Host seat and the Ready commit; it is never a package export, a second Host, a
+second Agent/Session owner, a TCP/HTTP endpoint, or an ACP byte stream on the
+Host's stdout (the control records remain the only stdout format). The listener
+is **OPT-IN and default-OFF**: a new Split Host binds no socket unless the
+profile's independent `autoStart` preference enables it (see below).
+
+- **One profile-scoped endpoint, two OS-specific physical paths.** The endpoint is
+  deterministic from the canonical profile `scopeId` and the current OS UID; no
+  environment variable, `$TMPDIR`, DSH home, user home or current directory may
+  move it. Linux keeps the logical `<scope.dir>/acp.sock`; macOS needs a short
+  Darwin pathname because `sockaddr_un.sun_path` is 104 bytes and there is no
+  `/proc`, so the same profile scope publishes
+  `/private/tmp/dpt-<decimal-uid>-<scope40>/acp.sock` (the first 160 bits of the
+  canonical scope SHA-256). These are the same profile-scoped contract at two
+  physical locations. An external advanced peer derives the local address from
+  the official profile scope and UID and is still not authorized by a computed
+  string: only a real `connect` + ACP `initialize` against the live Host counts.
+  There is no endpoint-discovery command, Remote field or TUI page; the strict
+  `piTuiAcpAccess` status vocabulary remains `{state}` /
+  `{state:'unavailable',reason}` and never carries a path or token.
 
 - **One owner, one scope, two independent control facts.** A single
   Host-entry-owned runtime controller is the ONLY socket owner per Host profile.
@@ -725,12 +740,28 @@ default-OFF**: a new Split Host binds no socket unless the profile's independent
 - **Unix socket only, private new files.** A scope directory THIS product
   creates is 0700; an existing user-chosen scope mode is neither rewritten nor
   used as an admission gate. The socket inode is owned by the current UID and
-  forced to 0600 before Ready. There is
-  no TCP/HTTP `/acp` port and no ACP JSON on the Host stdout. The bind uses a
-  Linux `/proc/self/fd/<dirfd>/acp.sock` short path so a long logical
-  `DSH_HOME`/scope pathname still works; the public/logical path stays
-  `<scope.dir>/acp.sock`, the inode stays in the scope, and the scope hash and
-  `instance.json` schema are unchanged.
+  forced to 0600 before Ready. There is no TCP/HTTP `/acp` port and no ACP JSON
+  on the Host stdout.
+  - **Linux.** The logical contract path stays `<scope.dir>/acp.sock`; the
+    server is bound through a private `/proc/self/fd/<dirfd>/acp.sock` name so a
+    long `DSH_HOME`/scope pathname still works, and the exact inode is published
+    onto the logical path with a no-replace hard link. The inode stays in the
+    scope, and the scope hash and `instance.json` schema are unchanged.
+  - **macOS.** The trusted parent is `/private/tmp` (an OS-owned root uid with
+    the sticky bit; never `$TMPDIR`, `DSH_HOME` or the user home). The one
+    deterministic root `dpt-<decimal-uid>-<scope40>` is created 0700 by the
+    current UID and REUSED across ACP Off/On and Host crashes; an existing
+    symlink, non-directory or foreign-owned root is refused and never written
+    through. The server binds an owner-only private name under that root,
+    forces it 0600, then publishes the same inode onto the public `acp.sock`
+    with a kernel no-replace hard link and drops the private name. Both names
+    must fit `sun_path[104]` including the trailing NUL; a pathname that cannot
+    is `LOCAL_ACP_SOCKET_PATH_UNSUPPORTED` and no fallback root is searched.
+    Node's server close can therefore only unlink the already-absent private
+    name.
+  - Retirement and crash recovery keep the existing exact-inode rule on BOTH
+    platforms: only the saved `(dev,ino,uid)` socket inode of this listener is
+    ever unlinked, so a foreign replacement at the public name survives.
 - **Opt-in; bind before Ready only when enabled.** A new Split Host starts with
   the listener DISABLED and still publishes a normal Ready. When the profile's
   `pi-tui-acp-preferences.autoStart` is true the entry reads it after profile
@@ -1009,9 +1040,11 @@ default-OFF**: a new Split Host binds no socket unless the profile's independent
   socket inode is reclaimed only when a short connect probe proves it refused
   (`ECONNREFUSED`) and its `(dev,ino,uid)` is unchanged; a live listener is
   `LOCAL_ACP_SOCKET_IN_USE`, and a symlink, regular file or foreign-owner entry
-  is `LOCAL_ACP_UNSAFE_SOCKET` and never removed. Cleanup unlinks only this
-  process's own saved inode; a SIGKILL leaves the inode for the next seat
-  winner's safe reclaim.
+  is `LOCAL_ACP_UNSAFE_SOCKET` and never removed. The same bounded
+  probe + identity recheck applies to the Linux private fd-shortened bind name
+  and to the macOS public and private names; a SIGKILL leaves those inodes for
+  the next seat winner's safe reclaim. Cleanup unlinks only this process's own
+  saved inode.
 
 ### Local protocol and version evolution
 

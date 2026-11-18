@@ -23,6 +23,12 @@
  *       lifecycle: read-only no-Host status/logs, warm reuse, verified stop,
  *       cold start, admin-seat race, restart into a new instance and the
  *       unsupported (no launchd) install/uninstall verbs.
+ *   D2ACP (M01-M10) the macOS local ACP v1 endpoint on the SAME candidate: the
+ *       short profile-scoped `/private/tmp` UDS, real bind/link/connect,
+ *       shared-Session resume/new/close/prompt through the official Host
+ *       writer, runtime Off/On, autoStart persistence and SIGTERM/SIGKILL
+ *       socket retirement/reclaim. Every M row carries its own real evidence;
+ *       M11 (Linux) stays NOT_VERIFIED here by design.
  *
  * Every wait is a bounded condition wait on a real fact (published registry,
  * painted tmux frame, durable zstd Session log, process table). The tmux server
@@ -42,7 +48,10 @@
 import { spawn, spawnSync } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import {
+  chmodSync,
   existsSync,
+  linkSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -52,10 +61,12 @@ import {
   rmSync,
   statSync,
   symlinkSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs'
+import { connect, createServer } from 'node:net'
 import { homedir, tmpdir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 
 import { inspectSplitCandidate, createSplitSmokeProfile } from '../lib/split-smoke-profile.mjs'
 import { SplitSmokeAssertionError } from '../lib/split-smoke-diagnostics.mjs'
@@ -1137,7 +1148,799 @@ async function runScene({ installation, workRoot, report }) {
     'P07: a macOS unit verb wrote a launchd plist')
   report.rows.push({ id: 'P07-LIVE', status: 'PASS', exitCode: 3, hostUnchanged: true, launchdPlists: 0 })
 
-  return { hostPid: restartRegistry.record.hostPid }
+  const d2acp = await runD2AcpScene({ installation, workRoot, report, start, projectA, projectB })
+  return { hostPid: d2acp.hostPid }
+}
+
+// ── D2ACP: the macOS local ACP endpoint (M01-M10 on the same candidate) ─────
+
+/** The frozen trusted parent of the Darwin profile-scoped ACP endpoint. */
+const DARWIN_ACP_PARENT = '/private/tmp'
+
+/**
+ * The frozen Darwin endpoint of one profile scope, derived the way an
+ * independent advanced peer does: from the real published scope id and the
+ * current OS uid. The smoke intentionally does NOT import product code for
+ * this formula — it is the EXTERNAL client contract under test.
+ */
+function darwinAcpEndpoint(scopeId, uid) {
+  const privateRoot = join(DARWIN_ACP_PARENT, `dpt-${String(uid)}-${String(scopeId).slice(0, 40)}`)
+  return {
+    privateRoot,
+    publicPath: join(privateRoot, 'acp.sock'),
+    privateBindPath: join(privateRoot, '.acp-priv', 'acp.sock'),
+  }
+}
+
+/** Endian-neutral `lstat` facts; the pathname itself never enters the evidence. */
+function lstatFacts(path) {
+  const info = lstatSync(path)
+  return {
+    dev: String(info.dev),
+    ino: String(info.ino),
+    uid: info.uid,
+    mode: (info.mode & 0o7777).toString(8),
+    isSocket: info.isSocket(),
+    isDirectory: info.isDirectory(),
+    isFile: info.isFile(),
+    isSymbolicLink: info.isSymbolicLink(),
+  }
+}
+
+function pathExists(path) {
+  try { lstatSync(path); return true } catch { return false }
+}
+
+/** Connect once to a real UDS and classify the kernel outcome. */
+function probeAcpSocket(path) {
+  return new Promise(resolveProbe => {
+    const socket = connect(path)
+    let settled = false
+    const finish = value => {
+      if (settled) return
+      settled = true
+      socket.destroy()
+      resolveProbe(value)
+    }
+    socket.once('connect', () => finish({ connected: true }))
+    socket.once('error', error => finish({ connected: false, code: error.code }))
+    setTimeout(() => finish({ connected: false, code: 'TIMEOUT' }), 2_000)
+  })
+}
+
+/** One raw ACP v1 NDJSON client over the SHORT physical endpoint (never /proc). */
+class AcpClient {
+  constructor(socket) {
+    this.socket = socket
+    this.buffer = ''
+    this.queue = []
+    this.received = []
+    this.waiter = undefined
+    this.closed = new Promise(resolveClose => socket.on('close', () => resolveClose()))
+    socket.setEncoding('utf8')
+    socket.on('data', chunk => {
+      this.buffer += chunk
+      for (let newline = this.buffer.indexOf('\n'); newline >= 0; newline = this.buffer.indexOf('\n')) {
+        const line = this.buffer.slice(0, newline).trim()
+        this.buffer = this.buffer.slice(newline + 1)
+        if (line === '') continue
+        let message
+        try { message = JSON.parse(line) } catch { continue }
+        this.received.push(message)
+        const waiter = this.waiter
+        if (waiter !== undefined) {
+          this.waiter = undefined
+          waiter(message)
+        } else {
+          this.queue.push(message)
+        }
+      }
+    })
+    socket.on('error', () => {})
+  }
+
+  static open(path) {
+    return new Promise((resolveOpen, rejectOpen) => {
+      const socket = connect(path)
+      socket.once('connect', () => {
+        socket.off('error', rejectOpen)
+        resolveOpen(new AcpClient(socket))
+      })
+      socket.once('error', rejectOpen)
+    })
+  }
+
+  send(message) {
+    this.socket.write(`${JSON.stringify(message)}\n`)
+  }
+
+  next(timeoutMs = 30_000) {
+    if (this.queue.length > 0) return Promise.resolve(this.queue.shift())
+    return new Promise((resolveNext, rejectNext) => {
+      const timer = setTimeout(() => {
+        this.waiter = undefined
+        rejectNext(new Error(`d2acp raw client: no message within ${String(timeoutMs)}ms`))
+      }, timeoutMs)
+      this.waiter = value => { clearTimeout(timer); resolveNext(value) }
+    })
+  }
+
+  /** Send ONE request and await ITS response id; interleaved notifications are kept in `received`. */
+  async request(id, method, params = {}, timeoutMs = TIMEOUTS.turn) {
+    this.send({ jsonrpc: '2.0', id, method, params })
+    const deadline = Date.now() + timeoutMs
+    for (;;) {
+      const message = await this.next(Math.max(1, deadline - Date.now()))
+      if (message?.id === id) return message
+    }
+  }
+
+  async initialize(id = 1) {
+    return await this.request(id, 'initialize', { protocolVersion: 1, clientCapabilities: {} })
+  }
+
+  close() {
+    this.socket.destroy()
+  }
+}
+
+/** An empty-object ACP success result (`{}`), no error. */
+function isEmptyAcpResult(response) {
+  return response?.error === undefined
+    && response?.result !== undefined
+    && typeof response.result === 'object'
+    && response.result !== null
+    && Object.keys(response.result).length === 0
+}
+
+/** One real non-TUI qualification Peer process driving the production ACP port. */
+class AcpPeer {
+  constructor(options) {
+    this.label = options.label
+    this.records = []
+    this.stderrText = ''
+    this.exited = false
+    this.exitResult = undefined
+    this.sequence = 0
+    this.child = spawn(process.execPath, [options.installation.entries.client], {
+      cwd: options.installation.profileDir,
+      env: {
+        ...options.installation.env,
+        SPLIT_PROCESS_CLIENT_MODE: 'peer',
+        SPLIT_PROCESS_DSH_ANCHOR: options.installation.anchor,
+        SPLIT_PROCESS_PROFILE: 'pi-tui',
+        SPLIT_PROCESS_SCRATCH: join(options.workRoot, `d2acp-peer-${randomUUID().slice(0, 8)}`),
+      },
+      stdio: ['pipe', 'pipe', 'pipe'],
+    })
+    this.child.stdout.setEncoding('utf8')
+    this.child.stderr.setEncoding('utf8')
+    let buffer = ''
+    this.child.stdout.on('data', chunk => {
+      buffer += chunk
+      for (let newline = buffer.indexOf('\n'); newline >= 0; newline = buffer.indexOf('\n')) {
+        const line = buffer.slice(0, newline).trim()
+        buffer = buffer.slice(newline + 1)
+        if (line === '') continue
+        try { this.records.push(JSON.parse(line)) } catch { /* the peer emits JSONL only; a torn tail is not a record */ }
+      }
+    })
+    this.child.stderr.on('data', chunk => { this.stderrText += chunk })
+    this.closed = new Promise(resolveClose => {
+      this.child.once('close', (code, signal) => {
+        this.exited = true
+        this.exitResult = { code, signal }
+        resolveClose(this.exitResult)
+      })
+    })
+  }
+
+  static async start(options) {
+    const peer = new AcpPeer(options)
+    await peer.waitFor(record => record.m4a0 === 'ready', `${options.label} peer ready`, 180_000)
+    return peer
+  }
+
+  send(record) {
+    this.child.stdin.write(`${JSON.stringify(record)}\n`)
+  }
+
+  async waitFor(predicate, label, timeoutMs = TIMEOUTS.process) {
+    const existing = this.records.find(predicate)
+    if (existing !== undefined) return existing
+    const deadline = Date.now() + timeoutMs
+    while (Date.now() < deadline) {
+      const found = this.records.find(predicate)
+      if (found !== undefined) return found
+      if (this.exited) {
+        throw new SplitSmokeAssertionError(`${label}: the peer exited before its record (${JSON.stringify(this.exitResult)})`
+          + (process.env.D2ACP_DEBUG === '1' ? `; stderr: ${this.stderrText.slice(-800)}` : ''))
+      }
+      await sleep(50)
+    }
+    throw new SplitSmokeAssertionError(`${label}: the peer record did not arrive before the deadline`)
+  }
+
+  /** Drive ONE control op and await exactly its requestId response. */
+  async request(record, label) {
+    const requestId = `d2acp-${String(++this.sequence)}-${String(process.pid)}-${randomUUID().slice(0, 6)}`
+    this.send({ ...record, requestId })
+    return await this.waitFor(candidate => candidate.requestId === requestId,
+      `${this.label} ${label}`, TIMEOUTS.turn)
+  }
+
+  async shutdown() {
+    if (this.exited) return this.exitResult
+    try { this.send({ op: 'shutdown' }) } catch { /* the peer is already gone */ }
+    const settled = await Promise.race([this.closed, sleep(20_000).then(() => undefined)])
+    if (settled === undefined && !this.exited) {
+      try { this.child.kill('SIGKILL') } catch { /* already gone */ }
+      await this.closed
+    }
+    return this.exitResult
+  }
+
+  async dispose() {
+    if (!this.exited) {
+      try { this.child.kill('SIGKILL') } catch { /* already gone */ }
+      await this.closed
+    }
+  }
+}
+
+/** Assert one `piTuiAcpAccess` control response reached the expected state. */
+function assertAcpAccess(response, expected, label) {
+  assert(response.ok === true, `${label}: the ACP access call failed (${String(response.errorCode ?? 'unknown')})`)
+  assert(response.status?.state === expected,
+    `${label}: the Host reported ${JSON.stringify(response.status)} instead of ${expected}`)
+}
+
+/** Bind a raw server at the endpoint the way another owner would (private bind -> hard link). */
+async function bindForeignAcpEndpoint(endpoint) {
+  mkdirSync(join(endpoint.privateRoot, '.acp-priv'), { recursive: true, mode: 0o700 })
+  const server = createServer(socket => socket.destroy())
+  await new Promise((resolveListen, rejectListen) => {
+    server.once('error', rejectListen)
+    server.listen(endpoint.privateBindPath, () => { server.off('error', rejectListen); resolveListen() })
+  })
+  chmodSync(endpoint.privateBindPath, 0o600)
+  linkSync(endpoint.privateBindPath, endpoint.publicPath)
+  unlinkSync(endpoint.privateBindPath)
+  return {
+    server,
+    close: () => new Promise(resolveClose => server.close(() => resolveClose())),
+  }
+}
+
+/**
+ * M01-M10 on the SAME packed candidate: the real public daemon Host, a real TUI
+ * Client holding a Session, and a real non-TUI Peer that enables the Host's own
+ * `piTuiAcpAccess`; every ACP fact comes from a real UDS connection served by
+ * the installed bundle. M11 is Linux-only and is settled by the Linux lanes.
+ */
+async function runD2AcpScene({ installation, workRoot, report, start, projectA, projectB }) {
+  const { dshHome, manifest } = installation
+  const uid = process.getuid()
+  const row = (id, evidence) => {
+    const value = { id, status: 'PASS', ...evidence }
+    report.rows.push(value)
+    return value
+  }
+  const requireHost = label => {
+    const registry = readRegistry(dshHome)
+    assert(registry !== undefined, `${label}: the Host registry is missing`)
+    return registry.record
+  }
+  const scopeId = requireHost('D2ACP initial Host').scopeId
+  const endpoint = darwinAcpEndpoint(scopeId, uid)
+  // Cleanup owns exactly this run's deterministic profile root; the raw path is
+  // kept in memory until every owned process is gone, never in the evidence file.
+  report.d2acpEndpointRoots = [endpoint.privateRoot]
+  const acpClients = []
+  const peers = []
+  const startPeer = async label => {
+    const peer = await AcpPeer.start({ installation, workRoot, label })
+    peers.push(peer)
+    return peer
+  }
+  const openAcp = async label => {
+    const client = await AcpClient.open(endpoint.publicPath)
+    acpClients.push(client)
+    return client
+  }
+  const openInitialized = async label => {
+    const client = await openAcp(label)
+    const init = await client.initialize(1)
+    assert(init?.result?.protocolVersion === 1, `${label}: the endpoint must answer protocolVersion 1`)
+    assert(init?.result?.agentInfo?.name === 'dsh-pi-tui', `${label}: agentInfo.name must be dsh-pi-tui`)
+    assert(init?.result?.agentInfo?.version === manifest.version,
+      `${label}: agentInfo.version must be the installed bundle version ${manifest.version}`)
+    assert(init?.result?.agentCapabilities?.loadSession === false, `${label}: loadSession must stay false`)
+    assert(init?.result?.agentCapabilities?.sessionCapabilities?.resume !== undefined,
+      `${label}: sessionCapabilities.resume must be advertised`)
+    assert(init?.result?.agentCapabilities?.sessionCapabilities?.close !== undefined,
+      `${label}: sessionCapabilities.close must be advertised`)
+    return { client, init }
+  }
+  const setAcp = async (peer, enabled, label) => {
+    const response = await peer.request({ op: 'qualification-acp-access', acpEnabled: enabled }, label)
+    if (response.ok !== true) return response
+    assertAcpAccess(response, enabled ? 'enabled' : 'disabled', label)
+    return response
+  }
+  const getAcp = async (peer, label) => {
+    return await peer.request({ op: 'qualification-acp-access' }, label)
+  }
+  const writeAutoStart = async (peer, value, label) => {
+    const response = await peer.request({ op: 'qualification-acp-autostart', acpAutoStart: value }, label)
+    assert(response.ok === true && response.readBack === true && response.autoStart === value,
+      `${label}: the autoStart preference did not settle to ${String(value)} (${JSON.stringify(response)})`)
+    return response
+  }
+  const waitEndpoint = async label => {
+    return await waitFor(() => (pathExists(endpoint.publicPath) ? lstatFacts(endpoint.publicPath) : undefined),
+      `${label}: the public ACP endpoint to appear`, TIMEOUTS.daemon)
+  }
+  const waitEndpointGone = async label => {
+    return await waitFor(() => (!pathExists(endpoint.publicPath) ? true : undefined),
+      `${label}: the public ACP endpoint to retire`, TIMEOUTS.daemon)
+  }
+  const daemonStatus = label => {
+    const result = runDaemonCommand(installation, ['status'])
+    assert(result.status === 0, `${label}: daemon status exited ${String(result.status)}: ${result.stderr.slice(-500)}`)
+    return statusFields(result.stdout)
+  }
+  const daemonRestart = label => {
+    const result = runDaemonCommand(installation, ['restart'])
+    assert(result.status === 0, `${label}: daemon restart exited ${String(result.status)}: ${result.stderr.slice(-500)}`)
+    const fields = statusFields(result.stdout)
+    assert(fields.host === 'ready', `${label}: the restarted Host is not ready (${JSON.stringify(fields)})`)
+    return fields
+  }
+  const daemonStart = label => {
+    const result = runDaemonCommand(installation, ['start'])
+    assert(result.status === 0, `${label}: daemon start exited ${String(result.status)}: ${result.stderr.slice(-500)}`)
+    const fields = statusFields(result.stdout)
+    assert(fields.host === 'ready', `${label}: the started Host is not ready (${JSON.stringify(fields)})`)
+    return fields
+  }
+  const daemonStop = label => {
+    const result = runDaemonCommand(installation, ['stop'])
+    assert(result.status === 0, `${label}: daemon stop exited ${String(result.status)}: ${result.stderr.slice(-500)}`)
+    assert(/^host=stopped$/mu.test(result.stdout), `${label}: stop did not report a stopped Host`)
+    return result
+  }
+
+  // ── M01/M02: the running public daemon Host + TWO real Clients ───────────
+  const inherited = ['P01', 'P06-NOLOG', 'P07-NOHOST', 'A01', 'A02', 'P02-WARM', 'P02-COLD',
+    'P03', 'P04', 'P05', 'P06', 'P07-LIVE', 'P09']
+  for (const id of inherited) {
+    assert(report.rows.some(entry => entry.id === id && entry.status === 'PASS'),
+      `M02: the inherited macOS management row ${id} is not PASS in this run`)
+  }
+
+  const tui = start({ name: 'd2acp-tui', cwd: projectA, installation, backend: 'daemon' })
+  await waitPainted(tui, 'D2ACP TUI paint')
+  await waitComposer(tui, 'D2ACP TUI composer')
+  sendKeys(tui, 'd2acp tui session marker', 'D2ACP TUI prompt')
+  await waitFrameText(tui, 'stub answer', 'D2ACP TUI answer', TIMEOUTS.turn)
+  const sessionA = (await waitSessionWithText(dshHome, 'd2acp tui session marker', 'D2ACP durable Session A')).sessionId
+  const tuiClient = await waitClientOfSession(tui, workRoot, 'D2ACP TUI client')
+  const peer = await startPeer('M01 peer')
+  const hostAtStart = requireHost('M01 host')
+  const readyStatus = daemonStatus('M01 status')
+  assert(readyStatus.host === 'ready' && readyStatus.manager === 'process' && readyStatus.unit === 'none',
+    `M01: unexpected ready status ${JSON.stringify(readyStatus)}`)
+  assert(readyStatus.pid === String(hostAtStart.hostPid), 'M01: status reported a different Host pid')
+  assert(readyStatus.instance === hostAtStart.instanceId.slice(0, 8), 'M01: status reported a different Host instance')
+  const liveHosts = ownedRoles(workRoot).hosts.filter(candidate => alive(candidate.pid))
+  assert(liveHosts.length === 1, `M01: expected exactly ONE live Host, saw ${String(liveHosts.length)}`)
+  assert(alive(tuiClient.pid) && alive(peer.child.pid), 'M01: both Clients must be alive')
+  assert(tuiClient.pid !== peer.child.pid && tuiClient.pid !== hostAtStart.hostPid,
+    'M01: the two Clients and the Host must be distinct OS processes')
+  assert(!existsSync(join(installation.home, 'Library', 'LaunchAgents')) || readdirSync(join(installation.home, 'Library', 'LaunchAgents')).length === 0,
+    'M01: the daemon path must not write a launchd plist')
+  row('M01', {
+    hostPid: hostAtStart.hostPid,
+    instanceId: hostAtStart.instanceId,
+    clientPids: [tuiClient.pid, peer.child.pid],
+    manager: readyStatus.manager,
+    launchd: false,
+  })
+  row('M02', {
+    inherited,
+    stopIdentityGone: true,
+    unknownIdentitySignal: 'daemon-control.test.ts (no SIGKILL on unknown identity)',
+    unitVerbs: 'UNSUPPORTED_PLATFORM/3, no plist',
+  })
+
+  // ── M03: default Off, no listener, Direct remains unavailable ────────────
+  assert(!pathExists(endpoint.publicPath), 'M03: a default-Off Host must not bind the Darwin ACP endpoint')
+  assert(!pathExists(join(dshHome, 'run', 'dsh-pi-tui', scopeId, 'acp.sock')),
+    'M03: the macOS Host must not bind the Linux scope acp.sock either')
+  const initialAccess = await getAcp(peer, 'M03 getStatus')
+  assertAcpAccess(initialAccess, 'disabled', 'M03 initial status')
+  row('M03', {
+    state: 'disabled',
+    publicSocket: false,
+    scopeSocket: false,
+    directUnavailable: 'settings-acp-controls.test.ts (Direct ACP port is truthfully unavailable)',
+  })
+
+  // ── M04: real enable -> short bind/link -> raw initialize; IN_USE negative ─
+  const enabled = await setAcp(peer, true, 'M04 enable')
+  assert(enabled.status?.state === 'enabled', 'M04: the enable did not report enabled')
+  const socketFacts = await waitEndpoint('M04')
+  const rootFacts = lstatFacts(endpoint.privateRoot)
+  assert(rootFacts.isDirectory === true && rootFacts.isSymbolicLink === false,
+    'M04: the endpoint root must be a real directory')
+  assert(rootFacts.uid === uid, 'M04: the endpoint root must be owned by this uid')
+  assert(rootFacts.mode === '700', `M04: the endpoint root must be 0700, saw ${rootFacts.mode}`)
+  assert(socketFacts.isSocket === true, 'M04: the public endpoint must be a socket')
+  assert(socketFacts.uid === uid, 'M04: the public endpoint must be owned by this uid')
+  assert(socketFacts.mode === '600', `M04: the public endpoint must be 0600, saw ${socketFacts.mode}`)
+  assert(socketFacts.dev === rootFacts.dev, 'M04: root and socket must share the same filesystem dev')
+  assert(!pathExists(endpoint.privateBindPath), 'M04: the private bind name must be gone after publish')
+  const m04Peer = peer
+  const m04 = await openInitialized('M04 raw initialize')
+  assert(m04.client.received.some(message => message.id === 1), 'M04: the initialize response must be on the wire')
+  const hostAfterEnable = requireHost('M04 host')
+  assert(hostAfterEnable.hostPid === hostAtStart.hostPid && hostAfterEnable.instanceId === hostAtStart.instanceId,
+    'M04: enabling ACP must never replace the Host')
+  m04.client.close()
+  await m04.client.closed
+
+  // Negative: a live foreign listener at the public path makes the enable refuse
+  // (LOCAL_ACP_SOCKET_IN_USE) and is never overwritten or deleted.
+  const disabled = await setAcp(m04Peer, false, 'M04 disable for the IN_USE probe')
+  assert(disabled.status?.state === 'disabled', 'M04: the disable did not report disabled')
+  await waitEndpointGone('M04 disable')
+  const foreign = await bindForeignAcpEndpoint(endpoint)
+  const foreignInode = lstatFacts(endpoint.publicPath).ino
+  try {
+    const busy = await m04Peer.request({ op: 'qualification-acp-access', acpEnabled: true }, 'M04 enable over a foreign listener')
+    assert(busy.ok === false, 'M04: enabling over a live foreign listener must be refused')
+    assert(lstatFacts(endpoint.publicPath).ino === foreignInode, 'M04: the foreign endpoint inode must be untouched')
+    const probe = await probeAcpSocket(endpoint.publicPath)
+    assert(probe.connected === true, 'M04: the foreign listener must keep answering')
+  } finally {
+    await foreign.close()
+    if (pathExists(endpoint.publicPath)) unlinkSync(endpoint.publicPath)
+  }
+  const afterReject = await getAcp(m04Peer, 'M04 status after the refusal')
+  assertAcpAccess(afterReject, 'disabled', 'M04 status after the refusal')
+  const reenabled = await setAcp(m04Peer, true, 'M04 clean re-enable')
+  assert(reenabled.status?.state === 'enabled', 'M04: the clean re-enable did not report enabled')
+  const rebound = await waitEndpoint('M04 re-enable')
+  assert(rebound.ino !== foreignInode, 'M04: the clean re-enable must bind a NEW inode')
+  const m04b = await openInitialized('M04 re-enabled raw initialize')
+  m04b.client.close()
+  await m04b.client.closed
+  row('M04', {
+    scopeIdPrefix: scopeId.slice(0, 8),
+    rootMode: rootFacts.mode,
+    socketMode: socketFacts.mode,
+    socketInode: socketFacts.ino,
+    initialize: true,
+    bundleVersion: manifest.version,
+    inUseRejected: true,
+    foreignPreserved: true,
+    hostInstanceUnchanged: true,
+  })
+
+  // ── M05: the ACP View shares ONE real TUI Session A; duplicate is refused ─
+  const headerA = hostSessionHeader(dshHome, sessionA)
+  assert(headerA !== undefined, 'M05: Session A has no durable header')
+  assert(realpathSync(headerA.cwd) === realpathSync(projectA),
+    `M05: Session A cwd ${JSON.stringify(headerA.cwd)} is not the Client launch directory ${JSON.stringify(projectA)}`)
+  const connA = await openAcp('M05 resume connection')
+  const initA = await connA.initialize(1)
+  assert(initA?.result?.protocolVersion === 1, 'M05: initialize failed')
+  const resumeA = await connA.request(2, 'session/resume', { sessionId: sessionA, cwd: realpathSync(projectA) })
+  assert(isEmptyAcpResult(resumeA), `M05: session/resume(A) must return {} (got ${JSON.stringify(resumeA?.error ?? resumeA?.result)})`)
+  const frameA = tmuxCapture(tui, 'M05 TUI frame')
+  assert(frameA.includes('d2acp tui session marker'), 'M05: the real TUI lost Session A after the ACP resume')
+  const connDup = await openAcp('M05 duplicate connection')
+  await connDup.initialize(1)
+  const duplicate = await connDup.request(2, 'session/resume', { sessionId: sessionA, cwd: realpathSync(projectA) })
+  assert(duplicate?.error?.code === -32602 && duplicate?.error?.data?.code === 'LOCAL_ACP_VIEW_ALREADY_ATTACHED',
+    `M05: a second resume must fail LOCAL_ACP_VIEW_ALREADY_ATTACHED (got ${JSON.stringify(duplicate?.error ?? duplicate?.result)})`)
+  connDup.close()
+  await connDup.closed
+  const hostAfterResume = requireHost('M05 host')
+  assert(hostAfterResume.hostPid === hostAtStart.hostPid && hostAfterResume.instanceId === hostAtStart.instanceId,
+    'M05: the ACP resume must never replace the Host')
+  assert(alive(tuiClient.pid), 'M05: the TUI Client must stay alive across the ACP resume')
+  row('M05', {
+    sessionId: sessionA,
+    durableCwd: 'client-launch-directory',
+    tuiStillReferences: true,
+    duplicateRejected: 'LOCAL_ACP_VIEW_ALREADY_ATTACHED',
+    writer: 'one official Host Session',
+  })
+
+  // ── M06: session/new + session/close; close only releases the View ───────
+  // A fresh directory (never projectB, which the main scene already made a
+  // Workspace) proves the official Workspace+Session creation path itself.
+  const acpWorkspace = join(workRoot, 'd2acp-workspace')
+  mkdirSync(acpWorkspace, { mode: 0o700 })
+  const acpWorkspaceReal = realpathSync(acpWorkspace)
+  const connNew = await openAcp('M06 session/new connection')
+  await connNew.initialize(1)
+  const created = await connNew.request(2, 'session/new', { cwd: acpWorkspaceReal, mcpServers: [] })
+  assert(created?.error === undefined && typeof created?.result?.sessionId === 'string' && created.result.sessionId !== '',
+    `M06: session/new must return a real sessionId (got ${JSON.stringify(created?.error ?? created?.result)})`)
+  const sessionB = created.result.sessionId
+  assert(sessionB !== sessionA, 'M06: session/new must create a distinct Session')
+  const headerB = hostSessionHeader(dshHome, sessionB)
+  assert(headerB !== undefined, 'M06: the created Session has no durable header')
+  assert(realpathSync(headerB.cwd) === acpWorkspaceReal,
+    `M06: Session B cwd ${JSON.stringify(headerB.cwd)} is not the requested workspace`)
+  const closeB = await connNew.request(3, 'session/close', { sessionId: sessionB })
+  assert(isEmptyAcpResult(closeB), `M06: session/close(B) must return {} (got ${JSON.stringify(closeB?.error ?? closeB?.result)})`)
+  assert(hostSessionEvents(dshHome, sessionB) !== undefined, 'M06: session/close must not delete the official Session')
+  const badCwd = await connNew.request(4, 'session/new', { cwd: 'relative/path', mcpServers: [] })
+  assert(badCwd?.error?.code === -32602 && badCwd?.error?.data?.code === 'LOCAL_ACP_VIEW_INVALID_REQUEST',
+    `M06: a relative cwd must be LOCAL_ACP_VIEW_INVALID_REQUEST (got ${JSON.stringify(badCwd?.error ?? badCwd?.result)})`)
+  const badMcp = await connNew.request(5, 'session/new', {
+    cwd: acpWorkspaceReal,
+    mcpServers: [{ name: 'd2acp-mcp', command: '/bin/true', args: [], env: [] }],
+  })
+  assert(badMcp?.error?.code === -32602 && badMcp?.error?.data?.code === 'LOCAL_ACP_VIEW_INVALID_REQUEST',
+    `M06: non-empty mcpServers must be LOCAL_ACP_VIEW_INVALID_REQUEST (got ${JSON.stringify(badMcp?.error ?? badMcp?.result)})`)
+  const promptAfterClose = await connNew.request(6, 'session/prompt', {
+    sessionId: sessionB,
+    prompt: [{ type: 'text', text: 'must not dispatch' }],
+  })
+  assert(promptAfterClose?.error?.code === -32602 && promptAfterClose?.error?.data?.code === 'LOCAL_ACP_VIEW_NOT_OWNED',
+    `M06: a detached session/prompt must be LOCAL_ACP_VIEW_NOT_OWNED (got ${JSON.stringify(promptAfterClose?.error ?? promptAfterClose?.result)})`)
+  connNew.close()
+  await connNew.closed
+  const connResumeB = await openAcp('M06 resume B connection')
+  await connResumeB.initialize(1)
+  const resumeB = await connResumeB.request(2, 'session/resume', { sessionId: sessionB, cwd: acpWorkspaceReal })
+  assert(isEmptyAcpResult(resumeB), `M06: B must stay resumable after close (got ${JSON.stringify(resumeB?.error ?? resumeB?.result)})`)
+  connResumeB.close()
+  await connResumeB.closed
+  row('M06', {
+    createdSession: sessionB,
+    durableCwd: 'requested-workspace',
+    closeReleasesViewOnly: true,
+    resumableAfterClose: true,
+    invalidCwdRejected: true,
+    invalidMcpRejected: true,
+    detachedPromptRejected: 'LOCAL_ACP_VIEW_NOT_OWNED',
+  })
+
+  // ── M07: a real ACP text prompt through the official Host writer ─────────
+  const connPrompt = await openAcp('M07 prompt connection')
+  await connPrompt.initialize(1)
+  const createdC = await connPrompt.request(2, 'session/new', { cwd: acpWorkspaceReal, mcpServers: [] })
+  assert(typeof createdC?.result?.sessionId === 'string', 'M07: session/new must create a Session for the prompt')
+  const sessionC = createdC.result.sessionId
+  const promptText = 'd2acp acp prompt marker'
+  const promptResponse = await connPrompt.request(3, 'session/prompt', {
+    sessionId: sessionC,
+    prompt: [{ type: 'text', text: promptText }],
+  })
+  assert(promptResponse?.error === undefined, `M07: session/prompt failed (${JSON.stringify(promptResponse?.error)})`)
+  assert(promptResponse.result?.stopReason === 'end_turn',
+    `M07: the prompt must settle with end_turn, saw ${JSON.stringify(promptResponse.result)}`)
+  const eventsC = hostSessionEvents(dshHome, sessionC)
+  assert(eventsC !== undefined, 'M07: the prompted Session has no durable log')
+  const userTexts = eventsC.filter(event => event.type === 'user/message' && JSON.stringify(event).includes(promptText))
+  assert(userTexts.length === 1, `M07: exactly ONE durable user message must carry the prompt, saw ${String(userTexts.length)}`)
+  assert(eventsC.some(event => event.type === 'assistant/message' && JSON.stringify(event).includes('stub answer')),
+    'M07: the official Host writer must persist the model answer')
+  assert(eventsC.some(event => event.type === 'turn/end'), 'M07: the durable turn must end')
+  const updates = connPrompt.received.filter(message => message.method === 'session/update')
+  assert(updates.length > 0, 'M07: the ACP peer must receive its own session/update notifications')
+  assert(updates.every(message => message.params?.sessionId === sessionC),
+    'M07: the ACP connection must receive updates ONLY for its own Session')
+  assert(connA.received.every(message => message.method !== 'session/update' || message.params?.sessionId !== sessionC),
+    'M07: an unrelated ACP connection must not receive this Session updates')
+  connPrompt.close()
+  await connPrompt.closed
+  // Negative: a physical ACP disconnect during (or right after) a prompt never
+  // clears TUI work; the TUI Session A still commits a real turn afterwards.
+  const connDrop = await openAcp('M07 disconnect probe')
+  await connDrop.initialize(1)
+  const createdD = await connDrop.request(2, 'session/new', { cwd: realpathSync(projectB), mcpServers: [] })
+  assert(typeof createdD?.result?.sessionId === 'string', 'M07: session/new for the disconnect probe failed')
+  connDrop.send({
+    jsonrpc: '2.0',
+    id: 3,
+    method: 'session/prompt',
+    params: { sessionId: createdD.result.sessionId, prompt: [{ type: 'text', text: 'disconnect probe' }] },
+  })
+  // Let the frame leave this process before the physical teardown; the pass
+  // predicate remains the real TUI turn below, not this bounded delay.
+  await sleep(100)
+  connDrop.close()
+  await connDrop.closed
+  sendKeys(tui, 'd2acp tui after acp prompt', 'M07 TUI prompt after the ACP disconnect')
+  await waitSessionWithText(dshHome, 'd2acp tui after acp prompt', 'M07 durable TUI turn after the ACP disconnect')
+  const hostAfterPrompt = requireHost('M07 host')
+  assert(hostAfterPrompt.hostPid === hostAtStart.hostPid && hostAfterPrompt.instanceId === hostAtStart.instanceId,
+    'M07: the ACP prompt must never replace the Host')
+  row('M07', {
+    sessionId: sessionC,
+    stopReason: promptResponse.result.stopReason,
+    durableUserMessages: userTexts.length,
+    ownUpdatesOnly: true,
+    tuiTurnAfterAcp: true,
+    disconnectPreservedTui: true,
+    modelRoute: 'isolated scripted stub',
+  })
+
+  // ── M08: Off retires the socket; On rebinds the SAME endpoint ────────────
+  const inodeBeforeOff = lstatFacts(endpoint.publicPath).ino
+  const off = await setAcp(peer, false, 'M08 off')
+  assert(off.status?.state === 'disabled', 'M08: the disable did not report disabled')
+  await waitEndpointGone('M08 off')
+  await connA.closed
+  assert(hostSessionEvents(dshHome, sessionA) !== undefined, 'M08: the Host Session must survive an ACP Off')
+  assert(lstatFacts(endpoint.privateRoot).mode === '700', 'M08: the endpoint root must survive an ACP Off')
+  // Negative: a foreign regular file at the public path is refused and preserved.
+  writeFileSync(endpoint.publicPath, 'FOREIGN-D2ACP', { mode: 0o600 })
+  const unsafe = await peer.request({ op: 'qualification-acp-access', acpEnabled: true }, 'M08 enable over a foreign file')
+  assert(unsafe.ok === false, 'M08: enabling over a foreign public file must be refused')
+  assert(readFileSync(endpoint.publicPath, 'utf8') === 'FOREIGN-D2ACP', 'M08: the foreign file must be preserved')
+  assertAcpAccess(await getAcp(peer, 'M08 status after the refusal'), 'disabled', 'M08 status after the refusal')
+  unlinkSync(endpoint.publicPath)
+  const on = await setAcp(peer, true, 'M08 on')
+  assert(on.status?.state === 'enabled', 'M08: the re-enable did not report enabled')
+  const inodeAfterOn = (await waitEndpoint('M08 re-enable')).ino
+  assert(inodeAfterOn !== inodeBeforeOff, 'M08: a re-enable must bind a new inode at the same endpoint')
+  const connOn = await openAcp('M08 resumed connection')
+  await connOn.initialize(1)
+  const resumeOn = await connOn.request(2, 'session/resume', { sessionId: sessionA, cwd: realpathSync(projectA) })
+  assert(isEmptyAcpResult(resumeOn), `M08: the original Session must stay resumable after Off/On (got ${JSON.stringify(resumeOn?.error ?? resumeOn?.result)})`)
+  connOn.close()
+  await connOn.closed
+  assert(requireHost('M08 host').instanceId === hostAtStart.instanceId, 'M08: Off/On must never replace the Host instance')
+  row('M08', {
+    offRetiredSocket: true,
+    oldPeerClosed: true,
+    hostInstanceUnchanged: true,
+    sessionDurable: true,
+    sameEndpointRebound: true,
+    inodeChanged: true,
+    foreignFilePreserved: true,
+  })
+
+  // ── M09: autoStart persistence across a real Host boot ──────────────────
+  sendKeys(tui, '/exit', 'M09 exit the TUI Client')
+  await waitFor(() => (!tmuxSessionExists(tui) ? true : undefined), 'M09 TUI Client exits', TIMEOUTS.exit)
+  await waitFor(() => (!alive(tuiClient.pid) ? true : undefined), 'M09 TUI Client process is gone', TIMEOUTS.process)
+  await setAcp(peer, false, 'M09 disable before the preference write')
+  await writeAutoStart(peer, true, 'M09 write autoStart On')
+  const beforeRestart = requireHost('M09 host before restart')
+  const restarted = daemonRestart('M09 restart with autoStart On')
+  const afterRestart = requireHost('M09 host after restart')
+  assert(afterRestart.instanceId !== beforeRestart.instanceId, 'M09: the restart must publish a new Host instance')
+  assert(restarted.instance === afterRestart.instanceId.slice(0, 8), 'M09: restart reported a different instance')
+  const autostartSocket = await waitEndpoint('M09 pre-Ready autostart bind')
+  assert(autostartSocket.isSocket === true && autostartSocket.mode === '600',
+    'M09: the autostart endpoint must be a 0600 socket')
+  const autoConn = await openAcp('M09 autostart connection')
+  const autoInit = await autoConn.initialize(1)
+  assert(autoInit?.result?.protocolVersion === 1, 'M09: the autostart endpoint must answer ACP initialize')
+  autoConn.close()
+  await autoConn.closed
+  const autoLogs = runDaemonCommand(installation, ['logs', '--lines', '400'])
+  assert(autoLogs.status === 0, `M09: daemon logs exited ${String(autoLogs.status)}`)
+  assert(/acp-autostart/u.test(autoLogs.stdout) && /pre-ready/u.test(autoLogs.stdout),
+    'M09: the Host log must prove the pre-Ready autostart bind')
+  await peer.dispose()
+
+  const peer2 = await startPeer('M09 peer after restart')
+  await writeAutoStart(peer2, false, 'M09 write autoStart Off')
+  const restartedOff = daemonRestart('M09 restart with autoStart Off')
+  const afterOffRestart = requireHost('M09 host after the Off restart')
+  assert(afterOffRestart.instanceId !== afterRestart.instanceId, 'M09: the Off restart must publish a new Host instance')
+  assert(restartedOff.instance === afterOffRestart.instanceId.slice(0, 8), 'M09: the Off restart reported a different instance')
+  assert(!pathExists(endpoint.publicPath), 'M09: autoStart=false must bind NO endpoint on the next Host boot')
+  await peer2.dispose()
+
+  // Negative: autoStart=true + an unsafe endpoint root -> the Host still becomes
+  // Ready, emits ONE redacted diagnostic and never prints the endpoint/path.
+  const peer2b = await startPeer('M09 peer for the failure probe')
+  await writeAutoStart(peer2b, true, 'M09 write autoStart On for the failure probe')
+  await peer2b.dispose()
+  rmSync(endpoint.privateRoot, { recursive: true, force: true })
+  const unsafeTarget = join(workRoot, 'd2acp-unsafe-root-target')
+  mkdirSync(unsafeTarget, { mode: 0o700 })
+  symlinkSync(unsafeTarget, endpoint.privateRoot)
+  const restartedUnsafe = daemonRestart('M09 restart with an unsafe endpoint root')
+  const afterUnsafe = requireHost('M09 host after the unsafe boot')
+  assert(afterUnsafe.instanceId !== afterOffRestart.instanceId, 'M09: the unsafe boot must publish a new Host instance')
+  assert(restartedUnsafe.host === 'ready', 'M09: the Host must stay Ready when the ACP autostart bind fails')
+  const unsafeLogs = runDaemonCommand(installation, ['logs', '--lines', '400'])
+  assert(unsafeLogs.status === 0, `M09: daemon logs exited ${String(unsafeLogs.status)}`)
+  const diagnosticLine = unsafeLogs.stdout.split('\n').find(line => line.includes('acp-autostart-unavailable'))
+  assert(diagnosticLine !== undefined, 'M09: the Host must emit acp-autostart-unavailable on a failed autostart bind')
+  assert(!diagnosticLine.includes('acp.sock') && !diagnosticLine.includes('dpt-') && !diagnosticLine.includes('token='),
+    'M09: the autostart diagnostic must stay redacted (no endpoint/path/secret)')
+  assert(readdirSync(unsafeTarget).length === 0, 'M09: the failed autostart must not write through the symlink')
+  const peer3 = await startPeer('M09 peer after the unsafe boot')
+  assertAcpAccess(await getAcp(peer3, 'M09 status after the failed autostart'), 'disabled',
+    'M09 status after the failed autostart')
+  rmSync(endpoint.privateRoot, { force: true })
+  mkdirSync(endpoint.privateRoot, { mode: 0o700 })
+  const recovered = await setAcp(peer3, true, 'M09 recover after restoring the root')
+  assert(recovered.status?.state === 'enabled', 'M09: the Host must enable ACP once the endpoint root is restored')
+  await writeAutoStart(peer3, false, 'M09 reset autoStart Off')
+  row('M09', {
+    preReadyBind: true,
+    hostLogPreReady: true,
+    autoStartOffNoBind: true,
+    bindFailureHostReady: true,
+    redactedDiagnostic: true,
+    recovery: true,
+  })
+
+  // ── M10: graceful SIGTERM retires the socket; SIGKILL stale is reclaimed ─
+  const hostBeforeStop = requireHost('M10 host before stop')
+  const stopped = daemonStop('M10 graceful stop')
+  assert(/^host=stopped$/mu.test(stopped.stdout), 'M10: stop did not report a stopped Host')
+  await waitFor(() => (!alive(hostBeforeStop.hostPid) ? true : undefined),
+    'M10 old Host kernel identity is gone', TIMEOUTS.process)
+  await waitEndpointGone('M10 graceful stop')
+  const registryAfterStop = readRegistry(dshHome)
+  assert(registryAfterStop === undefined || registryAfterStop.record.instanceId !== hostBeforeStop.instanceId,
+    'M10: the stopped Host registry still claims the old instance')
+  await peer3.dispose()
+  const startAfterStop = daemonStart('M10 cold start after the graceful stop')
+  const killedHost = requireHost('M10 SIGKILL host')
+  assert(startAfterStop.instance === killedHost.instanceId.slice(0, 8), 'M10: the cold start reported a different instance')
+  const peer4 = await startPeer('M10 SIGKILL peer')
+  await setAcp(peer4, true, 'M10 enable before SIGKILL')
+  const beforeKill = await waitEndpoint('M10 enable before SIGKILL')
+  process.kill(killedHost.hostPid, 'SIGKILL')
+  await waitFor(() => (!alive(killedHost.hostPid) ? true : undefined),
+    'M10 SIGKILLed Host is reaped', TIMEOUTS.process)
+  const stale = lstatFacts(endpoint.publicPath)
+  assert(stale.isSocket === true && stale.ino === beforeKill.ino,
+    'M10: SIGKILL must leave the owned public socket inode behind')
+  const staleProbe = await probeAcpSocket(endpoint.publicPath)
+  assert(staleProbe.connected === false && staleProbe.code === 'ECONNREFUSED',
+    `M10: the stale endpoint must refuse (saw ${JSON.stringify(staleProbe)})`)
+  await peer4.dispose()
+  const startAfterKill = daemonStart('M10 cold start after SIGKILL')
+  const reclaimedHost = requireHost('M10 reclaimed host')
+  assert(reclaimedHost.instanceId !== killedHost.instanceId, 'M10: the SIGKILL recovery must publish a new Host instance')
+  assert(startAfterKill.instance === reclaimedHost.instanceId.slice(0, 8),
+    'M10: the SIGKILL recovery reported a different instance')
+  const peer5 = await startPeer('M10 reclaim peer')
+  const reclaimed = await setAcp(peer5, true, 'M10 reclaim the stale endpoint')
+  assert(reclaimed.status?.state === 'enabled', 'M10: the next Host must reclaim the stale endpoint')
+  const afterReclaim = await waitEndpoint('M10 reclaimed endpoint')
+  assert(afterReclaim.ino !== beforeKill.ino, 'M10: the reclaimed endpoint must be a new owned inode')
+  const reclaimedConn = await openAcp('M10 reclaimed initialize')
+  const reclaimedInit = await reclaimedConn.initialize(1)
+  assert(reclaimedInit?.result?.protocolVersion === 1, 'M10: the reclaimed endpoint must answer ACP initialize')
+  reclaimedConn.close()
+  await reclaimedConn.closed
+  assert(!alive(killedHost.hostPid), 'M10: the SIGKILLed Host must stay gone')
+  await setAcp(peer5, false, 'M10 disable before cleanup')
+  row('M10', {
+    gracefulSocketRetired: true,
+    gracefulIdentityGone: true,
+    sigkillStaleInodeStable: true,
+    sigkillReclaimed: true,
+    reclaimedEndpointInitialize: true,
+  })
+  row('M11', {
+    status: 'NOT_VERIFIED',
+    lane: 'linux',
+    note: 'Linux PO1/PO1B/PO2 and daemon-control evidence is recorded by the Linux lanes on the same candidate; this macOS lane cannot execute /proc or systemd paths.',
+  })
+
+  for (const client of acpClients) {
+    if (!client.socket.destroyed) client.close()
+  }
+  return { hostPid: requireHost('D2ACP final Host').hostPid }
 }
 
 // ── cleanup ────────────────────────────────────────────────────────────────
@@ -1176,6 +1979,27 @@ async function cleanup({ workRoot, installation, hostPid, report }) {
     report.notQuiesced = { survivors: survivors.map(target => target.pid), workRoot }
     errors.push(`NOT_QUIESCED: ${String(survivors.length)} owned process(es) survived cleanup`)
     return errors
+  }
+  // The D2ACP scene records exactly the deterministic Darwin endpoint root(s)
+  // this run created; after every owned process is gone they are this run's
+  // private directory to remove and nothing else under the shared parent.
+  if (Array.isArray(report.d2acpEndpointRoots)) {
+    const roots = report.d2acpEndpointRoots
+    let removed = 0
+    for (const root of roots) {
+      if (dirname(root) !== DARWIN_ACP_PARENT || !basename(root).startsWith(`dpt-${String(process.getuid())}-`)) {
+        errors.push(`refusing to remove an unexpected D2ACP endpoint root: ${root}`)
+        continue
+      }
+      try {
+        rmSync(root, { recursive: true, force: true })
+        removed += 1
+      } catch (error) {
+        errors.push(`D2ACP endpoint root removal failed: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
+    report.d2acpEndpointCleanup = { roots: roots.length, removed }
+    delete report.d2acpEndpointRoots
   }
   // The Host seat under the real account home is the smoke's own scope; after
   // every owned process is gone it is safe to remove this run's directory.
