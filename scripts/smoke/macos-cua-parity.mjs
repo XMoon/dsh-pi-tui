@@ -1590,6 +1590,17 @@ async function sceneSplit({ installation, workRoot, report, textEditPid }) {
   const splitQuestion = await waitFrameText(tui, 'Allow computer use', 'Split Client consent Question', TIMEOUTS.consent)
   logOperator([`Split Session consent Question is painted. Attach now: ${attachCommand(tui)}`,
     'Choose "Allow for this session" exactly once. This is the Split Host/Client path.'])
+  // Runs 11-13: the answer landed AFTER the ask had aborted (ASK_ABORTED on
+  // the pending dispatch) even though the frame painted the Question seconds
+  // earlier. The submit is gated on the CURRENT frame still owning the
+  // Question review/answer state: select only on a painted option row, and
+  // submit only on a painted Submit row, re-reading the frame between keys.
+  const paintedQuestion = () => tmuxCapture(tui, 'Split consent state')
+    .includes('Allow computer use')
+  await waitFor(paintedQuestion, 'Split consent Question still painted before the answer', 10_000)
+  const frameBeforeKeys = tmuxCapture(tui, 'Split consent pre-answer')
+  assert(frameBeforeKeys.includes('[1] Allow for this session'),
+    'Split consent: the painted Question lost its option row before the answer (aborted ask); re-run the lane')
   // The pending Question must still be paintable when the answer is sent: an
   // aborted ask (the flow left the seat before the submit) settles isError
   // 'aborted before the user answered' and is an operator-timing failure, not
