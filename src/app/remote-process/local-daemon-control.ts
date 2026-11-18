@@ -51,8 +51,10 @@ import {
   type LocalScope,
 } from './local-scope.ts'
 import {
+  collectUnitFacts,
   inspectOwnedProfileUnit,
   installProfileHostUnit,
+  profileIdentityDigest,
   queryOwnedProfileUnit,
   runSystemctl,
   selectRuntimeDir,
@@ -61,6 +63,21 @@ import {
   type OwnedProfileUnit,
   type SystemctlRunner,
 } from './local-host-manager.ts'
+import {
+  inspectLaunchdService,
+  inspectOwnedLaunchdUnit,
+  installLaunchdUnit,
+  launchdLogPaths,
+  launchdServiceMatches,
+  startLaunchdService,
+  stopLaunchdService,
+  uninstallLaunchdUnit,
+  type LaunchdAdapterDeps,
+  type LaunchdServiceObservation,
+  type LaunchdUnitFacts,
+  type LaunchctlRunner,
+  type OwnedLaunchdUnit,
+} from './local-host-launchd.ts'
 
 /** The public management verbs (the fixed M6-2C set). */
 export type DaemonControlVerb = 'status' | 'start' | 'stop' | 'restart' | 'logs' | 'install' | 'uninstall'
@@ -152,9 +169,17 @@ export const LOG_TRUNCATION_MARKER = '[dsh-pi-tui daemon: earlier log output tru
 /** Host state printed by `status` (never inferred from manager state alone). */
 export type DaemonHostState = 'ready' | 'stopped' | 'starting' | 'unresponsive' | 'incompatible' | 'unknown'
 /** Supervision attribution printed by `status`. */
-export type DaemonManagerKind = 'systemd' | 'process' | 'unmanaged'
+export type DaemonManagerKind = 'systemd' | 'launchd' | 'process' | 'unmanaged'
 /** Unit state printed by `status`. */
-export type DaemonUnitState = 'active' | 'inactive' | 'not-found' | 'unknown'
+export type DaemonUnitState =
+  | 'active'
+  | 'inactive'
+  | 'not-found'
+  | 'unknown'
+  /** Actual launchd job states (macOS): never a readiness verdict. */
+  | 'running'
+  | 'not-running'
+  | 'spawn-scheduled'
 /** Compatibility of the live Host (or the installed unit without a Host). */
 export type DaemonCompatibility = 'compatible' | 'other-build' | 'incompatible' | 'unknown' | 'none'
 
@@ -197,6 +222,9 @@ export interface DaemonControlDeps {
   readonly darwinAccountHome?: string
   /** Supervisor shutdown signal: refuse to COMMIT a new OS transition once set. */
   readonly signal?: AbortSignal
+  /** Explicit Darwin launchd command seam for structural tests; production
+   *  uses `/bin/launchctl`. */
+  readonly launchctl?: LaunchctlRunner
 }
 
 /** One internal snapshot shared by the read-only status and the pre-flight checks. */
@@ -214,6 +242,12 @@ interface Snapshot {
   /** The manager's raw ActiveState; `unitState` is the coarse presentation. */
   readonly unitActiveState: string
   readonly unitMainPid: number
+  /** The installed launchd plist fact (Darwin only); the ONLY launchd-IO admission. */
+  readonly launchdUnit: OwnedLaunchdUnit | undefined
+  readonly launchdService: LaunchdServiceObservation | undefined
+  readonly launchdFacts: LaunchdUnitFacts | undefined
+  readonly launchdInspectionFailure: DaemonControlError | undefined
+  readonly launchdQueryFailure: DaemonControlError | undefined
   readonly record: LocalInstanceRecord | undefined
   readonly processAlive: boolean
   readonly authenticated: VerifiedLocalHost | undefined
@@ -317,6 +351,41 @@ function runtimeDirOf(deps: DaemonControlDeps): string | undefined {
   return selectRuntimeDir(uidOf(deps))
 }
 
+/** The Darwin launchd adapter inputs; production uses the OS account home and
+ *  the real `/bin/launchctl`. */
+function launchdDepsOf(deps: DaemonControlDeps): LaunchdAdapterDeps {
+  return {
+    uid: uidOf(deps),
+    ...(deps.darwinAccountHome === undefined ? {} : { accountHome: deps.darwinAccountHome }),
+    ...(deps.launchctl === undefined ? {} : { launchctl: deps.launchctl }),
+  }
+}
+
+/** Collect the validated launchd facts for one installed profile. */
+function launchdFactsOf(scope: LocalScope, profile: DaemonControlProfile): LaunchdUnitFacts {
+  const facts = collectUnitFacts({
+    scope,
+    hostEntryPath: join(profile.packageRoot, 'dist', 'local-host.mjs'),
+    dshAnchor: profile.installAnchor,
+    profile: profile.name,
+  })
+  return {
+    ...facts,
+    scopeDir: scope.dir,
+    profileIdentity: profileIdentityDigest(scope.profileRealpath),
+  }
+}
+
+/** Map one actual launchd job state onto the stable status vocabulary. */
+function launchdUnitState(state: string): DaemonUnitState {
+  switch (state) {
+    case 'running': return 'running'
+    case 'not running': return 'not-running'
+    case 'spawn scheduled': return 'spawn-scheduled'
+    default: return 'unknown'
+  }
+}
+
 /**
  * Read-only snapshot; `status`, pre-flight checks and `logs` consume it.
  *
@@ -338,11 +407,15 @@ async function readSnapshot(profile: DaemonControlProfile, deps: DaemonControlDe
   let userManager: 'not-checked' | 'available' | 'error' = 'not-checked'
   let unitInspectionFailure: DaemonControlError | undefined
   let unitQueryFailure: DaemonControlError | undefined
+  let launchdUnit: OwnedLaunchdUnit | undefined
+  let launchdService: LaunchdServiceObservation | undefined
+  let launchdFacts: LaunchdUnitFacts | undefined
+  let launchdInspectionFailure: DaemonControlError | undefined
+  let launchdQueryFailure: DaemonControlError | undefined
   if (platform === 'linux') {
-    // Only Linux has the verified systemd user unit. Darwin has no unit fact at
-    // all in this stage, so it must not inspect a unit path, resolve a runtime
-    // dir or invoke systemctl: the fixed no-unit facts below are the truth, not
-    // a fake "manager absent" observation.
+    // Only Linux has the verified systemd user unit. Darwin has its own
+    // LaunchAgent branch below; the two manager facts never substitute for
+    // each other and no other platform reaches the manager IO at all.
     const systemctl = deps.systemctl ?? runSystemctl
     const runtimeDir = runtimeDirOf(deps)
     try {
@@ -375,8 +448,46 @@ async function readSnapshot(profile: DaemonControlProfile, deps: DaemonControlDe
       unitInspectionFailure = toDaemonControlError(error)
       unitState = 'unknown'
     }
+  } else if (platform === 'darwin') {
+    // The installed plist file is the ONLY launchd-IO admission: with no owned
+    // plist no launchctl call is made at all, so a missing/broken GUI domain
+    // cannot affect the basic independent Host.
+    try {
+      launchdFacts = launchdFactsOf(scope, profile)
+      const launchdDeps = launchdDepsOf(deps)
+      const inspected = inspectOwnedLaunchdUnit(launchdFacts, launchdDeps)
+      if (inspected.kind === 'owned') {
+        launchdUnit = inspected.unit
+        try {
+          launchdService = await inspectLaunchdService(inspected.unit, launchdDeps)
+          userManager = 'available'
+          if (launchdService.kind === 'not-loaded') {
+            unitState = 'not-found'
+          } else if (launchdService.kind === 'loaded') {
+            const service = launchdService.service
+            unitActiveState = service.state
+            unitState = launchdUnitState(service.state)
+            unitMainPid = service.pid ?? 0
+            if (!launchdServiceMatches(launchdFacts, inspected.unit, service)) {
+              launchdQueryFailure = new DaemonControlError('IDENTITY_OR_OWNERSHIP_REFUSED', 'the loaded launchd job does not match the installed profile plist')
+            }
+          } else {
+            userManager = 'error'
+            unitState = 'unknown'
+            launchdQueryFailure = new DaemonControlError('MANAGER_OR_OS_FAILURE', 'the loaded launchd job state is not recognizable')
+          }
+        } catch (error) {
+          userManager = 'error'
+          unitState = 'unknown'
+          launchdQueryFailure = toDaemonControlError(error)
+        }
+      }
+    } catch (error) {
+      launchdInspectionFailure = toDaemonControlError(error)
+      unitState = 'unknown'
+    }
   }
-  let failure = unitInspectionFailure ?? unitQueryFailure
+  let failure = unitInspectionFailure ?? unitQueryFailure ?? launchdInspectionFailure ?? launchdQueryFailure
   let exitCode = failure?.exitCode ?? 0
 
   const readRecord = deps.readRecord ?? readLocalRecord
@@ -440,50 +551,117 @@ async function readSnapshot(profile: DaemonControlProfile, deps: DaemonControlDe
   }
 
   if (authenticated !== undefined && record !== undefined) {
-    // `manager=systemd` is claimed ONLY when the loaded unit's MainPID is the
-    // authenticated Host PID. An independent authenticated Host is `process`
-    // even when a usable user bus exists; a unit that does not supervise it
-    // never re-labels that Host. With NO authoritative unit observation
-    // (inspection refusal or manager query failure) neither attribution is
-    // proven: keep the authenticated `host=ready` truth but leave `manager`
-    // unmanaged until the unit state can be read.
-    const loaded = unit !== undefined && unitState !== 'not-found'
-    const running = unitActiveState === 'active' || unitActiveState === 'activating'
-    const ended = unitActiveState === 'inactive' || unitActiveState === 'failed'
-    if (unitInspectionFailure !== undefined || unitQueryFailure !== undefined) {
-      manager = 'unmanaged'
-    } else if (loaded && running) {
-      if (unitMainPid === record.hostPid) {
-        manager = 'systemd'
+    if (platform === 'darwin') {
+      // `manager=launchd` is claimed ONLY when the loaded job was bootstrapped
+      // from THIS profile plist, its fixed launch facts match the installed
+      // profile, and its real PID is the authenticated Host PID. A job in flux
+      // never relabels the authenticated Host as verified supervision.
+      if (launchdUnit === undefined) {
+        manager = 'process'
+      } else if (launchdInspectionFailure !== undefined || launchdQueryFailure !== undefined || launchdService === undefined) {
+        manager = 'unmanaged'
+      } else if (launchdService.kind === 'loaded') {
+        const service = launchdService.service
+        if (service.state === 'running') {
+          if (service.pid === undefined) {
+            manager = 'unmanaged'
+            if (failure === undefined) {
+              failure = new DaemonControlError('TRANSITION_UNCERTAIN', 'the launchd job reports running without a PID')
+              exitCode = failure.exitCode
+            }
+          } else if (service.pid === record.hostPid) {
+            manager = 'launchd'
+          } else {
+            manager = 'process'
+            if (failure === undefined) {
+              failure = new DaemonControlError('IDENTITY_OR_OWNERSHIP_REFUSED', 'the launchd job PID is not the authenticated Host; use launchctl for this custom service')
+              exitCode = failure.exitCode
+            }
+          }
+        } else if (service.state === 'spawn scheduled') {
+          // A job that is still starting could become a second Host beside the
+          // authenticated one; neither independent-process nor launchd
+          // supervision is proven.
+          manager = 'unmanaged'
+          if (failure === undefined) {
+            failure = new DaemonControlError('TRANSITION_UNCERTAIN', 'the launchd job is still starting beside a live Host')
+            exitCode = failure.exitCode
+          }
+        } else if (service.state === 'not running') {
+          manager = 'process'
+        } else {
+          manager = 'unmanaged'
+          if (failure === undefined) {
+            failure = new DaemonControlError('TRANSITION_UNCERTAIN', `the launchd job is in an unconfirmed state (${service.state === '' ? 'unknown' : service.state})`)
+            exitCode = failure.exitCode
+          }
+        }
       } else {
         manager = 'process'
-        if (failure === undefined) {
-          failure = new DaemonControlError('IDENTITY_OR_OWNERSHIP_REFUSED', 'the unit MainPID is not the authenticated Host; use systemctl --user for this custom service')
-          exitCode = failure.exitCode
-        }
-      }
-    } else if (loaded && !ended) {
-      // A loaded unit in a transitional/unknown state cannot prove that the
-      // authenticated Host is an independent process (nor that it is
-      // systemd-supervised). Keep the truthful host=ready and the nonzero
-      // uncertainty, but never assert verified independent-process supervision.
-      manager = 'unmanaged'
-      if (failure === undefined) {
-        failure = new DaemonControlError('TRANSITION_UNCERTAIN', `the profile unit is in an unconfirmed state (${unitActiveState === '' ? 'unknown' : unitActiveState})`)
-        exitCode = failure.exitCode
       }
     } else {
-      manager = 'process'
+      // `manager=systemd` is claimed ONLY when the loaded unit's MainPID is the
+      // authenticated Host PID. An independent authenticated Host is `process`
+      // even when a usable user bus exists; a unit that does not supervise it
+      // never re-labels that Host. With NO authoritative unit observation
+      // (inspection refusal or manager query failure) neither attribution is
+      // proven: keep the authenticated `host=ready` truth but leave `manager`
+      // unmanaged until the unit state can be read.
+      const loaded = unit !== undefined && unitState !== 'not-found'
+      const running = unitActiveState === 'active' || unitActiveState === 'activating'
+      const ended = unitActiveState === 'inactive' || unitActiveState === 'failed'
+      if (unitInspectionFailure !== undefined || unitQueryFailure !== undefined) {
+        manager = 'unmanaged'
+      } else if (loaded && running) {
+        if (unitMainPid === record.hostPid) {
+          manager = 'systemd'
+        } else {
+          manager = 'process'
+          if (failure === undefined) {
+            failure = new DaemonControlError('IDENTITY_OR_OWNERSHIP_REFUSED', 'the unit MainPID is not the authenticated Host; use systemctl --user for this custom service')
+            exitCode = failure.exitCode
+          }
+        }
+      } else if (loaded && !ended) {
+        // A loaded unit in a transitional/unknown state cannot prove that the
+        // authenticated Host is an independent process (nor that it is
+        // systemd-supervised). Keep the truthful host=ready and the nonzero
+        // uncertainty, but never assert verified independent-process supervision.
+        manager = 'unmanaged'
+        if (failure === undefined) {
+          failure = new DaemonControlError('TRANSITION_UNCERTAIN', `the profile unit is in an unconfirmed state (${unitActiveState === '' ? 'unknown' : unitActiveState})`)
+          exitCode = failure.exitCode
+        }
+      } else {
+        manager = 'process'
+      }
     }
   } else if (record === undefined || !processAlive) {
-    const loaded = unit !== undefined && unitState !== 'not-found'
-    if (loaded && (unitActiveState === 'active' || unitActiveState === 'activating')) {
-      host = 'starting'
-    } else if (loaded && unitActiveState !== 'inactive' && unitActiveState !== 'failed') {
-      host = 'unknown'
-      if (failure === undefined) {
-        failure = new DaemonControlError('TRANSITION_UNCERTAIN', `the profile unit is in an unconfirmed state (${unitActiveState === '' ? 'unknown' : unitActiveState})`)
-        exitCode = failure.exitCode
+    if (platform === 'darwin') {
+      if (launchdUnit !== undefined && launchdService?.kind === 'loaded') {
+        const state = launchdService.service.state
+        if (state === 'running' || state === 'spawn scheduled') {
+          host = 'starting'
+        } else if (state === 'not running') {
+          host = 'stopped'
+        } else {
+          host = 'unknown'
+          if (failure === undefined) {
+            failure = new DaemonControlError('TRANSITION_UNCERTAIN', `the launchd job is in an unconfirmed state (${state === '' ? 'unknown' : state})`)
+            exitCode = failure.exitCode
+          }
+        }
+      }
+    } else {
+      const loaded = unit !== undefined && unitState !== 'not-found'
+      if (loaded && (unitActiveState === 'active' || unitActiveState === 'activating')) {
+        host = 'starting'
+      } else if (loaded && unitActiveState !== 'inactive' && unitActiveState !== 'failed') {
+        host = 'unknown'
+        if (failure === undefined) {
+          failure = new DaemonControlError('TRANSITION_UNCERTAIN', `the profile unit is in an unconfirmed state (${unitActiveState === '' ? 'unknown' : unitActiveState})`)
+          exitCode = failure.exitCode
+        }
       }
     }
   }
@@ -493,11 +671,18 @@ async function readSnapshot(profile: DaemonControlProfile, deps: DaemonControlDe
   } else if (failure === undefined && unit !== undefined && unitState !== 'not-found'
     && unit.installBuild !== scope.buildId) {
     compatibility = 'other-build'
+  } else if (failure === undefined && launchdUnit !== undefined && launchdUnit.installBuild !== scope.buildId) {
+    compatibility = 'other-build'
   }
-  if (unitQueryFailure !== undefined && compatibility === 'none') compatibility = 'unknown'
+  if ((unitQueryFailure !== undefined || launchdQueryFailure !== undefined) && compatibility === 'none') compatibility = 'unknown'
   return {
     scope,
     unit,
+    launchdUnit,
+    launchdService,
+    launchdFacts,
+    launchdInspectionFailure,
+    launchdQueryFailure,
     userManager,
     unitInspectionFailure,
     unitQueryFailure,
@@ -514,7 +699,9 @@ async function readSnapshot(profile: DaemonControlProfile, deps: DaemonControlDe
       manager,
       userManager,
       host,
-      unit: unit === undefined ? 'none' : unit.unitName,
+      unit: platform === 'darwin'
+        ? (launchdUnit === undefined ? 'none' : launchdUnit.label)
+        : (unit === undefined ? 'none' : unit.unitName),
       unitState,
       compatibility,
       ...(processAlive && record !== undefined ? { pid: record.hostPid } : {}),
@@ -574,14 +761,24 @@ async function withAdminSeat<T>(scope: LocalScope, deps: DaemonControlDeps, oper
 }
 
 /** A live Host authentication or compatibility failure is a diagnosis, not a
- *  unit-ownership verdict. A verified current-Profile unit remains manageable
- *  through the manager; every other snapshot failure keeps its normal
- *  admission. The product never auto-recovers — this only permits an explicit
- *  user command. */
+ *  unit-ownership verdict. A verified current-Profile service remains
+ *  manageable through the manager; every other snapshot failure keeps its
+ *  normal admission. The product never auto-recovers — this only permits an
+ *  explicit user command. */
 function verifiedUnitManagementAdmitted(snapshot: Snapshot): boolean {
   return (snapshot.hostAuthenticationFailed || snapshot.hostCompatibilityFailed)
     && snapshot.unit !== undefined
     && snapshot.userManager === 'available'
+}
+
+/** The same admission for a verified launchd job whose real PID is the live
+ *  Host record (or whose job state proves no process is running). */
+function verifiedLaunchdManagementAdmitted(snapshot: Snapshot): boolean {
+  const { launchdUnit, launchdFacts, launchdService, record, processAlive } = snapshot
+  if (launchdUnit === undefined || launchdFacts === undefined || launchdService?.kind !== 'loaded') return false
+  if (!launchdServiceMatches(launchdFacts, launchdUnit, launchdService.service)) return false
+  if (!processAlive || record === undefined) return true
+  return launchdService.service.pid !== undefined && launchdService.service.pid === record.hostPid
 }
 
 /** A stable local error for an unknown Host state. */
@@ -729,11 +926,53 @@ function readFileString(path: string): string {
   }
 }
 
+/** Stop one live independent authenticated Host through exactly one verified
+ *  POSIX SIGTERM (Linux procfs identity or Darwin schema-2 kernel identity). */
+async function stopIndependentHost(
+  snapshot: Snapshot,
+  deps: DaemonControlDeps,
+): Promise<void> {
+  const record = snapshot.record
+  if (record === undefined) {
+    throw new DaemonControlError('IDENTITY_OR_OWNERSHIP_REFUSED', 'the Host registry disappeared before the stop')
+  }
+  const authenticate = deps.authenticate ?? authenticateLocalHost
+  let authenticated: VerifiedLocalHost
+  try {
+    authenticated = await authenticate(record, snapshot.scope)
+  } catch (error) {
+    throw toDaemonControlError(error)
+  }
+  if (platformOf(deps) === 'darwin') {
+    assertDarwinHostOwnership(record, authenticated, deps)
+  } else {
+    assertProcessHostOwnership(record, deps)
+    const readStarttime = deps.readStarttime ?? ((pid: number) => {
+      try { return readLinuxStarttime(pid) } catch { return undefined }
+    })
+    if (record.schema !== 1 || readStarttime(record.hostPid) !== record.hostStarttime) {
+      throw new DaemonControlError('IDENTITY_OR_OWNERSHIP_REFUSED', 'the Host process start identity changed before the signal')
+    }
+  }
+  assertNotAborted(deps.signal)
+  const kill = deps.kill ?? process.kill
+  try {
+    kill(record.hostPid, 'SIGTERM')
+  } catch (error) {
+    throw new DaemonControlError('MANAGER_OR_OS_FAILURE', 'the verified Host process could not be signalled', error)
+  }
+  try {
+    await waitForHostStopped(record, record.hostPid, deps)
+  } catch (error) {
+    throw afterCommittedAction(toDaemonControlError(error), 'Host stop')
+  }
+}
+
 /**
  * Stop the snapshot's Host and prove the original instance is gone.
  *
- * Routing follows the authenticated attribution, never the mere presence of a
- * systemd user bus:
+ * Linux routing follows the authenticated attribution, never the mere presence
+ * of a systemd user bus:
  * - a loaded active/activating unit whose MainPID IS the authenticated Host is
  *   stopped through that unit and its exit is awaited;
  * - an independent authenticated Host (no unit, or a loaded unit that systemd
@@ -743,11 +982,18 @@ function readFileString(path: string): string {
  *   SIGTERM;
  * - a live Host beside an active unit with a different MainPID, a unit in flux,
  *   or an unreadable manager is refused WITHOUT trying the other stop method.
+ *
+ * Darwin routing uses the verified LaunchAgent instead of a systemd unit: a
+ * loaded job whose fixed launch facts match this profile and whose real PID is
+ * the authenticated Host is stopped only through `bootout`; a job that is
+ * loaded but not running is booted out without a signal; anything transitional,
+ * foreign or unreadable is refused.
  */
 async function stopFromSnapshot(
   snapshot: Snapshot,
   deps: DaemonControlDeps,
 ): Promise<void> {
+  if (platformOf(deps) === 'darwin') return await stopDarwinFromSnapshot(snapshot, deps)
   const { unit, unitState, unitActiveState, unitMainPid, record, processAlive } = snapshot
   const systemctl = deps.systemctl ?? runSystemctl
   const liveHost = processAlive && record !== undefined
@@ -775,36 +1021,7 @@ async function stopFromSnapshot(
       throw new DaemonControlError('TRANSITION_UNCERTAIN', `the profile unit is in an unconfirmed state (${unitActiveState === '' ? 'unknown' : unitActiveState}); refusing to signal the Host`)
     }
     if (!running) {
-      const authenticate = deps.authenticate ?? authenticateLocalHost
-      let authenticated: VerifiedLocalHost
-      try {
-        authenticated = await authenticate(record, snapshot.scope)
-      } catch (error) {
-        throw toDaemonControlError(error)
-      }
-      if (platformOf(deps) === 'darwin') {
-        assertDarwinHostOwnership(record, authenticated, deps)
-      } else {
-        assertProcessHostOwnership(record, deps)
-        const readStarttime = deps.readStarttime ?? ((pid: number) => {
-          try { return readLinuxStarttime(pid) } catch { return undefined }
-        })
-        if (record.schema !== 1 || readStarttime(record.hostPid) !== record.hostStarttime) {
-          throw new DaemonControlError('IDENTITY_OR_OWNERSHIP_REFUSED', 'the Host process start identity changed before the signal')
-        }
-      }
-      assertNotAborted(deps.signal)
-      const kill = deps.kill ?? process.kill
-      try {
-        kill(record.hostPid, 'SIGTERM')
-      } catch (error) {
-        throw new DaemonControlError('MANAGER_OR_OS_FAILURE', 'the verified Host process could not be signalled', error)
-      }
-      try {
-        await waitForHostStopped(record, record.hostPid, deps)
-      } catch (error) {
-        throw afterCommittedAction(toDaemonControlError(error), 'Host stop')
-      }
+      await stopIndependentHost(snapshot, deps)
       return
     }
   }
@@ -822,6 +1039,71 @@ async function stopFromSnapshot(
     }
   }
   // No live Host and no loaded unit: already stopped (idempotent no-op).
+}
+
+/** The Darwin stop route: verified LaunchAgent bootout or one verified SIGTERM. */
+async function stopDarwinFromSnapshot(snapshot: Snapshot, deps: DaemonControlDeps): Promise<void> {
+  const { launchdUnit, launchdFacts, launchdService, record, processAlive } = snapshot
+  if (snapshot.launchdInspectionFailure !== undefined) throw snapshot.launchdInspectionFailure
+  if (snapshot.launchdQueryFailure !== undefined) throw snapshot.launchdQueryFailure
+  const loaded = launchdService?.kind === 'loaded' ? launchdService.service : undefined
+  if (launchdService?.kind === 'unknown') {
+    throw new DaemonControlError('TRANSITION_UNCERTAIN', 'the launchd job state is not recognizable; refusing to change supervision')
+  }
+  if (launchdUnit !== undefined && launchdFacts === undefined) {
+    throw new DaemonControlError('TRANSITION_UNCERTAIN', 'the launchd job facts are unavailable; refusing to change supervision')
+  }
+  if (launchdUnit !== undefined && loaded !== undefined && launchdFacts !== undefined
+    && !launchdServiceMatches(launchdFacts, launchdUnit, loaded)) {
+    throw new DaemonControlError('IDENTITY_OR_OWNERSHIP_REFUSED', 'the loaded launchd job does not match the profile plist; refusing to signal an unknown process')
+  }
+  const liveHost = processAlive && record !== undefined
+  if (liveHost && launchdUnit !== undefined && launchdFacts !== undefined && loaded !== undefined) {
+    if (loaded.state === 'running') {
+      if (loaded.pid === undefined) {
+        throw new DaemonControlError('TRANSITION_UNCERTAIN', 'the launchd job reports running without a PID; refusing to signal the Host')
+      }
+      if (loaded.pid !== record.hostPid) {
+        throw new DaemonControlError('IDENTITY_OR_OWNERSHIP_REFUSED', 'the launchd job PID is not the authenticated Host; refusing to signal an unknown process')
+      }
+      assertNotAborted(deps.signal)
+      await stopLaunchdService(launchdFacts, launchdUnit, launchdDepsOf(deps))
+      try {
+        await waitForHostStopped(record, loaded.pid, deps)
+      } catch (error) {
+        throw afterCommittedAction(toDaemonControlError(error), 'Host stop')
+      }
+      return
+    }
+    if (loaded.state === 'spawn scheduled') {
+      throw new DaemonControlError('TRANSITION_UNCERTAIN', 'the launchd job is still starting beside the live Host; refusing to signal the Host')
+    }
+    if (loaded.state !== 'not running') {
+      throw new DaemonControlError('TRANSITION_UNCERTAIN', `the launchd job is in an unconfirmed state (${loaded.state === '' ? 'unknown' : loaded.state}); refusing to signal the Host`)
+    }
+  }
+  if (liveHost) {
+    // The Host is independent: the launchd job (if any) does not supervise it.
+    await stopIndependentHost(snapshot, deps)
+    return
+  }
+  if (launchdUnit !== undefined && launchdFacts !== undefined && loaded !== undefined) {
+    if (loaded.state === 'running' || loaded.state === 'spawn scheduled' || loaded.state === 'not running') {
+      assertNotAborted(deps.signal)
+      const stopped = await stopLaunchdService(launchdFacts, launchdUnit, launchdDepsOf(deps))
+      if (stopped.stopped && record !== undefined && record.schema === 2) {
+        try {
+          await waitForHostStopped(record, record.hostPid, deps)
+        } catch (error) {
+          throw afterCommittedAction(toDaemonControlError(error), 'Host stop')
+        }
+      }
+      return
+    }
+    throw new DaemonControlError('TRANSITION_UNCERTAIN', `the launchd job is in an unconfirmed state (${loaded.state === '' ? 'unknown' : loaded.state}); refusing to change supervision`)
+  }
+  if (snapshot.launchdQueryFailure !== undefined) throw snapshot.launchdQueryFailure
+  // No live Host and no loaded job: already stopped (idempotent no-op).
 }
 
 /** The `status` handler. */
@@ -892,7 +1174,7 @@ async function runStop(profile: DaemonControlProfile, deps: DaemonControlDeps): 
   const inspected = inspectScope(profile, deps)
   return await withAdminSeat(inspected, deps, async () => {
     const pre = await readSnapshot(profile, deps, inspected)
-    if (pre.failure !== undefined && !verifiedUnitManagementAdmitted(pre)) throw pre.failure
+    if (pre.failure !== undefined && !verifiedUnitManagementAdmitted(pre) && !verifiedLaunchdManagementAdmitted(pre)) throw pre.failure
     assertNotAborted(deps.signal)
     await stopFromSnapshot(pre, deps)
     try {
@@ -911,30 +1193,45 @@ async function runRestart(profile: DaemonControlProfile, deps: DaemonControlDeps
   const inspected = inspectScope(profile, deps)
   return await withAdminSeat(inspected, deps, async () => {
     const pre = await readSnapshot(profile, deps, inspected)
+    const launchdLoaded = pre.launchdService?.kind === 'loaded' ? pre.launchdService.service : undefined
+    const launchdVerified = pre.launchdUnit !== undefined && pre.launchdFacts !== undefined && launchdLoaded !== undefined
+      && launchdServiceMatches(pre.launchdFacts, pre.launchdUnit, launchdLoaded)
     const unitFailureRecovery = verifiedUnitManagementAdmitted(pre)
       && (pre.record === undefined || !pre.processAlive || pre.unitMainPid === pre.record.hostPid)
-    // An explicit restart is a unit operation, not a Ready verdict. A verified
-    // current-Profile unit that is active/activating may be stuck before
-    // readiness (for example ExecStartPre); the same verified stop target that
-    // `stop` accepts must be restartable. Transitional/foreign states remain
-    // refusals.
+    const launchdFailureRecovery = launchdVerified
+      && (pre.hostAuthenticationFailed || pre.hostCompatibilityFailed)
+      && (pre.record === undefined || !pre.processAlive || launchdLoaded?.pid === pre.record.hostPid)
+    // An explicit restart is a service operation, not a Ready verdict. A
+    // verified current-Profile unit/job that is active/starting may be stuck
+    // before readiness; the same verified stop target that `stop` accepts must
+    // be restartable. Transitional/foreign states remain refusals.
     const verifiedUnitRestart = pre.unit !== undefined
       && pre.userManager === 'available'
       && (pre.unitActiveState === 'active' || pre.unitActiveState === 'activating')
       && (pre.record === undefined || !pre.processAlive || pre.unitMainPid === pre.record.hostPid)
-    if (pre.failure !== undefined && !unitFailureRecovery) throw pre.failure
+    const verifiedLaunchdRestart = launchdVerified
+      && launchdLoaded !== undefined
+      && (launchdLoaded.state === 'running' || launchdLoaded.state === 'spawn scheduled' || launchdLoaded.state === 'not running')
+      && (pre.record === undefined || !pre.processAlive || launchdLoaded.pid === pre.record.hostPid)
+    const serviceFailureRecovery = unitFailureRecovery || launchdFailureRecovery
+    if (pre.failure !== undefined && !serviceFailureRecovery) throw pre.failure
     if (pre.status.host !== 'ready' && pre.status.host !== 'stopped'
-      && !unitFailureRecovery && !verifiedUnitRestart) throw refuseHostState(pre.status)
+      && !serviceFailureRecovery && !verifiedUnitRestart && !verifiedLaunchdRestart) throw refuseHostState(pre.status)
     const oldInstance = pre.record?.instanceId
-    // Owner decision (M6-2C scope): an owned unit from ANOTHER installed build
-    // is never migrated here. Cross-build unit replacement is M6-2D work; this
-    // stage refuses it BEFORE any stop so a refused restart leaves the running
-    // old-build Host and its unit exactly as they were, instead of guessing the
-    // old build's compatibility from its metadata alone.
+    // Owner decision (M6-2C scope): an owned service from ANOTHER installed
+    // build is never migrated here. Cross-build replacement is the upgrade
+    // flow's work; this stage refuses it BEFORE any stop so a refused restart
+    // leaves the running old-build Host and its service exactly as they were.
     if (pre.unit !== undefined && pre.unit.installBuild !== pre.scope.buildId) {
       throw new DaemonControlError(
         'IDENTITY_OR_OWNERSHIP_REFUSED',
         'the profile unit belongs to another installed build; removing or replacing it is deferred to the upgrade flow',
+      )
+    }
+    if (pre.launchdUnit !== undefined && pre.launchdUnit.installBuild !== pre.scope.buildId) {
+      throw new DaemonControlError(
+        'IDENTITY_OR_OWNERSHIP_REFUSED',
+        'the profile LaunchAgent belongs to another installed build; removing or replacing it is deferred to the upgrade flow',
       )
     }
     assertNotAborted(deps.signal)
@@ -975,9 +1272,7 @@ async function runRestart(profile: DaemonControlProfile, deps: DaemonControlDeps
 
 /** The `install` handler: explicit unit installation only, never host control. */
 async function runInstall(profile: DaemonControlProfile, deps: DaemonControlDeps): Promise<DaemonControlResult> {
-  if (platformOf(deps) === 'darwin') {
-    throw new DaemonControlError('UNSUPPORTED_PLATFORM', 'daemon install is not supported on macOS; the basic daemon uses a detached Host process')
-  }
+  if (platformOf(deps) === 'darwin') return await runDarwinInstall(profile, deps)
   const inspected = inspectScope(profile, deps)
   return await withAdminSeat(inspected, deps, async () => {
     const pre = await readSnapshot(profile, deps, inspected)
@@ -1030,9 +1325,7 @@ async function runInstall(profile: DaemonControlProfile, deps: DaemonControlDeps
 
 /** The `uninstall` handler: remove this Profile's service definition only. */
 async function runUninstall(profile: DaemonControlProfile, deps: DaemonControlDeps): Promise<DaemonControlResult> {
-  if (platformOf(deps) === 'darwin') {
-    throw new DaemonControlError('UNSUPPORTED_PLATFORM', 'daemon uninstall is not supported on macOS; the basic daemon uses a detached Host process')
-  }
+  if (platformOf(deps) === 'darwin') return await runDarwinUninstall(profile, deps)
   const inspected = inspectScope(profile, deps)
   return await withAdminSeat(inspected, deps, async () => {
     const pre = await readSnapshot(profile, deps, inspected)
@@ -1094,6 +1387,100 @@ async function runUninstall(profile: DaemonControlProfile, deps: DaemonControlDe
       return { code: 0, stdout: formatDaemonStatus(post.status), stderr: running ? RUNNING_WORK_NOTICE : '' }
     } catch (error) {
       throw afterCommittedAction(toDaemonControlError(error), 'profile unit removal')
+    }
+  })
+}
+
+/** The Darwin `install` handler: explicit LaunchAgent plist only, never host control. */
+async function runDarwinInstall(profile: DaemonControlProfile, deps: DaemonControlDeps): Promise<DaemonControlResult> {
+  const inspected = inspectScope(profile, deps)
+  return await withAdminSeat(inspected, deps, async () => {
+    const pre = await readSnapshot(profile, deps, inspected)
+    // An install owns exactly one question: may this Profile write/verify its
+    // plist? A foreign plist/job or an unreadable manager blocks it; a Host that
+    // is merely unauthenticated/incompatible does not (install never touches it).
+    if (pre.launchdInspectionFailure !== undefined) throw pre.launchdInspectionFailure
+    if (pre.launchdQueryFailure !== undefined) throw pre.launchdQueryFailure
+    assertNotAborted(deps.signal)
+    try {
+      const facts = pre.launchdFacts ?? launchdFactsOf(inspected, profile)
+      await installLaunchdUnit(facts, launchdDepsOf(deps))
+    } catch (error) {
+      throw toDaemonControlError(error)
+    }
+    try {
+      const post = await readSnapshot(profile, deps, inspected)
+      if (post.launchdInspectionFailure !== undefined) throw post.launchdInspectionFailure
+      if (post.launchdQueryFailure !== undefined) throw post.launchdQueryFailure
+      if (post.launchdUnit === undefined) {
+        throw new DaemonControlError('TRANSITION_UNCERTAIN', 'the installed launchd plist could not be confirmed')
+      }
+      if (post.launchdUnit.installBuild !== post.scope.buildId) {
+        throw new DaemonControlError('IDENTITY_OR_OWNERSHIP_REFUSED', 'the installed launchd plist belongs to another installed build')
+      }
+      if (pre.processAlive && pre.record !== undefined
+        && (!post.processAlive || post.record === undefined || post.record.instanceId !== pre.record.instanceId)) {
+        throw new DaemonControlError('TRANSITION_UNCERTAIN', 'the running Host instance changed during the plist install')
+      }
+      return { code: 0, stdout: formatDaemonStatus(post.status), stderr: '' }
+    } catch (error) {
+      throw afterCommittedAction(toDaemonControlError(error), 'launchd plist install')
+    }
+  })
+}
+
+/** The Darwin `uninstall` handler: remove this Profile's LaunchAgent only. */
+async function runDarwinUninstall(profile: DaemonControlProfile, deps: DaemonControlDeps): Promise<DaemonControlResult> {
+  const inspected = inspectScope(profile, deps)
+  return await withAdminSeat(inspected, deps, async () => {
+    const pre = await readSnapshot(profile, deps, inspected)
+    if (pre.launchdInspectionFailure !== undefined) throw pre.launchdInspectionFailure
+    // A named plist is the ONLY uninstall target. With no owned plist this is
+    // an idempotent no-op and no launchctl call is made.
+    if (pre.launchdUnit === undefined) {
+      return { code: 0, stdout: formatDaemonStatus(pre.status), stderr: '' }
+    }
+    if (pre.launchdQueryFailure !== undefined) throw pre.launchdQueryFailure
+    if (pre.launchdFacts === undefined) {
+      throw new DaemonControlError('TRANSITION_UNCERTAIN', 'the launchd plist facts are unavailable; refusing to uninstall')
+    }
+    // Cross-build replacement is the upgrade flow's job. Never rewrite or
+    // remove a plist this installed build does not own.
+    if (pre.launchdUnit.installBuild !== pre.scope.buildId) {
+      throw new DaemonControlError('IDENTITY_OR_OWNERSHIP_REFUSED', 'the profile LaunchAgent belongs to another installed build; use the upgrade flow')
+    }
+    const service = pre.launchdService
+    if (service?.kind === 'unknown') {
+      throw new DaemonControlError('TRANSITION_UNCERTAIN', 'the launchd job state is not recognizable; refusing to uninstall')
+    }
+    const loadedService = service?.kind === 'loaded' ? service.service : undefined
+    const liveHost = pre.processAlive && pre.record !== undefined
+    const running = loadedService !== undefined
+      && (loadedService.pid !== undefined || loadedService.state === 'running' || loadedService.state === 'spawn scheduled')
+    // Only a running job that IS the live authenticated Host may stop that
+    // Host. A job whose real PID is another live Host is a conflict, never a
+    // permission to signal.
+    if (running && liveHost && pre.record !== undefined && loadedService?.pid !== pre.record.hostPid) {
+      throw new DaemonControlError('IDENTITY_OR_OWNERSHIP_REFUSED', 'the launchd job PID is not the live Host; refusing to uninstall')
+    }
+    assertNotAborted(deps.signal)
+    try {
+      await uninstallLaunchdUnit(pre.launchdFacts, pre.launchdUnit, launchdDepsOf(deps))
+      if (running && liveHost && pre.record !== undefined) {
+        await waitForHostStopped(pre.record, loadedService?.pid ?? pre.record.hostPid, deps)
+      }
+    } catch (error) {
+      throw afterCommittedAction(toDaemonControlError(error), 'launchd plist removal')
+    }
+    try {
+      const post = await readSnapshot(profile, deps, inspected)
+      if (post.launchdInspectionFailure !== undefined) throw post.launchdInspectionFailure
+      if (post.launchdUnit !== undefined) {
+        throw new DaemonControlError('TRANSITION_UNCERTAIN', 'the profile LaunchAgent could not be confirmed removed')
+      }
+      return { code: 0, stdout: formatDaemonStatus(post.status), stderr: running ? RUNNING_WORK_NOTICE : '' }
+    } catch (error) {
+      throw afterCommittedAction(toDaemonControlError(error), 'launchd plist removal')
     }
   })
 }
@@ -1221,6 +1608,73 @@ export function sanitizeLogText(text: string): string {
 }
 
 /**
+ * Darwin log source: a verified loaded LaunchAgent governs the profile and its
+ * private `launchd.stdout.log` / `launchd.stderr.log` are read as two
+ * separately bounded, separately labelled streams (never presented as one
+ * time-merged log). A job that is installed but NOT loaded does not govern an
+ * independent Host, so that Host keeps reading `host.log`.
+ */
+async function runDarwinLogs(
+  scope: LocalScope,
+  intent: DaemonControlIntent,
+  deps: DaemonControlDeps,
+  snapshot: Snapshot,
+): Promise<DaemonControlResult> {
+  if (snapshot.launchdInspectionFailure !== undefined) throw snapshot.launchdInspectionFailure
+  if (snapshot.launchdQueryFailure !== undefined) {
+    // A launchd job-identity refusal is the ownership refusal it already is;
+    // any other manager failure means no source can be attributed.
+    if (snapshot.launchdQueryFailure.code === 'IDENTITY_OR_OWNERSHIP_REFUSED') throw snapshot.launchdQueryFailure
+    throw new DaemonControlError('LOG_SOURCE_UNAVAILABLE', `the launchd job cannot be verified: ${snapshot.launchdQueryFailure.reason}`)
+  }
+  const lines = intent.lines ?? 100
+  const { launchdUnit, launchdFacts, launchdService, record, processAlive, authenticated } = snapshot
+  if (launchdUnit !== undefined) {
+    if (launchdFacts === undefined) {
+      throw new DaemonControlError('LOG_SOURCE_UNAVAILABLE', 'the launchd job facts are unavailable; refusing to guess a log source')
+    }
+    if (launchdService?.kind === 'unknown') {
+      throw new DaemonControlError('LOG_SOURCE_UNAVAILABLE', 'the launchd job state is not recognizable; refusing to guess a log source')
+    }
+    if (launchdService?.kind === 'loaded') {
+      const service = launchdService.service
+      if (!launchdServiceMatches(launchdFacts, launchdUnit, service)) {
+        throw new DaemonControlError('LOG_SOURCE_UNAVAILABLE', 'the launchd job does not match the profile plist; refusing to guess a log source')
+      }
+      const liveHost = processAlive && record !== undefined
+      if (liveHost
+        && (authenticated === undefined || record === undefined || service.pid === undefined || service.pid !== record.hostPid)) {
+        throw new DaemonControlError('LOG_SOURCE_UNAVAILABLE', 'the launchd job PID is not the authenticated Host; refusing to guess a log source')
+      }
+      const logs = launchdLogPaths(launchdFacts.scopeDir)
+      const tail = deps.hostLogTail ?? tailHostLog
+      const stdout = await tail(logs.stdout, lines)
+      const stderr = await tail(logs.stderr, lines)
+      const sections: string[] = []
+      if (stdout !== undefined && stdout.trim() !== '') {
+        sections.push(`[dsh-pi-tui daemon: launchd stdout]\n${sanitizeLogText(stdout).replace(/\n*$/u, '\n')}`)
+      }
+      if (stderr !== undefined && stderr.trim() !== '') {
+        sections.push(`[dsh-pi-tui daemon: launchd stderr]\n${sanitizeLogText(stderr).replace(/\n*$/u, '\n')}`)
+      }
+      if (sections.length === 0) {
+        throw new DaemonControlError('LOG_SOURCE_UNAVAILABLE', 'no launchd Host log output is available for this profile')
+      }
+      return { code: 0, stdout: sections.join(''), stderr: LOG_SANITIZATION_NOTICE }
+    }
+  }
+  // No loaded LaunchAgent: the Host, if any, is independent and writes the
+  // scope host.log. An installed-but-not-loaded job is not the Host's source.
+  const path = join(scope.dir, 'host.log')
+  const tail = deps.hostLogTail ?? tailHostLog
+  const value = await tail(path, lines)
+  if (value === undefined || value.trim() === '') {
+    throw new DaemonControlError('LOG_SOURCE_UNAVAILABLE', 'no Host log is available for this profile')
+  }
+  return { code: 0, stdout: `${sanitizeLogText(value)}`, stderr: LOG_SANITIZATION_NOTICE }
+}
+
+/**
  * The `logs` handler. The source follows the SAME verified attribution as
  * `status`: an installed, manager-loaded unit that actually supervises the
  * current Host (or governs a stopped/starting profile) reads its
@@ -1232,6 +1686,7 @@ export function sanitizeLogText(text: string): string {
 async function runLogs(profile: DaemonControlProfile, intent: DaemonControlIntent, deps: DaemonControlDeps): Promise<DaemonControlResult> {
   const scope = inspectScope(profile, deps)
   const snapshot = await readSnapshot(profile, deps, scope)
+  if (platformOf(deps) === 'darwin') return await runDarwinLogs(scope, intent, deps, snapshot)
   if (snapshot.unitInspectionFailure !== undefined) throw snapshot.unitInspectionFailure
   if (snapshot.unitQueryFailure !== undefined) {
     // A manager channel failure is a log-source failure; a unit-identity refusal

@@ -47,6 +47,12 @@ import { userInfo } from 'node:os'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { installedPackageRootFromEntry, LocalScopeError, type LocalScope } from './local-scope.ts'
+import {
+  inspectOwnedLaunchdUnit,
+  startLaunchdService,
+  type LaunchdAdapterDeps,
+  type LaunchdUnitFacts,
+} from './local-host-launchd.ts'
 
 /** The system manager executable resolved through PATH (distribution-agnostic). */
 const SYSTEMCTL = 'systemctl'
@@ -79,6 +85,9 @@ export interface HostStartOptions {
   readonly dshAnchor: string
   /** Installed profile name. */
   readonly profile: string
+  /** The public start policy. Only `public` may consult an installed manager
+   *  job; internal/peer/reexec launches keep the detached process path. */
+  readonly hostStartPolicy?: 'public' | 'public-managed'
 }
 
 /** The validated facts ONE unit file is rendered from. */
@@ -367,7 +376,7 @@ export function inspectTrustedDshAnchor(path: string): string {
 }
 
 /** Collect and validate the exact installed facts one unit is rendered from. */
-function collectUnitFacts(options: HostStartOptions): UnitFacts {
+export function collectUnitFacts(options: HostStartOptions): UnitFacts {
   // The Node interpreter is a system executable: trust absolute + executable.
   const nodePath = inspectTrustedExecutable(process.execPath, 'node executable')
   // The Host entry and DSH anchor are installed package files. A legal package
@@ -559,6 +568,9 @@ export interface HostManagerDeps {
   /** Explicit unit directory seam for structural tests; production uses the account home. */
   readonly unitDir?: (uid: number) => string
   readonly systemctl?: SystemctlRunner
+  /** Explicit Darwin launchd seam for structural/native tests; production uses
+   *  the real OS account home and `/bin/launchctl`. */
+  readonly launchd?: LaunchdAdapterDeps
 }
 
 /** Run `systemctl --user show -p ... <unit>` and parse the properties. */
@@ -1171,18 +1183,44 @@ export async function startPublicHostCandidate(
 }
 
 /**
- * Compatibility entry for the managed public-start policy. macOS has no systemd
- * user manager and launchd supervision is out of scope, so the real Darwin path
- * keeps using the existing detached fallback without probing or installing any
- * user service. On Linux it follows the D0 public policy: the installed-unit
- * fact decides between the basic detached daemon and the verified systemd unit;
- * an explicit `daemon install` is the only install path.
+ * Collect the same validated installed facts for BOTH manager renderers; the
+ * profile identity digest is the shared canonical-profile owner.
+ */
+function collectLaunchdUnitFacts(options: HostStartOptions): LaunchdUnitFacts {
+  const facts = collectUnitFacts(options)
+  return {
+    ...facts,
+    scopeDir: options.scope.dir,
+    profileIdentity: profileIdentityDigest(options.scope.profileRealpath),
+  }
+}
+
+/**
+ * Compatibility entry for the managed public-start policy.
+ *
+ * Linux follows the D0 public policy: the installed-unit fact decides between
+ * the basic detached daemon and the verified systemd unit. On macOS only the
+ * real public start consults the installed user LaunchAgent: no plist keeps the
+ * historic detached process; an owned plist must start through the verified
+ * launchd job and never degrades to a detached Host. The internal
+ * qualification/peer/manual/reexec policies never consider a manager job.
  */
 export async function startManagedHostCandidate(
   options: HostStartOptions,
   deps: HostManagerDeps = {},
 ): Promise<HostStartObservation> {
-  if (process.platform === 'darwin') return spawnHostCandidate(options)
+  if (process.platform === 'darwin') {
+    if (options.hostStartPolicy !== 'public') return spawnHostCandidate(options)
+    const launchdDeps = deps.launchd ?? {}
+    const facts = collectLaunchdUnitFacts(options)
+    const inspected = inspectOwnedLaunchdUnit(facts, launchdDeps)
+    if (inspected.kind === 'none') return spawnHostCandidate(options)
+    if (inspected.unit.installBuild !== options.scope.buildId) {
+      throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the installed launchd plist belongs to another installed build')
+    }
+    await startLaunchdService(facts, inspected.unit, launchdDeps)
+    return () => undefined
+  }
   return startPublicHostCandidate(options, deps)
 }
 

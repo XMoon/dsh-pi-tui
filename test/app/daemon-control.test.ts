@@ -10,7 +10,7 @@
  */
 
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, readFileSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test, { type TestContext } from 'node:test'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
@@ -25,9 +25,20 @@ import {
 } from '../../src/app/remote-process/local-scope.ts'
 import {
   buildUnitName,
+  collectUnitFacts,
+  profileIdentityDigest,
   renderUnitContent,
   type SystemctlResult,
 } from '../../src/app/remote-process/local-host-manager.ts'
+import {
+  buildLaunchdLabel,
+  launchdLogPaths,
+  launchdPlistName,
+  renderLaunchdPlist,
+  type LaunchctlResult,
+  type LaunchctlRunner,
+  type LaunchdUnitFacts,
+} from '../../src/app/remote-process/local-host-launchd.ts'
 import {
   formatDaemonStatus,
   journalctlArgs,
@@ -230,6 +241,157 @@ function darwinDepsOf(fx: Fixture, overrides: Partial<DaemonControlDeps> = {}): 
     inspectProcess: () => 'dead',
     ...overrides,
   }
+}
+
+const UID = process.getuid?.() ?? 1000
+
+/** The same validated launchd facts the Darwin management path derives. */
+function launchdFactsOf(fx: Fixture): LaunchdUnitFacts {
+  const base = collectUnitFacts({
+    scope: fx.scope,
+    hostEntryPath: join(fx.profile.packageRoot, 'dist', 'local-host.mjs'),
+    dshAnchor: fx.profile.installAnchor,
+    profile: fx.profile.name,
+  })
+  return {
+    ...base,
+    scopeDir: fx.scope.dir,
+    profileIdentity: profileIdentityDigest(fx.scope.profileRealpath),
+  }
+}
+
+function launchdPlistPathOf(fx: Fixture): string {
+  return join(fx.accountHome, 'Library', 'LaunchAgents', launchdPlistName(fx.scope.scopeId))
+}
+
+function writeOwnedLaunchd(fx: Fixture): { readonly path: string; readonly content: string; readonly facts: LaunchdUnitFacts } {
+  const facts = launchdFactsOf(fx)
+  const path = launchdPlistPathOf(fx)
+  mkdirSync(join(fx.accountHome, 'Library', 'LaunchAgents'), { recursive: true, mode: 0o700 })
+  const content = renderLaunchdPlist(facts)
+  writeFileSync(path, content, { mode: 0o600 })
+  return { path, content, facts }
+}
+
+function exitedLaunchctl(code: number, stdout = '', stderr = ''): LaunchctlResult {
+  return { kind: 'exited', code, stdout, stderr }
+}
+
+interface FakeLaunchdJob {
+  loaded: boolean
+  state: string
+  pid?: number
+  path: string
+  program: string
+  arguments: readonly string[]
+  workingDirectory: string
+  stdoutPath: string
+  stderrPath: string
+  environment: Readonly<Record<string, string>>
+}
+
+interface FakeLaunchdOptions {
+  loaded?: boolean
+  state?: string
+  pid?: number
+  path?: string
+  program?: string
+  arguments?: readonly string[]
+  workingDirectory?: string
+  stdoutPath?: string
+  stderrPath?: string
+  environment?: Readonly<Record<string, string>>
+  domainCode?: number
+  onBootout?: () => void
+}
+
+/** One real-format `launchctl print` answer for the narrow structural seam. */
+function launchdPrint(fx: Fixture, job: FakeLaunchdJob): string {
+  const label = buildLaunchdLabel(fx.scope.scopeId)
+  const args = job.arguments.map(value => `\t\t${value}`).join('\n')
+  const env = Object.entries(job.environment).map(([key, value]) => `\t\t${key} => ${value}`).join('\n')
+  return [
+    `gui/${String(UID)}/${label} = {`,
+    '\tactive count = 1',
+    `\tpath = ${job.path}`,
+    '\ttype = LaunchAgent',
+    `\tstate = ${job.state}`,
+    '',
+    `\tprogram = ${job.program}`,
+    '\targuments = {',
+    args,
+    '\t}',
+    '',
+    `\tworking directory = ${job.workingDirectory}`,
+    '',
+    `\tstdout path = ${job.stdoutPath}`,
+    `\tstderr path = ${job.stderrPath}`,
+    '',
+    '\tenvironment = {',
+    env,
+    '\t}',
+    '',
+    ...(job.pid === undefined ? [] : [`\tpid = ${String(job.pid)}`]),
+    '\truns = 1',
+    '\tlast exit code = (never exited)',
+    '\tproperties = partial import | inferred program',
+    '}',
+    '',
+  ].join('\n')
+}
+
+function fakeLaunchd(fx: Fixture, options: FakeLaunchdOptions = {}) {
+  const facts = launchdFactsOf(fx)
+  const logs = launchdLogPaths(facts.scopeDir)
+  const label = buildLaunchdLabel(fx.scope.scopeId)
+  const job: FakeLaunchdJob = {
+    loaded: options.loaded ?? false,
+    state: options.state ?? 'not running',
+    ...(options.pid === undefined ? {} : { pid: options.pid }),
+    path: options.path ?? launchdPlistPathOf(fx),
+    program: options.program ?? facts.nodePath,
+    arguments: options.arguments ?? [facts.nodePath, facts.hostEntryPath],
+    workingDirectory: options.workingDirectory ?? facts.profileRealpath,
+    stdoutPath: options.stdoutPath ?? logs.stdout,
+    stderrPath: options.stderrPath ?? logs.stderr,
+    environment: options.environment ?? {
+      DSH_HOME: facts.dshHome,
+      SPLIT_PROCESS_DSH_ANCHOR: facts.dshAnchor,
+      SPLIT_PROCESS_PROFILE: facts.profile,
+    },
+  }
+  const calls: string[][] = []
+  const run: LaunchctlRunner = async args => {
+    calls.push([...args])
+    if (args[0] === 'print' && args[1] === `gui/${String(UID)}`) {
+      return (options.domainCode ?? 0) === 0 ? exitedLaunchctl(0, `gui/${String(UID)} = {\n}\n`) : exitedLaunchctl(options.domainCode as number, '', 'domain unavailable')
+    }
+    if (args[0] === 'print' && args[1] === `gui/${String(UID)}/${label}`) {
+      return job.loaded ? exitedLaunchctl(0, launchdPrint(fx, job)) : exitedLaunchctl(113, '', `Could not find service "${label}"`)
+    }
+    if (args[0] === 'bootstrap') {
+      job.loaded = true
+      job.state = 'not running'
+      delete job.pid
+      return exitedLaunchctl(0)
+    }
+    if (args[0] === 'kickstart') {
+      job.loaded = true
+      job.state = 'running'
+      job.pid = 4242
+      return exitedLaunchctl(0)
+    }
+    if (args[0] === 'bootout') {
+      if (!job.loaded) return exitedLaunchctl(3, '', 'No such process')
+      job.loaded = false
+      job.state = 'not running'
+      delete job.pid
+      options.onBootout?.()
+      return exitedLaunchctl(0)
+    }
+    return exitedLaunchctl(2, '', 'unexpected launchctl verb')
+  }
+  return { run, calls, job }
 }
 
 function assertCode(result: { code: number; stdout: string; stderr: string }, code: number, pattern?: RegExp): void {
@@ -869,6 +1031,7 @@ test('darwin status with no Host reports the fixed no-unit facts without touchin
   const systemctlCalls: string[][] = []
   const result = await runDaemonControl({ verb: 'status' }, fx.profile, darwinDepsOf(fx, {
     systemctl: async args => { systemctlCalls.push([...args]); return exited(0) },
+    launchctl: async () => { throw new Error('no installed plist means NO launchctl call') },
   }))
   assertCode(result, 0)
   assert.match(result.stdout, /^manager=unmanaged$/mu)
@@ -888,6 +1051,7 @@ test('darwin status never inspects an installed systemd unit file', async t => {
   const systemctlCalls: string[][] = []
   const result = await runDaemonControl({ verb: 'status' }, fx.profile, darwinDepsOf(fx, {
     systemctl: async args => { systemctlCalls.push([...args]); return exited(0) },
+    launchctl: async () => { throw new Error('a systemd unit file is not a launchd unit') },
   }))
   assertCode(result, 0)
   assert.match(result.stdout, /^unit=none$/mu)
@@ -903,6 +1067,7 @@ test('darwin status reports an authenticated Host as process-supervised with no 
     readRecord: () => record,
     inspectProcess: () => 'alive',
     authenticate: async () => ({ record, cookie: 'c', identity: record }),
+    launchctl: async () => { throw new Error('an independent Host needs no launchctl query') },
   }))
   assertCode(result, 0)
   assert.match(result.stdout, /^host=ready$/mu)
@@ -918,6 +1083,7 @@ test('darwin logs reads the scope host.log and never a unit journal', async t =>
   const fx = fixture(t)
   let journalReads = 0
   const result = await runDaemonControl({ verb: 'logs', lines: 20 }, fx.profile, darwinDepsOf(fx, {
+    launchctl: async () => { throw new Error('an independent Host log needs no launchctl query') },
     journal: async () => { journalReads += 1; return { code: 0, stdout: 'unit journal\n', stderr: '' } },
     hostLogTail: async (path, lines) => {
       assert.equal(path, join(fx.scope.dir, 'host.log'))
@@ -931,15 +1097,343 @@ test('darwin logs reads the scope host.log and never a unit journal', async t =>
   assert.match(result.stdout, /host line/u)
 })
 
-test('darwin install and uninstall are unsupported before any unit, seat or scope write', async t => {
+test('darwin install writes one owned LaunchAgent without starting, stopping or migrating an independent Host', { skip: process.platform !== 'darwin' ? 'the Darwin admin seat requires macOS' : false }, async t => {
   const fx = fixture(t)
-  for (const verb of ['install', 'uninstall'] as const) {
-    const result = await runDaemonControl({ verb }, fx.profile, darwinDepsOf(fx))
-    assertCode(result, 3, /UNSUPPORTED_PLATFORM/u)
-  }
-  assert.equal(existsSync(join(fx.unitDir, fx.unitName)), false, 'macOS must not write a unit')
-  assert.equal(existsSync(fx.scope.dir), false, 'an unsupported verb must not create the scope')
-  assert.equal(existsSync(join(fx.accountHome, '.dsh-pi-tui')), false, 'an unsupported verb must not take the admin seat')
+  const record = darwinRecordOf(fx.scope)
+  const launchctl = fakeLaunchd(fx, { loaded: false })
+  const result = await runDaemonControl({ verb: 'install' }, fx.profile, darwinDepsOf(fx, {
+    launchctl: launchctl.run,
+    readRecord: () => record,
+    inspectProcess: () => 'alive',
+    authenticate: async () => ({ record, cookie: 'c', identity: record }),
+  }))
+  assertCode(result, 0)
+  assert.match(result.stdout, new RegExp(`^unit=${buildLaunchdLabel(fx.scope.scopeId)}$`, 'mu'))
+  assert.match(result.stdout, /^unit-state=not-found$/mu)
+  assert.match(result.stdout, /^manager=process$/mu)
+  assert.match(result.stdout, /^host=ready$/mu)
+  assert.match(result.stdout, /^pid=4242$/mu)
+  assert.equal(existsSync(launchdPlistPathOf(fx)), true, 'install must write the owned plist')
+  assert.equal(statSync(launchdPlistPathOf(fx)).mode & 0o777, 0o600)
+  assert.equal(existsSync(fx.scope.dir), false, 'install must not create the profile runtime scope')
+  assert.equal(launchctl.calls.some(args => args[0] === 'bootstrap' || args[0] === 'kickstart' || args[0] === 'bootout'), false,
+    'install never starts or stops a job')
+  assert.equal(existsSync(join(fx.unitDir, fx.unitName)), false, 'macOS must not write a systemd unit')
+})
+
+test('darwin install is idempotent and refuses a same-label job from another source', { skip: process.platform !== 'darwin' ? 'the Darwin admin seat requires macOS' : false }, async t => {
+  const fx = fixture(t)
+  const launchctl = fakeLaunchd(fx, { loaded: false })
+  const deps = darwinDepsOf(fx, { launchctl: launchctl.run })
+  const first = await runDaemonControl({ verb: 'install' }, fx.profile, deps)
+  assertCode(first, 0)
+  const content = readFileSync(launchdPlistPathOf(fx), 'utf8')
+  const second = await runDaemonControl({ verb: 'install' }, fx.profile, deps)
+  assertCode(second, 0)
+  assert.equal(readFileSync(launchdPlistPathOf(fx), 'utf8'), content, 'a repeat install never rewrites the owned plist')
+
+  const foreignFx = fixture(t)
+  const foreignPath = join(foreignFx.accountHome, 'foreign.plist')
+  writeFileSync(foreignPath, '<?xml?><plist/>', { mode: 0o600 })
+  const foreignLaunchctl = fakeLaunchd(foreignFx, { loaded: true, path: foreignPath })
+  const refused = await runDaemonControl({ verb: 'install' }, foreignFx.profile, darwinDepsOf(foreignFx, { launchctl: foreignLaunchctl.run }))
+  assertCode(refused, 3, /IDENTITY_OR_OWNERSHIP_REFUSED/u)
+  assert.equal(existsSync(launchdPlistPathOf(foreignFx)), false, 'no plist is written while a foreign job owns the label')
+})
+
+test('darwin status claims launchd only when the real job PID is the authenticated Host', async t => {
+  const fx = fixture(t)
+  writeOwnedLaunchd(fx)
+  const record = darwinRecordOf(fx.scope)
+  const launchctl = fakeLaunchd(fx, { loaded: true, state: 'running', pid: record.hostPid })
+  const result = await runDaemonControl({ verb: 'status' }, fx.profile, darwinDepsOf(fx, {
+    launchctl: launchctl.run,
+    readRecord: () => record,
+    inspectProcess: () => 'alive',
+    authenticate: async () => ({ record, cookie: 'c', identity: record }),
+  }))
+  assertCode(result, 0)
+  assert.match(result.stdout, /^manager=launchd$/mu)
+  assert.match(result.stdout, /^user-manager=available$/mu)
+  assert.match(result.stdout, new RegExp(`^unit=${buildLaunchdLabel(fx.scope.scopeId)}$`, 'mu'))
+  assert.match(result.stdout, /^unit-state=running$/mu)
+  assert.match(result.stdout, /^host=ready$/mu)
+  assert.match(result.stdout, /^pid=4242$/mu)
+})
+
+test('darwin status refuses a launchd PID that is not the authenticated Host without claiming launchd', async t => {
+  const fx = fixture(t)
+  writeOwnedLaunchd(fx)
+  const record = darwinRecordOf(fx.scope)
+  const launchctl = fakeLaunchd(fx, { loaded: true, state: 'running', pid: 5151 })
+  const result = await runDaemonControl({ verb: 'status' }, fx.profile, darwinDepsOf(fx, {
+    launchctl: launchctl.run,
+    readRecord: () => record,
+    inspectProcess: () => 'alive',
+    authenticate: async () => ({ record, cookie: 'c', identity: record }),
+  }))
+  assertCode(result, 3, /IDENTITY_OR_OWNERSHIP_REFUSED/u)
+  assert.match(result.stdout, /^manager=process$/mu)
+  assert.match(result.stdout, /^host=ready$/mu)
+  assert.doesNotMatch(result.stdout, /^manager=launchd$/mu)
+})
+
+test('darwin status reports a loaded not-running job as stopped and never as launchd supervision', async t => {
+  const fx = fixture(t)
+  writeOwnedLaunchd(fx)
+  const launchctl = fakeLaunchd(fx, { loaded: true, state: 'not running' })
+  const result = await runDaemonControl({ verb: 'status' }, fx.profile, darwinDepsOf(fx, { launchctl: launchctl.run }))
+  assertCode(result, 0)
+  assert.match(result.stdout, /^manager=unmanaged$/mu)
+  assert.match(result.stdout, /^host=stopped$/mu)
+  assert.match(result.stdout, /^unit-state=not-running$/mu)
+  assert.match(result.stdout, new RegExp(`^unit=${buildLaunchdLabel(fx.scope.scopeId)}$`, 'mu'))
+})
+
+test('darwin status fails closed when the loaded job does not match the installed plist', async t => {
+  const fx = fixture(t)
+  writeOwnedLaunchd(fx)
+  const record = darwinRecordOf(fx.scope)
+  const launchctl = fakeLaunchd(fx, {
+    loaded: true,
+    state: 'running',
+    pid: record.hostPid,
+    environment: { DSH_HOME: '/other', SPLIT_PROCESS_DSH_ANCHOR: '/other', SPLIT_PROCESS_PROFILE: 'other' },
+  })
+  const result = await runDaemonControl({ verb: 'status' }, fx.profile, darwinDepsOf(fx, {
+    launchctl: launchctl.run,
+    readRecord: () => record,
+    inspectProcess: () => 'alive',
+    authenticate: async () => ({ record, cookie: 'c', identity: record }),
+  }))
+  assertCode(result, 3, /IDENTITY_OR_OWNERSHIP_REFUSED/u)
+  assert.match(result.stdout, /^manager=unmanaged$/mu)
+  assert.match(result.stdout, /^host=ready$/mu)
+})
+
+test('darwin start reuses an authenticated Host before any launchctl call', { skip: process.platform !== 'darwin' ? 'the Darwin admin seat requires macOS' : false }, async t => {
+  const fx = fixture(t)
+  writeOwnedLaunchd(fx)
+  const record = darwinRecordOf(fx.scope)
+  const launchctl = fakeLaunchd(fx, { loaded: true, state: 'running', pid: record.hostPid })
+  const result = await runDaemonControl({ verb: 'start' }, fx.profile, darwinDepsOf(fx, {
+    launchctl: launchctl.run,
+    readRecord: () => record,
+    inspectProcess: () => 'alive',
+    authenticate: async () => ({ record, cookie: 'c', identity: record }),
+    ensureHost: async () => { throw new Error('a warm start must never create a Host') },
+  }))
+  assertCode(result, 0)
+  assert.match(result.stdout, /^host=ready$/mu)
+  assert.match(result.stdout, /^instance=11111111$/mu)
+  assert.equal(launchctl.calls.some(args => args[0] !== 'print'), false, 'a reused Host needs no launchctl mutation')
+  assert.equal(launchctl.calls.filter(args => args[0] === 'print').length, 1, 'the snapshot reads the current service once')
+})
+
+test('darwin stop boots out only the verified job and proves the old kernel identity gone', { skip: process.platform !== 'darwin' ? 'the Darwin admin seat requires macOS' : false }, async t => {
+  const fx = fixture(t)
+  writeOwnedLaunchd(fx)
+  const record = darwinRecordOf(fx.scope)
+  let alive = true
+  let kernelReads = 0
+  const signals: NodeJS.Signals[] = []
+  const launchctl = fakeLaunchd(fx, {
+    loaded: true,
+    state: 'running',
+    pid: record.hostPid,
+    onBootout: () => { alive = false },
+  })
+  const result = await runDaemonControl({ verb: 'stop' }, fx.profile, darwinDepsOf(fx, {
+    launchctl: launchctl.run,
+    readRecord: () => (alive ? record : undefined),
+    inspectProcess: () => (alive ? 'alive' : 'dead'),
+    authenticate: async () => ({ record, cookie: 'c', identity: record }),
+    readKernel: () => {
+      kernelReads += 1
+      return alive ? { kind: 'alive', identity: record.hostKernelIdentity } : { kind: 'gone' }
+    },
+    kill: (_pid, signal) => { signals.push(signal) },
+    sleep: async () => {},
+    now: () => 0,
+  }))
+  assertCode(result, 0)
+  assert.match(result.stdout, /^host=stopped$/mu)
+  assert.deepEqual(signals, [], 'a verified launchd job is stopped through bootout, never a raw PID signal')
+  assert.equal(launchctl.calls.filter(args => args[0] === 'bootout').length, 1)
+  assert.ok(kernelReads >= 1, 'the recorded kernel identity must be observed after bootout')
+})
+
+test('darwin stop boots out a loaded job with no live Host and never signals', { skip: process.platform !== 'darwin' ? 'the Darwin admin seat requires macOS' : false }, async t => {
+  const fx = fixture(t)
+  writeOwnedLaunchd(fx)
+  const launchctl = fakeLaunchd(fx, { loaded: true, state: 'not running' })
+  const signals: NodeJS.Signals[] = []
+  const result = await runDaemonControl({ verb: 'stop' }, fx.profile, darwinDepsOf(fx, {
+    launchctl: launchctl.run,
+    kill: (_pid, signal) => { signals.push(signal) },
+    sleep: async () => {},
+    now: () => 0,
+  }))
+  assertCode(result, 0)
+  assert.match(result.stdout, /^host=stopped$/mu)
+  assert.deepEqual(signals, [])
+  assert.equal(launchctl.calls.filter(args => args[0] === 'bootout').length, 1)
+})
+
+test('darwin stop refuses a launchd PID that is not the live Host with zero bootout', { skip: process.platform !== 'darwin' ? 'the Darwin admin seat requires macOS' : false }, async t => {
+  const fx = fixture(t)
+  writeOwnedLaunchd(fx)
+  const record = darwinRecordOf(fx.scope)
+  const launchctl = fakeLaunchd(fx, { loaded: true, state: 'running', pid: 5151 })
+  const signals: NodeJS.Signals[] = []
+  const result = await runDaemonControl({ verb: 'stop' }, fx.profile, darwinDepsOf(fx, {
+    launchctl: launchctl.run,
+    readRecord: () => record,
+    inspectProcess: () => 'alive',
+    authenticate: async () => ({ record, cookie: 'c', identity: record }),
+    kill: (_pid, signal) => { signals.push(signal) },
+  }))
+  assertCode(result, 3, /IDENTITY_OR_OWNERSHIP_REFUSED/u)
+  assert.deepEqual(signals, [])
+  assert.equal(launchctl.calls.some(args => args[0] === 'bootout'), false, 'a mismatched job is never booted out')
+})
+
+test('darwin restart stops the launchd job and starts a new instance through the public ensure', { skip: process.platform !== 'darwin' ? 'the Darwin admin seat requires macOS' : false }, async t => {
+  const fx = fixture(t)
+  writeOwnedLaunchd(fx)
+  const oldRecord = darwinRecordOf(fx.scope)
+  const newRecord = darwinRecordOf(fx.scope, {
+    instanceId: '44444444-4444-4444-8444-444444444444',
+    hostPid: 6464,
+  })
+  let alive = true
+  let current: LocalInstanceRecord | undefined = oldRecord
+  let ensured = 0
+  const launchctl = fakeLaunchd(fx, { loaded: true, state: 'running', pid: oldRecord.hostPid, onBootout: () => { alive = false } })
+  const result = await runDaemonControl({ verb: 'restart' }, fx.profile, darwinDepsOf(fx, {
+    launchctl: launchctl.run,
+    readRecord: () => current,
+    inspectProcess: record => (record.instanceId === oldRecord.instanceId ? (alive ? 'alive' : 'dead') : (ensured > 0 ? 'alive' : 'dead')),
+    authenticate: async record => ({ record, cookie: 'c', identity: record }),
+    readKernel: pid => {
+      if (pid === oldRecord.hostPid) return alive ? { kind: 'alive', identity: oldRecord.hostKernelIdentity } : { kind: 'gone' }
+      return { kind: 'alive', identity: newRecord.hostKernelIdentity }
+    },
+    ensureHost: async options => {
+      ensured += 1
+      assert.equal(options.hostStartPolicy, 'public')
+      current = newRecord
+      return { record: newRecord, cookie: 'c', identity: newRecord }
+    },
+    sleep: async () => {},
+    now: () => 0,
+  }))
+  assertCode(result, 0)
+  assert.equal(ensured, 1)
+  assert.match(result.stdout, /^previous=11111111$/mu)
+  assert.match(result.stdout, /^instance=44444444$/mu)
+  assert.match(result.stdout, /^host=ready$/mu)
+  assert.equal(launchctl.calls.filter(args => args[0] === 'bootout').length, 1)
+})
+
+test('darwin uninstall removes only the verified job and plist, keeps the logs and never signals', { skip: process.platform !== 'darwin' ? 'the Darwin admin seat requires macOS' : false }, async t => {
+  const fx = fixture(t)
+  writeOwnedLaunchd(fx)
+  const facts = launchdFactsOf(fx)
+  mkdirSync(facts.scopeDir, { recursive: true, mode: 0o700 })
+  const logs = launchdLogPaths(facts.scopeDir)
+  writeFileSync(logs.stdout, 'managed stdout retained\n', { mode: 0o600 })
+  writeFileSync(logs.stderr, 'managed stderr retained\n', { mode: 0o600 })
+  const record = darwinRecordOf(fx.scope)
+  let alive = true
+  const signals: NodeJS.Signals[] = []
+  const launchctl = fakeLaunchd(fx, { loaded: true, state: 'running', pid: record.hostPid, onBootout: () => { alive = false } })
+  const result = await runDaemonControl({ verb: 'uninstall' }, fx.profile, darwinDepsOf(fx, {
+    launchctl: launchctl.run,
+    readRecord: () => (alive ? record : undefined),
+    inspectProcess: () => (alive ? 'alive' : 'dead'),
+    authenticate: async () => ({ record, cookie: 'c', identity: record }),
+    readKernel: () => (alive ? { kind: 'alive', identity: record.hostKernelIdentity } : { kind: 'gone' }),
+    kill: (_pid, signal) => { signals.push(signal) },
+    sleep: async () => {},
+    now: () => 0,
+  }))
+  assertCode(result, 0)
+  assert.equal(existsSync(launchdPlistPathOf(fx)), false, 'uninstall removes the owned plist')
+  assert.equal(readFileSync(logs.stdout, 'utf8'), 'managed stdout retained\n')
+  assert.equal(readFileSync(logs.stderr, 'utf8'), 'managed stderr retained\n')
+  assert.deepEqual(signals, [])
+  assert.equal(launchctl.calls.filter(args => args[0] === 'bootout').length, 1)
+})
+
+test('darwin uninstall with no plist is an idempotent no-op and never calls launchctl', { skip: process.platform !== 'darwin' ? 'the Darwin admin seat requires macOS' : false }, async t => {
+  const fx = fixture(t)
+  const run: LaunchctlRunner = async () => { throw new Error('uninstall with no plist must not query launchctl') }
+  const result = await runDaemonControl({ verb: 'uninstall' }, fx.profile, darwinDepsOf(fx, { launchctl: run }))
+  assertCode(result, 0)
+  assert.match(result.stdout, /^unit=none$/mu)
+})
+
+test('darwin logs reads the two launchd streams with explicit sources and never host.log', async t => {
+  const fx = fixture(t)
+  writeOwnedLaunchd(fx)
+  const facts = launchdFactsOf(fx)
+  const logs = launchdLogPaths(facts.scopeDir)
+  const record = darwinRecordOf(fx.scope)
+  const launchctl = fakeLaunchd(fx, { loaded: true, state: 'running', pid: record.hostPid })
+  const result = await runDaemonControl({ verb: 'logs', lines: 20 }, fx.profile, darwinDepsOf(fx, {
+    launchctl: launchctl.run,
+    readRecord: () => record,
+    inspectProcess: () => 'alive',
+    authenticate: async () => ({ record, cookie: 'c', identity: record }),
+    hostLogTail: async (path, lines) => {
+      assert.equal(lines, 20)
+      if (path === logs.stdout) return 'managed out token=SECRET\n'
+      if (path === logs.stderr) return 'managed err\n'
+      assert.fail(`the launchd log source must not read ${path}`)
+    },
+  }))
+  assertCode(result, 0)
+  assert.match(result.stdout, /\[dsh-pi-tui daemon: launchd stdout\]/u)
+  assert.match(result.stdout, /\[dsh-pi-tui daemon: launchd stderr\]/u)
+  assert.match(result.stdout, /managed out/u)
+  assert.match(result.stdout, /managed err/u)
+  assert.doesNotMatch(result.stdout, /SECRET/u)
+})
+
+test('darwin logs keeps host.log for an independent Host beside an installed but unloaded plist', async t => {
+  const fx = fixture(t)
+  writeOwnedLaunchd(fx)
+  const record = darwinRecordOf(fx.scope)
+  const launchctl = fakeLaunchd(fx, { loaded: false })
+  const result = await runDaemonControl({ verb: 'logs', lines: 20 }, fx.profile, darwinDepsOf(fx, {
+    launchctl: launchctl.run,
+    readRecord: () => record,
+    inspectProcess: () => 'alive',
+    authenticate: async () => ({ record, cookie: 'c', identity: record }),
+    hostLogTail: async (path, lines) => {
+      assert.equal(path, join(fx.scope.dir, 'host.log'))
+      assert.equal(lines, 20)
+      return 'independent host line\n'
+    },
+  }))
+  assertCode(result, 0)
+  assert.match(result.stdout, /independent host line/u)
+})
+
+test('darwin logs reports an unavailable launchd source without inventing one', async t => {
+  const fx = fixture(t)
+  writeOwnedLaunchd(fx)
+  const record = darwinRecordOf(fx.scope)
+  const launchctl = fakeLaunchd(fx, { loaded: true, state: 'running', pid: record.hostPid })
+  const result = await runDaemonControl({ verb: 'logs', lines: 20 }, fx.profile, darwinDepsOf(fx, {
+    launchctl: launchctl.run,
+    readRecord: () => record,
+    inspectProcess: () => 'alive',
+    authenticate: async () => ({ record, cookie: 'c', identity: record }),
+    hostLogTail: async () => undefined,
+  }))
+  assertCode(result, 4, /LOG_SOURCE_UNAVAILABLE/u)
 })
 
 test('darwin stop signals the kernel-verified Host exactly once and waits for its identity to go', { skip: process.platform !== 'darwin' ? 'Darwin kernel seats require macOS' : false }, async t => {
@@ -953,9 +1447,8 @@ test('darwin stop signals the kernel-verified Host exactly once and waits for it
     inspectProcess: () => (alive ? 'alive' : 'dead'),
     authenticate: async () => ({ record, cookie: 'c', identity: record }),
     readKernel: () => {
-      if (!alive) return { kind: 'gone' }
       kernelReads += 1
-      return { kind: 'alive', identity: record.hostKernelIdentity }
+      return alive ? { kind: 'alive', identity: record.hostKernelIdentity } : { kind: 'gone' }
     },
     kill: (pid, signal) => { signals.push([pid, signal]); alive = false },
     sleep: async () => {},
