@@ -1913,13 +1913,18 @@ async function runD2AcpScene({ installation, workRoot, report, start, projectA, 
   const headerC = await waitForHostSessionHeader(dshHome, sessionC, 'M07: Session C durable header', TIMEOUTS.process)
   assert(realpathSync(headerC.cwd) === acpWorkspaceReal,
     `M07: Session C cwd ${JSON.stringify(headerC.cwd)} is not the requested Workspace`)
-  const eventsC = hostSessionEvents(dshHome, sessionC)
-  assert(eventsC !== undefined, 'M07: the prompted Session has no durable log')
+  // The ACP response can settle before the Host writer's log flush is visible;
+  // wait for the complete durable fact (one user message, answer, turn end).
+  const eventsC = await waitFor(() => {
+    const events = hostSessionEvents(dshHome, sessionC)
+    if (events === undefined) return undefined
+    const users = events.filter(event => event.type === 'user/message' && JSON.stringify(event).includes(promptText))
+    return users.length === 1
+      && events.some(event => event.type === 'assistant/message' && JSON.stringify(event).includes('long-turn answer'))
+      && events.some(event => event.type === 'turn/end') ? events : undefined
+  }, 'M07 official Host writer persists one prompt, the answer and turn/end', TIMEOUTS.turn)
   const userTexts = eventsC.filter(event => event.type === 'user/message' && JSON.stringify(event).includes(promptText))
   assert(userTexts.length === 1, `M07: exactly ONE durable user message must carry the prompt, saw ${String(userTexts.length)}`)
-  assert(eventsC.some(event => event.type === 'assistant/message' && JSON.stringify(event).includes('long-turn answer')),
-    'M07: the official Host writer must persist the model answer')
-  assert(eventsC.some(event => event.type === 'turn/end'), 'M07: the durable turn must end')
   const updates = connPrompt.received.filter(message => message.method === 'session/update')
   assert(updates.length > 0, 'M07: the ACP peer must receive its own session/update notifications')
   assert(updates.every(message => message.params?.sessionId === sessionC),
