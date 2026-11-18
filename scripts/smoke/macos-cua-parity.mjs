@@ -1593,7 +1593,7 @@ async function sceneSplit({ installation, workRoot, report, textEditPid }) {
   const splitConsent = await waitCuaResult(dshHome, screenshot.sessionId, screenshot.dispatch.subCallId,
     'Split consent resumes the dispatch', TIMEOUTS.consent)
   assert(splitConsent.result.isError !== true,
-    `Split consent failed: ${dispatchErrorCode(splitConsent.result) ?? 'unknown error'}`)
+    `Split consent failed: ${dispatchErrorCode(splitConsent.result) ?? 'unknown error'} :: ${dispatchContentText(splitConsent.result).slice(0, 400)}`)
   assert(dispatchParams(screenshot.dispatch)?.selector === String(textEditPid),
     'Split MAC09-10: the official getApp did not select this run\'s exact TextEdit PID')
   const splitShot = await waitFor(() => cuaDispatches(eventsOf(dshHome, screenshot.sessionId), screenshot.afterIndex)
