@@ -1398,7 +1398,9 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
 
   /** ONE candidate line. The active cursor is `primary` only while the Detail
    *  region really owns the keyboard; the `[current]` chip is painted only on a
-   *  candidate that matches the LATEST authoritative read. */
+   *  candidate that matches the LATEST authoritative read. The chip is a
+   *  CURRENT-VALUE fact and outranks the optional explanation: when the row is
+   *  too narrow for both, the note is dropped and the chip stays whole. */
   private optionLine(
     rowId: WebSettingRowId,
     value: string,
@@ -1411,8 +1413,8 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     const label = this.optionLabel(rowId, value)
     const note = this.optionNote(rowId, value)
     let text = `${marker}${selected ? color.textStrong(label) : color.text(label)}`
-    if (note !== '' && visibleWidth(`${text} · ${note}`) <= width) text += color.textDim(` · ${note}`)
     if (committed === value && visibleWidth(`${text} [current]`) <= width) text += ` ${color.textMuted('[current]')}`
+    if (note !== '' && visibleWidth(`${text} · ${note}`) <= width) text += color.textDim(` · ${note}`)
     return { text, option: value }
   }
 
@@ -1475,7 +1477,7 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
           ? 'The configured search provider is a CUSTOM route: it is displayed as-is and is not selectable here. '
             + 'The official candidates are DeepSeek server-side search and DeepSeek Search API.'
           : 'With no explicit selection the Host routes AUTOMATICALLY (DSH rc.5): a request on a DeepSeek model route '
-            + 'uses DeepSeek server-side search (no per-search charge), while other models and requests outside a '
+            + 'PREFERS DeepSeek server-side search (no per-search charge), while other models and requests outside a '
             + 'model route prefer the DeepSeek Search API (billed per Search API call; a Messages plan does not '
             + 'guarantee coverage). An explicit selection always overrides the automatic routing. When no preferred '
             + 'provider is usable the Host may pick another single usable provider or fail with an explicit error; '
@@ -1512,13 +1514,13 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
         const overrides = settings === undefined ? [] : webAdvancedOverrideFields(settings.advanced, capability)
         if (settings !== undefined && !this.billingProviderSelected(settings, capability)) {
           notes.push(capability === 'search'
-            ? 'Not selected: Search Billing applies only while the DeepSeek Search API is the explicitly selected '
-              + 'provider. Under Automatic the Host may still execute the Search API for other models\' requests, and '
-              + 'any stored Billing stays a Host setting that can apply then; this page follows the official Client '
-              + 'and does not offer its Billing editor here. This row cannot write.'
-            : 'Not selected: Fetch Billing applies only while the DeepSeek Fetch API is the explicitly selected '
-              + 'provider; under Automatic the Host auto-selects one usable fetch provider, and HTTP calls no billed '
-              + 'API. This row cannot write.')
+            ? 'Not selected: the DeepSeek Search API Billing is EDITABLE HERE only while that API is the explicitly '
+              + 'selected provider. Under Automatic the Host may still execute the Search API for other models\' '
+              + 'requests, and any stored Billing stays a Host setting that can apply then; this page follows the '
+              + 'official Client and does not offer its Billing editor here. This row cannot write.'
+            : 'Not selected: the DeepSeek Fetch API Billing is EDITABLE HERE only while that API is the explicitly '
+              + 'selected provider; under Automatic the Host auto-selects one usable fetch provider, and HTTP calls '
+              + 'no billed API. This row cannot write.')
           if (overrides.length > 0) {
             notes.push(`Configured override: ${this.overrideFactsLine(overrides)}`)
           }

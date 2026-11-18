@@ -1219,8 +1219,8 @@ specialist-page contract below).
   `DeepSeek Search API` / `DeepSeek Fetch API`. HOST SELECTION IS AUTHORITATIVE:
   an absent `web.searchProvider`/`web.fetchProvider` is no explicit provider —
   the Host's AUTOMATIC routing state, and supported Host versions may choose the
-  actual provider per request based on the served model route (on Hosts older
-  than rc.5 the automatic decision may differ). The page paints that absence as
+  actual provider per request based on the served model route (supported Host
+  versions may decide the automatic routing differently). The page paints that absence as
   `Automatic`, never precomputes which provider one request would consume and
   never writes a provider merely to display it; an explicitly configured id
   always takes precedence. A configured provider id

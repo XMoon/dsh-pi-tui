@@ -634,8 +634,8 @@ test('the workspace row reports the configured providers and opens the Web page 
     previous = at
   }
   assert.match(page, /Current: DeepSeek server-side search/u, 'the selected row states the real Host value')
-  assert.match(page, /› DeepSeek server-side search · server-side · model-token billed \[current\]/u,
-    'the current candidate carries the [current] chip')
+  assert.match(page, /› DeepSeek server-side search \[current\] · server-side · model-token billed/u,
+    'the current candidate carries the whole [current] chip before its note')
   assert.equal(h.readCount() >= 1, true, 'opening the page really read the Host')
 
   // Enter opens the Detail, the highlight moves, Enter confirms EXACTLY once.
@@ -885,6 +885,63 @@ test('the Search Billing row is inert while AUTOMATIC: a stale Confirm writes no
   await h.vt.waitForRender()
   assert.deepEqual(h.writes, [], 'the Billing row writes nothing while Automatic')
   assert.equal(h.store.web.api.searchBilling, 'auto', 'the stored Billing mode is kept, never reset')
+})
+
+test('a Billing confirm queued while writable is REFUSED after the Host moved the route, same value included', async t => {
+  // The admission gates run BEFORE the already-current zero-write shortcut:
+  // a Confirm queued while the Search API was explicitly selected must still
+  // be REFUSED (never Verified) when the queue-head's own fresh read observes
+  // a Host the stale presentation no longer describes — for the SAME value
+  // and for a different one, with ZERO Host writes either way.
+  const h = setup({ searchProvider: 'deepseek-search-api' })
+  t.after(h.dispose)
+  await openWebPage(h)
+  await openWebRow(h, 4) // the Search Billing row (writable: explicit Search API)
+  assert.match(h.view(), /› Automatic/u, 'the Billing row offers its candidates')
+
+  // R1 (a workspace refresh read) is held so the page settles on the STALE
+  // writable presentation; the route moves underneath AFTER R1 captured the
+  // old facts and BEFORE the commit's own fresh read R2 is issued — R2 (the
+  // real gate base) then observes AUTOMATIC while the page offers candidates.
+  const release = h.holdRead()
+  t.after(release)
+  await key(h, 'r') // issue the held read R1
+  h.store.web.searchProvider = undefined // another Host writer: explicit -> AUTOMATIC
+  release() // R1 settles its stale snapshot back: the page is ready and writable again
+  await settlePainted(h, 'the stale writable facts to repaint', frame =>
+    frame.includes('› Automatic [current] · follows the conversation route') && !frame.includes('Loading…'))
+  await key(h, ENTER) // Confirm the CURRENT value (`auto`) — R2 is the gate base
+  const refused = await settlePainted(h, 'the same-value stale confirm to be refused', frame =>
+    frame.includes('Not saved') && frame.includes('Current: Not selected') && !frame.includes('Saving…'))
+  assert.match(refused, /EDITABLE HERE/u,
+    `the refusal names the real admission cause:\n${refused}`)
+  assert.doesNotMatch(refused, /Verified/u, 'a refused stale confirm is never Verified')
+  assert.deepEqual(h.writes, [], 'zero Host writes for the same-value stale confirm')
+  assert.equal(h.store.web.api.searchBilling, 'auto', 'the stored Billing mode is untouched')
+
+  // The override gate takes the SAME pre-shortcut path: a confirm offered by
+  // the stale presentation is refused with zero writes once the fresh read
+  // observes a Host YAML override that now owns the capability.
+  h.store.web.searchProvider = 'deepseek-search-api' // another Host writer pins the API again
+  await key(h, ESC)
+  await h.vt.waitForRender()
+  await key(h, 'r')
+  await openWebRow(h, 4)
+  await settlePainted(h, 'the restored writable billing row', frame =>
+    frame.includes('› Automatic [current] · follows the conversation route') && !frame.includes('Loading…'))
+  const release2 = h.holdRead()
+  t.after(release2)
+  await key(h, 'r')
+  h.store.web.advanced = { searchBaseURL: 'https://gateway.example.test/deepseek/v1' } // a Host YAML override lands
+  release2()
+  await settlePainted(h, 'the stale no-override facts to repaint', frame =>
+    frame.includes('› Automatic [current] · follows the conversation route') && !frame.includes('Loading…'))
+  await key(h, ENTER) // Confirm the CURRENT value — the gate base R2 observes the override
+  const refused2 = await settlePainted(h, 'the override stale confirm to be refused', frame =>
+    frame.includes('Not saved') && !frame.includes('Saving…'))
+  assert.match(refused2, /overridden by Host YAML/u)
+  assert.deepEqual(h.writes, [], 'zero Host writes for the override stale confirm')
+  assert.equal(h.store.web.api.searchBilling, 'auto')
 })
 
 test('a configured custom provider id stays visible and offers no candidate', async t => {
@@ -1301,7 +1358,7 @@ supersededBillingCase(
     // seeing Account highlighted as current proves the newest read decided
     // (a tiny viewport may crop the Current: line itself).
     await openWebRow(h, 4)
-    assert.match(h.view(), /› Account · signed-in account only \[current\]/u,
+    assert.match(h.view(), /› Account \[current\] · signed-in account only/u,
       `the row opens on the verified billing mode:\n${h.view()}`)
     await key(h, ESC)
   },
@@ -1582,7 +1639,7 @@ test('a list wheel re-anchors the Detail on the NEW row authoritative candidates
   await h.vt.waitForRender()
   const after = h.view()
   assert.match(after, /Current: HTTP/u, 'the Detail followed the scrolled row')
-  assert.match(after, /› HTTP · anonymous · no billed API/u,
+  assert.match(after, /› HTTP \[current\] · anonymous · no billed API/u,
     `the NEW row's current candidate is highlighted, never the stale index:\n${after}`)
   assert.doesNotMatch(after, /› DeepSeek Fetch API/u)
   // Enter confirms the NEW row's CURRENT value (already-current → zero writes).
@@ -2219,7 +2276,7 @@ test('Billing rows are Not selected and inert when their API provider is not the
     page.handleInput('\r')
     const search = stripTerminalSequences(page.render(140).join('\n'))
     assert.match(search, /Current: Not selected/u)
-    assert.match(search, /Search Billing applies only while the DeepSeek Search API is the explicitly selected/u)
+    assert.match(search, /EDITABLE HERE/u)
     assert.match(search, /may still execute the Search API for other models' requests/u,
       'the inert row explains the Automatic routing without claiming a fixed route')
     assert.doesNotMatch(search, /Automatic · follows/u,
@@ -2232,7 +2289,7 @@ test('Billing rows are Not selected and inert when their API provider is not the
     page.handleInput('\r')
     const fetch = stripTerminalSequences(page.render(140).join('\n'))
     assert.match(fetch, /Current: Not selected/u)
-    assert.match(fetch, /Fetch Billing applies only while the DeepSeek Fetch API is the explicitly selected/u)
+    assert.match(fetch, /EDITABLE HERE/u)
     page.handleInput('\r')
     assert.deepEqual(writes, [], 'the non-API Fetch route dispatches zero writes')
   } finally {
