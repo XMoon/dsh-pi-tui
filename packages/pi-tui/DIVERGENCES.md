@@ -6873,12 +6873,14 @@ The fork suppressed the process-wide iTerm2 image capability whenever AltScreen 
 - Direct iTerm2 emits OSC 1337 Image bytes inside AltScreen when the static capability is retained; the fork Image path handles cursor-up placement without the old process-wide suppression.
 - PI_IMAGE_PROTOCOL=none remains text-only and the root SVG/Image viewer gates fail closed when no protocol is admitted.
 - The root Retry affordance and sink re-check live preview permission, so capability revocation cannot expose Retry or start another raster.
-- Audit note: Unit/fork wire tests and root viewer tests guard the protocol and live-permission behavior. On the installed tarball a real iTerm2 verifies the Regular SVG thumbnail, the fullscreen OSC 1337 Preview at 100x30/44x20/30x10/80x24, Tab to Source, CSI-u Escape back to the transcript, Copy of the exact source, the raster ImageViewer with its Esc return, the PI_IMAGE_PROTOCOL=none text fallback, the kitty mismatch negative, an overlay over a painted image with intact restore, and a stale click after the image left the viewport. A tmux 3.8 run verifies the multiplexer text-only negative, long Source scrolling and session-switch release. Evidence lives outside repository docs.
+- A visible overlay intersecting the rows of a Direct iTerm2 inline image makes the whole block yield that frame (anchor dropped, covered rows cleared) and the image is re-emitted when the overlay closes, so overlay text is never covered by pixels.
+- Audit note: Unit/fork wire tests and root viewer tests guard the protocol, live-permission and overlay-preemption behavior. On the installed tarball a real iTerm2 verifies the Regular SVG thumbnail, the fullscreen OSC 1337 Preview at 100x30/44x20/30x10/80x24, Tab to Source, CSI-u Escape back to the transcript, Copy of the exact source, the raster ImageViewer with its Esc return, the PI_IMAGE_PROTOCOL=none text fallback, the kitty mismatch negative, an overlay over a painted image that is readable while the image yields and restores on close, and a stale click after the image left the viewport. A tmux 3.8 run verifies the multiplexer text-only negative, long Source scrolling and session-switch release. Evidence lives outside repository docs.
 
 #### Guarding tests
 
 - packages/pi-tui/test/tui-alt-screen.test.ts: X080 — iTerm2 emits OSC 1337 and does not emit Kitty/OSC133 zone commands.
 - packages/pi-tui/test/tui-alt-screen.test.ts: X080 — AltScreen leaves the process capability unchanged across an instance Kitty override.
+- packages/pi-tui/test/tui-render.test.ts: X080 — a visible overlay preempts a covered Direct iTerm2 image block and the image returns after close.
 - test/client/svg-viewer.test.ts: live capability revocation hides Retry and starts no new raster.
 - test/client/transcript-image-viewer.test.ts: Direct iTerm2 preserves original JPEG MIME and exact OSC 1337 payload bytes.
 
@@ -6889,6 +6891,7 @@ The fork suppressed the process-wide iTerm2 image capability whenever AltScreen 
 - Reference snapshot: `earendil-works/pi@f9a26365568127461c47a07a37dcb42c140a3ac5`
 - Relevant upstream files:
 - packages/tui/src/tui-alt-screen.ts
+- packages/tui/src/tui.ts
 - Relevant issues/PRs:
 - None recorded; issue/PR state was not used as semantic proof.
 - Remaining semantic delta: Pinned upstream f9a26365568127461c47a07a37dcb42c140a3ac5 suppresses the process-wide iTerm2 capability while AltScreen is active (savedCapabilities + setCapabilities({...images: null}) in beforeTerminalStart, restore in afterTerminalStop). The fork had inherited and relied on that suppression for an older workspace restriction; X080 removes it, keeps the process capability stable and guards the real Direct iTerm2 OSC 1337 contract in the vendored source plus root consumers.

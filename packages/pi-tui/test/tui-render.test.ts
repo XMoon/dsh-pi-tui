@@ -1048,6 +1048,52 @@ describe("TUI Native Kitty overlay preemption (X077)", () => {
 	});
 });
 
+describe("TUI Direct iTerm2 overlay preemption (X080)", () => {
+	/** The fork Image renders `rows - 1` blank frame lines and an anchor whose
+	 *  cursor-up prefix is the only height authority. */
+	const iterm2Anchor = (rows: number): string =>
+		`${rows > 1 ? `\x1b[${rows - 1}A` : ""}\x1b]1337;File=inline=1;size=4;width=2;height=auto:AAAA\x07`;
+
+	it("yields the whole iTerm2 image when an overlay covers its body and restores it after close", async () => {
+		setCapabilities({ images: "iterm2", trueColor: true, hyperlinks: false });
+		setCellDimensions({ widthPx: 10, heightPx: 10 });
+		try {
+			const terminal = new LoggingVirtualTerminal(40, 10);
+			const tui: TUI = new TuiMainScreen(terminal);
+			const component = new TestComponent();
+			tui.addChild(component);
+			const anchor = iterm2Anchor(3);
+			component.lines = ["top", "", "", anchor, "bottom"];
+			tui.start();
+			await terminal.waitForRender();
+			assert.ok(terminal.getWrites().includes(anchor), "the image paints while nothing covers it");
+			terminal.clearWrites();
+
+			// The overlay lands on the block's TOP row; the anchor row stays outside it.
+			const overlay = new TestComponent();
+			overlay.lines = ["MODAL"];
+			const handle = tui.showOverlay(overlay, { row: 1, col: 0, width: 10 });
+			tui.renderNow();
+			await terminal.waitForRender();
+			const covered = terminal.getWrites();
+			assert.ok(!covered.includes(anchor), "the covered block is not re-emitted in this frame");
+			assert.ok(covered.includes("MODAL"), "the overlay text is painted");
+			assert.ok(terminal.getViewport().some(line => line.includes("MODAL")), "the overlay wins the image body row");
+			assert.ok(!terminal.getViewport().some(line => line.includes("1337")), "no row carries a stale image anchor");
+
+			handle.hide();
+			terminal.clearWrites();
+			tui.renderNow();
+			await terminal.waitForRender();
+			assert.ok(terminal.getWrites().includes(anchor), "the same image returns after the overlay closes");
+			tui.stop();
+		} finally {
+			resetCapabilitiesCache();
+			setCellDimensions({ widthPx: 9, heightPx: 18 });
+		}
+	});
+});
+
 describe("TUI resize handling", () => {
 	it("triggers full re-render when terminal height changes", async () => {
 		await withEnv({ TERMUX_VERSION: undefined }, async () => {
