@@ -20,9 +20,11 @@ import {
 } from '../../src/domain/file-completion/query.ts'
 import {
   createFinderRecordStream,
+  discoverForQuery,
   MAX_UNTERMINATED_FINDER_CODE_UNITS,
   normalizeFinderRecord,
   type FinderRecord,
+  type LocalDiscoveryDriver,
 } from '../../src/domain/file-completion/discovery-policy.ts'
 import {
   compareScoredPaths,
@@ -36,6 +38,7 @@ import type { PathCandidate } from '../../src/domain/file-completion/types.ts'
 const POSIX: PathQueryEnvironment = { homeDir: '/home/fixture', windowsHost: false }
 const WINDOWS: PathQueryEnvironment = { homeDir: 'C:\\Users\\fixture', windowsHost: true }
 const CWD = '/ws'
+const abort = new AbortController().signal
 
 test('the resolver is environment-neutral: the explicit windowsHost selects the join, never process.platform', () => {
   // The same raw token and cwd under the two INJECTED host facts. Every expected
@@ -318,6 +321,75 @@ test('an unterminated record over the IO bound trips the stream guard', () => {
   const stream = createFinderRecordStream(() => {})
   assert.equal(stream.push('a'.repeat(MAX_UNTERMINATED_FINDER_CODE_UNITS + 1)), false)
   assert.equal(stream.finish(), false)
+})
+
+// ── the discovery routes (Owner amendment D2: direct-child-first scopes) ──
+
+/** A recording driver: `find` never answers unless the test wants it to. */
+function recordingDriver(options: {
+  readonly entries?: readonly { name: string; kind: 'file' | 'directory' }[]
+  readonly findResult?: readonly PathCandidate[] | null
+} = {}): LocalDiscoveryDriver & { calls: string[] } {
+  const calls: string[] = []
+  return {
+    calls,
+    async listDirectory(_baseDir, relativeDir) {
+      calls.push(`list:${relativeDir}`)
+      return (options.entries ?? []).map(entry => ({
+        name: entry.name,
+        kind: entry.kind,
+        descendable: entry.kind === 'directory',
+      }))
+    },
+    async find() {
+      calls.push('find')
+      return options.findResult ?? []
+    },
+  }
+}
+
+test('an explicit scope answers from its DIRECT children first and never calls the finder', async () => {
+  // The Owner-amended contract (D2): the user explicitly named this directory,
+  // so its own matching entries answer before any subtree work — however many
+  // deeper candidates a finder would race in.
+  const driver = recordingDriver({
+    entries: [
+      { name: 'tmp', kind: 'directory' },
+      { name: 'home', kind: 'directory' },
+    ],
+  })
+  const found = await discoverForQuery(resolvePathQuery('/tm', '/', POSIX), driver, abort)
+  assert.deepEqual(found, [{ path: 'tmp', kind: 'directory' }],
+    'the direct child matching the term is the answer')
+  assert.ok(!driver.calls.includes('find'),
+    `the finder never runs when a direct child matches: ${JSON.stringify(driver.calls)}`)
+  // The empty-term scoped listing keeps its complete-children route.
+  const listing = await discoverForQuery(resolvePathQuery('/', '/', POSIX), driver, abort)
+  assert.deepEqual(listing.map(candidate => candidate.path), ['tmp', 'home'])
+})
+
+test('a direct prefix match outranks a deeper exact basename on an explicit scope', async () => {
+  // The finder WOULD return `dir/src` (exact basename, score 100); the direct
+  // child `srcray` matches only as a prefix (80). The amended contract answers
+  // with the direct match and skips the subtree race entirely.
+  const driver = recordingDriver({
+    entries: [{ name: 'srcray', kind: 'file' }],
+    findResult: [{ path: 'src', kind: 'file' }],
+  })
+  const found = await discoverForQuery(resolvePathQuery('dir/sr', '/ws', POSIX), driver, abort)
+  assert.deepEqual(found, [{ path: 'srcray', kind: 'file' }])
+  assert.ok(!driver.calls.includes('find'))
+})
+
+test('a scoped query with NO direct match keeps the finder and its result merge', async () => {
+  const driver = recordingDriver({
+    entries: [{ name: 'sub', kind: 'directory' }],
+    findResult: [{ path: 'sub/utility.ts', kind: 'file' }],
+  })
+  const found = await discoverForQuery(resolvePathQuery('dir/uti', '/ws', POSIX), driver, abort)
+  assert.deepEqual(found, [{ path: 'sub/utility.ts', kind: 'file' }],
+    'no direct child matches `uti`, so the finder answers')
+  assert.equal(driver.calls.filter(call => call === 'find').length, 1)
 })
 
 test('a record that reaches the bound and is terminated in a later chunk still trips the guard', () => {

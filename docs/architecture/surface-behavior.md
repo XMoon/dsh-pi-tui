@@ -2324,9 +2324,12 @@ Attachment completion and intake are Client-local:
 
 - `/attach` and `/image` carry path-argument completion backed by
   `suggestPathArgument(argument, clientCwd)`. An unscoped term uses
-  finder-first discovery with a bounded recursive fallback; a scoped empty term
-  lists that directory's children; a scoped non-empty term constrains the
-  search; Windows drive/UNC tokens keep their own dialect.
+  time-budgeted finder-first discovery with a bounded recursive fallback; a
+  scoped empty term lists that directory's children; a scoped NON-empty term
+  matches the named directory's DIRECT children first — when any direct child
+  matches, exactly those candidates answer (no recursion into the subtree);
+  with no matching direct child the time-budgeted finder, then the bounded
+  fallback, search the scope. Windows drive/UNC tokens keep their own dialect.
 - Tab on an empty argument is a file-completion site only for commands that
   declare path-argument completion; accepting a directory reopens its children.
   The Client cwd is read at call time and stays independent of the Session/Host
@@ -2705,7 +2708,15 @@ falls back to the scanner. The scoped route never calls the official provider,
 so explicitly named excluded directories, symlink scopes, parent and absolute
 paths all work; the accepted candidate is materialized as an absolute Host path,
 and ranking scores the SCOPE-RELATIVE candidate (the home prefix never
-fabricates matches).
+fabricates matches). For a non-empty scoped term the same direct-child-first
+rule as Client path completion applies: a matching DIRECT child of the named
+scope answers without recursion; only when none matches does the scoped search
+descend. Both localities bound the finder's whole work with one shared wall
+clock budget; an over-budget run is a finder failure whose partial output is
+never presented — the existing bounded fallback answers instead. A finder run
+that finishes within the budget is ranked exactly into the all-types and
+directory-only top 50 sets; no claim of a global best-50 over an arbitrarily
+large tree is made when the work does not finish in time.
 
 - POSIX boundary: on a POSIX Host a backslash is an ordinary filename character,
   but the reused path resolver selects its Windows dialect from the token alone

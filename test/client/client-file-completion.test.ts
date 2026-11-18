@@ -282,6 +282,56 @@ test('a single terminated record over the IO bound is a finder failure with the 
     'the over-bound record never surfaces as a candidate')
 })
 
+test('a finder run over the wall budget is a failure: the bounded fallback answers, never a partial result', async (t) => {
+  const life = testLifecycle(t)
+  const cwd = life.tempDir('dsh-client-budget-')
+  writeFileSync(join(cwd, 'fallback-needle.txt'), 'x')
+  // A finder that never finishes inside the budget (amendment D4): the run is
+  // killed and settles as a FAILURE, so the existing bounded fallback answers
+  // and no streamed partial candidate is presented as success. A short
+  // injected budget keeps the test fast and deterministic (sleep 5 >> 50ms).
+  const finder = fakeFinder(life, `printf '%s\\0' 'finder-only-needle.txt'; sleep 5`)
+  const driver = new ClientLocalDiscoveryDriver(finder.path, 50)
+  const candidates = await discoverForQuery(resolvePathQuery('needle', cwd, ENV), driver, abort)
+  const paths = candidates.map(candidate => candidate.path)
+  assert.ok(paths.includes('fallback-needle.txt'),
+    `the bounded fallback answers after the budget: ${JSON.stringify(paths)}`)
+  assert.ok(!paths.includes('finder-only-needle.txt'),
+    'a killed finder contributes no partial match')
+})
+
+test('a burst of records whose processing exceeds the budget is a failure, not a starvation', async (t) => {
+  const life = testLifecycle(t)
+  const cwd = life.tempDir('dsh-client-budget-burst-')
+  writeFileSync(join(cwd, 'fallback-needle.txt'), 'x')
+  // Amendment D5: the deadline is re-checked at least every 64 records, so a
+  // synchronous classification burst cannot starve the budget timer. 100k
+  // records cost well over the injected 30ms budget on any host.
+  const records = Array.from({ length: 100_000 }, (_value, index) =>
+    `nested/deep/needle-${String(index).padStart(6, '0')}.txt`)
+  const finder = scriptedFinder(life, records)
+  const driver = new ClientLocalDiscoveryDriver(finder.path, 30)
+  const candidates = await discoverForQuery(resolvePathQuery('needle', cwd, ENV), driver, abort)
+  const paths = candidates.map(candidate => candidate.path)
+  assert.ok(paths.includes('fallback-needle.txt'),
+    `the bounded fallback answers after the processing budget: ${JSON.stringify(paths.slice(0, 3))}`)
+  assert.ok(!paths.some(path => path.startsWith('nested/deep/needle-')),
+    'the over-budget run contributes no partial match')
+})
+
+test('an abort during a budgeted finder run cancels without a fallback scan', async (t) => {
+  const life = testLifecycle(t)
+  const cwd = life.tempDir('dsh-client-budget-abort-')
+  writeFileSync(join(cwd, 'visible.txt'), 'x')
+  const finder = fakeFinder(life, 'sleep 5')
+  const driver = new ClientLocalDiscoveryDriver(finder.path, 5000)
+  const controller = new AbortController()
+  const pending = discoverForQuery(resolvePathQuery('visible', cwd, ENV), driver, controller.signal)
+  setTimeout(() => controller.abort(), 20)
+  assert.deepEqual(await pending, [],
+    'the user abort settles as cancellation, never as a timeout or a fallback scan')
+})
+
 test('a successful finder with no matches is a valid empty result, never a fallback scan', async (t) => {
   const life = testLifecycle(t)
   const cwd = life.tempDir('dsh-client-empty-')

@@ -779,7 +779,11 @@ test('review finding (round 4): failed fd falls back to the bounded scan', async
   const life = testLifecycle(t)
   const { workspace, sibling } = outsideCwdFixture(life)
   const root = workspace
-  writeFileSync(join(sibling, 'fallback-scan.ts'), 'x')
+  // The scoped query must have NO matching direct child (the amended D2
+  // contract answers direct matches before any finder work), so the fixture
+  // nests the wanted file and the term only matches it in the subtree.
+  mkdirSync(join(sibling, 'sub'))
+  writeFileSync(join(sibling, 'sub', 'fallback-scan.ts'), 'x')
   // A fake fd that always FAILS (non-zero exit): discovery must fall back
   // to the bounded recursive scan, never report a false "no match".
   const fakeFd = join(life.tempDir('dsh-conv-fdcrash-'), 'fd')
@@ -788,7 +792,7 @@ test('review finding (round 4): failed fd falls back to the bounded scan', async
   // The explicit `../sibling` session route through the failing finder: the
   // neutral discovery policy runs the bounded scan when the finder fails.
   const driver = new DirectHostDiscoveryDriver(fakeFd)
-  const resolved = resolvePathQuery('../sibling/fallback', root, { homeDir: homedir(), windowsHost: false })
+  const resolved = resolvePathQuery('../sibling/fal', root, { homeDir: homedir(), windowsHost: false })
   const found = await discoverForQuery(resolved, driver, abort)
   assert.ok(found.some(item => item.path.includes('fallback-scan.ts')), `fallback missing: ${JSON.stringify(found)}`)
 })

@@ -314,7 +314,10 @@ test('the HOME shorthand searches exactly the directory its absolute value names
   const expected: Record<string, readonly string[]> = {
     '~': [join(lexical, 'Downloads'), join(lexical, 'lexical-only.ts')],
     '~/': [join(lexical, 'Downloads'), join(lexical, 'lexical-only.ts')],
-    '~/Down': [join(lexical, 'Downloads'), join(lexical, 'Downloads', 'decoy.txt')],
+    // The term matches the NESTED decoy's basename but no direct child of the
+    // home scope — `loads` would path-match `Downloads` and take the
+    // non-recursive direct route (amendment D2).
+    '~/decoy': [join(lexical, 'Downloads', 'decoy.txt')],
   }
   const ctx = new Context()
   await ctx.plugin(LocalFileSystem)
@@ -377,10 +380,16 @@ test('a Host-absolute scope is searched without any workspace containment rule',
   mkdirSync(join(outside, 'logs'))
   writeFileSync(join(outside, 'logs', 'app.log'), 'x')
   const h = harness(life, { 'logs/app.log': 'y' })
-  const paths = okItems(await listPiTuiHostFileReferences(h.agent, `${outside}/lo`, abort, h.deps))
+  // `log` matches the direct child `logs` (amendment D2: a direct match
+  // answers without recursion), and a second scoped query with a term that
+  // matches no direct child still scans into the subtree.
+  const direct = okItems(await listPiTuiHostFileReferences(h.agent, `${outside}/log`, abort, h.deps))
     .map(item => item.path)
-  assert.equal(paths[0], `${outside}/logs`, `the absolute scope answers first: ${JSON.stringify(paths)}`)
-  assert.ok(paths.includes(`${outside}/logs/app.log`), 'the absolute scope scans without containment rules')
+  assert.deepEqual(direct, [`${outside}/logs`],
+    `a direct-child match answers the absolute scope non-recursively: ${JSON.stringify(direct)}`)
+  const paths = okItems(await listPiTuiHostFileReferences(h.agent, `${outside}/app`, abort, h.deps))
+    .map(item => item.path)
+  assert.equal(paths[0], `${outside}/logs/app.log`, `the absolute scope scans without containment rules: ${JSON.stringify(paths)}`)
   assert.deepEqual(h.officialCalls, [])
 })
 
@@ -398,7 +407,9 @@ test('the HOME shorthand scores the scope-relative candidate, never the absolute
     'the absolute HOME prefix never fabricates matches')
   assert.deepEqual(h.officialCalls, [], 'the home shorthand stays on the scoped route')
   // POSITIVE CONTROL: a genuine relative match still completes, absolute.
-  const paths = okItems(await listPiTuiHostFileReferences(h.agent, '~/Down', abort, h.deps)).map(item => item.path)
+  // The term matches the nested file's basename but no direct child of the
+  // home scope (amendment D2 keeps a direct match non-recursive).
+  const paths = okItems(await listPiTuiHostFileReferences(h.agent, '~/loads.', abort, h.deps)).map(item => item.path)
   assert.ok(paths.includes(join(home, 'Downloads', 'loads.txt')),
     `a real home-scope match still completes: ${JSON.stringify(paths)}`)
 })
@@ -432,12 +443,15 @@ test('a late home-scope directory survives 100 earlier finder records and stays 
   )
 })
 
-test('the HOME shorthand uses the Host home and returns ABSOLUTE paths, never `~/...`', async (t) => {  const life = testLifecycle(t)
+test('the HOME shorthand uses the Host home and returns ABSOLUTE paths, never `~/...`', async (t) => {
+  const life = testLifecycle(t)
   const home = life.tempDir('dsh-hfa-home-')
   mkdirSync(join(home, 'Downloads'))
   writeFileSync(join(home, 'Downloads', 'loads.txt'), 'x')
   const h = harness(life, {}, { homeDir: home })
-  const paths = okItems(await listPiTuiHostFileReferences(h.agent, '~/Down', abort, h.deps)).map(item => item.path)
+  // The term matches the nested file's basename but no direct child of the
+  // home scope, so the scoped recursive search finds the file (amendment D2).
+  const paths = okItems(await listPiTuiHostFileReferences(h.agent, '~/loads.', abort, h.deps)).map(item => item.path)
   assert.ok(paths.includes(join(home, 'Downloads', 'loads.txt')),
     `the Host HOME scope drives discovery: ${JSON.stringify(paths)}`)
   assert.ok(paths.every(path => isAbsolute(path) && !path.startsWith('~')),
@@ -488,9 +502,10 @@ test('an ambiguous POSIX token containing a backslash is NOT claimed by the scop
     assert.deepEqual(h.driverCalls, [], `the Host scanner is never entered for an ambiguous POSIX token: ${query}`)
   }
   // NEGATIVE CONTROL against the boundary over-reaching: a pure POSIX path is
-  // still scoped, so the guard is not a blanket POSIX opt-out.
+  // still scoped, so the guard is not a blanket POSIX opt-out. `uti` matches
+  // no direct child of `src/` (amendment D2), so the scoped search answers.
   const scoped = harness(life, { 'src/deep/utility.ts': 'x' })
-  const scopedPaths = okItems(await listPiTuiHostFileReferences(scoped.agent, 'src/deep', abort, scoped.deps))
+  const scopedPaths = okItems(await listPiTuiHostFileReferences(scoped.agent, 'src/uti', abort, scoped.deps))
     .map(item => item.path)
   assert.ok(scopedPaths.includes('src/deep/utility.ts'),
     `a pure POSIX path is still scoped: ${JSON.stringify(scopedPaths)}`)

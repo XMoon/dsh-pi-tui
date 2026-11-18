@@ -14,6 +14,7 @@
  * @module @xmoon76/dsh-pi-tui/domain/file-completion/discovery-policy
  */
 
+import { scorePathCandidate } from './ranking.ts'
 import type { PathCandidate, PathCompletionQuery } from './types.ts'
 
 /** The recursive scan bound (kimi's MAX_FALLBACK_SCAN): counts DESCENDED
@@ -21,6 +22,20 @@ import type { PathCandidate, PathCompletionQuery } from './types.ts'
  * a whole-tree fuzzy query like `@src` must find a root-level `src/` even when
  * the workspace holds >2000 deeper entries. */
 export const MAX_FALLBACK_SCAN = 2000
+
+/**
+ * The Finder wall-clock budget (Owner amendment D4, 2026-11-18): ONE spawn's
+ * whole work — from spawn to the last record processed and the normal close —
+ * must finish within this budget. An over-budget run is killed, settles as a
+ * FINDER FAILURE (`null`) and the neutral policy answers through the existing
+ * bounded fallback; a partial result is never presented as success. Both
+ * locality adapters share this neutral constant, and no user configuration
+ * exists for it. This is an initial product budget decision, not a measured
+ * universal fact: the adapters also check the deadline between record batches
+ * (a synchronous `statSync` burst cannot fire a timer), so an in-progress
+ * syscall on a network mount can still exceed the wall clock end to end.
+ */
+export const MAX_FINDER_WALL_MS = 500
 
 /** The bound on ONE not-yet-terminated finder record (or, for a finder that
  * ignored `--print0` and emitted only newline text, on its whole output while
@@ -164,8 +179,16 @@ export interface FinderRecordStream {
  * still unknown the bytes accumulate as one not-yet-terminated fragment (bounded
  * by {@link MAX_UNTERMINATED_FINDER_CODE_UNITS}), and the first NUL proves the
  * NUL dialect and commits that fragment as its first record.
+ *
+ * `shouldStop` is consulted before every record: when the consumer has
+ * abandoned this run (a deadline, an abort or a failure settled first), the
+ * stream stops consuming and reports `false` instead of continuing to feed a
+ * discarded collector.
  */
-export function createFinderRecordStream(emit: (record: FinderRecord) => void): FinderRecordStream {
+export function createFinderRecordStream(
+  emit: (record: FinderRecord) => void,
+  options: { readonly shouldStop?: () => boolean } = {},
+): FinderRecordStream {
   let pending = ''
   let nulDialect = false
   let overflowed = false
@@ -179,6 +202,7 @@ export function createFinderRecordStream(emit: (record: FinderRecord) => void): 
       pending += chunk
       let boundary = pending.indexOf('\0')
       while (boundary !== -1) {
+        if (options.shouldStop?.() === true) return false
         nulDialect = true
         // The bound protects against ONE pathological record, however it
         // arrives: a record completing in this chunk is over the bound when
@@ -273,10 +297,19 @@ function listingCandidates(entries: readonly LocalDirectoryEntry[]): readonly Pa
 }
 
 /**
- * Answer one resolved query with discovery facts: a scoped LISTING (empty
- * term) reads the target directory's direct children; a scoped or whole-tree
- * FUZZY query uses the locality finder when available and the bounded subtree
- * scan otherwise. Paths are relative to the QUERY's search base.
+ * Answer one resolved query with discovery facts. The routes, in order:
+ *
+ * 1. A scoped LISTING (explicit scope, empty term) reads the target
+ *    directory's direct children.
+ * 2. An explicit scope with a NON-EMPTY term matches the named directory's
+ *    DIRECT children first (Owner amendment D2): when any direct child scores
+ *    on the term, exactly those candidates are returned — the user explicitly
+ *    named this directory, so its own entries outrank a whole-subtree race and
+ *    deeper candidates never run this round. Only with NO matching direct
+ *    child (or an unreadable directory) does the query continue below.
+ * 3. A scoped or whole-tree FUZZY query uses the locality finder when
+ *    available and the bounded subtree scan otherwise. Paths are relative to
+ *    the QUERY's search base.
  * @param query - the resolved path query (searchBase already absolute).
  * @param driver - the locality's discovery boundary.
  * @param signal - the editor's request abort.
@@ -294,6 +327,21 @@ export async function discoverForQuery(
     const direct = await driver.listDirectory(query.searchBase, '', signal)
     if (signal.aborted || direct === null) return []
     return listingCandidates(direct)
+  }
+  // Direct-child-first for an explicitly named scope (Owner amendment D2):
+  // the user typed this directory, so its own matching entries answer before
+  // any subtree work. An unreadable directory or a zero-score entry set keeps
+  // the original finder/fallback routes below.
+  if (query.explicitScope) {
+    if (signal.aborted) return []
+    const direct = await driver.listDirectory(query.searchBase, '', signal)
+    if (signal.aborted) return []
+    if (direct !== null) {
+      const lowerTerm = query.searchTerm.toLowerCase()
+      const matches = listingCandidates(direct)
+        .filter(candidate => scorePathCandidate(candidate, lowerTerm) > 0)
+      if (matches.length > 0) return matches
+    }
   }
   // Fuzzy (scoped or whole-tree): finder first, bounded scan fallback. A
   // Windows-dialect token stays on the scan path (a POSIX finder does not

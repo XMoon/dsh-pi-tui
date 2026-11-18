@@ -19,6 +19,8 @@ import { homedir } from 'node:os'
 import { isAbsolute, join } from 'node:path'
 import { DirectHostFilePort, resolveFdPath } from '../../src/runtime/direct/host-file-direct.ts'
 import { isExplicitHostFileQuery } from '../../src/runtime/direct/host-file-augmentation-direct.ts'
+import { discoverForQuery } from '../../src/domain/file-completion/discovery-policy.ts'
+import { resolvePathQuery } from '../../src/domain/file-completion/query.ts'
 import { RemoteHostFilePort } from '../../src/runtime/remote/host-file-remote.ts'
 import { createPiTuiHostFileReferenceRuntime } from '../../src/runtime/remote/pi-tui-file-reference-host-bridge.ts'
 import { createObservableGenerationHarness } from '../support/remote-generation.ts'
@@ -671,6 +673,32 @@ test('a Host finder record over the IO bound is a finder failure with the bounde
     `the bounded fallback answers: ${JSON.stringify(items)}`)
   assert.ok(!items.some(item => item.path.length > 65_536),
     'the over-bound Host record never surfaces as a candidate')
+})
+
+test('a Host finder run over the wall budget is a failure with the bounded fallback', async (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-hostfile-budget-')
+  writeFileSync(join(root, 'fallback-needle.txt'), 'x')
+  // Amendment D4 on the Host locality: the same neutral budget, the same
+  // failure semantics, proven at the Host driver's owning seam (the port-level
+  // routing is covered by the other cases). A short injected budget keeps the
+  // case deterministic.
+  const finder = fakeFd(life, `printf '%s\\0' 'finder-only-needle.txt'; sleep 5`)
+  const driver = new DirectHostDiscoveryDriver(finder, 50)
+  const candidates = await driver.find(root, 'needle', abort)
+  assert.ok(candidates === null, 'an over-budget Host run is a finder FAILURE, never a partial success')
+  const fallback = await discoverForQuery(
+    resolvePathQuery(`${root}/needle`, root, { homeDir: homedir(), windowsHost: false }),
+    driver,
+    abort,
+  )
+  // The scope's OWN matching direct child answered (amendment D2: a direct
+  // match needs no finder and no subtree scan), and the killed finder
+  // contributed nothing.
+  assert.ok(fallback.some(item => item.path === 'fallback-needle.txt'),
+    `the scope still answers after the budget: ${JSON.stringify(fallback)}`)
+  assert.ok(!fallback.some(item => item.path.includes('finder-only-needle')),
+    'a killed Host finder contributes no partial match')
 })
 
 test('the Host-home shorthand returns an ABSOLUTE Host path, never a literal ~/... value', async (t) => {
