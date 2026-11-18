@@ -2,7 +2,12 @@
  * Host-owned local ACP v1 front door over a pathname Unix domain socket.
  *
  * The one Host process that already owns a canonical profile scope opens a
- * bounded `acp.sock` inside that 0700 scope. The listener speaks ACP v1 with
+ * bounded `acp.sock` on ONE platform-specific physical endpoint: Linux keeps the
+ * 0700 scope directory and binds through `/proc/self/fd` so an over-long scope
+ * pathname still fits the kernel `sun_path`; Darwin publishes the same
+ * private-bind inode onto a short profile-scoped
+ * `/private/tmp/dpt-<uid>-<scope40>/acp.sock` pathname that stays within the
+ * Darwin `sockaddr_un.sun_path` byte limit. The listener speaks ACP v1 with
  * the official `@agentclientprotocol/sdk` stream and request/notification
  * dispatch, but it owns NO Agent, Session or business method in this phase: a
  * valid `initialize` is answered with the installed bundle's own identity and
@@ -172,6 +177,16 @@ const SOCKET_FILE = 'acp.sock'
  *  server.close() unlink always targets this private dir, so it can never delete
  *  a foreign inode at the contract path. */
 const PRIVATE_DIR = '.acp-priv'
+/** The trusted, OS-owned sticky parent of the Darwin profile-scoped endpoint. Never
+ *  `$TMPDIR`, `DSH_HOME` or the user home: those are variable and unbounded. */
+const DARWIN_SOCKET_PARENT = '/private/tmp'
+/** Darwin `sockaddr_un.sun_path` capacity in bytes INCLUDING the trailing NUL. */
+const DARWIN_SUN_PATH_BYTES = 104
+/** Prefix of the one deterministic Darwin endpoint root per profile scope. */
+const DARWIN_ROOT_PREFIX = 'dpt-'
+/** Scope-id hex characters kept in the Darwin root name (the existing 160-bit
+ *  collision budget the local seats already use). */
+const DARWIN_SCOPE_PREFIX_HEX = 40
 
 const NEWLINE = 0x0a
 
@@ -211,7 +226,12 @@ export class LocalAcpError extends Error {
 
 /** The one Host-entry-local lifecycle handle for the bound local ACP listener. */
 export interface LocalAcpListener {
-  /** The logical socket pathname inside the 0700 scope (never the fd-shortened bind path). */
+  /**
+   * The PUBLIC contract socket pathname this listener published: Linux
+   * `<scope.dir>/acp.sock` and Darwin the short profile-scoped
+   * `/private/tmp/dpt-<uid>-<scope40>/acp.sock`. Never the private bind name and
+   * never a client-side fd-shortened alias.
+   */
   readonly socketPath: string
   /** The number of live connections this listener currently owns. */
   readonly connectionCount: () => number
@@ -848,6 +868,99 @@ function fdSocketPath(dirFd: number): string {
   return `/proc/self/fd/${String(dirFd)}/${SOCKET_FILE}`
 }
 
+/** The physical, profile-scoped endpoint the Darwin Host binds and publishes. */
+export interface DarwinAcpSocketPaths {
+  /** The public contract pathname independent ACP peers connect to. */
+  readonly publicPath: string
+  /** The deterministic 0700 root owned by this uid and profile scope. */
+  readonly privateRoot: string
+  /** The private bind name the inode is published from (never a client address). */
+  readonly privateBindPath: string
+}
+
+/**
+ * Compute the FROZEN Darwin endpoint from the real profile scope id and the
+ * current OS uid: `/private/tmp/dpt-<decimal-uid>-<scope40>` holds one 0700 root
+ * whose `acp.sock` is the public address and whose `.acp-priv/acp.sock` is the
+ * private bind name. No configuration, environment variable or user path can
+ * change it, and both names must fit `sun_path[104]` INCLUDING the NUL. The
+ * caller creates/admits the root; this function performs no filesystem IO.
+ *
+ * @param scope - the canonical profile scope (its `scopeId` is a 64-hex SHA-256).
+ * @param uid - the current process uid; the root is scoped to this exact uid.
+ * @returns the public, root and private bind pathnames.
+ * @throws {LocalAcpError} `LOCAL_ACP_SOCKET_PATH_UNSUPPORTED` when a name exceeds
+ *   the Darwin kernel path capacity.
+ */
+export function darwinAcpSocketPaths(scope: LocalScope, uid: number): DarwinAcpSocketPaths {
+  const privateRoot = join(DARWIN_SOCKET_PARENT, `${DARWIN_ROOT_PREFIX}${String(uid)}-${scope.scopeId.slice(0, DARWIN_SCOPE_PREFIX_HEX)}`)
+  const publicPath = join(privateRoot, SOCKET_FILE)
+  const privateBindPath = join(privateRoot, PRIVATE_DIR, SOCKET_FILE)
+  if (Buffer.byteLength(publicPath, 'utf8') + 1 > DARWIN_SUN_PATH_BYTES
+    || Buffer.byteLength(privateBindPath, 'utf8') + 1 > DARWIN_SUN_PATH_BYTES) {
+    throw new LocalAcpError(
+      'LOCAL_ACP_SOCKET_PATH_UNSUPPORTED',
+      'local acp: the Darwin endpoint exceeds the kernel sun_path byte limit',
+    )
+  }
+  return { publicPath, privateRoot, privateBindPath }
+}
+
+/**
+ * Admit the trusted Darwin parent and create/reuse the ONE deterministic 0700
+ * root of this profile scope. `/private/tmp` must be the OS-owned, root-owned
+ * sticky directory the frozen endpoint contract relies on; the root itself must
+ * be a real directory owned by this uid (a symlink, file, foreign-owned entry or
+ * an EXISTING directory that is not 0700 is refused and never written through or
+ * silently repaired). The root is REUSED across ACP Off/On and Host crashes —
+ * only this scope's root is ever touched.
+ */
+function ensureDarwinSocketRoot(privateRoot: string, uid: number): void {
+  let parent: ReturnType<typeof lstatSync>
+  try {
+    parent = lstatSync(DARWIN_SOCKET_PARENT)
+  } catch (error) {
+    throw new LocalAcpError('LOCAL_ACP_SOCKET_PATH_UNSUPPORTED', 'local acp: the Darwin socket parent is not available', error)
+  }
+  if (parent.isSymbolicLink() || !parent.isDirectory() || parent.uid !== 0 || (parent.mode & 0o1000) === 0) {
+    throw new LocalAcpError(
+      'LOCAL_ACP_SOCKET_PATH_UNSUPPORTED',
+      'local acp: the Darwin socket parent is not a root-owned sticky directory',
+    )
+  }
+  let created = true
+  try {
+    mkdirSync(privateRoot, { mode: 0o700 })
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
+      throw new LocalAcpError('LOCAL_ACP_SOCKET_PATH_UNSUPPORTED', 'local acp: the Darwin endpoint root could not be created', error)
+    }
+    created = false
+  }
+  const info = lstatSync(privateRoot)
+  if (info.isSymbolicLink() || !info.isDirectory() || info.uid !== uid) {
+    throw new LocalAcpError(
+      'LOCAL_ACP_UNSAFE_SOCKET',
+      'local acp: the Darwin endpoint root is not a private directory owned by this uid',
+    )
+  }
+  if (created) {
+    // The endpoint contract is 0700 for the root THIS run just created; force it
+    // so the caller's umask can never weaken the mode.
+    chmodSync(privateRoot, 0o700)
+    return
+  }
+  // An EXISTING root must already be the private directory the contract names.
+  // It is never silently repaired: a non-private mode means the directory is not
+  // the one this contract created.
+  if ((info.mode & 0o777) !== 0o700) {
+    throw new LocalAcpError(
+      'LOCAL_ACP_UNSAFE_SOCKET',
+      'local acp: the existing Darwin endpoint root is not a 0700 directory owned by this uid',
+    )
+  }
+}
+
 /** A ≤500ms connect probe used only to distinguish an inert stale socket from a live one. */
 function probeSocket(path: string): Promise<'open' | 'refused' | 'unknown'> {
   return new Promise(resolve => {
@@ -900,19 +1013,38 @@ export async function startLocalAcpListener(options: StartLocalAcpListenerOption
   if (!Number.isInteger(maxConnections) || maxConnections < 1 || maxConnections > 16) {
     throw new LocalAcpError('LOCAL_ACP_INVALID_MAX_CONNECTIONS', 'local acp: maxConnections must be an integer in 1..16')
   }
-  const logicalPath = join(scope.dir, SOCKET_FILE)
-  // The scope dirfd is used ONLY to probe/reclaim a stale pathname BEFORE bind.
-  const scopeDirFd = openScopeDirFd(scope)
-  const scopeProbePath = fdSocketPath(scopeDirFd)
-  // The server is BOUND inside a private, owner-only subdirectory (fd-shortened)
-  // and its inode is then hard-linked onto the contract path (then the private
-  // name is unlinked). Node's net.Server.close() unlinks the path it was told to
-  // listen on; because that private name is already gone, the automatic unlink is
-  // always ENOENT and can never touch a foreign inode at the contract path. The
-  // private dirfd is kept OPEN across close, so
-  // its /proc/self/fd path can never be redirected to another directory by
-  // fd-number reuse — the fix does NOT rely on a released fd staying unused.
-  const privDir = join(scope.dir, PRIVATE_DIR)
+  const platform = process.platform
+  const darwin = platform === 'darwin'
+  if (platform !== 'linux' && !darwin) {
+    throw new LocalAcpError('LOCAL_ACP_SOCKET_PATH_UNSUPPORTED', 'local acp: the local ACP endpoint is supported on Linux and macOS only')
+  }
+  // ONE platform-specific physical endpoint: Linux keeps the scope directory and
+  // shortens the bind through /proc/self/fd; Darwin publishes the inode onto the
+  // short, profile-scoped /private/tmp endpoint. Both are derived from the SAME
+  // canonical scope fact, never from $TMPDIR, $HOME or the current directory.
+  const darwinPaths = darwin ? darwinAcpSocketPaths(scope, uid) : undefined
+  const logicalPath = darwinPaths === undefined ? join(scope.dir, SOCKET_FILE) : darwinPaths.publicPath
+  let scopeDirFd: number | undefined
+  if (darwinPaths === undefined) {
+    // The scope dirfd is used ONLY to probe/reclaim a stale pathname BEFORE bind.
+    scopeDirFd = openScopeDirFd(scope)
+  } else {
+    // Admit the OS-owned sticky parent and create/reuse THIS scope's 0700 root
+    // before any probe, bind or publish uses the endpoint.
+    ensureDarwinSocketRoot(darwinPaths.privateRoot, uid)
+  }
+  const scopeProbePath = scopeDirFd === undefined ? logicalPath : fdSocketPath(scopeDirFd)
+  // The server is BOUND inside a private, owner-only subdirectory (fd-shortened
+  // on Linux, a direct short name on Darwin) and its inode is then hard-linked
+  // onto the contract path (then the private name is unlinked). Node's
+  // net.Server.close() unlinks the path it was told to listen on; because that
+  // private name is already gone, the automatic unlink is always ENOENT and can
+  // never touch a foreign inode at the contract path. On Linux the private dirfd
+  // is kept OPEN across close, so its /proc/self/fd path can never be redirected
+  // to another directory by fd-number reuse — the fix does NOT rely on a released
+  // fd staying unused. Darwin holds no directory fd and never uses /proc or
+  // /dev/fd.
+  const privDir = darwinPaths === undefined ? join(scope.dir, PRIVATE_DIR) : join(darwinPaths.privateRoot, PRIVATE_DIR)
   let privFd: number | undefined
   let scopeDirFdClosed = false
   let privFdClosed = false
@@ -946,7 +1078,7 @@ export async function startLocalAcpListener(options: StartLocalAcpListenerOption
   }
 
   const closeScopeDirFd = (): void => {
-    if (scopeDirFdClosed) return
+    if (scopeDirFdClosed || scopeDirFd === undefined) return
     scopeDirFdClosed = true
     try {
       closeSync(scopeDirFd)
@@ -1090,8 +1222,15 @@ export async function startLocalAcpListener(options: StartLocalAcpListenerOption
       }
     }
     chmodSync(privDir, 0o700)
-    privFd = openSync(privDir, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW)
-    const privBindPath = fdSocketPath(privFd)
+    let privBindPath: string
+    if (darwinPaths === undefined) {
+      privFd = openSync(privDir, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW)
+      privBindPath = fdSocketPath(privFd)
+    } else {
+      // Darwin binds the direct short private name; no directory fd is held and
+      // no /proc or /dev/fd shortcut is used.
+      privBindPath = darwinPaths.privateBindPath
+    }
     // Recover a stale PRIVATE bind name left by a crash BETWEEN the private bind
     // and the private-name unlink (e.g. SIGKILL mid-startup). Only this one
     // anchored private name is considered — never a scope-wide scan, never another
