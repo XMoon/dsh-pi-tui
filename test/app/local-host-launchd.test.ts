@@ -318,10 +318,15 @@ test('service matching requires the exact file, program, argv, cwd, sinks and an
     ['working directory', { ...service, workingDirectory: `${service.workingDirectory}-other` }],
     ['stdout path', { ...service, stdoutPath: `${service.stdoutPath}-other` }],
     ['environment', { ...service, environment: { ...service.environment, SPLIT_PROCESS_PROFILE: 'other' } }],
+    ['extra job environment', { ...service, environment: { ...service.environment, NODE_OPTIONS: '--require /tmp/evil.mjs' } }],
   ]
   for (const [label, value] of mismatches) {
     assert.equal(launchdServiceMatches(fx.facts, unit, value), false, `${label} mismatch must not match`)
   }
+  assert.equal(launchdServiceMatches(fx.facts, unit, {
+    ...service,
+    environment: { ...service.environment, OSLogRateLimit: '64', XPC_SERVICE_NAME: unit.label },
+  }), true, 'launchd-injected environment keys do not break the exact user-anchor match')
 })
 
 // ── file identity and atomic installation ──────────────────────────────────
@@ -578,6 +583,13 @@ test('the fixed-definition reader keeps harmless edits and rejects execution tri
     ),
     (error: unknown) => error instanceof LocalScopeError && error.code === 'HOST_MANAGER_UNIT_CONFLICT',
   )
+  assert.throws(
+    () => assertLaunchdFileDefinition(
+      fx.facts,
+      canonical.replace('<key>RunAtLoad</key>', '<key>RunAtL&#111;ad</key>'),
+    ),
+    (error: unknown) => error instanceof LocalScopeError && error.code === 'HOST_MANAGER_UNIT_CONFLICT',
+  )
 })
 
 test('stop boots out only a matched job, verifies removal and never signals twice', async t => {
@@ -590,7 +602,7 @@ test('stop boots out only a matched job, verifies removal and never signals twic
   launchctl.job.pid = 4242
   const unit = ownedUnitOf(fx, deps)
   launchctl.calls.length = 0
-  const result = await stopLaunchdService(fx.facts, unit, { ...deps, sleep: async () => {}, now: () => 0 })
+  const result = await stopLaunchdService(fx.facts, unit, { ...deps, sleep: async () => {}, now: () => 0 }, 4242)
   assert.equal(result.stopped, true)
   assert.deepEqual(launchctl.calls, [
     ['print', `gui/${String(UID)}/${unit.label}`],
@@ -664,6 +676,62 @@ test('stop re-proves the plist identity after the async inspection and before bo
   assert.equal(base.calls.some(args => args[0] === 'bootout'), false, 'a plist changed after inspection is never booted out')
 })
 
+test('stop refuses an idle job that becomes running at the final inspection without an expected PID', async t => {
+  const fx = fixture(t)
+  const base = fakeLaunchctl(fx, { loaded: false })
+  const deps = depsOf(fx, { launchctl: base.run })
+  await installLaunchdUnit(fx.facts, deps)
+  base.job.loaded = true
+  base.job.state = 'not running'
+  delete base.job.pid
+  const unit = ownedUnitOf(fx, deps)
+  let labelPrints = 0
+  const launchctl: LaunchctlRunner = async args => {
+    if (args[0] === 'print' && args[1] === `gui/${String(UID)}/${unit.label}`) {
+      labelPrints += 1
+      if (labelPrints === 1) {
+        base.job.state = 'running'
+        base.job.pid = 5151
+      }
+    }
+    return await base.run(args)
+  }
+  base.calls.length = 0
+  await assert.rejects(
+    stopLaunchdService(fx.facts, unit, depsOf(fx, { launchctl, sleep: async () => {}, now: () => 0 })),
+    (error: unknown) => error instanceof LocalScopeError && error.code === 'HOST_MANAGER_UNIT_CONFLICT',
+  )
+  assert.equal(base.calls.some(args => args[0] === 'bootout'), false, 'an idle-to-running race without an authenticated PID is never booted out')
+})
+
+test('stop refuses an idle job that becomes spawn scheduled at the final inspection without an expected PID', async t => {
+  const fx = fixture(t)
+  const base = fakeLaunchctl(fx, { loaded: false })
+  const deps = depsOf(fx, { launchctl: base.run })
+  await installLaunchdUnit(fx.facts, deps)
+  base.job.loaded = true
+  base.job.state = 'not running'
+  delete base.job.pid
+  const unit = ownedUnitOf(fx, deps)
+  let labelPrints = 0
+  const launchctl: LaunchctlRunner = async args => {
+    if (args[0] === 'print' && args[1] === `gui/${String(UID)}/${unit.label}`) {
+      labelPrints += 1
+      if (labelPrints === 1) {
+        base.job.state = 'spawn scheduled'
+        delete base.job.pid
+      }
+    }
+    return await base.run(args)
+  }
+  base.calls.length = 0
+  await assert.rejects(
+    stopLaunchdService(fx.facts, unit, depsOf(fx, { launchctl, sleep: async () => {}, now: () => 0 })),
+    (error: unknown) => error instanceof LocalScopeError && error.code === 'HOST_MANAGER_UNIT_CONFLICT',
+  )
+  assert.equal(base.calls.some(args => args[0] === 'bootout'), false, 'an idle-to-starting race without an authenticated PID is never booted out')
+})
+
 test('uninstall removes only the verified plist and leaves the private logs', async t => {
   const fx = fixture(t)
   const launchctl = fakeLaunchctl(fx, { loaded: false })
@@ -677,7 +745,7 @@ test('uninstall removes only the verified plist and leaves the private logs', as
   writeFileSync(logs.stderr, 'stderr retained\n', { mode: 0o600 })
   const unit = ownedUnitOf(fx, deps)
   launchctl.calls.length = 0
-  await uninstallLaunchdUnit(fx.facts, unit, { ...deps, sleep: async () => {}, now: () => 0 })
+  await uninstallLaunchdUnit(fx.facts, unit, { ...deps, sleep: async () => {}, now: () => 0 }, 4242)
   assert.equal(existsSync(installed.filePath), false)
   assert.equal(launchctl.calls.some(args => args[0] === 'bootout'), true)
   assert.equal(readFileSync(logs.stdout, 'utf8'), 'stdout retained\n')
@@ -884,7 +952,7 @@ test('native launchd bootstrap/kickstart/bootout runs the real foreground entry'
   const logs = launchdLogPaths(facts.scopeDir)
   assert.equal(statSync(logs.stdout).mode & 0o777, 0o600)
   assert.equal(statSync(logs.stderr).mode & 0o777, 0o600)
-  await stopLaunchdService(facts, unit, deps)
+  await stopLaunchdService(facts, unit, deps, pid)
   const goneDeadline = Date.now() + 10_000
   while (Date.now() < goneDeadline) {
     try { process.kill(pid as number, 0) } catch { break }
@@ -892,6 +960,6 @@ test('native launchd bootstrap/kickstart/bootout runs the real foreground entry'
   }
   assert.throws(() => process.kill(pid as number, 0), 'the booted-out child process must really exit')
   assert.equal((await inspectLaunchdService(unit, deps)).kind, 'not-loaded')
-  await uninstallLaunchdUnit(facts, unit, deps)
+  await uninstallLaunchdUnit(facts, unit, deps, pid)
   assert.equal(existsSync(installed.filePath), false)
 })

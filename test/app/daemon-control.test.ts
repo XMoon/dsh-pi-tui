@@ -1338,6 +1338,83 @@ test('darwin restart refuses a loaded running job with no authenticated Host rec
     'an unproven old process is never replaced by a new start')
 })
 
+test('darwin stop refuses an idle job that becomes running after the snapshot with no record', { skip: process.platform !== 'darwin' ? 'the Darwin admin seat requires macOS' : false }, async t => {
+  const fx = fixture(t)
+  writeOwnedLaunchd(fx)
+  const launchctl = fakeLaunchd(fx, { loaded: true, state: 'not running', pid: undefined })
+  const label = buildLaunchdLabel(fx.scope.scopeId)
+  let labelPrints = 0
+  const run: LaunchctlRunner = async args => {
+    if (args[0] === 'print' && args[1] === `gui/${String(UID)}/${label}`) {
+      labelPrints += 1
+      if (labelPrints === 2) {
+        launchctl.job.state = 'running'
+        launchctl.job.pid = 5151
+      }
+    }
+    return await launchctl.run(args)
+  }
+  const result = await runDaemonControl({ verb: 'stop' }, fx.profile, darwinDepsOf(fx, {
+    launchctl: run,
+    readRecord: () => undefined,
+    inspectProcess: () => 'dead',
+  }))
+  assertCode(result, 3, /IDENTITY_OR_OWNERSHIP_REFUSED/u)
+  assert.equal(launchctl.calls.some(args => args[0] === 'bootout'), false, 'an idle-to-running race without a record is never booted out')
+})
+
+test('darwin restart refuses an idle job that becomes running after the snapshot with no record', { skip: process.platform !== 'darwin' ? 'the Darwin admin seat requires macOS' : false }, async t => {
+  const fx = fixture(t)
+  writeOwnedLaunchd(fx)
+  const launchctl = fakeLaunchd(fx, { loaded: true, state: 'not running', pid: undefined })
+  const label = buildLaunchdLabel(fx.scope.scopeId)
+  let labelPrints = 0
+  const run: LaunchctlRunner = async args => {
+    if (args[0] === 'print' && args[1] === `gui/${String(UID)}/${label}`) {
+      labelPrints += 1
+      if (labelPrints === 2) {
+        launchctl.job.state = 'running'
+        launchctl.job.pid = 5151
+      }
+    }
+    return await launchctl.run(args)
+  }
+  const result = await runDaemonControl({ verb: 'restart' }, fx.profile, darwinDepsOf(fx, {
+    launchctl: run,
+    readRecord: () => undefined,
+    inspectProcess: () => 'dead',
+  }))
+  assertCode(result, 3, /IDENTITY_OR_OWNERSHIP_REFUSED/u)
+  assert.equal(launchctl.calls.some(args => args[0] === 'bootout' || args[0] === 'bootstrap' || args[0] === 'kickstart'), false,
+    'an idle-to-running race never starts a replacement')
+})
+
+test('darwin uninstall refuses an idle job that becomes running after the snapshot with no record', { skip: process.platform !== 'darwin' ? 'the Darwin admin seat requires macOS' : false }, async t => {
+  const fx = fixture(t)
+  writeOwnedLaunchd(fx)
+  const launchctl = fakeLaunchd(fx, { loaded: true, state: 'not running', pid: undefined })
+  const label = buildLaunchdLabel(fx.scope.scopeId)
+  let labelPrints = 0
+  const run: LaunchctlRunner = async args => {
+    if (args[0] === 'print' && args[1] === `gui/${String(UID)}/${label}`) {
+      labelPrints += 1
+      if (labelPrints === 2) {
+        launchctl.job.state = 'running'
+        launchctl.job.pid = 5151
+      }
+    }
+    return await launchctl.run(args)
+  }
+  const result = await runDaemonControl({ verb: 'uninstall' }, fx.profile, darwinDepsOf(fx, {
+    launchctl: run,
+    readRecord: () => undefined,
+    inspectProcess: () => 'dead',
+  }))
+  assertCode(result, 3, /IDENTITY_OR_OWNERSHIP_REFUSED/u)
+  assert.equal(launchctl.calls.some(args => args[0] === 'bootout'), false, 'an idle-to-running race is never booted out')
+  assert.equal(existsSync(launchdPlistPathOf(fx)), true, 'a refused uninstall keeps the plist')
+})
+
 test('darwin uninstall refuses a job that starts with another PID after the snapshot with zero bootout', { skip: process.platform !== 'darwin' ? 'the Darwin admin seat requires macOS' : false }, async t => {
   const fx = fixture(t)
   const record = darwinRecordOf(fx.scope)

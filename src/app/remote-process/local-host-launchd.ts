@@ -376,6 +376,15 @@ function readFixedInteger(content: string, key: string): number {
 export function assertLaunchdFileDefinition(facts: LaunchdUnitFacts, content: string): void {
   const cleaned = content.replace(/<!--[\s\S]*?-->/gu, '')
   const label = buildLaunchdLabel(facts.scopeId)
+  // The canonical file uses only the five predefined entities. Numeric or
+  // custom entity references can decode a key/value into a different name that
+  // our literal key parser (and the launchd semantics) would not agree on;
+  // refuse that syntax entirely before any manager call.
+  const numericReference = /&#(?:[0-9]+|x[0-9a-f]+);/iu.test(cleaned)
+  const customEntity = /&(?!(?:amp|lt|gt|quot|apos);)[a-z][a-z0-9._-]*;/iu.test(cleaned)
+  if (numericReference || customEntity) {
+    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'launchd: the profile plist contains an unsupported XML entity spelling; refusing to bootstrap it')
+  }
   const logs = launchdLogPaths(facts.scopeDir)
   const reject = (reason: string): never => {
     throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', `launchd: the profile plist has a changed fixed launch definition (${reason}); refusing to bootstrap it`)
@@ -809,6 +818,8 @@ export function launchdServiceMatches(
   service: LaunchdLoadedService,
 ): boolean {
   const logs = launchdLogPaths(facts.scopeDir)
+  const injected = new Set(['OSLogRateLimit', 'XPC_SERVICE_NAME'])
+  const userEnvironment = Object.entries(service.environment).filter(([key]) => !injected.has(key))
   return service.type === 'LaunchAgent'
     && service.path === unit.resolvedPath
     && service.program === facts.nodePath
@@ -818,9 +829,13 @@ export function launchdServiceMatches(
     && service.workingDirectory === facts.profileRealpath
     && service.stdoutPath === logs.stdout
     && service.stderrPath === logs.stderr
-    && service.environment.DSH_HOME === facts.dshHome
-    && service.environment.SPLIT_PROCESS_DSH_ANCHOR === facts.dshAnchor
-    && service.environment.SPLIT_PROCESS_PROFILE === facts.profile
+    && userEnvironment.length === 3
+    && userEnvironment.every(([key, value]) => {
+      if (key === 'DSH_HOME') return value === facts.dshHome
+      if (key === 'SPLIT_PROCESS_DSH_ANCHOR') return value === facts.dshAnchor
+      if (key === 'SPLIT_PROCESS_PROFILE') return value === facts.profile
+      return false
+    })
 }
 
 /** Prove the user GUI domain is queryable before an install writes anything. */
@@ -1073,26 +1088,27 @@ export async function stopLaunchdService(
   if (!launchdServiceMatches(facts, unit, observed.service)) {
     throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'launchd: the loaded job does not match this profile plist; refusing to stop an unknown process')
   }
-  if (expectedPid !== undefined) {
-    if (observed.service.pid !== undefined) {
-      if (observed.service.state !== 'running') {
-        throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'launchd: the loaded job has a process in an unconfirmed state; refusing to stop')
-      }
-      if (observed.service.pid !== expectedPid) {
-        throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'launchd: the loaded job PID changed before the stop; refusing to bootout an unverified process')
-      }
-    } else {
-      if (observed.service.state === 'running' || observed.service.state === 'spawn scheduled') {
-        throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'launchd: the loaded job is starting without a verifiable PID; refusing to stop')
-      }
-      if (observed.service.state !== 'not running') {
-        throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', `launchd: the loaded job is in an unconfirmed state (${observed.service.state === '' ? 'unknown' : observed.service.state}); refusing to stop`)
-      }
-      // A genuinely not-running job has no process to signal; bootout is the
-      // safe way to remove the loaded definition.
+  if (observed.service.pid !== undefined) {
+    if (observed.service.state !== 'running') {
+      throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'launchd: the loaded job has a process in an unconfirmed state; refusing to stop')
     }
+    if (expectedPid === undefined) {
+      throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'launchd: the loaded job has a process but no authenticated Host record proves its identity; refusing to stop')
+    }
+    if (observed.service.pid !== expectedPid) {
+      throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'launchd: the loaded job PID changed before the stop; refusing to bootout an unverified process')
+    }
+  } else {
+    if (observed.service.state === 'running' || observed.service.state === 'spawn scheduled') {
+      throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'launchd: the loaded job is starting without a verifiable PID; refusing to stop')
+    }
+    if (observed.service.state !== 'not running') {
+      throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', `launchd: the loaded job is in an unconfirmed state (${observed.service.state === '' ? 'unknown' : observed.service.state}); refusing to stop`)
+    }
+    // A genuinely not-running, PID-less job has no process to signal; bootout
+    // is the safe way to remove the loaded definition.
   }
-  const stopped = observed.service.pid !== undefined || observed.service.state === 'running' || observed.service.state === 'spawn scheduled'
+  const stopped = observed.service.pid !== undefined
   assertLaunchdFileIdentity(unit, facts, deps)
   const uid = effectiveUid(deps)
   const launchctl = deps.launchctl ?? runLaunchctl
