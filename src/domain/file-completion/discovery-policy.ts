@@ -228,7 +228,14 @@ export function createFinderRecordStream(
         // cut off mid-record, so this run produced no complete-result authority.
         return pending === ''
       }
-      for (const record of normalizeFinderRecords(pending)) emit(record)
+      for (const record of normalizeFinderRecords(pending)) {
+        // The deadline can settle the run DURING this synchronous loop (the
+        // newline dialect has no per-record buffer to push through). Once the
+        // consumer has abandoned the run, emitting the remaining records would
+        // feed a discarded collector — stop immediately and fail the run.
+        if (options.shouldStop?.() === true) return false
+        emit(record)
+      }
       pending = ''
       return true
     },

@@ -701,6 +701,19 @@ test('a Host finder run over the wall budget is a failure with the bounded fallb
     'a killed Host finder contributes no partial match')
 })
 
+test('a Host newline-dialect finder finishing over the budget settles as failure, never partial success', async (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-hostfile-budget-newline-')
+  // Fewer than 40 newline records (below the 64-record in-loop check): the
+  // post-finish deadline re-check is the ONLY guard for this slow close path.
+  const finder = fakeFd(life,
+    `i=0; while [ $i -lt 40 ]; do printf 'needle-%s\\n' "$i"; i=$((i+1)); done; sleep 0.2`)
+  const driver = new DirectHostDiscoveryDriver(finder, 30)
+  const result = await driver.find(root, 'needle', abort)
+  assert.equal(result, null,
+    'a run that crosses the wall budget inside finish() is a finder FAILURE')
+})
+
 test('the Host-home shorthand returns an ABSOLUTE Host path, never a literal ~/... value', async (t) => {
   const life = testLifecycle(t)
   const root = fixtureWorkspace(life)

@@ -332,6 +332,25 @@ test('an abort during a budgeted finder run cancels without a fallback scan', as
     'the user abort settles as cancellation, never as a timeout or a fallback scan')
 })
 
+test('a newline-dialect finder that finishes over the budget is a failure with the fallback answer', async (t) => {
+  const life = testLifecycle(t)
+  const cwd = life.tempDir('dsh-client-budget-newline-')
+  writeFileSync(join(cwd, 'fallback-needle.txt'), 'x')
+  // A fake finder that ignores --print0: it emits 40 newline records, while a
+  // payload payload takes long enough that the post-finish deadline check is
+  // the ONLY guard left (fewer than 64 records, so the per-record check never
+  // fires). The run must still fail and the fallback must answer.
+  const finder = fakeFinder(life,
+    `i=0; while [ $i -lt 40 ]; do printf 'needle-%s\\n' "$i"; i=$((i+1)); done; sleep 0.2`)
+  const driver = new ClientLocalDiscoveryDriver(finder.path, 30)
+  const candidates = await discoverForQuery(resolvePathQuery('needle', cwd, ENV), driver, abort)
+  const paths = candidates.map(candidate => candidate.path)
+  assert.ok(paths.includes('fallback-needle.txt'),
+    `the bounded fallback answers after the post-finish budget check: ${JSON.stringify(paths)}`)
+  assert.ok(!paths.some(path => path.startsWith('needle-')),
+    'the over-budget newline run contributes no partial match')
+})
+
 test('a successful finder with no matches is a valid empty result, never a fallback scan', async (t) => {
   const life = testLifecycle(t)
   const cwd = life.tempDir('dsh-client-empty-')

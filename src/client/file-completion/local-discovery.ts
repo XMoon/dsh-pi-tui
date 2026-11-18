@@ -256,6 +256,13 @@ function runClientFinder(
         settle(null)
         return
       }
+      // `finish()` synchronously classifies any buffered newline-dialect
+      // records; a slow burst can cross the deadline INSIDE it. Re-check AFTER
+      // the work, so an over-budget run can never settle as a success.
+      if (performance.now() >= deadline) {
+        settle(null)
+        return
+      }
       settle(collector.finish())
     })
   })

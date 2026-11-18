@@ -317,6 +317,23 @@ test('a NUL-free newline dialect is only accepted at close; a truncated NUL run 
     'a failed stream is never consumed as a partial result')
 })
 
+test('a stop requested during newline-dialect finish emits no further records', () => {
+  // Review RFL-005: finish() must honor the same abandonment signal as push().
+  const records: FinderRecord[] = []
+  let emitted = 0
+  const stream = createFinderRecordStream(record => {
+    records.push(record)
+    emitted += 1
+    if (emitted === 1) stopped = true
+  }, { shouldStop: () => stopped })
+  let stopped = false
+  assert.equal(stream.push('one\ntwo\nthree\n'), true)
+  assert.equal(stream.finish(), false,
+    'the run was abandoned during the first record, so finish fails')
+  assert.deepEqual(records.map(record => record.path), ['one'],
+    'remaining buffered records are never emitted into a discarded collector')
+})
+
 test('an unterminated record over the IO bound trips the stream guard', () => {
   const stream = createFinderRecordStream(() => {})
   assert.equal(stream.push('a'.repeat(MAX_UNTERMINATED_FINDER_CODE_UNITS + 1)), false)
