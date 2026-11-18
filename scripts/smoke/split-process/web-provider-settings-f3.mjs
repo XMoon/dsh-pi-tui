@@ -789,7 +789,7 @@ export async function runWebProviderSettingsF3(context) {
     // Server-side Search is not the billed Search API: its Billing row is inert
     // and says so instead of pretending to be writable.
     await assertInertBilling(clientA, documentPath, ROW.searchBilling, 'Not selected',
-      'Billing is EDITABLE HERE only while the DeepSeek',
+      'Billing is EDITABLE HERE',
       'UI_L6 A search billing route gate')
 
     const beforeSearchProviderBack = sectionsSnapshot(documentPath)
@@ -808,7 +808,7 @@ export async function runWebProviderSettingsF3(context) {
     assertWebEffective(documentPath, { searchProvider: 'deepseek-search-api', fetchProvider: 'http' },
       'UI_L6 A fetch provider')
     await assertInertBilling(clientA, documentPath, ROW.fetchBilling, 'Not selected',
-      'Billing is EDITABLE HERE only while the DeepSeek',
+      'Billing is EDITABLE HERE',
       'UI_L6 A fetch billing route gate')
 
     const beforeFetchProviderBack = sectionsSnapshot(documentPath)
