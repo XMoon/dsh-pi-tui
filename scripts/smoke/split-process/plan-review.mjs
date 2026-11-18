@@ -11,8 +11,10 @@
  *   3. the next authored prompt (`FR8_PLAN_APPROVE`) makes the scripted Host
  *      model call the OFFICIAL `exit_plan_mode` tool, which asks through the
  *      official `userQuestions` waterfall — the Client's ONE Question seat
- *      renders it, `View plan` reads the real transcript card, `Esc` returns
- *      without answering, and the official Approve row settles it;
+ *      renders it, the reading row shows the plan body (the real transcript card
+ *      when it can be located, else the official question's own full-text
+ *      fallback — both legitimate), `Esc` returns without answering, and the
+ *      official Approve row settles it;
  *   4. the Host records the EXACT `tool/call` / `tool/result` (`approved:true`)
  *      and the durable `plan/mode=false` lands only AFTER that result, inside
  *      the next accepted pre-step;

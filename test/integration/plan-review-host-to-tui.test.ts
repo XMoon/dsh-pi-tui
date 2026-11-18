@@ -25,6 +25,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { createUserMessage, LlmAdapter, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
+import { TuiApp } from '../../src/tui-app.ts'
 import { startS4D3Application, type S4D3Application } from '../support/application-fixture.ts'
 
 const PLAN = '# FR8 official plan\n- 检查真实 Host\n- 保存会话事实\n\nFR8_PLAN_TAIL_END'
@@ -257,6 +258,37 @@ async function enterPlanMode(harness: Harness): Promise<void> {
   assert.equal(harness.plan().active, true, 'the official /plan command commits plan mode')
 }
 
+/**
+ * Count the REAL answer admissions of the ONE mounted Question flow.
+ *
+ * `TuiApp.settleQuestions` is the production handler the mounted `QuestionFlow`
+ * calls on submit; its idempotence guard runs INSIDE it, so a re-entrant submit
+ * still arrives here and is counted even though its promise settles once. The
+ * unbound original is saved and called with the live receiver, so the
+ * production path is unchanged and the teardown restores the same identity.
+ * Only ANSWER attempts (`answers !== undefined`) are counted; a local cancel
+ * passes `undefined`.
+ *
+ * @returns the live admission list plus a release function.
+ */
+function observeAnswerAdmissions(): { readonly admissions: () => readonly string[][]; dispose(): void } {
+  const property = 'settleQuestions' as const
+  const original = (TuiApp.prototype as unknown as Record<string, unknown>)[property] as
+    (this: unknown, state: unknown, answers: readonly { id: string; selected: readonly string[] }[] | undefined) => void
+  const entries: string[][] = []
+  const patched = function patchedSettle(this: unknown, state: unknown, answers: readonly { id: string; selected: readonly string[] }[] | undefined): void {
+    if (answers !== undefined) entries.push(answers.map(answer => `${answer.id}:${answer.selected.join(',')}`))
+    original.call(this, state, answers)
+  }
+  ;(TuiApp.prototype as unknown as Record<string, unknown>)[property] = patched
+  return {
+    admissions: () => entries.map(entry => [...entry]),
+    dispose(): void {
+      ;(TuiApp.prototype as unknown as Record<string, unknown>)[property] = original
+    },
+  }
+}
+
 /** The first durable `plan/mode` write AFTER the given event index. */
 function planModeAfter(harness: Harness, index: number): { readonly active: boolean; readonly at: number } | undefined {
   const events = harness.events()
@@ -480,7 +512,9 @@ test('a dismissed review concludes the turn with approved:false and never writes
   assert.doesNotMatch(app.view(), /Approve plan/u, 'the seat is really gone')
 })
 
-test('an ordinary ask_user_question keeps the generic Question/Review flow and a repeated Enter never writes a second answer', async t => {
+test('an ordinary ask_user_question keeps the generic Question/Review flow and a repeated Enter writes exactly one answer', async t => {
+  const admissions = observeAnswerAdmissions()
+  t.after(() => { admissions.dispose() })
   const harness = await startHarness(t)
   const { app, adapter, agent } = harness
   adapter.scripts.push({
@@ -523,17 +557,25 @@ test('an ordinary ask_user_question keeps the generic Question/Review flow and a
   assert.deepEqual(harness.asks(), [{ answer: { answers: [{ id: 'fr8-generic', selected: ['Proceed'] }] } }],
     'the official ask resolved with the chosen option')
 
-  // A repeated Enter after the settlement must not re-open the settled question
+  // THE ANSWER ADMISSION COUNT: the production submit handler admitted exactly
+  // ONE answer. This counter sits at the REAL handler entry, BEFORE its
+  // idempotence guard, so a re-entrant submit is counted even though its promise
+  // settles once.
+  assert.deepEqual(admissions.admissions(), [['fr8-generic:Proceed']],
+    'the mounted Question flow admitted exactly one answer')
+
+  // A repeated Enter must not admit a second answer, re-open the settled seat,
   // or produce a second official call/result. The settled question CARD stays in
-  // the transcript by contract, so the closed SEAT is proven by the answer
-  // summary the seat paints — not by the absence of the question text. (The
-  // settlement list is NOT an attempt counter: a settled promise observes once.)
+  // the transcript by contract, so the closed SEAT is proven by the answered
+  // summary the seat paints — not by the absence of the question text.
   assert.match(app.view(), /Question Continue the qualification\? \[ok\]/u,
     'the settled question paints its answered summary instead of the form')
   assert.doesNotMatch(app.view(), /\[1\] Proceed|> Proceed/u, 'the settled form is no longer the live seat')
   app.vt.sendInput('\r')
 
   await app.settle(80) // bounded observation window for a negative fact
+  assert.deepEqual(admissions.admissions(), [['fr8-generic:Proceed']],
+    'a repeated Enter admits no second answer')
   assert.equal(harness.events().filter(event => event.type === 'tool/result').length, 1,
     'the settled call produces exactly one tool result')
   assert.equal(harness.events().filter(event => event.type === 'tool/call').length, 1,
