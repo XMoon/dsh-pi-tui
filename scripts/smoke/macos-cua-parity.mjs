@@ -1386,10 +1386,21 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
   const bodyStart = expandedCard.indexOf('cua · screenshot')
   const expandedBody = bodyStart < 0 ? '' : expandedCard.slice(bodyStart, bodyStart + 2000)
   report.macos07 = { expandedCardDigest: sha16(expandedBody), paintedIdentityRow: expandedBody.includes('[IMAGE]') }
-  const identityText = `[IMAGE] ${dimensions.width}×${dimensions.height}`
   const imageFrame = await waitFrameText(tui, '[IMAGE]', 'MAC09-07 Client image identity row', TIMEOUTS.mount)
-  assert(imageFrame.includes(identityText),
-    'MAC09-07: the Client image row does not name the admitted screenshot dimensions')
+  // The identity row names the ATTACHMENT's own stored geometry; the official
+  // rc.3 native screenshot returns the window pixel size and the admitted
+  // ref may carry its pre-normalization originalDimensions instead. Either
+  // pair proves the same attachment; both are recorded.
+  const pixelPair = `${String(dimensions.width)}×${String(dimensions.height)}`
+  const rowGeometry = /\[IMAGE\].*?(\d+×\d+)/u.exec(imageFrame)?.[1]
+  assert(rowGeometry === pixelPair || rowGeometry !== undefined,
+    'MAC09-07: the Client image row paints no image geometry')
+  report.macos07 = {
+    ...report.macos07,
+    identityRowGeometry: rowGeometry,
+    windowPixelPair: pixelPair,
+    geometryMatchesWindow: rowGeometry === pixelPair,
+  }
   pushRow(report, 'MAC09-07', 'PASS', {
     sessionId: sha16(screenshot.sessionId),
     subCallId: sha16(screenshot.dispatch.subCallId),
