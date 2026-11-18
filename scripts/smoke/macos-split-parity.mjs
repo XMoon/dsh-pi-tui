@@ -49,6 +49,7 @@ import { spawn, spawnSync } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import {
   chmodSync,
+  copyFileSync,
   existsSync,
   linkSync,
   lstatSync,
@@ -67,6 +68,7 @@ import {
 import { connect, createServer } from 'node:net'
 import { homedir, tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 import { inspectSplitCandidate, createSplitSmokeProfile } from '../lib/split-smoke-profile.mjs'
 import { SplitSmokeAssertionError } from '../lib/split-smoke-diagnostics.mjs'
@@ -277,15 +279,17 @@ function daemonInvocation(installation, args) {
   return [dshInvocation[0], ...dshInvocation.slice(1), '--profile', 'pi-tui', 'daemon', ...args]
 }
 
-function daemonEnvironment(installation) {
-  return { ...installation.env, NO_COLOR: '1' }
+function daemonEnvironment(installation, extraEnv = {}) {
+  return { ...installation.env, NO_COLOR: '1', ...extraEnv }
 }
 
-/** Run one management command to completion and keep its real exit/stdout/stderr. */
-function runDaemonCommand(installation, args) {
+/** Run one management command to completion and keep its real exit/stdout/stderr.
+ *  `extraEnv` reaches the Host spawned by start/restart (the daemon launcher
+ *  inherits this process environment). */
+function runDaemonCommand(installation, args, extraEnv = {}) {
   const result = spawnSync(daemonInvocation(installation, args)[0], daemonInvocation(installation, args).slice(1), {
     cwd: installation.profileDir,
-    env: daemonEnvironment(installation),
+    env: daemonEnvironment(installation, extraEnv),
     encoding: 'utf8',
     timeout: TIMEOUTS.daemon,
   })
@@ -1413,6 +1417,47 @@ async function bindForeignAcpEndpoint(endpoint) {
 }
 
 /**
+ * Install the repository's existing Host-workload fixture (the same one the
+ * selection lanes use) into the isolated profile and point its default model at
+ * the fixture provider. The `long-turn` scenario holds a REAL Host-admitted turn
+ * on a release barrier, so the D2ACP stage can disconnect an ACP View while a
+ * TUI turn is genuinely unsettled.
+ */
+function ensureHeldTurnFixture(profileDir) {
+  const source = fileURLToPath(new URL('../fixtures/split-process-host-work.mjs', import.meta.url))
+  const target = join(profileDir, 'split-process-host-work.mjs')
+  copyFileSync(source, target)
+  chmodSync(target, 0o600)
+  const patchPath = join(profileDir, 'cordis.patch.yml')
+  const stock = readFileSync(patchPath, 'utf8').replace(/\s*$/u, '')
+  const rows = [
+    '- insert:',
+    '    - id: d2acp-host-work',
+    `      name: 'file://${target}'`,
+    '      inject: [llm, tools, jobs, subagents, agents, workingDirectory, typertGateway, connection, commands, attachments]',
+    '- id: agent-default-model',
+    '  config:',
+    '    provider: c1-qualification',
+    '    model: c1',
+    '',
+  ].join('\n')
+  writeFileSync(patchPath, `${stock}\n${rows}`, { mode: 0o600 })
+}
+
+/** Read the held-turn fixture's own append-only proof records. */
+function readHeldTurnEvents(root) {
+  const path = join(root, 'events.jsonl')
+  if (!existsSync(path)) return []
+  return readFileSync(path, 'utf8').split('\n').filter(Boolean).flatMap(line => {
+    try {
+      return [JSON.parse(line)]
+    } catch {
+      return []
+    }
+  })
+}
+
+/**
  * M01-M10 on the SAME packed candidate: the real public daemon Host, a real TUI
  * Client holding a Session, and a real non-TUI Peer that enables the Host's own
  * `piTuiAcpAccess`; every ACP fact comes from a real UDS connection served by
@@ -1436,6 +1481,19 @@ async function runD2AcpScene({ installation, workRoot, report, start, projectA, 
   // Cleanup owns exactly this run's deterministic profile root; the raw path is
   // kept in memory until every owned process is gone, never in the evidence file.
   report.d2acpEndpointRoots = [endpoint.privateRoot]
+  // The repository's existing Host-workload fixture holds a REAL admitted turn
+  // on a release barrier. Every D2ACP Host boot receives the same scenario env;
+  // the barrier file is pre-created so ordinary prompts release immediately and
+  // only the M07 disconnect witness removes it.
+  const heldTurnRoot = join(workRoot, 'd2acp-held-turn')
+  mkdirSync(heldTurnRoot, { mode: 0o700 })
+  const releaseBarrier = join(heldTurnRoot, 'long-turn.release')
+  writeFileSync(releaseBarrier, 'release\n', { mode: 0o600 })
+  const d2acpHostEnv = {
+    C1_SCENARIO: 'long-turn',
+    C1_WORK_ROOT: heldTurnRoot,
+    C1_HOLD_LONG_TURN: releaseBarrier,
+  }
   const acpClients = []
   const peers = []
   const startPeer = async label => {
@@ -1491,14 +1549,14 @@ async function runD2AcpScene({ installation, workRoot, report, start, projectA, 
     return statusFields(result.stdout)
   }
   const daemonRestart = label => {
-    const result = runDaemonCommand(installation, ['restart'])
+    const result = runDaemonCommand(installation, ['restart'], d2acpHostEnv)
     assert(result.status === 0, `${label}: daemon restart exited ${String(result.status)}: ${result.stderr.slice(-500)}`)
     const fields = statusFields(result.stdout)
     assert(fields.host === 'ready', `${label}: the restarted Host is not ready (${JSON.stringify(fields)})`)
     return fields
   }
   const daemonStart = label => {
-    const result = runDaemonCommand(installation, ['start'])
+    const result = runDaemonCommand(installation, ['start'], d2acpHostEnv)
     assert(result.status === 0, `${label}: daemon start exited ${String(result.status)}: ${result.stderr.slice(-500)}`)
     const fields = statusFields(result.stdout)
     assert(fields.host === 'ready', `${label}: the started Host is not ready (${JSON.stringify(fields)})`)
@@ -1530,12 +1588,20 @@ async function runD2AcpScene({ installation, workRoot, report, start, projectA, 
     assert(report.rows.some(entry => entry.id === id && entry.status === 'PASS'),
       `M02: the inherited macOS management row ${id} is not PASS in this run`)
   }
+  // Load the held-turn fixture and the fixture model route on the CURRENT
+  // profile, then restart once: every D2ACP turn (TUI and ACP) then uses the
+  // controllable Host route.
+  ensureHeldTurnFixture(installation.profileDir)
+  const heldTurnBoot = daemonRestart('D2ACP restart with the held-turn fixture')
+  const heldTurnHost = requireHost('D2ACP host after the held-turn restart')
+  assert(heldTurnBoot.instance === heldTurnHost.instanceId.slice(0, 8),
+    'D2ACP: the held-turn restart reported a different instance')
 
   const tui = start({ name: 'd2acp-tui', cwd: projectA, installation, backend: 'daemon' })
   await waitPainted(tui, 'D2ACP TUI paint')
   await waitComposer(tui, 'D2ACP TUI composer')
   sendKeys(tui, 'd2acp tui session marker', 'D2ACP TUI prompt')
-  await waitFrameText(tui, 'stub answer', 'D2ACP TUI answer', TIMEOUTS.turn)
+  await waitFrameText(tui, 'long-turn answer', 'D2ACP TUI answer', TIMEOUTS.turn)
   const sessionA = (await waitSessionWithText(dshHome, 'd2acp tui session marker', 'D2ACP durable Session A')).sessionId
   const tuiClient = await waitClientOfSession(tui, workRoot, 'D2ACP TUI client')
   const peer = await startPeer('M01 peer')
@@ -1697,7 +1763,7 @@ async function runD2AcpScene({ installation, workRoot, report, start, projectA, 
   await waitFrameText(tuiB, sessionB, 'M06 TUI shows the SAME Session id', TIMEOUTS.mount)
   const bTuiText = 'd2acp m06 tui session b marker'
   sendKeys(tuiB, bTuiText, 'M06 TUI prompt on Session B')
-  await waitFrameText(tuiB, 'stub answer', 'M06 TUI turn on Session B', TIMEOUTS.turn)
+  await waitFrameText(tuiB, 'long-turn answer', 'M06 TUI turn on Session B', TIMEOUTS.turn)
   const headerB = await waitForHostSessionHeader(dshHome, sessionB, 'M06: Session B durable header', TIMEOUTS.process)
   assert(realpathSync(headerB.cwd) === acpWorkspaceReal,
     `M06: Session B cwd ${JSON.stringify(headerB.cwd)} is not the requested Workspace`)
@@ -1769,7 +1835,7 @@ async function runD2AcpScene({ installation, workRoot, report, start, projectA, 
   assert(eventsC !== undefined, 'M07: the prompted Session has no durable log')
   const userTexts = eventsC.filter(event => event.type === 'user/message' && JSON.stringify(event).includes(promptText))
   assert(userTexts.length === 1, `M07: exactly ONE durable user message must carry the prompt, saw ${String(userTexts.length)}`)
-  assert(eventsC.some(event => event.type === 'assistant/message' && JSON.stringify(event).includes('stub answer')),
+  assert(eventsC.some(event => event.type === 'assistant/message' && JSON.stringify(event).includes('long-turn answer')),
     'M07: the official Host writer must persist the model answer')
   assert(eventsC.some(event => event.type === 'turn/end'), 'M07: the durable turn must end')
   const updates = connPrompt.received.filter(message => message.method === 'session/update')
@@ -1780,44 +1846,45 @@ async function runD2AcpScene({ installation, workRoot, report, start, projectA, 
     'M07: an unrelated ACP connection must not receive this Session updates')
   connPrompt.close()
   await connPrompt.closed
-  // Negative: a TUI prompt on the SAME Session is submitted while the Host is
-  // SIGSTOPped (queued pending work), the ACP View is physically disconnected in
-  // that same pending window, and only then is the Host resumed. The queued TUI
-  // work must still be accepted and settle on the official Host writer; a
-  // disconnect that clears pending TUI work fails this witness.
+  // Negative: the Host's held-turn fixture admits a TUI turn on the SAME
+  // Session and holds it at the model release barrier. The ACP View is physically
+  // disconnected WHILE that Host-admitted turn is genuinely unsettled; only then
+  // is the barrier released. The TUI turn must still settle on the official Host
+  // writer. A disconnect that clears live TUI work cannot pass this witness.
   const connDisconnect = await openAcp('M07 disconnect View')
   await connDisconnect.initialize(1)
   const resumeBForDisconnect = await connDisconnect.request(2, 'session/resume', { sessionId: sessionB, cwd: acpWorkspaceReal })
   assert(isEmptyAcpResult(resumeBForDisconnect),
     `M07: the disconnect probe must attach Session B first (got ${JSON.stringify(resumeBForDisconnect?.error ?? resumeBForDisconnect?.result)})`)
-  const bQueuedText = 'd2acp m07 queued tui during acp disconnect'
-  const frozenHost = requireHost('M07 host before the frozen window')
-  process.kill(frozenHost.hostPid, 'SIGSTOP')
-  try {
-    sendKeys(tuiB, bQueuedText, 'M07 TUI prompt submitted while the Host is frozen')
-    // Let the client-side submit reach the frozen Host's kernel socket; the pass
-    // predicate remains the durable Host result after SIGCONT, never this delay.
-    await sleep(200)
-    connDisconnect.close()
-    await connDisconnect.closed
-  } finally {
-    process.kill(frozenHost.hostPid, 'SIGCONT')
-  }
-  const queuedIndex = await waitFor(() => {
+  const heldText = 'd2acp m07 held tui during acp disconnect'
+  rmSync(releaseBarrier, { force: true })
+  sendKeys(tuiB, heldText, 'M07 held TUI turn on the ACP-attached Session')
+  const held = await waitFor(() => readHeldTurnEvents(heldTurnRoot).find(event =>
+    event.kind === 'long-turn-held' && String(event.userText ?? '').includes(heldText)),
+  'M07 Host-admitted TUI turn is held', TIMEOUTS.turn)
+  assert(typeof held.sessionId === 'string' && Number.isInteger(held.attempt),
+    'M07: the held-turn fixture must name the Session and attempt')
+  connDisconnect.close()
+  await connDisconnect.closed
+  writeFileSync(releaseBarrier, 'release\n', { mode: 0o600 })
+  await waitFor(() => readHeldTurnEvents(heldTurnRoot).some(event =>
+    event.kind === 'long-turn-released' && event.sessionId === held.sessionId && event.attempt === held.attempt),
+  'M07 held TUI turn released after the ACP disconnect', TIMEOUTS.turn)
+  const heldIndex = await waitFor(() => {
     const events = hostSessionEvents(dshHome, sessionB)
     if (events === undefined) return undefined
-    const index = events.findIndex(event => event.type === 'user/message' && JSON.stringify(event).includes(bQueuedText))
+    const index = events.findIndex(event => event.type === 'user/message' && JSON.stringify(event).includes(heldText))
     return index < 0 ? undefined : index
-  }, 'M07 frozen-window TUI prompt accepted after the Host resumes', TIMEOUTS.turn)
+  }, 'M07 held TUI prompt is durable on the official Session', TIMEOUTS.turn)
   await waitFor(() => {
     const events = hostSessionEvents(dshHome, sessionB)
     if (events === undefined) return undefined
-    const rest = events.slice(queuedIndex + 1)
-    return rest.some(event => event.type === 'assistant/message' && JSON.stringify(event).includes('stub answer'))
+    const rest = events.slice(heldIndex + 1)
+    return rest.some(event => event.type === 'assistant/message' && JSON.stringify(event).includes('long-turn answer'))
       && rest.some(event => event.type === 'turn/end') ? events : undefined
-  }, 'M07 queued TUI turn settles after the ACP disconnect', TIMEOUTS.turn)
-  assert(tmuxSessionExists(tuiB) && tmuxCapture(tuiB, 'M07 TUI frame after the disconnect').includes(bQueuedText),
-    'M07: the TUI must still show its queued same-Session work after the ACP View disconnect')
+  }, 'M07 held TUI turn settles after the ACP disconnect', TIMEOUTS.turn)
+  assert(tmuxSessionExists(tuiB) && tmuxCapture(tuiB, 'M07 TUI frame after the disconnect').includes(heldText),
+    'M07: the TUI must still show its held same-Session work after the ACP View disconnect')
   sendKeys(tuiB, '/exit', 'M07 exit the Session-B TUI')
   await waitFor(() => (!tmuxSessionExists(tuiB) ? true : undefined), 'M07 Session-B TUI exits', TIMEOUTS.exit)
   const hostAfterPrompt = requireHost('M07 host')
@@ -1830,9 +1897,9 @@ async function runD2AcpScene({ installation, workRoot, report, start, projectA, 
     durableUserMessages: userTexts.length,
     ownUpdatesOnly: true,
     disconnectSameSessionTuiTurnSettled: true,
-    queuedWhileHostFrozen: true,
-    acpDisconnectInSamePendingWindow: true,
-    modelRoute: 'isolated scripted stub',
+    hostAdmittedTurnHeldAtDisconnect: true,
+    releasedAfterDisconnect: true,
+    modelRoute: 'existing Host-workload held-turn fixture',
   })
 
   // ── M08: Off retires the socket; On rebinds the SAME endpoint ────────────
