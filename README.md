@@ -161,7 +161,7 @@ dsh --profile pi-tui --continue            # 继续当前 Host Workspace 中最�
 
 ### 本地 ACP 客户端接入（Linux / macOS）
 
-ACP v1 是可选的 **Host-owned Unix socket** 入口，仅供同一操作系统用户的本机客户端连接；不提供 TCP/HTTP 监听或第二个 Host。它属于尚未发布的 **0.5.7 候选版**（对应 DSH `0.2.2-rc.3`），已发布的 0.5.6 不包含此能力。
+ACP v1 是可选的 **Host-owned Unix socket** 入口，仅供同一操作系统用户的本机客户端连接；不提供 TCP/HTTP 监听或第二个 Host。此能力自 **0.5.7** 版本起支持。
 
 **无需启动 TUI 即可配置。** 在安装好的 `pi-tui` Profile 的**用户** `cordis.patch.yml`（通常为 `<DSH_HOME>/profiles/pi-tui/cordis.patch.yml`）中添加以下条目，若已存在相同 `id` 则只修改其值。保留文件的其他内容，不要修改包内 patch：
 
