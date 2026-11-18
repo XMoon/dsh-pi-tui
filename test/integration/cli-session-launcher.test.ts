@@ -232,12 +232,16 @@ test('the real pinned dsh launcher forwards the PR2 Session grammar to tuiStartu
   // Three is the bounded parallelism of this one test: every process gets
   // independent Host persistence, and the real CLI still parses every argv.
   for (let offset = 0; offset < prepared.length; offset += 3) {
-    const results = await Promise.all(prepared.slice(offset, offset + 3).map(async ({ args, expected, isolated }) => ({
+    // A failing process must not let this test retire its temp roots while
+    // other real CLI processes from the same batch are still running.
+    const results = await Promise.allSettled(prepared.slice(offset, offset + 3).map(async ({ args, expected, isolated }) => ({
       args,
       expected,
       result: await run(args, isolated.env),
     })))
-    for (const { args, expected, result } of results) {
+    for (const outcome of results) {
+      if (outcome.status === 'rejected') throw outcome.reason
+      const { args, expected, result } = outcome.value
       assert.equal(result.status, 0, `the real launcher must exit 0 for ${args.join(' ')}:\n${result.output}`)
       assert.deepEqual(probeRecord(result.output), expected,
         `the real launcher must forward ${args.join(' ')} verbatim to tuiStartup:\n${result.output}`)
