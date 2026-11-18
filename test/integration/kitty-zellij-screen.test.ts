@@ -224,7 +224,7 @@ async function settle(app: TuiApp, vt: VirtualTerminal): Promise<void> {
  * Re-render three more times AFTER the witness is visible, so a late duplicate
  * transmission/placement remains observable by the caller's wire assertions.
  * The tests for no emission, delayed denial, and the exact-once PNG upload keep
- * the original 20-round settle() observation window below.
+ * the original 20-round negative-observation and idempotency window.
  */
 async function settlePainted(
   app: TuiApp,
