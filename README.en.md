@@ -162,6 +162,89 @@ The candidate release offers a local Linux and macOS daemon backend. **Direct (t
 
 If you edited the unit/plist/symlink/drop-in yourself: the product preserves those bytes and never rewrites them into a new build's defaults; if an old launch command, environment or drop-in prevents the new Host from authenticating, the command reports the real failure, and you adjust it through normal systemd/launchd operations. Do not read this flow as zero-downtime, automatic rollback or arbitrary in-place data downgrade.
 
+### Integrating a local ACP client (Linux / macOS)
+
+ACP v1 is an optional **Host-owned Unix socket** endpoint for local clients running as the same OS user; it is not TCP/HTTP or a second Host. This capability is supported starting with **0.5.7**.
+
+**Enable in TUI Settings.** Open `/settings → General → Start ACP automatically` and save the enabled preference to start ACP automatically on the **next Host cold boot**. To enable the ACP listener on the **currently running Host**, open `/settings → Tools → ACP Server` and switch it on. These controls are independent: saving the startup preference does not toggle the running listener, and a runtime toggle does not change the next-start preference. ACP is off by default.
+
+**Headless (no TUI required).** In the installed `pi-tui` Profile's **user** `cordis.patch.yml` (normally `<DSH_HOME>/profiles/pi-tui/cordis.patch.yml`), add this row or update the existing row with the same `id`. Keep other entries intact and do not edit the patch bundled inside the npm package:
+
+```yaml
+- id: pi-tui-acp-preferences
+  config:
+    autoStart: true
+```
+
+After saving the configuration above, use the public management commands to start the Host on a headless machine or restart an existing Host to apply the preference:
+
+```sh
+dsh --profile pi-tui daemon start      # if no Host is running
+dsh --profile pi-tui daemon restart    # if the Host runs and the preference changed
+```
+
+The basic daemon does not need `daemon install`; `restart` interrupts in-flight Turns/Jobs. `host=ready` from `daemon status` **does not prove ACP is listening**. Verify a real socket connection and successful ACP `initialize`; inspect `dsh --profile pi-tui daemon logs --lines 200` on failure.
+
+**Endpoint discovery.** `scopeId` is SHA256 of `dsh-pi-tui/local-scope/1`, decimal UID and Profile `realpath`, separated by NUL bytes. Linux uses `<DSH_HOME>/run/dsh-pi-tui/<scopeId>/acp.sock`; macOS uses `/private/tmp/dpt-<uid>-<first 40 hex characters of scopeId>/acp.sock`. The socket has mode `0600` and newly created private directories are `0700`.
+
+The following official SDK example assumes the default `~/.dsh/profiles/pi-tui` layout. For custom locations, set `DSH_HOME` or the **example-only** `ACP_PROFILE_DIR` to the directories actually resolved by DSH. Install `@agentclientprotocol/sdk@1.4.0` in a separate Node.js (>=24.9.0) client project, save the code as `acp-client.mjs` and run `node acp-client.mjs`; the Host also needs a working model/provider configuration:
+
+```js
+// acp-client.mjs — run from an independent Node.js client project
+import { createHash } from 'node:crypto'
+import { realpathSync } from 'node:fs'
+import { connect } from 'node:net'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
+import { Readable, Writable } from 'node:stream'
+import * as acp from '@agentclientprotocol/sdk'
+
+const home = realpathSync(process.env.DSH_HOME ?? join(homedir(), '.dsh'))
+const profile = realpathSync(process.env.ACP_PROFILE_DIR ?? join(home, 'profiles', 'pi-tui'))
+const uid = process.getuid()
+const id = createHash('sha256')
+  .update(['dsh-pi-tui/local-scope/1', String(uid), profile].join('\0'))
+  .digest('hex')
+const path = process.platform === 'darwin'
+  ? join('/private/tmp', 'dpt-' + uid + '-' + id.slice(0, 40), 'acp.sock')
+  : join(home, 'run', 'dsh-pi-tui', id, 'acp.sock')
+
+const socket = connect(path)
+await new Promise((resolve, reject) => {
+  socket.once('connect', resolve)
+  socket.once('error', reject)
+})
+const app = acp.client({ name: 'local-acp-example' })
+  .onNotification(acp.methods.client.session.update, ({ params }) => {
+    console.log(JSON.stringify(params.update))
+  })
+const connection = app.connect(acp.ndJsonStream(Writable.toWeb(socket), Readable.toWeb(socket)))
+try {
+  await connection.agent.request(acp.methods.agent.initialize, {
+    protocolVersion: acp.PROTOCOL_VERSION, clientCapabilities: {},
+  })
+  const { sessionId } = await connection.agent.request(acp.methods.agent.session.new, {
+    cwd: process.cwd(), mcpServers: [],
+  })
+  try {
+    const result = await connection.agent.request(acp.methods.agent.session.prompt, {
+      sessionId, prompt: [{ type: 'text', text: 'Hello' }],
+    })
+    console.log('stopReason:', result.stopReason)
+  } finally {
+    await connection.agent.request(acp.methods.agent.session.close, { sessionId })
+  }
+} finally {
+  connection.close()
+  socket.destroy()
+}
+```
+
+For an existing Session, replace `session.new` with `acp.methods.agent.session.resume`, passing `{ sessionId, cwd }`. Each ACP connection owns at most one Session View, and a Session allows at most one ACP View at a time; TUI clients are unaffected. `session/close` **only detaches** the View; it neither deletes the Session nor disposes the shared Agent. Host shutdown retires the listener, and an owned stale socket is safely reclaimed on the next start.
+
+The default maximum is **4** connections, configurable in the Host startup environment with `DSH_PI_TUI_ACP_MAX_CONNECTIONS=1..16`. Available operations include `initialize`, `session/new|resume|prompt|cancel|close`, standard text, `resource_link`, capability-negotiated prompt images and committed Assistant/Tool content. `session/list`, `session/load`, `session/set_config_option`, ACP-side MCP Server registration and dedicated file/artifact transfer are unsupported; `resource_link` never causes the Host to fetch a URI. For protocol errors inspect JSON-RPC `data.code` for `LOCAL_ACP_*`. See the [Host/Client contract](docs/architecture/host-client.md) for details.
+
+
 ## Features
 
 ### Conversation and tools

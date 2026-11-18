@@ -159,6 +159,89 @@ dsh --profile pi-tui --continue            # 继续当前 Host Workspace 中最�
 
 自己编辑过 unit/symlink/drop-in（或 launchd plist）的用户：产品只保留这些字节，不会自动改写成新 build 的默认配置；如果旧启动命令、环境或 drop-in 让新 Host 无法认证，命令会如实失败，请按正常 systemd/launchd 操作自行修改。不要把本流程理解为零中断、自动回滚或任意数据原地降级。
 
+### 本地 ACP 客户端接入（Linux / macOS）
+
+ACP v1 是可选的 **Host-owned Unix socket** 入口，仅供同一操作系统用户的本机客户端连接；不提供 TCP/HTTP 监听或第二个 Host。此能力自 **0.5.7** 版本起支持。
+
+**在 TUI 设置中开启。** 打开 `/settings → General → Start ACP automatically`，开启并保存后，ACP 将在**下一次 Host 冷启动**时自动启用；需要立即启用当前 Host 的 ACP Listener，则进入 `/settings → Tools → ACP Server` 开启。两项设置相互独立：保存自动启动偏好不会立即改变运行时状态，运行时开启也不会更改下次启动的偏好。ACP 默认关闭。
+
+**Headless（无需 TUI）。** 在已安装 `pi-tui` Profile 的**用户** `cordis.patch.yml`（通常为 `<DSH_HOME>/profiles/pi-tui/cordis.patch.yml`）中添加以下条目，若已存在相同 `id` 则只修改其值。保留文件的其他内容，不要修改包内 patch：
+
+```yaml
+- id: pi-tui-acp-preferences
+  config:
+    autoStart: true
+```
+
+保存上述配置后，在 Headless 主机上使用公开管理命令启动 Host，或重启已有 Host 使配置生效：
+
+```sh
+dsh --profile pi-tui daemon start      # Host 尚未运行时
+dsh --profile pi-tui daemon restart    # Host 已运行且配置已变更时
+```
+
+基础 Daemon 无需先 `daemon install`；`restart` 会中断进行中的 Turn/Job。`daemon status` 返回 `host=ready` **不等于 ACP 已监听**；请以实际 Socket 连接和成功的 ACP `initialize` 确认，失败时检查 `dsh --profile pi-tui daemon logs --lines 200`。
+
+**端点发现。** `scopeId` 是以 `dsh-pi-tui/local-scope/1`、十进制 UID、Profile `realpath` 组成、由 NUL 分隔后计算的 SHA256。Linux 为 `<DSH_HOME>/run/dsh-pi-tui/<scopeId>/acp.sock`；macOS 为 `/private/tmp/dpt-<uid>-<scopeId 前 40 位十六进制字符>/acp.sock`。Socket 权限为 `0600`，产品新建的私有目录为 `0700`。
+
+以下官方 SDK 示例假设默认的 `~/.dsh/profiles/pi-tui` 布局。自定义位置时将 `DSH_HOME` 或**仅供此示例使用**的 `ACP_PROFILE_DIR` 设为 DSH 实际解析的目录。在独立的 Node.js（>=24.9.0）客户端项目中先安装 `@agentclientprotocol/sdk@1.4.0`，再保存为 `acp-client.mjs` 并运行 `node acp-client.mjs`；Host 须已有可用的模型/凭据配置：
+
+```js
+// acp-client.mjs — run from an independent Node.js client project
+import { createHash } from 'node:crypto'
+import { realpathSync } from 'node:fs'
+import { connect } from 'node:net'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
+import { Readable, Writable } from 'node:stream'
+import * as acp from '@agentclientprotocol/sdk'
+
+const home = realpathSync(process.env.DSH_HOME ?? join(homedir(), '.dsh'))
+const profile = realpathSync(process.env.ACP_PROFILE_DIR ?? join(home, 'profiles', 'pi-tui'))
+const uid = process.getuid()
+const id = createHash('sha256')
+  .update(['dsh-pi-tui/local-scope/1', String(uid), profile].join('\0'))
+  .digest('hex')
+const path = process.platform === 'darwin'
+  ? join('/private/tmp', 'dpt-' + uid + '-' + id.slice(0, 40), 'acp.sock')
+  : join(home, 'run', 'dsh-pi-tui', id, 'acp.sock')
+
+const socket = connect(path)
+await new Promise((resolve, reject) => {
+  socket.once('connect', resolve)
+  socket.once('error', reject)
+})
+const app = acp.client({ name: 'local-acp-example' })
+  .onNotification(acp.methods.client.session.update, ({ params }) => {
+    console.log(JSON.stringify(params.update))
+  })
+const connection = app.connect(acp.ndJsonStream(Writable.toWeb(socket), Readable.toWeb(socket)))
+try {
+  await connection.agent.request(acp.methods.agent.initialize, {
+    protocolVersion: acp.PROTOCOL_VERSION, clientCapabilities: {},
+  })
+  const { sessionId } = await connection.agent.request(acp.methods.agent.session.new, {
+    cwd: process.cwd(), mcpServers: [],
+  })
+  try {
+    const result = await connection.agent.request(acp.methods.agent.session.prompt, {
+      sessionId, prompt: [{ type: 'text', text: 'Hello' }],
+    })
+    console.log('stopReason:', result.stopReason)
+  } finally {
+    await connection.agent.request(acp.methods.agent.session.close, { sessionId })
+  }
+} finally {
+  connection.close()
+  socket.destroy()
+}
+```
+
+已有 Session 可将 `session.new` 换成 `acp.methods.agent.session.resume`，参数为 `{ sessionId, cwd }`。每个 ACP 连接至多持有一个 Session View，同一 Session 同时至多一个 ACP View，TUI 不受此限制；`session/close` **仅 detach**，不删除 Session 或 dispose 共享 Agent。关闭 Host 会清理 Listener，自有 stale Socket 可在下一次启动时安全回收。
+
+连接数默认上限 **4**，Host 启动环境可设置 `DSH_PI_TUI_ACP_MAX_CONNECTIONS=1..16`。提供 `initialize`、`session/new|resume|prompt|cancel|close`、标准文本、`resource_link`、能力协商后的图片输入以及已提交的 Assistant/Tool 内容。不支持 `session/list`、`session/load`、`session/set_config_option`、ACP 端的 MCP Server 注册或专用文件/产物传输；`resource_link` 不代表 Host 会抓取 URI。协议错误可检查 JSON-RPC `data.code` 中的 `LOCAL_ACP_*` 分类。详细语义参见 [Host/Client 合同](docs/architecture/host-client.md)。
+
+
 ## 功能
 
 ### 对话与工具
