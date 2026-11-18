@@ -27,6 +27,8 @@ import {
   runWorkspaceNewFailureRecovery,
 } from '../smoke/split-process/workspace-failure-recovery.mjs'
 import { runInteractionNavigationFirst } from '../smoke/split-process/interaction-admission.mjs'
+import { runPlanReview } from '../smoke/split-process/plan-review.mjs'
+import { runTeamBoard } from '../smoke/split-process/team-board.mjs'
 import { runSessionWorkspaceActivity } from '../smoke/split-process/session-workspace-activity.mjs'
 import { runSessionWorkspaceEditorEntry } from '../smoke/split-process/session-workspace-editor-entry.mjs'
 import {
@@ -235,6 +237,18 @@ const CASE_REGISTRY = Object.freeze([
     id: 'interaction.workspace-first-submit-failure-recovery',
     title: 'a real refused first submit restores its attachment-free draft, Verify registers only the Workspace and a second Enter writes the marker exactly once',
     run: runWorkspaceFirstSubmitFailureRecovery,
+  }),
+  Object.freeze({
+    suite: 'interaction',
+    id: 'interaction.plan-review',
+    title: 'a real Split Client approves the OFFICIAL exit_plan_mode review through its ONE Question seat and the Host commits plan mode off only at the next accepted pre-step, while Keep planning leaves the plan active',
+    run: runPlanReview,
+  }),
+  Object.freeze({
+    suite: 'team',
+    id: 'team.board-host-to-tui',
+    title: 'the OFFICIAL team_task_create/update results reach the real Split Client\'s current /tasks Team page through the official agentTeam projection, and another Session never borrows the board',
+    run: runTeamBoard,
   }),
   Object.freeze({
     suite: 'recovery',
