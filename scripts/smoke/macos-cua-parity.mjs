@@ -1590,8 +1590,29 @@ async function sceneSplit({ installation, workRoot, report, textEditPid }) {
   const splitQuestion = await waitFrameText(tui, 'Allow computer use', 'Split Client consent Question', TIMEOUTS.consent)
   logOperator([`Split Session consent Question is painted. Attach now: ${attachCommand(tui)}`,
     'Choose "Allow for this session" exactly once. This is the Split Host/Client path.'])
-  const splitConsent = await waitCuaResult(dshHome, screenshot.sessionId, screenshot.dispatch.subCallId,
-    'Split consent resumes the dispatch', TIMEOUTS.consent)
+  // The pending Question must still be paintable when the answer is sent: an
+  // aborted ask (the flow left the seat before the submit) settles isError
+  // 'aborted before the user answered' and is an operator-timing failure, not
+  // a product one. Fail fast with that fact.
+  // Poll BOTH facts each tick: the settled result and the Question's seat
+  // liveness. A Question that leaves the seat before the answer settles is an
+  // aborted ask (operator timing), not a product failure — fail fast with that
+  // fact instead of waiting out the whole consent budget.
+  const deadline = Date.now() + TIMEOUTS.consent
+  let splitConsent
+  while (true) {
+    const events = eventsOf(dshHome, screenshot.sessionId)
+    const settled = cuaResults(events, 0).find(item => item.subCallId === screenshot.dispatch.subCallId)
+    if (settled !== undefined) { splitConsent = { result: settled, events }; break }
+    if (Date.now() > deadline) {
+      throw new SplitSmokeAssertionError('Split consent: the dispatch never settled within the consent budget')
+    }
+    if (tmuxSessionExists(tui)
+      && !tmuxCapture(tui, 'Split consent liveness').includes('Allow computer use')) {
+      throw new SplitSmokeAssertionError('Split consent: the Question left the seat before the answer was submitted (aborted ask); re-run the lane')
+    }
+    await sleep(1_000)
+  }
   assert(splitConsent.result.isError !== true,
     `Split consent failed: ${dispatchErrorCode(splitConsent.result) ?? 'unknown error'} :: ${dispatchContentText(splitConsent.result).slice(0, 400)}`)
   assert(dispatchParams(screenshot.dispatch)?.selector === String(textEditPid),
