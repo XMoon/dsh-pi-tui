@@ -166,7 +166,9 @@ If you edited the unit/plist/symlink/drop-in yourself: the product preserves tho
 
 ACP v1 is an optional **Host-owned Unix socket** endpoint for local clients running as the same OS user; it is not TCP/HTTP or a second Host. This capability is supported starting with **0.5.7**.
 
-**Configure without running a TUI.** In the installed `pi-tui` Profile's **user** `cordis.patch.yml` (normally `<DSH_HOME>/profiles/pi-tui/cordis.patch.yml`), add this row or update the existing row with the same `id`. Keep other entries intact and do not edit the patch bundled inside the npm package:
+**Enable in TUI Settings.** Open `/settings → General → Start ACP automatically` and save the enabled preference to start ACP automatically on the **next Host cold boot**. To enable the ACP listener on the **currently running Host**, open `/settings → Tools → ACP Server` and switch it on. These controls are independent: saving the startup preference does not toggle the running listener, and a runtime toggle does not change the next-start preference. ACP is off by default.
+
+**Headless (no TUI required).** In the installed `pi-tui` Profile's **user** `cordis.patch.yml` (normally `<DSH_HOME>/profiles/pi-tui/cordis.patch.yml`), add this row or update the existing row with the same `id`. Keep other entries intact and do not edit the patch bundled inside the npm package:
 
 ```yaml
 - id: pi-tui-acp-preferences
@@ -174,7 +176,7 @@ ACP v1 is an optional **Host-owned Unix socket** endpoint for local clients runn
     autoStart: true
 ```
 
-The default is `false`; the saved preference applies only on the **next Host cold boot**. The TUI also offers `/settings → General → Start ACP automatically` (the saved preference) and `/settings → Tools → ACP Server` (the current runtime switch). On a headless machine use the public management commands:
+After saving the configuration above, use the public management commands to start the Host on a headless machine or restart an existing Host to apply the preference:
 
 ```sh
 dsh --profile pi-tui daemon start      # if no Host is running
