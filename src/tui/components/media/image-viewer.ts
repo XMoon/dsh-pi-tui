@@ -63,8 +63,8 @@ export interface ImageViewerExitHit {
   readonly rows: number
 }
 
-/** One resolved pixel payload the body can place: a raw read (PNG only) or
- * the loader's scoped JPEG/WebP derivative. Both arrive as PNG base64; the
+/** One resolved pixel payload the body can place: a raw source (original MIME
+ * on iTerm2, PNG on Kitty/SIXEL) or the loader's scoped PNG derivative. The
  * KIND keeps the local `Image` from being reused across a source switch. */
 interface ResolvedPixelSource {
   readonly base64: string
@@ -378,7 +378,7 @@ export class ImageViewerPanel implements Component {
     return truncateToWidth(painted, width, '…')
   }
 
-  /** Render one resolved PNG payload at `width` and clip the rows to the grant. */
+  /** Render the resolved original/derived payload at `width` and clip to the grant. */
   private imageLines(width: number, bodyRows: number, pixel: ResolvedPixelSource, protocol: 'kitty' | 'sixel' | 'iterm2'): string[] {
     const image = this.imageFor(width, bodyRows, pixel, protocol)
     return image.render(width).slice(0, bodyRows)
@@ -424,7 +424,7 @@ export class ImageViewerPanel implements Component {
         )
         : new Image(
           pixel.base64,
-          'image/png',
+          protocol === 'iterm2' && pixel.kind === 'raw' ? this.ref.mediaType : 'image/png',
           { fallbackColor: this.theme.fallbackColor },
           {
             maxWidthCells: Math.max(1, width),
