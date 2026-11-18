@@ -473,6 +473,7 @@ test('an SVG source using the new static paint attributes is blob-admitted over 
     await waitFor('the pane painted the image node with the admitted blob', () =>
       imageCarriesBlob(fixture.pane.frames(), expectedBlobId), 30_000)
   } finally {
+    // Bounded teardown window: the fixture disposes the app, pane and Host before the next case.
     await fixture.settle()
   }
 })
