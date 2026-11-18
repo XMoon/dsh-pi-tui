@@ -367,8 +367,10 @@ export async function runDaemonControlSystemdLifecycle({ installation, trace, ds
 
     // Exercise the native systemctl edit workflow using an editor that writes
     // only the fixture's requested drop-in. script supplies systemctl's TTY.
+    // Newer systemd passes a `+<line>` hint before the drop-in path, so the
+    // drop-in file is always the editor's last argument.
     const editor = join(workDir, 'user-unit-editor.sh')
-    writeFileSync(editor, "#!/bin/sh\nprintf '%s\\n' '[Service]' 'Environment=\"MY_DROPIN_FLAG=1\"' 'RestartSec=5' > \"$1\"\n", { mode: 0o700 })
+    writeFileSync(editor, "#!/bin/sh\nfor file in \"$@\"; do :; done\nprintf '%s\\n' '[Service]' 'Environment=\"MY_DROPIN_FLAG=1\"' 'RestartSec=5' > \"$file\"\n", { mode: 0o700 })
     const edit = spawnSync('script', ['-qefc', `${SYSTEMCTL} --user edit ${unit}`, '/dev/null'], {
       env: { ...process.env, XDG_RUNTIME_DIR: runtimeDir(), SYSTEMD_EDITOR: editor }, encoding: 'utf8', timeout: 30_000,
     })
