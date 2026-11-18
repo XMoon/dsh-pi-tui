@@ -6883,6 +6883,7 @@ The fork suppressed the process-wide iTerm2 image capability whenever AltScreen 
 - packages/pi-tui/test/tui-render.test.ts: X080 — a visible overlay preempts a covered Direct iTerm2 image block and the image returns after close.
 - test/client/svg-viewer.test.ts: live capability revocation hides Retry and starts no new raster.
 - test/client/transcript-image-viewer.test.ts: Direct iTerm2 preserves original JPEG MIME and exact OSC 1337 payload bytes.
+- packages/pi-tui/test/tui-alt-screen.test.ts: X080 — an AltScreen overlay preempts a covered Direct iTerm2 image block and the image is re-emitted after close.
 
 #### Upstream comparison
 

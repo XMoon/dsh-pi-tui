@@ -1411,6 +1411,43 @@ describe("TuiAltScreen", () => {
 		}
 	});
 
+	it("yields a Direct iTerm2 image block to an overlay inside AltScreen and restores it (X080)", async () => {
+		setCapabilities({ images: "iterm2", trueColor: true, hyperlinks: false });
+		try {
+			const terminal = new RecordingTerminal(20, 6);
+			const tui = new TuiAltScreen(terminal);
+			const anchorLine = "\x1b[2A\x1b]1337;File=inline=1;size=4;width=2;height=auto:AAAA\x07";
+			tui.addChild({ render: () => ["header", "", "", anchorLine, "tail"], invalidate: () => {} });
+			const wire = (): string =>
+				terminal.events
+					.filter((event): event is { type: "write"; data: string } => event.type === "write")
+					.map((event) => event.data)
+					.join("");
+			tui.start();
+			await terminal.waitForRender();
+			assert.ok(wire().includes("]1337;File="), "the image paints while nothing covers it");
+
+			// The overlay lands on the block's TOP row, not the anchor row.
+			terminal.events.length = 0;
+			const handle = tui.showOverlay({ render: () => ["MODAL"], invalidate: () => {} }, { row: 1, col: 0, width: 10 });
+			tui.renderNow();
+			await terminal.waitForRender();
+			const covered = wire();
+			assert.ok(!covered.includes("]1337;File="), "the covered block is not re-emitted in this frame");
+			assert.ok(covered.includes("MODAL"), "the overlay itself is painted");
+			assert.ok(terminal.getViewport().some((line) => line.includes("MODAL")), "the overlay text is readable");
+
+			handle.hide();
+			terminal.events.length = 0;
+			tui.renderNow();
+			await terminal.waitForRender();
+			assert.ok(wire().includes("]1337;File="), "the same image returns after close");
+			tui.stop();
+		} finally {
+			resetCapabilitiesCache();
+		}
+	});
+
 	it("retains recently offscreen Kitty images for placement-only reuse", async () => {
 		setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
 		try {
