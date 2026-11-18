@@ -1363,7 +1363,8 @@ export class QuestionFlow implements Component, Focusable {
     // contract; a free-text row would be offered but refused by the Host. Keep
     // the same Question seat and answer writer, without inventing a writer/app
     // consent input the official card does not have.
-    const fixedCuaApproval = question.id === 'cua-app-access' && question.intent?.kind === 'approval'
+    const fixedCuaApproval = (question.id === 'cua-app-access' || question.id === 'cua-mouse-control')
+      && question.intent?.kind === 'approval'
     if ((question.options?.length ?? 0) > 0 && !fixedCuaApproval) {
       rows.push({ key: OTHER_ROW, label: 'Type something.', recommended: false })
     }

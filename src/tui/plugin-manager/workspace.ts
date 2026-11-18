@@ -558,6 +558,20 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
 
   handleInput(data: string): void {
     if (this.disposed) return
+    if (this.firstCuaEnableNotice) {
+      if (data === 'o' || data === 'O') {
+        this.firstCuaEnableNotice = false
+        const reason = this.intents.openComputerUseSettings?.()
+        if (reason !== undefined) this.controller.explain(reason)
+        return
+      }
+      if (data === 'l' || data === 'L' || matchesKey(data, 'escape')) {
+        this.firstCuaEnableNotice = false
+        return
+      }
+      // Any other key means "later": dismiss the notice and process the key.
+      this.firstCuaEnableNotice = false
+    }
     this.syncInputFocus()
     if (matchesKey(data, 'escape')) {
       this.handleEscape()
@@ -2316,6 +2330,8 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
 
   /** The CUA bundle value awaiting a settled first enable (never a pre-result). */
   private pendingCuaFirstEnable: string | undefined
+  /** The one-shot first-enable notice's Open/Later keyboard window. */
+  private firstCuaEnableNotice = false
 
   // ── rendering ────────────────────────────────────────────────────────────
 
@@ -2567,7 +2583,8 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     }
     if (card.enabled) {
       this.pendingCuaFirstEnable = undefined
-      this.controller.explain('Computer Use is enabled. Next: open Settings → Tools → Computer Use (or this card’s Manage Computer Use…) and authorize Accessibility and Screen Recording on the Host Mac. You can do this later.')
+      this.firstCuaEnableNotice = true
+      this.controller.explain('Computer Use is enabled. Press o to open Settings → Tools · Computer Use and authorize Accessibility and Screen Recording on the Host Mac, or l to continue later.')
     } else if (this.controller.notice() !== undefined) {
       // The settled Host result was a failure/no-op; its generic message owns
       // the explanation and no first-use claim is made.

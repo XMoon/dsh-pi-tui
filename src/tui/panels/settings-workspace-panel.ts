@@ -4478,6 +4478,15 @@ export class SettingsWorkspacePanel implements Component {
     // transition) only the real Esc is admitted — a key must never act on a
     // body the user cannot see.
     if (this.specialistPage !== undefined) {
+      // RFL-016: the root chrome (an App notice/choice) can shrink the hosted
+      // grant without changing the terminal size. The pointer path already
+      // refuses a stale hit map; the keyboard path must revoke the specialist's
+      // old action grant too. Only the real Esc passes.
+      if (this.chromeGeometryStale() && !matchesKey(data, 'escape')) {
+        this.cancelPointerOwners()
+        this.intents.requestRender()
+        return
+      }
       if (!matchesKey(data, 'escape') && this.specialistPage.grantAwaitingPaint?.() === true) return
       this.specialistPage.handleInput(data)
       // The child's own model changed THIS frame's business content; the root

@@ -303,3 +303,41 @@ test('two buffered Enters admit exactly ONE Request dispatch and the stale frame
     'the second buffered Enter is refused by the frame/admission fence')
   mounted.page.dispose()
 })
+
+test('a non-Darwin Host paints Unsupported and the Plugins recovery route', async () => {
+  const mounted = mount({
+    cua: {
+      readSystemStatus: async () => ({
+        platform: 'win32',
+        accessibility: false,
+        screenRecording: false,
+        sessionLocked: false,
+        captureAvailable: true,
+        elevated: false,
+        helper: { pid: 9, name: 'helper', path: '/helper' },
+        parent: { pid: 1, path: 'C:\\Windows' },
+      }),
+    },
+  })
+  const frame = await settle(mounted, 'Unsupported platform')
+  const text = frame.join('\n')
+  assert.match(text, /Unsupported platform/u)
+  assert.match(text, /\[Open Settings → Plugins\]/u)
+  mounted.page.dispose()
+})
+
+test('keyboard PageDown reaches the Help appended after the last action', async () => {
+  const mounted = mount()
+  await settle(mounted, 'Accessibility: Not allowed')
+  mounted.page.setMaxRows(5)
+  mounted.page.invalidate()
+  mounted.render(44)
+  mounted.page.handleInput('?')
+  let frame = mounted.render(44)
+  for (let attempt = 0; attempt < 40 && !frame.join('\n').includes('Help and recovery'); attempt += 1) {
+    mounted.page.handleInput('\x1b[6~')
+    frame = mounted.render(44)
+  }
+  assert.match(frame.join('\n'), /Help and recovery/u, 'keyboard scrolling reaches content below the last action')
+  mounted.page.dispose()
+})

@@ -157,7 +157,7 @@ function bundleSummary(snapshot: CuaAccessSettingsSnapshot): string {
     case 'ready':
       if (!bundle.enabled) return 'Disabled'
       return bundle.providerReady
-        ? 'Enabled (official provider selected)'
+        ? 'Enabled (selection saved; provider reads below)'
         : `Enabled (provider unavailable: ${bundle.error ?? bundle.reason ?? 'unknown'})`
   }
 }
@@ -322,6 +322,14 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
         this.scrollConfirmation(1)
         return
       }
+      if (matchesKey(data, 'pageDown')) {
+        this.scrollConfirmation(Math.max(1, this.rowGrant - 2))
+        return
+      }
+      if (matchesKey(data, 'pageUp')) {
+        this.scrollConfirmation(-Math.max(1, this.rowGrant - 2))
+        return
+      }
       return
     }
     if (matchesKey(data, 'escape')) {
@@ -334,6 +342,26 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
       return
     }
     if (!current) return
+    // Keyboard access to the WHOLE scrollport (Help/receipts appended after the
+    // last action); arrow keys still move only the action cursor.
+    if (matchesKey(data, 'pageDown')) {
+      this.scroll(Math.max(1, this.rowGrant - 2))
+      return
+    }
+    if (matchesKey(data, 'pageUp')) {
+      this.scroll(-Math.max(1, this.rowGrant - 2))
+      return
+    }
+    if (matchesKey(data, 'home')) {
+      this.offset = 0
+      this.bump()
+      return
+    }
+    if (matchesKey(data, 'end')) {
+      this.offset = Math.max(0, this.contentLength)
+      this.scroll(0)
+      return
+    }
     if (matchesKey(data, 'up')) {
       this.move(-1)
       return
@@ -513,6 +541,9 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
         pushAction(`  ${system.screenRecording ? '[Refresh permission]' : '[Request permission]'}`, system.screenRecording
           ? { id: 'refresh-permission', kind: 'refresh', label: 'Refresh permission', enabled: !busy }
           : { id: 'request-screen-recording', kind: 'request-screen-recording', label: 'Request Screen Recording permission', enabled: !busy, permission: 'screenRecording' })
+      } else if (system?.platform === 'win32') {
+        pushText('Host platform: Windows (unsupported by the macOS provider)')
+        pushAction('  [Open Settings → Plugins]', { id: 'plugins', kind: 'plugins', label: 'Open Settings Plugins', enabled: !busy })
       } else {
         pushText(`Host platform: ${readPhaseText(snapshot.system)}`)
       }
@@ -539,6 +570,15 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
     pushText(`  Responsible app: ${responsibleApplication(system)}`)
     if (system?.platform === 'darwin') pushText(`  Helper parent: ${system.parent.path ?? system.parent.name ?? 'Unknown'}`)
     pushText('  Complete permission prompts on the HOST Mac. A Request/Open action does not grant permission.')
+    if (system?.platform === 'win32') {
+      pushText('  This page manages the official macOS Computer Use provider only; this Host cannot grant Accessibility or Screen Recording.')
+      pushAction('  [Open Settings → Plugins]', { id: 'plugins', kind: 'plugins', label: 'Open Settings Plugins', enabled: !busy })
+      return lines
+    }
+    if (system === undefined && ['unavailable', 'failed', 'unknown'].includes(snapshot.system.phase)) {
+      pushText(`  Provider unavailable: ${snapshot.system.reason ?? 'the official CUA system status was not read'}`)
+      pushAction('  [Open Settings → Plugins]', { id: 'plugins', kind: 'plugins', label: 'Open Settings Plugins', enabled: !busy })
+    }
     if (system?.platform === 'darwin' && system !== undefined && (!system.accessibility || !system.screenRecording)) {
       pushText('  First use: grant the missing permissions above, then Refresh and read the fresh observation.')
     }
@@ -646,7 +686,10 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
       }
     }
     lines.push({ text: '' })
-    for (const part of wrapText('  y/Enter confirm · n/Esc cancel; no change has been made yet.', width)) {
+    const hint = this.confirmationVisible
+      ? '  y/Enter confirm · n/Esc cancel; no change has been made yet.'
+      : '  The full risk text must fit before confirm is available; n/Esc cancels.'
+    for (const part of wrapText(hint, width)) {
       lines.push({ text: part })
     }
     return lines

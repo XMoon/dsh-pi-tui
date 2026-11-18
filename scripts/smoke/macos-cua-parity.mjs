@@ -1163,7 +1163,7 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
     'MAC09-02 cua capabilities result', TIMEOUTS.consent)
   assert(capabilitiesResult.result.isError !== true,
     `MAC09-02: the official cua tool failed: ${dispatchErrorCode(capabilitiesResult.result) ?? 'unknown error'}`)
-  pushRow(report, 'MAC09-02', 'PASS', {
+  pushRow(report, 'MAC09-02', 'NOT_VERIFIED', {
     sessionId: sha16(capabilities.sessionId),
     subCallId: sha16(capabilities.dispatch.subCallId),
     dispatchMethod: dispatchMethod(capabilities.dispatch),
@@ -1171,7 +1171,8 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
     nonPtcCuaDispatches: 0,
     bundle: CUA_BUNDLE,
     agentPreset: composition.agentPreset,
-  })
+    negativeEvidence: 'model turn instructed "Without using any tools"; zero cua dispatch does not prove Agent tool admission',
+  }, 'the PTC positive is observed, but the standard-session negative is model-compliance evidence only; a Host tool-catalog/preset admission fact is still required')
 
   // MAC09-03: the REAL helper reports its observed macOS permissions. The
   // operator grants Accessibility + Screen Recording in System Settings; the
@@ -1201,8 +1202,13 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
     try {
       await waitOwnedRoleGone(workRoot, helper.pid, 'MAC09-03 helper restart')
     } catch {
-      try { process.kill(helper.pid, 'SIGKILL') } catch { /* already gone */ }
-      await waitOwnedRoleGone(workRoot, helper.pid, 'MAC09-03 helper restart')
+      // Never escalate a helper pid after the wait without re-proving that the
+      // CURRENT process at that pid is still this run's helper.
+      const stillHelper = ownedRoles(workRoot).helpers.some(row => row.pid === helper.pid && alive(row.pid))
+      if (stillHelper) {
+        try { process.kill(helper.pid, 'SIGKILL') } catch { /* already gone */ }
+        await waitOwnedRoleGone(workRoot, helper.pid, 'MAC09-03 helper restart')
+      }
     }
   }
   const verified = await promptAndWaitCua({

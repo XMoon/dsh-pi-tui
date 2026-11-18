@@ -210,7 +210,7 @@ export class CuaAccessSettingsController {
           applications: { phase: disabledPhase, reason },
           icons: { phase: disabledPhase, reason },
           ptc: { phase: disabledPhase, reason },
-          busy: false,
+          busy: this.actionInFlight,
         })
         return
       }
@@ -226,7 +226,7 @@ export class CuaAccessSettingsController {
         this.readGroup(epoch, sequence, 'icons', () => this.deps.cuaAccess.readApplicationIcons()),
         this.readGroup(epoch, sequence, 'ptc', () => this.deps.cuaAccess.readPtcConfiguration()),
       ])
-      if (this.current(epoch, sequence)) this.patch({ busy: false })
+      if (this.current(epoch, sequence)) this.patch({ busy: this.actionInFlight })
     })()
     this.readInFlight = run.catch(() => {})
     await this.readInFlight
