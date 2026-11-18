@@ -2788,7 +2788,13 @@ async function cleanup({ workRoot, report }) {
       }
     }
     report.d4lCleanup = { labels: report.d4lLabels.length, launchAgentsRoot, removed, preserved }
+    if (preserved > 0 || errors.some(message => message.startsWith('D4L cleanup:'))) {
+      report.notQuiesced = { ...(report.notQuiesced ?? {}), launchd: report.d4lCleanup, workRoot }
+      errors.push('NOT_QUIESCED: preserved launchd resource(s) still depend on this work root')
+    }
   }
+  const launchdCleanupFailed = (report.d4lCleanup?.preserved ?? 0) > 0
+    || errors.some(message => message.startsWith('D4L cleanup:'))
   // 2. Only processes whose CURRENT process table row still names THIS work
   //    root and an owned role. A saved bare pid is never an identity: every
   //    signal re-reads the table and refuses a recycled or foreign pid.
@@ -2808,7 +2814,7 @@ async function cleanup({ workRoot, report }) {
   await sleep(250)
   const survivors = ownedTargets()
   if (survivors.length > 0) {
-    report.notQuiesced = { survivors: survivors.map(target => target.pid), workRoot }
+    report.notQuiesced = { ...(report.notQuiesced ?? {}), survivors: survivors.map(target => target.pid), workRoot }
     errors.push(`NOT_QUIESCED: ${String(survivors.length)} owned process(es) survived cleanup`)
     return errors
   }
@@ -2835,7 +2841,7 @@ async function cleanup({ workRoot, report }) {
   }
   // The Host seat under the real account home is the smoke's own scope; after
   // every owned process is gone it is safe to remove this run's directory.
-  if (typeof report.globalSeatDir === 'string') {
+  if (!launchdCleanupFailed && typeof report.globalSeatDir === 'string') {
     const seatDir = report.globalSeatDir
     if (dirname(seatDir) !== join(homedir(), '.dsh-pi-tui', 'run')) {
       errors.push(`refusing to remove an unexpected global seat directory: ${seatDir}`)
@@ -2847,7 +2853,7 @@ async function cleanup({ workRoot, report }) {
   }
   // 2b. Remove ONLY the profile-scoped account-home seat directories this D4L
   //     run created; each entry must be a direct child of the account run root.
-  if (Array.isArray(report.d4lSeatDirs)) {
+  if (!launchdCleanupFailed && Array.isArray(report.d4lSeatDirs)) {
     const accountSeatRoot = join(homedir(), '.dsh-pi-tui', 'run')
     for (const seatDir of report.d4lSeatDirs) {
       if (typeof seatDir !== 'string' || dirname(seatDir) !== accountSeatRoot) {
@@ -2862,7 +2868,7 @@ async function cleanup({ workRoot, report }) {
     }
   }
   // 3. Remove the private work root only after every owned process is gone.
-  if (!KEEP) {
+  if (!KEEP && !launchdCleanupFailed) {
     try { rmSync(workRoot, { recursive: true, force: true }) } catch (error) {
       errors.push(`work root removal failed: ${error instanceof Error ? error.message : String(error)}`)
     }

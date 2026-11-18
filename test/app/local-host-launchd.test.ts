@@ -1100,6 +1100,7 @@ test('native test cleanup preserves the plist when bootout fails', { skip: NATIV
 
 test('native launchd bootstrap/kickstart/bootout runs the real foreground entry', { skip: process.platform !== 'darwin' ? 'the native launchd lifecycle requires macOS' : (nativeDomainAvailable() ? false : 'BLOCKED_ENV: the user GUI launchd domain is unavailable') }, async t => {
   const fx = fixture(t)
+  fx.lifecycle.retainOnCleanupFailure()
   const marker = join(fx.root, 'native-child.marker')
   const child = join(fx.root, 'native-child.mjs')
   writeFileSync(child, [
