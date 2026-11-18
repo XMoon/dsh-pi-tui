@@ -7,11 +7,3 @@ export const EMPTY_DIRECT_SHELL_COMPLETION: HostShellCompletionPort = {
     return { kind: 'ok', candidates: [] }
   },
 }
-
-
-export const EMPTY_REMOTE_SHELL_COMPLETION: HostShellCompletionPort = {
-  pathAuthority: 'host',
-  async complete() {
-    return { kind: 'unavailable', reason: 'test Host is not connected' }
-  },
-}
