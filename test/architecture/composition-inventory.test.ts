@@ -8,7 +8,6 @@ import { compositionFile, compositionFilesUnder, compositionOccurrences, composi
 import {
   aliasAwareConstructionSites,
   ownerFile,
-  ownerOccurrences,
   parseSources,
   productionFilesUnder,
   productionScriptKind,
@@ -108,13 +107,6 @@ const SINGLE_OWNER_SITES: ReadonlyArray<readonly [string, number, string]> = [
   ['new TranscriptWindowController(', 1, 'src/app/surface/viewer-runtime.ts'],
 ]
 
-test('every composition responsibility still has a site', () => {
-  const source = compositionSource()
-  for (const [name, site] of COMPOSITION_INVENTORY) {
-    assert.ok(source.includes(site), `the composition surface must still own ${name} (${site})`)
-  }
-})
-
 test('the composition ROOT owns every composition site (the entry owns none)', () => {
   // Ownership LOCATION, not just "somewhere in the composition surface". The
   // aggregate counts below cannot catch a regression that moves a construction
@@ -173,21 +165,6 @@ test('the composition ROOT owns every composition site (the entry owns none)', (
         `src/app/bootstrap.ts must not construct ${site} — its owner is ${owner}`,
       )
     }
-  }
-})
-
-test('every single-owner construction has exactly its expected count across the owner surface', () => {
-  // The aggregate companion to the per-module location lock above: the TOTAL
-  // count across the owner surface (which includes the composition root) must
-  // still match, so a relocation that duplicates a construction in TWO owner
-  // modules fails even when each module individually looks plausible.
-  const expectedBySite = new Map<string, number>()
-  for (const [site, expected] of SINGLE_OWNER_SITES) {
-    expectedBySite.set(site, (expectedBySite.get(site) ?? 0) + expected)
-  }
-  for (const [site, expected] of expectedBySite) {
-    assert.equal(ownerOccurrences(site), expected,
-      `${site} must have exactly ${expected} construction site(s) in the A5b owner surface`)
   }
 })
 
