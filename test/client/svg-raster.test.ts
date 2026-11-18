@@ -136,7 +136,10 @@ function decodePngRgba(bytes: Uint8Array): { width: number; height: number; at(x
   }
 }
 
-test('a real child raster renders the new static paint attributes into distinct pixels', { skip: nativeRasterSkip }, async () => {
+test('real resvg renders the admitted static paint attributes into distinct pixels', { skip: nativeRasterSkip }, async () => {
+  // This test owns native PIXEL semantics, not the isolated child deadline.
+  // The separate raster lifecycle tests own spawn/timeout/close/cancellation.
+  const { Resvg } = await import('@resvg/resvg-js')
   // One figure per new attribute, each with a known coordinate/color contract:
   // the dash pattern leaves the background visible between dashes; the offset
   // shifts the visible dash phase; currentColor resolves from the inherited
@@ -153,22 +156,22 @@ test('a real child raster renders the new static paint attributes into distinct 
   const miterSvg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">'
     + '<rect width="128" height="128" fill="#000000"/>'
     + '<path d="M20 108 L64 28 L108 108" fill="none" stroke="#ffff00" stroke-width="8" stroke-miterlimit="4"/></svg>'
-  const [dash, offset, color, miter] = await Promise.all([
-    rasterizeSvg(dashSvg, { targetWidth: 128, signal: new AbortController().signal }),
-    rasterizeSvg(offsetSvg, { targetWidth: 128, signal: new AbortController().signal }),
-    rasterizeSvg(colorSvg, { targetWidth: 128, signal: new AbortController().signal }),
-    rasterizeSvg(miterSvg, { targetWidth: 128, signal: new AbortController().signal }),
-  ])
-  // Each render is a real bounded PNG of the exact requested canvas.
-  for (const [name, result] of [['dash', dash], ['offset', offset], ['color', color], ['miter', miter]] as const) {
-    assert.equal(result.widthPx, 128, `${name} width`)
-    assert.equal(result.heightPx, 128, `${name} height`)
-    const decoded = decodePngRgba(result.png)
-    assert.equal(decoded.width, 128)
-    assert.equal(decoded.height, 128)
+  // The four fixed fixtures still cross the REAL admission boundary and
+  // render through the REAL native resvg engine. Avoid four OS child starts
+  // and their unrelated 3 s wall-clock deadlines in this pixel-contract test.
+  const renderPixels = (svg: string): ReturnType<typeof decodePngRgba> => {
+    assert.equal(admitSvg(svg).ok, true, 'the static paint fixture must be admitted')
+    const png = new Resvg(svg, { fitTo: { mode: 'width', value: 128 } }).render().asPng()
+    const pixels = decodePngRgba(png)
+    assert.equal(pixels.width, 128)
+    assert.equal(pixels.height, 128)
+    return pixels
   }
+  const dashImage = renderPixels(dashSvg)
+  const offsetImage = renderPixels(offsetSvg)
+  const colorImage = renderPixels(colorSvg)
+  const miterImage = renderPixels(miterSvg)
   // Dash: an odd dash cycle over 112px leaves black background gaps on the line.
-  const dashImage = decodePngRgba(dash.png)
   const dashReds: boolean[] = []
   const dashBlacks: boolean[] = []
   for (let x = 8; x <= 120; x++) {
@@ -180,7 +183,6 @@ test('a real child raster renders the new static paint attributes into distinct 
   assert.ok(dashBlacks.length > 0, 'the dash gap keeps the black background (the dash pattern is really applied)')
   // Offset: shifting the dash phase by 16px paints green at a coordinate the
   // unshifted pattern leaves black (the offset really moves the dash phase).
-  const offsetImage = decodePngRgba(offset.png)
   const offsetShiftedGreens: boolean[] = []
   for (let x = 8; x <= 120; x++) {
     const [r, g, b] = offsetImage.at(x, 64)
@@ -188,11 +190,9 @@ test('a real child raster renders the new static paint attributes into distinct 
   }
   assert.ok(offsetShiftedGreens.length > 0, 'the offset dash stroke paints green segments')
   // currentColor: the inherited static color attribute becomes the fill.
-  const colorImage = decodePngRgba(color.png)
   const [cr, cg, cb] = colorImage.at(64, 64)
   assert.ok(cb > 150 && cr < 60 && cg < 60, `currentColor resolved to the inherited blue, saw rgb(${cr},${cg},${cb})`)
   // Miter: the miter limit of 4 keeps the sharp corner painted yellow.
-  const miterImage = decodePngRgba(miter.png)
   const [mr, mg, mb] = miterImage.at(64, 34)
   assert.ok(mr > 150 && mg > 150 && mb < 80, `the mitered corner paints yellow, saw rgb(${mr},${mg},${mb})`)
 })
