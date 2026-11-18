@@ -925,11 +925,22 @@ export async function stopLaunchdService(
     throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'launchd: the loaded job does not match this profile plist; refusing to stop an unknown process')
   }
   if (expectedPid !== undefined) {
-    if (observed.service.state === 'running' && observed.service.pid === undefined) {
-      throw new LocalScopeError('HOST_MANAGER_START_FAILED', 'launchd: the loaded job reports running without a PID; refusing to stop')
-    }
-    if (observed.service.pid !== undefined && observed.service.pid !== expectedPid) {
-      throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'launchd: the loaded job PID changed before the stop; refusing to bootout an unverified process')
+    if (observed.service.pid !== undefined) {
+      if (observed.service.state !== 'running') {
+        throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'launchd: the loaded job has a process in an unconfirmed state; refusing to stop')
+      }
+      if (observed.service.pid !== expectedPid) {
+        throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'launchd: the loaded job PID changed before the stop; refusing to bootout an unverified process')
+      }
+    } else {
+      if (observed.service.state === 'running' || observed.service.state === 'spawn scheduled') {
+        throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'launchd: the loaded job is starting without a verifiable PID; refusing to stop')
+      }
+      if (observed.service.state !== 'not running') {
+        throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', `launchd: the loaded job is in an unconfirmed state (${observed.service.state === '' ? 'unknown' : observed.service.state}); refusing to stop`)
+      }
+      // A genuinely not-running job has no process to signal; bootout is the
+      // safe way to remove the loaded definition.
     }
   }
   const stopped = observed.service.pid !== undefined || observed.service.state === 'running' || observed.service.state === 'spawn scheduled'

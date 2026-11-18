@@ -1328,6 +1328,36 @@ test('darwin uninstall refuses a job that starts with another PID after the snap
   assert.equal(existsSync(launchdPlistPathOf(fx)), true, 'a refused uninstall keeps the owned plist')
 })
 
+test('darwin uninstall refuses a job that enters spawn scheduled without a PID after the snapshot with zero bootout', { skip: process.platform !== 'darwin' ? 'the Darwin admin seat requires macOS' : false }, async t => {
+  const fx = fixture(t)
+  const record = darwinRecordOf(fx.scope)
+  writeOwnedLaunchd(fx)
+  const launchctl = fakeLaunchd(fx, { loaded: true, state: 'not running', pid: undefined })
+  const label = buildLaunchdLabel(fx.scope.scopeId)
+  let labelPrints = 0
+  const run: LaunchctlRunner = async args => {
+    if (args[0] === 'print' && args[1] === `gui/${String(UID)}/${label}`) {
+      labelPrints += 1
+      // The job enters launchd's spawn transition after the snapshot; launchd
+      // has not reported a real PID yet, so this process can never be attributed.
+      if (labelPrints === 2) {
+        launchctl.job.state = 'spawn scheduled'
+        delete launchctl.job.pid
+      }
+    }
+    return await launchctl.run(args)
+  }
+  const result = await runDaemonControl({ verb: 'uninstall' }, fx.profile, darwinDepsOf(fx, {
+    launchctl: run,
+    readRecord: () => record,
+    inspectProcess: () => 'alive',
+    authenticate: async () => ({ record, cookie: 'c', identity: record }),
+  }))
+  assertCode(result, 3, /IDENTITY_OR_OWNERSHIP_REFUSED|verifiable PID|unconfirmed/u)
+  assert.equal(launchctl.calls.some(args => args[0] === 'bootout'), false, 'a spawn-scheduled job without a PID is never booted out')
+  assert.equal(existsSync(launchdPlistPathOf(fx)), true, 'a refused uninstall keeps the owned plist')
+})
+
 test('darwin restart stops the launchd job and starts a new instance through the public ensure', { skip: process.platform !== 'darwin' ? 'the Darwin admin seat requires macOS' : false }, async t => {
   const fx = fixture(t)
   writeOwnedLaunchd(fx)

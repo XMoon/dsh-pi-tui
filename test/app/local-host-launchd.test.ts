@@ -677,6 +677,35 @@ test('uninstall refuses a loaded job that becomes running with a different PID b
   assert.equal(existsSync(installed.filePath), true, 'a refused uninstall keeps the plist')
 })
 
+test('uninstall refuses a loaded job that enters spawn scheduled without a PID before bootout', async t => {
+  const fx = fixture(t)
+  const base = fakeLaunchctl(fx, { loaded: false })
+  const deps = depsOf(fx, { launchctl: base.run })
+  const installed = await installLaunchdUnit(fx.facts, deps)
+  base.job.loaded = true
+  base.job.state = 'not running'
+  delete base.job.pid
+  const unit = ownedUnitOf(fx, deps)
+  let labelPrints = 0
+  const launchctl: LaunchctlRunner = async args => {
+    if (args[0] === 'print' && args[1] === `gui/${String(UID)}/${unit.label}`) {
+      labelPrints += 1
+      if (labelPrints === 2) {
+        base.job.state = 'spawn scheduled'
+        delete base.job.pid
+      }
+    }
+    return await base.run(args)
+  }
+  base.calls.length = 0
+  await assert.rejects(
+    uninstallLaunchdUnit(fx.facts, unit, depsOf(fx, { launchctl, sleep: async () => {}, now: () => 0 }), 4242),
+    (error: unknown) => error instanceof LocalScopeError && error.code === 'HOST_MANAGER_UNIT_CONFLICT',
+  )
+  assert.equal(base.calls.some(args => args[0] === 'bootout'), false, 'a transitional job without a verifiable PID is never booted out')
+  assert.equal(existsSync(installed.filePath), true, 'a refused uninstall keeps the plist')
+})
+
 // ── the public-start wiring ────────────────────────────────────────────────
 
 test('a public managed start uses the installed LaunchAgent instead of the detached process', { skip: process.platform !== 'darwin' ? 'the launchd public-start route requires macOS' : false }, async t => {
