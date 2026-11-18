@@ -1,0 +1,344 @@
+/**
+ * The per-open Computer Use settings controller (PR-5 / MAC-09 v2).
+ *
+ * It owns ONLY transient state of one open `Settings · Tools · Computer Use`
+ * page: the open epoch, the latest independent observations, the one
+ * serialized write, the action receipt and the transient notice. The official
+ * Host/provider remains the only authority for the bundle selection, the two
+ * macOS privileges, the helper identity, PTC execution and persisted
+ * application decisions.
+ *
+ * Rules pinned here:
+ *
+ * - Opening starts ONE read; a refresh retires older results by sequence.
+ * - A disabled bundle is NOT queried: its rows are `disabled`, not `denied`.
+ * - Each read settles independently; an icon failure never blocks the
+ *   permission facts, and a failed read is never coerced into an empty list.
+ * - `requested`/`opened` are ACTION receipts, never permission states; only a
+ *   later fresh read may observe `Allowed`.
+ * - A Connection-generation supersession (`SupersededReadError`) or a closed
+ *   page discards the late result; it never overwrites the newer page.
+ * - Writes are serialized and never replayed. Closing does not claim that a
+ *   Host-side effect was rolled back.
+ *
+ * @module @xmoon76/dsh-pi-tui/app/command/cua-access-settings
+ */
+
+import {
+  CuaAccessUnavailableError,
+  type CuaAccessPort,
+  type CuaApplicationId,
+  type CuaApplicationState,
+  type CuaPermission,
+  type CuaPtcConfiguration,
+  type CuaSystemStatus,
+} from '../../runtime/cua-access-port.ts'
+import type { PresetDefaultConfig } from '../../runtime/config-port.ts'
+import type { PluginAvailability, PluginManagerPort } from '../../runtime/plugin-manager-port.ts'
+import { SupersededReadError } from '../../runtime/read-error.ts'
+
+/** The official bundle this page manages. */
+export const CUA_BUNDLE_NAME = '@deepseek-ai/dsh-cua-bundle'
+
+/** One independently settled read. */
+export type CuaReadPhase = 'idle' | 'loading' | 'ready' | 'unavailable' | 'failed' | 'disabled' | 'unknown'
+
+/** The page-facing read state. `value` is absent unless `phase === 'ready'`. */
+export interface CuaReadState<T> {
+  readonly phase: CuaReadPhase
+  readonly value?: T
+  readonly reason?: string
+}
+
+/** The official bundle's selection/availability facts (never a provider Ready). */
+export interface CuaBundleState {
+  readonly phase: 'idle' | 'loading' | 'ready' | 'disabled' | 'unknown'
+  readonly enabled: boolean
+  readonly availability?: PluginAvailability
+  readonly version?: string
+  readonly error?: string
+  readonly reason?: string
+}
+
+/** The saved default agent preset, as the official ConfigPort reports it. */
+export interface CuaPresetState {
+  readonly phase: 'ready' | 'failed'
+  readonly available: boolean
+  readonly value?: string
+  readonly reason?: string
+}
+
+/** The one transient action receipt of this open. */
+export type CuaActionKind = 'request' | 'open' | 'persistent-ptc' | 'preset' | 'revoke' | 'retry'
+
+export interface CuaActionReceipt {
+  readonly kind: CuaActionKind
+  readonly state: 'ok' | 'failed'
+  readonly text: string
+  readonly permission?: CuaPermission
+  readonly applicationId?: CuaApplicationId
+  readonly at: number
+}
+
+/** The render-facing snapshot; the page never calls the Host directly. */
+export interface CuaAccessSettingsSnapshot {
+  readonly epoch: number
+  readonly busy: boolean
+  readonly bundle: CuaBundleState
+  readonly preset: CuaPresetState
+  readonly system: CuaReadState<CuaSystemStatus>
+  readonly applications: CuaReadState<CuaApplicationState>
+  readonly icons: CuaReadState<Readonly<Record<string, string>>>
+  readonly ptc: CuaReadState<CuaPtcConfiguration>
+  readonly action?: CuaActionReceipt
+}
+
+/** The per-open controller's dependencies (all Host authority remains outside). */
+export interface CuaAccessSettingsDeps {
+  readonly cuaAccess: CuaAccessPort
+  readonly pluginManager: PluginManagerPort
+  readonly presetDefault: PresetDefaultConfig
+  /** The current Client language for the official native guide. */
+  readonly locale: () => string
+}
+
+function reasonOf(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
+function readReasonOf(error: unknown): { phase: 'unavailable' | 'failed' | 'unknown'; reason: string } {
+  if (error instanceof SupersededReadError) return { phase: 'unknown', reason: `the Host connection changed; observation discarded (${error.reason})` }
+  if (error instanceof CuaAccessUnavailableError) return { phase: 'unavailable', reason: error.message }
+  return { phase: 'failed', reason: reasonOf(error) }
+}
+
+const IDLE = <T>(): CuaReadState<T> => ({ phase: 'idle' })
+
+/** ONE per-open controller; constructed when the Settings specialist opens. */
+export class CuaAccessSettingsController {
+  private readonly deps: CuaAccessSettingsDeps
+  private readonly listeners = new Set<() => void>()
+  private state: CuaAccessSettingsSnapshot
+  private readonly openingEpoch: number
+  private epoch: number
+  private readSequence = 0
+  private readInFlight: Promise<void> = Promise.resolve()
+  private closed = false
+  private tail: Promise<void> = Promise.resolve()
+  private disposed: Promise<void> | undefined
+
+  constructor(deps: CuaAccessSettingsDeps) {
+    this.deps = deps
+    this.epoch = 0
+    this.openingEpoch = this.epoch
+    this.state = {
+      epoch: this.epoch,
+      busy: false,
+      bundle: { phase: 'idle', enabled: false },
+      preset: this.readPreset(),
+      system: IDLE(),
+      applications: IDLE(),
+      icons: IDLE(),
+      ptc: IDLE(),
+    }
+  }
+
+  getSnapshot(): CuaAccessSettingsSnapshot {
+    return this.state
+  }
+
+  subscribe(listener: () => void): () => void {
+    if (this.closed) return () => {}
+    this.listeners.add(listener)
+    return () => { this.listeners.delete(listener) }
+  }
+
+  /** The opening epoch; a page token may compare it across async completions. */
+  get epochValue(): number {
+    return this.openingEpoch
+  }
+
+  /**
+   * Re-read the bundle, the preset and (only while the bundle is enabled) the
+   * four CUA groups. The latest refresh wins; older results are discarded.
+   */
+  async refresh(): Promise<void> {
+    if (this.closed) return
+    const epoch = this.epoch
+    const sequence = ++this.readSequence
+    this.patch({
+      busy: true,
+      bundle: { ...this.state.bundle, phase: 'loading' },
+      system: this.state.bundle.phase === 'disabled' ? this.state.system : { phase: 'loading' },
+      applications: this.state.bundle.phase === 'disabled' ? this.state.applications : { phase: 'loading' },
+      icons: this.state.bundle.phase === 'disabled' ? this.state.icons : { phase: 'loading' },
+      ptc: this.state.bundle.phase === 'disabled' ? this.state.ptc : { phase: 'loading' },
+      preset: this.readPreset(),
+    })
+    const run = (async () => {
+      const bundle = await this.readBundle(epoch, sequence)
+      if (!this.current(epoch, sequence)) return
+      this.patch({ bundle })
+      if (bundle.phase !== 'ready' || !bundle.enabled) {
+        const disabledPhase = bundle.phase === 'disabled' ? 'disabled' : 'unknown'
+        const reason = bundle.reason ?? (bundle.phase === 'disabled' ? 'the official Computer Use bundle is disabled' : 'the bundle state is unknown')
+        this.patch({
+          system: { phase: disabledPhase, reason },
+          applications: { phase: disabledPhase, reason },
+          icons: { phase: disabledPhase, reason },
+          ptc: { phase: disabledPhase, reason },
+          busy: false,
+        })
+        return
+      }
+      this.patch({
+        system: { phase: 'loading' },
+        applications: { phase: 'loading' },
+        icons: { phase: 'loading' },
+        ptc: { phase: 'loading' },
+      })
+      await Promise.all([
+        this.readGroup(epoch, sequence, 'system', () => this.deps.cuaAccess.readSystemStatus()),
+        this.readGroup(epoch, sequence, 'applications', () => this.deps.cuaAccess.readApplications()),
+        this.readGroup(epoch, sequence, 'icons', () => this.deps.cuaAccess.readApplicationIcons()),
+        this.readGroup(epoch, sequence, 'ptc', () => this.deps.cuaAccess.readPtcConfiguration()),
+      ])
+      if (this.current(epoch, sequence)) this.patch({ busy: false })
+    })()
+    this.readInFlight = run.catch(() => {})
+    await this.readInFlight
+  }
+
+  /** Request one macOS privilege through the official native guide. */
+  async requestPermission(permission: CuaPermission): Promise<void> {
+    await this.runAction('request',
+      { kind: 'request', permission, text: 'Request sent. Complete the guidance on the Host Mac, then Refresh; this action does not grant permission.' },
+      async () => { await this.deps.cuaAccess.requestPermission(permission, this.deps.locale()) })
+  }
+
+  /** Open the Host's macOS privacy pane (an action, not a permission grant). */
+  async openSettings(permission: CuaPermission): Promise<void> {
+    await this.runAction('open',
+      { kind: 'open', permission, text: 'Opened the Host System Settings attempt. No permission is granted by this action; confirm the exact helper there.' },
+      async () => { await this.deps.cuaAccess.openSettings(permission, this.deps.locale()) })
+  }
+
+  /** Persist PTC execution; the official runtime may reload. */
+  async enablePersistentPtc(): Promise<void> {
+    await this.runAction('persistent-ptc',
+      { kind: 'persistent-ptc', text: 'Persistent PTC requested. The official runtime may reload; refresh to observe the new state.' },
+      async () => { await this.deps.cuaAccess.enablePersistentPtc() })
+  }
+
+  /** Set the saved default preset for NEW Sessions (never the live Session). */
+  async setPtcDefault(): Promise<void> {
+    await this.runAction('preset',
+      { kind: 'preset', text: 'Default preset set to PTC for new Sessions. An existing Session keeps its own preset.' },
+      async () => { await this.deps.presetDefault.set('ptc') })
+  }
+
+  /** Revoke the exact painted application decision; the page confirms first. */
+  async revoke(id: CuaApplicationId): Promise<void> {
+    await this.runAction('revoke',
+      { kind: 'revoke', applicationId: id, text: 'Application access revoked. Affected Computer Use work may stop; dispatched input is not undone.' },
+      async () => { await this.deps.cuaAccess.revoke(id) })
+  }
+
+  /** Clear refusals so the next selection may ask again; it grants nothing. */
+  async retryApproval(id: CuaApplicationId): Promise<void> {
+    await this.runAction('retry',
+      { kind: 'retry', applicationId: id, text: 'Refusal record cleared. The next selection will ask again; this action grants no access.' },
+      async () => { await this.deps.cuaAccess.retryApproval(id) })
+  }
+
+  /** Drop this open's results; a Host-side effect already dispatched is not undone. */
+  async dispose(): Promise<void> {
+    if (this.disposed !== undefined) return this.disposed
+    this.closed = true
+    this.epoch++
+    this.listeners.clear()
+    this.disposed = Promise.all([this.readInFlight, this.tail]).then(() => {})
+    await this.disposed
+  }
+
+  private async readBundle(epoch: number, sequence: number): Promise<CuaBundleState> {
+    try {
+      const snapshot = await this.deps.pluginManager.snapshot()
+      if (!this.current(epoch, sequence)) return this.state.bundle
+      const bundle = snapshot.bundles.find(candidate => candidate.name === CUA_BUNDLE_NAME)
+      if (bundle === undefined) {
+        return { phase: 'unknown', enabled: false, reason: `the Host roster does not contain ${CUA_BUNDLE_NAME}` }
+      }
+      return {
+        phase: bundle.enabled ? 'ready' : 'disabled',
+        enabled: bundle.enabled,
+        availability: bundle.availability,
+        ...(bundle.version === undefined ? {} : { version: bundle.version }),
+        ...(bundle.error === undefined ? {} : { error: bundle.error.code }),
+      }
+    } catch (error) {
+      return { phase: 'unknown', enabled: false, reason: reasonOf(error) }
+    }
+  }
+
+  private async readGroup<T>(
+    epoch: number,
+    sequence: number,
+    key: 'system' | 'applications' | 'icons' | 'ptc',
+    read: () => Promise<T>,
+  ): Promise<void> {
+    try {
+      const value = await read()
+      if (!this.current(epoch, sequence)) return
+      this.patch({ [key]: { phase: 'ready', value } } as Partial<CuaAccessSettingsSnapshot>)
+    } catch (error) {
+      if (!this.current(epoch, sequence)) return
+      this.patch({ [key]: readReasonOf(error) } as Partial<CuaAccessSettingsSnapshot>)
+    }
+  }
+
+  private readPreset(): CuaPresetState {
+    try {
+      return { phase: 'ready', available: this.deps.presetDefault.available(), value: this.deps.presetDefault.get() }
+    } catch (error) {
+      return { phase: 'failed', available: false, reason: reasonOf(error) }
+    }
+  }
+
+  private current(epoch: number, sequence: number): boolean {
+    return !this.closed && epoch === this.epoch && sequence === this.readSequence
+  }
+
+  private async runAction(
+    kind: CuaActionKind,
+    receipt: Omit<CuaActionReceipt, 'state' | 'at'>,
+    run: () => Promise<void>,
+  ): Promise<void> {
+    if (this.closed) return
+    const epoch = this.epoch
+    const task = this.tail.then(async () => {
+      if (this.closed || epoch !== this.epoch) return
+      this.patch({ busy: true })
+      try {
+        await run()
+        if (this.closed || epoch !== this.epoch) return
+        this.patch({ action: { ...receipt, kind, state: 'ok', at: Date.now() } })
+        await this.refresh()
+      } catch (error) {
+        if (this.closed || epoch !== this.epoch) return
+        this.patch({
+          action: { ...receipt, kind, state: 'failed', text: reasonOf(error), at: Date.now() },
+          busy: false,
+        })
+      }
+    })
+    this.tail = task.catch(() => {})
+    await task
+  }
+
+  private patch(partial: Partial<CuaAccessSettingsSnapshot>): void {
+    if (this.closed) return
+    this.state = { ...this.state, ...partial }
+    for (const listener of this.listeners) listener()
+  }
+}
