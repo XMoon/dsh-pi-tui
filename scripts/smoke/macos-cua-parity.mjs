@@ -1369,7 +1369,10 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
   const dimensions = imageDimensions(bytes)
   assert(dimensions !== undefined, 'MAC09-07: the official Host Attachment object is not a supported image')
   await expandNestedToolCard(tui, 'cua · screenshot', 'MAC09-07 screenshot result')
-  const imageFrame = await waitFrameText(tui, '🖼️', 'MAC09-07 Client image identity row', TIMEOUTS.mount)
+  // The TSP tool-result image identity line is the frozen `[IMAGE] name ·
+  // W×H · bytes` row (`imageIdentityText`); `🖼️` is the DRAFT/queued
+  // attachment vocabulary, never the tool-result row.
+  const imageFrame = await waitFrameText(tui, '[IMAGE]', 'MAC09-07 Client image identity row', TIMEOUTS.mount)
   assert(imageFrame.includes(`${String(dimensions.width)}×${String(dimensions.height)}`),
     'MAC09-07: the Client image row does not name the admitted screenshot dimensions')
   pushRow(report, 'MAC09-07', 'PASS', {
