@@ -1044,7 +1044,7 @@ function fillUnreachedCases(report) {
 
 // ── Direct scene ──────────────────────────────────────────────────────────
 
-async function sceneDirect({ installation, workRoot, report, operator, helperAppPath }) {
+async function sceneDirect({ installation, workRoot, report, operator, helperAppPath, textEditPid }) {
   const dshHome = installation.dshHome
   let tui = startTui({ installation, workRoot, sessionName: `cua-direct-${randomUUID().slice(0, 6)}` })
   report.directTui = { session: tui }
@@ -1216,7 +1216,7 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
     tui,
     dshHome,
     sessionId: verified.sessionId,
-    prompt: `Run exactly this in run_code: const app = await tools.cua({ method: 'getApp', params: { selector: '${TEXTEDIT_BUNDLE}' } }); const windows = await tools.cua({ method: 'listWindows', params: { appHandle: app.appHandle } }); return JSON.stringify(windows). Do not click or type.`,
+    prompt: `Run exactly this in run_code: const app = await tools.cua({ method: 'getApp', params: { selector: '${String(textEditPid)}' } }); const windows = await tools.cua({ method: 'listWindows', params: { appHandle: app.appHandle } }); return JSON.stringify(windows). Do not click or type.`,
     label: 'MAC09-04 consent request',
     method: 'getApp',
   })
@@ -1257,7 +1257,7 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
     tui,
     dshHome,
     sessionId: consent.sessionId,
-    prompt: `Run exactly this in run_code: const app = await tools.cua({ method: 'getApp', params: { selector: '${TEXTEDIT_BUNDLE}' } }); const windows = await tools.cua({ method: 'listWindows', params: { appHandle: app.appHandle } }); const window = windows.find(item => String(item.title ?? '').includes('cua-blank')); if (!window) throw new Error('the controlled TextEdit window was not found'); const shot = await tools.cua({ method: 'screenshot', params: { appHandle: app.appHandle, windowId: window.windowId } }); return { width: shot.pixelWidth, height: shot.pixelHeight }`,
+    prompt: `Run exactly this in run_code: const app = await tools.cua({ method: 'getApp', params: { selector: '${String(textEditPid)}' } }); const windows = await tools.cua({ method: 'listWindows', params: { appHandle: app.appHandle } }); const window = windows.find(item => String(item.title ?? '').includes('cua-blank')); if (!window) throw new Error('the controlled TextEdit window was not found'); const shot = await tools.cua({ method: 'screenshot', params: { appHandle: app.appHandle, windowId: window.windowId } }); return { width: shot.pixelWidth, height: shot.pixelHeight }`,
     label: 'MAC09-07 screenshot',
     method: 'screenshot',
     timeoutMs: TIMEOUTS.screenshot,
@@ -1298,7 +1298,7 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
     tui,
     dshHome,
     sessionId: consent.sessionId,
-    prompt: `Run exactly this in run_code: const app = await tools.cua({ method: 'getApp', params: { selector: '${TEXTEDIT_BUNDLE}' } }); const windows = await tools.cua({ method: 'listWindows', params: { appHandle: app.appHandle } }); const window = windows.find(item => String(item.title ?? '').includes('cua-blank')); if (!window) throw new Error('the controlled TextEdit window was not found'); await tools.cua({ method: 'activate', params: { appHandle: app.appHandle } }); await tools.cua({ method: 'typeText', params: { appHandle: app.appHandle, windowId: window.windowId, text: '${marker}' } }); const tree = await tools.cua({ method: 'getState', params: { appHandle: app.appHandle, windowId: window.windowId } }); return JSON.stringify(tree).includes('${marker}') ? 'MARKER_PRESENT' : 'MARKER_MISSING'`,
+    prompt: `Run exactly this in run_code: const app = await tools.cua({ method: 'getApp', params: { selector: '${String(textEditPid)}' } }); const windows = await tools.cua({ method: 'listWindows', params: { appHandle: app.appHandle } }); const window = windows.find(item => String(item.title ?? '').includes('cua-blank')); if (!window) throw new Error('the controlled TextEdit window was not found'); await tools.cua({ method: 'show', params: { appHandle: app.appHandle, windowId: window.windowId } }); await tools.cua({ method: 'activate', params: { appHandle: app.appHandle } }); await tools.cua({ method: 'typeText', params: { appHandle: app.appHandle, windowId: window.windowId, text: '${marker}' } }); const tree = await tools.cua({ method: 'getState', params: { appHandle: app.appHandle, windowId: window.windowId } }); return JSON.stringify(tree).includes('${marker}') ? 'MARKER_PRESENT' : 'MARKER_MISSING'`,
     label: 'MAC09-08 controlled input',
     method: 'typeText',
     timeoutMs: TIMEOUTS.turn,
@@ -1329,7 +1329,7 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
     tui,
     dshHome,
     sessionId: undefined,
-    prompt: `Run exactly this in run_code: const app = await tools.cua({ method: 'getApp', params: { selector: '${TEXTEDIT_BUNDLE}' } }); return app.appHandle`,
+    prompt: `Run exactly this in run_code: const app = await tools.cua({ method: 'getApp', params: { selector: '${String(textEditPid)}' } }); return app.appHandle`,
     label: 'MAC09-09 Session B consent',
     method: 'getApp',
   })
@@ -1373,7 +1373,7 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
 
 // ── Split scene ───────────────────────────────────────────────────────────
 
-async function sceneSplit({ installation, workRoot, report }) {
+async function sceneSplit({ installation, workRoot, report, textEditPid }) {
   const dshHome = installation.dshHome
   const tui = startTui({ installation, workRoot, backend: 'daemon', sessionName: `cua-split-${randomUUID().slice(0, 6)}` })
   report.splitTui = { session: tui }
@@ -1401,7 +1401,7 @@ async function sceneSplit({ installation, workRoot, report }) {
     tui,
     dshHome,
     sessionId: capabilities.sessionId,
-    prompt: `Run exactly this in run_code: const app = await tools.cua({ method: 'getApp', params: { selector: '${TEXTEDIT_BUNDLE}' } }); const windows = await tools.cua({ method: 'listWindows', params: { appHandle: app.appHandle } }); const window = windows.find(item => String(item.title ?? '').includes('cua-blank')); if (!window) throw new Error('the controlled TextEdit window was not found'); const shot = await tools.cua({ method: 'screenshot', params: { appHandle: app.appHandle, windowId: window.windowId } }); return { width: shot.pixelWidth, height: shot.pixelHeight }`,
+    prompt: `Run exactly this in run_code: const app = await tools.cua({ method: 'getApp', params: { selector: '${String(textEditPid)}' } }); const windows = await tools.cua({ method: 'listWindows', params: { appHandle: app.appHandle } }); const window = windows.find(item => String(item.title ?? '').includes('cua-blank')); if (!window) throw new Error('the controlled TextEdit window was not found'); const shot = await tools.cua({ method: 'screenshot', params: { appHandle: app.appHandle, windowId: window.windowId } }); return { width: shot.pixelWidth, height: shot.pixelHeight }`,
     label: 'MAC09-10 Split screenshot selection',
     method: 'getApp',
     timeoutMs: TIMEOUTS.turn,
@@ -1436,7 +1436,7 @@ async function sceneSplit({ installation, workRoot, report }) {
     tui,
     dshHome,
     sessionId: undefined,
-    prompt: `Run exactly this in run_code: const app = await tools.cua({ method: 'getApp', params: { selector: '${TEXTEDIT_BUNDLE}' } }); return app.appHandle`,
+    prompt: `Run exactly this in run_code: const app = await tools.cua({ method: 'getApp', params: { selector: '${String(textEditPid)}' } }); return app.appHandle`,
     label: 'MAC09-10 pending consent',
     method: 'getApp',
   })
@@ -1658,8 +1658,8 @@ async function main() {
     textEdit = await openBlankTextEdit(workRoot)
     report.textEdit = { pid: textEdit.pid, file: textEdit.file }
 
-    const directScene = await sceneDirect({ installation, workRoot, report, operator, helperAppPath })
-    const splitTui = await sceneSplit({ installation, workRoot, report })
+    const directScene = await sceneDirect({ installation, workRoot, report, operator, helperAppPath, textEditPid: textEdit.pid })
+    const splitTui = await sceneSplit({ installation, workRoot, report, textEditPid: textEdit.pid })
 
     // MAC09-11: the operator disables the bundle through the real Plugin
     // Manager; the tool is withdrawn, but the OS TCC entry and the durable

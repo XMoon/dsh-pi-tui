@@ -1204,6 +1204,11 @@ export class SettingsWorkspacePanel implements Component {
     readonly pluginPage: EmbeddedPluginPage
     readonly categoryId: SettingsWorkspaceCategoryId
     readonly view: import('../plugin-manager/workspace.ts').PluginWorkspaceView
+    readonly width: number
+    readonly rows: number
+    readonly notice: string | undefined
+    readonly cardValue: string | undefined
+    readonly focus: SettingsWorkspaceFocus
   } | undefined
   /** The ONE command-facing settlement of the typed deeplink: it resolves on
    *  the frame that really mounts the page (or on a failure/teardown), so the
@@ -4171,6 +4176,11 @@ export class SettingsWorkspacePanel implements Component {
       pluginPage,
       categoryId: this.categoryId,
       view: pluginPage.currentView(),
+      width: this.lastRenderWidth,
+      rows: this.lastRenderRows,
+      notice: this.noticeKey(),
+      cardValue: typeof pluginPage.selectedCardValue === 'function' ? pluginPage.selectedCardValue() : undefined,
+      focus: this.focus,
     }
     this.intents.requestRender()
     return undefined
@@ -4181,6 +4191,12 @@ export class SettingsWorkspacePanel implements Component {
    * load-bearing: retire the Plugin child and release its Host claim FIRST,
    * commit the Tools row/focus SECOND, and mount the specialist THIRD.
    */
+  /** A stable identity for the shared App notice (the object is rebuilt). */
+  private noticeKey(): string | undefined {
+    const notice = this.intents.notice()
+    return notice === undefined ? undefined : `${notice.kind}\u0000${notice.text}`
+  }
+
   private consumeComputerUseNavigation(): void {
     const pending = this.pendingComputerUseNavigation
     if (pending === undefined) return
@@ -4192,6 +4208,11 @@ export class SettingsWorkspacePanel implements Component {
     if (this.categoryId !== pending.categoryId) return
     if (this.pluginPage !== pending.pluginPage) return
     if (pending.pluginPage.currentView() !== pending.view) return
+    if (this.lastRenderWidth !== pending.width || this.lastRenderRows !== pending.rows) return
+    if (this.noticeKey() !== pending.notice) return
+    if (this.focus !== pending.focus) return
+    if (typeof pending.pluginPage.selectedCardValue === 'function'
+      && pending.pluginPage.selectedCardValue() !== pending.cardValue) return
     if (this.pluginPageHasPendingMutation()) return
     const destination = this.snapshot.rows.find(candidate => candidate.id === 'computer-use')
     if (destination === undefined || destination.specialist !== 'computer-use'
@@ -5478,6 +5499,7 @@ export class SettingsWorkspacePanel implements Component {
 
   onCellPress(x: number, y: number): void {
     if (this.disposed) return
+    this.pendingComputerUseNavigation = undefined
     // A directory change invalidates the WHOLE painted hit map, not just the
     // cells that happen to move: the press is refused and the release may never
     // resurrect a target of the previous registry generation.
@@ -5638,6 +5660,7 @@ export class SettingsWorkspacePanel implements Component {
 
   onCellClick(x: number, y: number): void {
     if (this.disposed) return
+    this.pendingComputerUseNavigation = undefined
     // The same directory fence on release: a gesture that began before a
     // registration/unload/dispose can never complete against the new directory.
     this.syncExtensionDirectory()

@@ -128,7 +128,9 @@ export class CuaAccessSettingsController {
   private readInFlight: Promise<void> = Promise.resolve()
   private closed = false
   private actionInFlight = false
+  private observedBasis: unknown
   private unsubscribeObservation: () => void = () => {}
+  private unsubscribePlugins: () => void = () => {}
   private tail: Promise<void> = Promise.resolve()
   private disposed: Promise<void> | undefined
 
@@ -150,7 +152,14 @@ export class CuaAccessSettingsController {
     // real observation boundary: an older Allowed/application list must not
     // remain actionable or paintable after it. The callback invalidates the
     // current read epoch and immediately performs ONE fresh read.
+    this.observedBasis = deps.cuaAccess.observation.readSnapshot()
     this.unsubscribeObservation = deps.cuaAccess.observation.subscribe(() => this.invalidateObservation())
+    // The official Plugin Manager is the Direct bundle-change authority (and
+    // also observes same-connection Remote changes). A bundle enable/disable is
+    // an observation boundary even when the CUA service object is unchanged.
+    this.unsubscribePlugins = typeof deps.pluginManager.subscribeInvalidation === 'function'
+      ? deps.pluginManager.subscribeInvalidation(() => this.invalidateObservation())
+      : () => {}
   }
 
   getSnapshot(): CuaAccessSettingsSnapshot {
@@ -274,6 +283,7 @@ export class CuaAccessSettingsController {
     this.closed = true
     this.epoch++
     this.unsubscribeObservation()
+    this.unsubscribePlugins()
     this.listeners.clear()
   }
 
@@ -289,12 +299,16 @@ export class CuaAccessSettingsController {
     if (this.closed) return
     this.epoch += 1
     this.readSequence += 1
+    this.observedBasis = this.deps.cuaAccess.observation.readSnapshot()
     this.patch({
       system: { phase: 'unknown', reason: 'The Host observation basis changed; refresh to read the new generation.' },
       applications: { phase: 'unknown', reason: 'The Host observation basis changed; refresh to read the new generation.' },
       icons: { phase: 'unknown', reason: 'The Host observation basis changed; refresh to read the new generation.' },
       ptc: { phase: 'unknown', reason: 'The Host observation basis changed; refresh to read the new generation.' },
-      busy: false,
+      // An already-dispatched write is still in flight: keep the admission
+      // visible (actions disabled) until it settles, then publish its unknown
+      // outcome. A read-only refresh may proceed independently.
+      busy: this.actionInFlight,
     })
     void this.refresh()
   }
@@ -376,6 +390,13 @@ export class CuaAccessSettingsController {
     // refused before it can enter the serial queue. The page also disables its
     // actions while busy, but this admission is the authority.
     if (this.closed || this.actionInFlight) return
+    // Consume the observation basis before any dispatch: a page action painted
+    // against an older generation is refused and the new generation is read.
+    const basis = this.deps.cuaAccess.observation.readSnapshot()
+    if (!Object.is(basis, this.observedBasis)) {
+      this.invalidateObservation()
+      return
+    }
     this.actionInFlight = true
     const epoch = this.epoch
     const task = this.tail.then(async () => {
@@ -383,11 +404,19 @@ export class CuaAccessSettingsController {
       this.patch({ busy: true })
       try {
         await run()
-        if (this.closed || epoch !== this.epoch) return
+        if (this.closed) return
+        if (epoch !== this.epoch) {
+          this.publishUnknown(receipt, kind)
+          return
+        }
         this.patch({ action: { ...receipt, kind, state: 'ok', at: Date.now() } })
         await this.refresh()
       } catch (error) {
-        if (this.closed || epoch !== this.epoch) return
+        if (this.closed) return
+        if (epoch !== this.epoch) {
+          this.publishUnknown(receipt, kind)
+          return
+        }
         const unknown = error instanceof SupersededReadError
         this.patch({
           action: {
@@ -408,7 +437,24 @@ export class CuaAccessSettingsController {
       await task
     } finally {
       this.actionInFlight = false
+      if (!this.closed && this.state.busy) this.patch({ busy: false })
     }
+  }
+
+  private publishUnknown(
+    receipt: Omit<CuaActionReceipt, 'state' | 'at'>,
+    kind: CuaActionKind,
+  ): void {
+    this.patch({
+      action: {
+        ...receipt,
+        kind,
+        state: 'unknown',
+        text: 'The Host observation basis changed while the action was in flight; the outcome is unconfirmed. Refresh before retrying.',
+        at: Date.now(),
+      },
+      busy: this.actionInFlight,
+    })
   }
 
   private patch(partial: Partial<CuaAccessSettingsSnapshot>): void {

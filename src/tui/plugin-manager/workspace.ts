@@ -171,6 +171,8 @@ export interface PluginContentViewport {
  * application layer keeps seeing a plain `Component`.
  */
 export interface EmbeddedPluginPage extends Component {
+  /** The selected Plugin card value, when the page can name its source. */
+  selectedCardValue?(): string | undefined
   focused: boolean
   /** Release this page and the Host claim it owns, exactly once. */
   dispose(): void
@@ -1868,19 +1870,16 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
         if (card === undefined) return
         this.openUpdateFromDetail(card)
         return
-      case PLUGIN_ACTION.toggle: {
+      case PLUGIN_ACTION.toggle:
         if (card === undefined) return
-        const firstCuaEnable = card.name === '@deepseek-ai/dsh-cua-bundle' && !card.enabled
         if (this.controller.toggleCard(card.value)) {
           this.openConfirmation()
-        } else if (firstCuaEnable) {
-          // v2 §3.4: a one-shot, recoverable next step after the explicit
-          // enable. The generic mutation result stays; this notice never
-          // claims permissions were granted or forces a page change.
-          this.controller.explain('Computer Use is enabled. Next: open Settings → Tools → Computer Use (or this card’s Manage Computer Use…) and authorize Accessibility and Screen Recording on the Host Mac. You can do this later.')
+        } else if (card.name === '@deepseek-ai/dsh-cua-bundle' && !card.enabled) {
+          // Remember only the INTENT; the notice is published in render() after
+          // the Host mutation result and a fresh inventory read show enabled.
+          this.pendingCuaFirstEnable = card.value
         }
         return
-      }
       case PLUGIN_ACTION.remove:
         if (card !== undefined && this.controller.requestRemove(card.value)) this.openConfirmation()
         return
@@ -2315,6 +2314,9 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
 
   private installOffset = 0
 
+  /** The CUA bundle value awaiting a settled first enable (never a pre-result). */
+  private pendingCuaFirstEnable: string | undefined
+
   // ── rendering ────────────────────────────────────────────────────────────
 
   render(width: number): string[] {
@@ -2326,6 +2328,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     }
     this.syncInputFocus()
     this.syncFrameState()
+    this.settleFirstCuaEnableNotice()
     this.ensureSelection()
     this.ensureDetailSelection()
     this.ensureUpdateSelection()
@@ -2549,6 +2552,29 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
   /** The page's OWN Host notice row: a settled/refused operation message, a
    *  failed inventory read or a version-exemption warning. The shared App
    *  notice is NOT a second source here — the Settings root paints it once. */
+  /**
+   * v2 §3.4 first-enable guidance: publish ONLY after the official toggle
+   * result + inventory readback show the bundle enabled and the mutation is no
+   * longer busy. A failed/no-op enable never claims success.
+   */
+  private settleFirstCuaEnableNotice(): void {
+    const pending = this.pendingCuaFirstEnable
+    if (pending === undefined || this.controller.busy() !== undefined) return
+    const card = this.controller.cards().find(candidate => candidate.value === pending)
+    if (card === undefined) {
+      this.pendingCuaFirstEnable = undefined
+      return
+    }
+    if (card.enabled) {
+      this.pendingCuaFirstEnable = undefined
+      this.controller.explain('Computer Use is enabled. Next: open Settings → Tools → Computer Use (or this card’s Manage Computer Use…) and authorize Accessibility and Screen Recording on the Host Mac. You can do this later.')
+    } else if (this.controller.notice() !== undefined) {
+      // The settled Host result was a failure/no-op; its generic message owns
+      // the explanation and no first-use claim is made.
+      this.pendingCuaFirstEnable = undefined
+    }
+  }
+
   private renderNotice(plan: ChromePlan): string {
     const model = this.controller.model()
     const exemptionWarning = model.exemptionWarnings.length === 0

@@ -63,6 +63,7 @@ interface PageAction {
   readonly reason?: string
   readonly permission?: CuaPermission
   readonly applicationId?: string
+  readonly applicationLabel?: string
 }
 
 interface PageLine {
@@ -75,6 +76,7 @@ interface Confirmation {
   readonly title: string
   readonly body: string
   readonly confirm: string
+  readonly epoch: number
   readonly offset: number
 }
 
@@ -452,12 +454,13 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
       const start = semantic.lastIndexOf('[')
       const close = start < 0 ? -1 : semantic.indexOf(']', start)
       if (start < 0 || close < 0) continue
-      targets.push({
-        row: index,
-        startCol: visibleWidth(semantic.slice(0, start)),
-        endCol: visibleWidth(semantic.slice(0, close + 1)),
-        action: line.action,
-      })
+      const startCol = visibleWidth(semantic.slice(0, start))
+      const endCol = visibleWidth(semantic.slice(0, close + 1))
+      // The closing bracket must itself be inside the granted width; a target
+      // derived from the untruncated string would otherwise accept cells that
+      // paint an ellipsis instead of the action label.
+      if (endCol > width || startCol >= width) continue
+      targets.push({ row: index, startCol, endCol, action: line.action })
     }
     const bar = this.renderBar(width, snapshot)
     this.paintedEscapeSpanValue = bar.escapeSpan
@@ -487,7 +490,7 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
     const bundle = snapshot.bundle
     const providerReady = bundle.phase === 'ready' && bundle.enabled && bundle.providerReady
 
-    if (this.rowGrant <= 9 || width < 56) {
+    if (this.rowGrant <= 9) {
       // The short/narrow first screen: page identity, Host+bundle and the first
       // missing permission/action remain reachable; the bar is the last line.
       const shortBundle = bundle.phase === 'ready' && bundle.enabled
@@ -503,20 +506,19 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
       const system = systemOf(snapshot)
       if (system?.platform === 'darwin') {
         push(`Accessibility: ${permissionText(system.accessibility)}`)
-        pushAction(`  ${system.accessibility ? '[Refresh permission]' : '[Request permission]'}`, {
-          id: 'request-accessibility', kind: 'request-accessibility', label: 'Request Accessibility permission',
-          enabled: !busy, permission: 'accessibility',
-        })
+        pushAction(`  ${system.accessibility ? '[Refresh permission]' : '[Request permission]'}`, system.accessibility
+          ? { id: 'refresh-permission', kind: 'refresh', label: 'Refresh permission', enabled: !busy }
+          : { id: 'request-accessibility', kind: 'request-accessibility', label: 'Request Accessibility permission', enabled: !busy, permission: 'accessibility' })
         push(`Screen Recording: ${permissionText(system.screenRecording)}`)
-        pushAction(`  ${system.screenRecording ? '[Refresh permission]' : '[Request permission]'}`, {
-          id: 'request-screen-recording', kind: 'request-screen-recording', label: 'Request Screen Recording permission',
-          enabled: !busy, permission: 'screenRecording',
-        })
+        pushAction(`  ${system.screenRecording ? '[Refresh permission]' : '[Request permission]'}`, system.screenRecording
+          ? { id: 'refresh-permission', kind: 'refresh', label: 'Refresh permission', enabled: !busy }
+          : { id: 'request-screen-recording', kind: 'request-screen-recording', label: 'Request Screen Recording permission', enabled: !busy, permission: 'screenRecording' })
       } else {
         pushText(`Host platform: ${readPhaseText(snapshot.system)}`)
       }
-      if (this.help) pushText(HELP_LINES[0]!)
-      return lines
+      // No early return for a READY short grant: the same scrollable full facts
+      // (PTC, applications, helper responsibility, receipts) follow below the
+      // compact first screen instead of being permanently omitted.
     }
 
     push(color.textStrong('Computer Use bundle'))
@@ -598,7 +600,7 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
         pushText(`    ${applicationLine(application)}`)
         pushAction('    [Revoke access…]', {
           id: `revoke:${application.id}`, kind: 'revoke', label: `Revoke ${application.name}`,
-          enabled: !busy, applicationId: application.id,
+          enabled: !busy, applicationId: application.id, applicationLabel: applicationLine(application),
         })
       }
       if (applications.blockedApps.length === 0) pushText('  Refused: none.')
@@ -606,7 +608,7 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
         pushText(`    ${applicationLine(application)} (refused)`)
         pushAction('    [Allow asking again…]', {
           id: `retry:${application.id}`, kind: 'retry', label: `Allow asking again for ${application.name}`,
-          enabled: !busy, applicationId: application.id,
+          enabled: !busy, applicationId: application.id, applicationLabel: applicationLine(application),
         })
       }
       if (!applications.persistentAvailable) pushText('  The Host reports durable application storage is unavailable.')
@@ -628,12 +630,25 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
   private buildConfirmation(width: number): PageLine[] {
     const confirmation = this.confirmation
     if (confirmation === undefined) return []
+    // The two-space indent is part of the painted cells; wrap the content to
+    // the REMAINING width or the frame loses the risk characters while still
+    // counting the line as visible and leaving the confirm key exposed.
     const lines: PageLine[] = []
-    for (const part of wrapText(confirmation.title, width)) lines.push({ text: color.warning(part) })
+    for (const part of wrapText(`  ${confirmation.title}`, width)) {
+      lines.push({ text: color.warning(part) })
+    }
     lines.push({ text: '' })
-    for (const part of wrapText(confirmation.body, width)) lines.push({ text: `  ${part}` })
+    for (const part of wrapText(`  ${confirmation.body}`, width)) lines.push({ text: part })
+    if (confirmation.action.applicationLabel !== undefined) {
+      lines.push({ text: '' })
+      for (const part of wrapText(`  Application: ${confirmation.action.applicationLabel}`, width)) {
+        lines.push({ text: part })
+      }
+    }
     lines.push({ text: '' })
-    lines.push({ text: '  y/Enter confirm · n/Esc cancel; no change has been made yet.' })
+    for (const part of wrapText('  y/Enter confirm · n/Esc cancel; no change has been made yet.', width)) {
+      lines.push({ text: part })
+    }
     return lines
   }
 
@@ -740,22 +755,25 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
       case 'request-accessibility':
       case 'open-accessibility':
       case 'request-screen-recording':
-      case 'open-screen-recording':
-      case 'revoke':
-      case 'retry': {
+      case 'open-screen-recording': {
         const system = snapshot.system.phase === 'ready' ? snapshot.system.value : undefined
         if (system?.platform !== 'darwin') {
           return { ok: false, reason: snapshot.system.reason ?? 'The official macOS permission observation is not current.' }
         }
-        if (action.kind === 'revoke' || action.kind === 'retry') {
-          const applications = snapshot.applications.phase === 'ready' ? snapshot.applications.value : undefined
-          if (applications === undefined) {
-            return { ok: false, reason: snapshot.applications.reason ?? 'The official application list is not current.' }
-          }
-          const list = action.kind === 'revoke' ? applications.allowedApps : applications.blockedApps
-          if (action.applicationId === undefined || !list.some(application => application.id === action.applicationId)) {
-            return { ok: false, reason: 'That application decision is no longer in the official list; refresh before acting.' }
-          }
+        return { ok: true }
+      }
+      case 'revoke':
+      case 'retry': {
+        // The official application decisions are an independent Host policy
+        // surface; a failed systemStatus() read must not freeze an existing
+        // decision's revoke/retry.
+        const applications = snapshot.applications.phase === 'ready' ? snapshot.applications.value : undefined
+        if (applications === undefined) {
+          return { ok: false, reason: snapshot.applications.reason ?? 'The official application list is not current.' }
+        }
+        const list = action.kind === 'revoke' ? applications.allowedApps : applications.blockedApps
+        if (action.applicationId === undefined || !list.some(application => application.id === action.applicationId)) {
+          return { ok: false, reason: 'That application decision is no longer in the official list; refresh before acting.' }
         }
         return { ok: true }
       }
@@ -818,6 +836,7 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
           title: 'Enable persistent PTC mode?',
           body: 'The official runtime may reload and interrupt in-flight Computer Use calls. The Host setting is re-read after the action; it is not assumed saved.',
           confirm: 'Use persistent mode',
+          epoch: this.controller.getSnapshot().epoch,
           offset: 0,
         }
         this.bump()
@@ -826,8 +845,9 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
         this.confirmation = {
           action,
           title: 'Revoke this application decision?',
-          body: 'Affected Computer Use work may stop immediately; input already dispatched cannot be undone. The exact application id painted below is passed to the Host; no other application is changed.',
+          body: 'Affected Computer Use work may stop immediately; input already dispatched cannot be undone. The exact application shown below is passed to the Host; no other application is changed.',
           confirm: 'Revoke',
+          epoch: this.controller.getSnapshot().epoch,
           offset: 0,
         }
         this.bump()
@@ -838,6 +858,7 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
           title: 'Allow this application to ask again?',
           body: 'This clears the persisted refusal only. The next selection will ask again and nothing is approved automatically.',
           confirm: 'Allow asking again',
+          epoch: this.controller.getSnapshot().epoch,
           offset: 0,
         }
         this.bump()
@@ -849,7 +870,14 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
     const confirmation = this.confirmation
     if (confirmation === undefined) return
     if (!this.frameCurrent() || !this.confirmationVisible) return
-    const live = this.liveAction(confirmation.action, this.controller.getSnapshot())
+    const snapshot = this.controller.getSnapshot()
+    if (confirmation.epoch !== snapshot.epoch) {
+      this.confirmation = undefined
+      this.notice = { kind: 'info', text: 'The Host observation changed; the confirmation was discarded. Refresh before acting again.' }
+      this.bump()
+      return
+    }
+    const live = this.liveAction(confirmation.action, snapshot)
     if (!live.ok) {
       this.confirmation = undefined
       this.notice = { kind: 'info', text: live.reason }

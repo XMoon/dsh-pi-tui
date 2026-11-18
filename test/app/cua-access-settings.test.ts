@@ -195,6 +195,39 @@ test('revoke and retry keep the exact painted id and admit ONE write at a time',
   await page.dispose()
 })
 
+test('a generation rollover during an in-flight write keeps admission and publishes Unknown', async () => {
+  let invalidate: (() => void) | undefined
+  let basis = 1
+  let release: (() => void) | undefined
+  const gate = new Promise<void>((resolve) => { release = resolve })
+  const fake = cuaPort({
+    observation: {
+      readSnapshot: () => basis,
+      subscribe: (listener) => { invalidate = listener; return () => {} },
+    },
+    revoke: async () => { await gate },
+  })
+  const page = new CuaAccessSettingsController({
+    cuaAccess: fake.port,
+    pluginManager: pluginManager({ enabled: true }),
+    presetDefault: presetDefault().config,
+    locale: () => 'zh',
+  })
+  const write = page.revoke('app-1')
+  await new Promise(resolve => setTimeout(resolve, 5))
+  assert.equal(page.getSnapshot().busy, true)
+  basis = 2
+  invalidate?.()
+  assert.equal(page.getSnapshot().busy, true, 'the in-flight write keeps the second action refused')
+  assert.equal(page.getSnapshot().action, undefined, 'no premature success receipt')
+  release?.()
+  await write
+  assert.equal(page.getSnapshot().action?.state, 'unknown')
+  assert.match(page.getSnapshot().action?.text ?? '', /unconfirmed/iu)
+  assert.equal(page.getSnapshot().busy, false)
+  await page.dispose()
+})
+
 test('dispose discards a late read and drops every listener', async () => {
   let release: ((value: CuaSystemStatus) => void) | undefined
   const pending = new Promise<CuaSystemStatus>((resolve) => { release = resolve })

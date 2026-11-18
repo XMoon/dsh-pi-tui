@@ -192,6 +192,8 @@ test('revoke uses a reviewable confirmation before the exact opaque application 
   const confirmation = mounted.render().join('\n')
   assert.match(confirmation, /Revoke this application decision\?/u)
   assert.match(confirmation, /may stop immediately/u)
+  assert.match(confirmation, /Application: TextEdit · \/Applications\/TextEdit\.app/u,
+    'the confirmation paints the exact application identity it will revoke')
   assert.match(confirmation, /\[y Revoke\]/u, 'the confirmation decision is painted in the bar')
   assert.deepEqual(mounted.calls.filter(call => call.startsWith('revoke:')), [], 'no write before the confirmation')
   mounted.page.handleInput('y')
@@ -199,6 +201,33 @@ test('revoke uses a reviewable confirmation before the exact opaque application 
   assert.ok(mounted.calls.includes('revoke:app-1'), 'the exact painted application id reaches the port')
   assert.ok(!mounted.calls.includes('revoke:app-2'))
   assert.ok(targetRow >= 0)
+  mounted.page.dispose()
+})
+
+test('a confirmation from an older Host observation epoch cannot dispatch after a rollover', async () => {
+  let invalidate: (() => void) | undefined
+  let basis = 1
+  const observation = {
+    readSnapshot: () => basis,
+    subscribe: (listener: () => void) => { invalidate = listener; return () => {} },
+  }
+  const mounted = mount({ cua: { observation } })
+  mounted.page.setMaxRows(80)
+  const frame = await settle(mounted, 'TextEdit')
+  const revokeRow = frame.findIndex(line => line.includes('[Revoke access…]'))
+  assert.ok(revokeRow >= 0)
+  const labelCol = frame[revokeRow]!.indexOf('[')
+  const event = { type: 'press', x: labelCol, y: revokeRow, width: 96, height: 79 } as TuiMouseEvent
+  mounted.page.handleMouse(event)
+  mounted.page.handleMouse({ ...event, type: 'click' } as TuiMouseEvent)
+  assert.match(mounted.render().join('\n'), /\[y Revoke\]/u)
+  basis = 2
+  invalidate?.()
+  mounted.render()
+  mounted.page.handleInput('y')
+  await new Promise(resolve => setTimeout(resolve, 5))
+  assert.deepEqual(mounted.calls.filter(call => call.startsWith('revoke:')), [],
+    'the old-generation confirmation is discarded, never re-admitted by id membership')
   mounted.page.dispose()
 })
 
