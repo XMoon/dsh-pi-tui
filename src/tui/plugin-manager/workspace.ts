@@ -231,7 +231,7 @@ export interface EmbeddedPluginPage extends Component {
 
 /** One painted hit target of the LAST frame (never a screen-index authority). */
 interface HitTarget {
-  readonly kind: 'card' | 'action' | 'filter' | 'pane' | 'search' | 'diagnostic-fact' | 'diagnostic-action'
+  readonly kind: 'card' | 'action' | 'filter' | 'pane' | 'search' | 'diagnostic-fact' | 'diagnostic-action' | 'notice'
   readonly value: string
   readonly row: number
   readonly startCol: number
@@ -1844,6 +1844,15 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       case 'action':
         this.dispatchAction(target.value)
         return
+      case 'notice':
+        this.firstCuaEnableNotice = false
+        if (target.value === 'first-cua-open') {
+          const reason = this.intents.openComputerUseSettings?.()
+          if (reason !== undefined) this.controller.explain(reason)
+        }
+        this.bumpRevision()
+        this.intents.requestRender()
+        return
       case 'diagnostic-fact': {
         const fact = this.diagnosticsFacts().find(candidate => candidate.id === target.value)
         if (fact === undefined) return
@@ -2357,7 +2366,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     const lines: string[] = []
     const targets: HitTarget[] = []
     if (plan.searchRows === 1) lines.push(this.renderSearchRow(plan, 0, targets))
-    if (plan.noticeRows === 1) lines.push(this.renderNotice(plan))
+    if (plan.noticeRows === 1) lines.push(this.renderNotice(plan, targets))
     const bodyTop = this.bodyTop(plan)
     if (plan.bodyRows > 0) {
       lines.push(...this.renderBody(plan, bodyTop, targets))
@@ -2592,7 +2601,21 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     }
   }
 
-  private renderNotice(plan: ChromePlan): string {
+  private renderNotice(plan: ChromePlan, targets: HitTarget[]): string {
+    if (this.firstCuaEnableNotice) {
+      const label = 'Computer Use is enabled. '
+      const openLabel = '[Open Computer Use settings]'
+      const laterLabel = '[Later]'
+      const text = `${color.textMuted('ℹ ')}${label}${color.primary(openLabel)} ${color.textDim(laterLabel)}`
+      const row = plan.searchRows
+      const openStart = visibleWidth(`${color.textMuted('ℹ ')}${label}`)
+      const openEnd = openStart + visibleWidth(openLabel)
+      const laterStart = openEnd + 1
+      const laterEnd = laterStart + visibleWidth(laterLabel)
+      if (openEnd <= plan.width) targets.push({ kind: 'notice', value: 'first-cua-open', row, startCol: openStart, endCol: openEnd })
+      if (laterEnd <= plan.width) targets.push({ kind: 'notice', value: 'first-cua-later', row, startCol: laterStart, endCol: laterEnd })
+      return fit(text, plan.width)
+    }
     const model = this.controller.model()
     const exemptionWarning = model.exemptionWarnings.length === 0
       ? undefined

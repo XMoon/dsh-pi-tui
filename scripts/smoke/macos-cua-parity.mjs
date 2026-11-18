@@ -1299,6 +1299,12 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
   const shotDispatch = shotDispatches.find(dispatch => dispatchMethod(dispatch) === 'screenshot')
   assert(shotGetApp !== undefined && dispatchParams(shotGetApp)?.selector === String(textEditPid),
     'MAC09-07: the official getApp did not select this run\'s exact TextEdit PID')
+  const shotAppResult = cuaResults(shotEvents, 0).find(result => result.subCallId === shotGetApp?.subCallId)
+  const shotAppHandle = dispatchJsonContent(shotAppResult)?.appHandle
+  assert(typeof shotAppHandle === 'string' && shotAppHandle !== ''
+    && dispatchParams(shotWindows)?.appHandle === shotAppHandle
+    && dispatchParams(shotDispatch)?.appHandle === shotAppHandle,
+    'MAC09-07: listWindows/screenshot do not use the exact approved getApp handle')
   const shotWindowId = dispatchParams(shotDispatch)?.windowId
   assert(typeof shotWindowId === 'number',
     'MAC09-07: the official screenshot did not name a concrete window')
@@ -1370,15 +1376,33 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
   'MAC09-08 official getState dispatch', TIMEOUTS.turn)
   assert(getAppDispatch !== undefined && dispatchParams(getAppDispatch)?.selector === String(textEditPid),
     'MAC09-08: the official getApp did not select this run\'s exact TextEdit PID')
+  const inputEventsNow = eventsOf(dshHome, input.sessionId)
+  const getAppResult = cuaResults(inputEventsNow, 0).find(result => result.subCallId === getAppDispatch?.subCallId)
+  const controlledHandle = dispatchJsonContent(getAppResult)?.appHandle
+  assert(typeof controlledHandle === 'string' && controlledHandle !== '',
+    'MAC09-08: the official getApp result carried no app handle')
+  const listWindowsDispatch = liveInputDispatches().find(dispatch => dispatchMethod(dispatch) === 'listWindows')
+  const listWindowsResult = cuaResults(inputEventsNow, 0)
+    .find(result => result.subCallId === listWindowsDispatch?.subCallId)
+  const controlledWindows = dispatchJsonContent(listWindowsResult)
   const typeParams = dispatchParams(typeDispatch)
   const stateParams = dispatchParams(stateDispatch)
+  const showParams = dispatchParams(showDispatch)
   assert(typeDispatch !== undefined && typeParams?.text === marker,
     'MAC09-08: the official typeText argument is not the exact random marker')
-  assert(typeof typeParams?.appHandle === 'string' && typeParams.appHandle !== ''
-    && typeParams.appHandle === stateParams?.appHandle,
-    'MAC09-08: typeText and getState do not target the same official app handle')
+  assert(typeof typeParams?.appHandle === 'string' && typeParams.appHandle === controlledHandle
+    && stateParams?.appHandle === controlledHandle
+    && showParams?.appHandle === controlledHandle
+    && dispatchParams(listWindowsDispatch)?.appHandle === controlledHandle,
+    'MAC09-08: listWindows/show/typeText/getState do not use the exact approved getApp handle')
+  const controlledInputWindow = Array.isArray(controlledWindows)
+    ? controlledWindows.find(window => window?.windowId === typeParams?.windowId
+      && String(window?.title ?? '').includes('cua-blank'))
+    : undefined
+  assert(controlledInputWindow !== undefined,
+    'MAC09-08: typeText windowId is not this run\'s controlled cua-blank listWindows result')
   assert(typeof typeParams?.windowId === 'number' && typeParams.windowId === stateParams?.windowId
-    && dispatchParams(showDispatch)?.windowId === typeParams.windowId,
+    && showParams?.windowId === typeParams.windowId,
     'MAC09-08: show/typeText/getState do not target the same controlled window id')
   const markerResult = await waitFor(() => cuaResults(eventsOf(dshHome, input.sessionId), 0)
     .find(result => result.rootCallId === input.dispatch.rootCallId
@@ -1505,8 +1529,9 @@ async function sceneSplit({ installation, workRoot, report, textEditPid }) {
   const splitAppResult = cuaResults(splitEvents, 0).find(result => result.subCallId === splitGetApp?.subCallId)
   const splitAppHandle = dispatchJsonContent(splitAppResult)?.appHandle
   assert(typeof splitAppHandle === 'string' && splitAppHandle !== ''
-    && dispatchParams(splitShot)?.appHandle === splitAppHandle,
-    'Split MAC09-10: the screenshot does not use the approved getApp handle')
+    && dispatchParams(splitShot)?.appHandle === splitAppHandle
+    && dispatchParams(splitWindowsDispatch)?.appHandle === splitAppHandle,
+    'Split MAC09-10: listWindows/screenshot do not use the approved getApp handle')
   const splitWindowId = dispatchParams(splitShot)?.windowId
   const splitWindowsResult = cuaResults(splitEvents, 0)
     .find(result => result.subCallId === splitWindowsDispatch?.subCallId)
