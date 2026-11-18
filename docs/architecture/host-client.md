@@ -527,11 +527,15 @@ supported Daemon platform in this contract.
   (program, arguments, working directory, stdout/stderr sinks and the three
   official environment anchors) match the installed profile, and whose real
   `pid` equals the authenticated Host PID. User runtime directives outside
-  those fixed facts belong to the user/launchd. The default job is created with
-  `RunAtLoad=false` and `KeepAlive=false`: installation never enables login
-  startup and launchd never auto-restarts the Host after a crash. The two
-  private launchd logs are distinct, bounded, separately labelled sources; an
-  installed-but-not-loaded plist does not govern an independent Host.
+  those fixed facts belong to the user/launchd. Every mutating transition
+  re-proves the captured file identity and, when a live Host is named, the
+  loaded job PID immediately before the manager call: a changed file or job is
+  refused before bootstrap, kickstart, bootout or unlink. The default job is
+  created with `RunAtLoad=false` and `KeepAlive=false`: installation never
+  enables login startup and launchd never auto-restarts the Host after a crash.
+  The two private launchd logs are distinct, bounded, separately labelled
+  sources; an installed-but-not-loaded plist does not govern an independent
+  Host.
 - **Explicit macOS installation and reuse.** `daemon install` writes only the
   account-home LaunchAgent plist, atomically as 0600 and never overwriting an
   existing file; it requires a queryable `gui/<uid>` domain and a same-label job

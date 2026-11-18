@@ -1,26 +1,28 @@
 /**
  * Profile-aware Host lifecycle: the basic detached process and the explicit
- * systemd user-service install.
+ * Linux systemd user service / macOS user LaunchAgent install.
  *
- * The basic Linux daemon is an independent Host process. A public cold start
- * inspects whether THIS profile has an installed unit first: no unit means
- * `spawnHostCandidate()` immediately, with no user-manager probe at all; an
- * installed, manager-loaded unit means one fixed `systemctl --user start`.
- * `installProfileHostUnit()` is the ONLY path that writes a unit, installs it
- * atomically, asks the real user manager to load it and verifies the manager's
- * `FragmentPath`/`LoadState`; it never starts, stops, enables or restarts
- * anything.
+ * The basic daemon is an independent Host process. A public cold start inspects
+ * whether THIS profile has an installed service definition first: on Linux no
+ * unit means `spawnHostCandidate()` immediately, with no user-manager probe at
+ * all; an installed, manager-loaded unit means one fixed `systemctl --user
+ * start`. On macOS no plist keeps the same detached path; an owned plist means
+ * one verified launchd bootstrap/kickstart through the Darwin adapter. The
+ * Linux `installProfileHostUnit()` and macOS `installLaunchdUnit()` are the ONLY
+ * paths that write a service definition; they never start, stop, enable,
+ * auto-restart or migrate a Host.
  *
- * `systemctl`/`journalctl` are invoked through the system PATH with fixed
+ * `systemctl`/`journalctl` and `/bin/launchctl` are invoked through fixed
  * argument arrays. A missing command can only affect the explicit service-
  * managed branch; the detached Host never depends on it.
  *
  * This module never imports `app/bootstrap.ts`, Cordis, the Web or a Session
  * service, and it creates no manager store, daemon or public API: the Host's
  * official 0700 scope directory, abstract kernel seat, authenticated identity
- * and `runProfile` shutdown owner are all unchanged. A `systemctl start` here
- * only means the manager accepted a request; readiness is still proven later by
- * the existing authenticated Host handshake in `local-discovery.ts`.
+ * and `runProfile` shutdown owner are all unchanged. A `systemctl start` or
+ * `launchctl bootstrap` here only means the manager accepted a request;
+ * readiness is still proven later by the existing authenticated Host handshake
+ * in `local-discovery.ts`.
  *
  * @module app/remote-process/local-host-manager
  */
@@ -375,7 +377,7 @@ export function inspectTrustedDshAnchor(path: string): string {
   return real
 }
 
-/** Collect and validate the exact installed facts one unit is rendered from. */
+/** Collect and validate the exact installed facts one service definition is rendered from. */
 export function collectUnitFacts(options: HostStartOptions): UnitFacts {
   // The Node interpreter is a system executable: trust absolute + executable.
   const nodePath = inspectTrustedExecutable(process.execPath, 'node executable')

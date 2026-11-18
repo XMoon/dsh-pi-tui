@@ -764,9 +764,11 @@ function installLaunchdFile(options: {
 
 /**
  * Install the ONE explicit user-level LaunchAgent for this profile. This path
- * only verifies the GUI domain and same-label job source and writes the plist
- * atomically; it never bootstraps, kickstarts, enables, stops or restarts a job
- * and never creates the profile runtime scope.
+ * verifies the GUI domain, the current owned file (if any) and the same-label
+ * job source, then writes the plist atomically. A job loaded from our target
+ * path with no owned file is an unprovable source and is refused rather than
+ * conflated with a new file. It never bootstraps, kickstarts, enables, stops or
+ * restarts a job and never creates the profile runtime scope.
  */
 export async function installLaunchdUnit(
   facts: LaunchdUnitFacts,
@@ -778,22 +780,31 @@ export async function installLaunchdUnit(
   const dir = ensureLaunchAgentsDir(accountHome)
   const filePath = join(dir, `${label}.plist`)
   const canonicalTarget = join(realpathSync(dir), `${label}.plist`)
-  // The same label must not already be loaded from another manager source. A
-  // job loaded from OUR target path is a stale cache of this profile's file and
-  // does not block an explicit install of the file.
+  // Inspect the CURRENT file BEFORE the loaded-job source check. A loaded job
+  // from our target path is reusable only when the exact owned plist still
+  // exists: with no file there is no proven relationship between the loaded
+  // job and any new file, so install must fail closed instead of conflating
+  // them.
+  const existing = inspectOwnedLaunchdUnit(facts, deps)
+  if (existing.kind === 'owned' && existing.unit.installBuild !== facts.buildId) {
+    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'launchd: the installed profile plist belongs to another installed build')
+  }
   const observed = await inspectLaunchdServiceByLabel(label, deps)
   if (observed.kind === 'unknown') {
     throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'launchd: the loaded job state of this label is unknown; refusing to install')
   }
-  if (observed.kind === 'loaded'
-    && observed.service.path !== filePath && observed.service.path !== canonicalTarget) {
-    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'launchd: this label is already loaded from another source; refusing to install')
-  }
-  const existing = inspectOwnedLaunchdUnit(facts, deps)
-  if (existing.kind === 'owned') {
-    if (existing.unit.installBuild !== facts.buildId) {
-      throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'launchd: the installed profile plist belongs to another installed build')
+  if (observed.kind === 'loaded') {
+    if (observed.service.path !== filePath && observed.service.path !== canonicalTarget) {
+      throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'launchd: this label is already loaded from another source; refusing to install')
     }
+    if (existing.kind === 'none') {
+      throw new LocalScopeError(
+        'HOST_MANAGER_UNIT_CONFLICT',
+        'launchd: this label is loaded from the profile plist path but no owned plist exists; the loaded source cannot be proven, refusing to install',
+      )
+    }
+  }
+  if (existing.kind === 'owned') {
     return { label, filePath: existing.unit.filePath, created: false }
   }
   const content = renderLaunchdPlist(facts)
@@ -829,6 +840,11 @@ export async function startLaunchdService(
   deps: LaunchdAdapterDeps = {},
 ): Promise<void> {
   const uid = effectiveUid(deps)
+  // The caller inspected the file before the read-only observation above; a
+  // user/launchctl actor can still replace it between that observation and this
+  // mutation. Re-prove the captured file identity at the adapter boundary and
+  // again immediately before each mutating request.
+  assertLaunchdFileIdentity(unit, facts, deps)
   let observed = await inspectLaunchdService(unit, deps)
   if (observed.kind === 'unknown') {
     throw new LocalScopeError('HOST_MANAGER_START_FAILED', 'launchd: the loaded job state is not recognizable; refusing to start')
@@ -839,12 +855,14 @@ export async function startLaunchdService(
     }
     if (observed.service.pid !== undefined) return
     ensureLaunchdLogFiles(facts)
+    assertLaunchdFileIdentity(unit, facts, deps)
     await kickstartLaunchdJob(unit, deps)
     return
   }
   // Not loaded: prepare the private sinks BEFORE launchd opens them, then
   // bootstrap exactly once from the verified plist path.
   ensureLaunchdLogFiles(facts)
+  assertLaunchdFileIdentity(unit, facts, deps)
   const launchctl = deps.launchctl ?? runLaunchctl
   const bootstrap = await launchctl(['bootstrap', `gui/${String(uid)}`, unit.filePath])
   if (bootstrap.kind !== 'exited' || bootstrap.code !== 0) {
@@ -855,6 +873,7 @@ export async function startLaunchdService(
       throw launchctlFailure(bootstrap, 'bootstrap')
     }
     if (raced.service.pid !== undefined) return
+    assertLaunchdFileIdentity(unit, facts, deps)
     await kickstartLaunchdJob(unit, deps)
     return
   }
@@ -863,6 +882,7 @@ export async function startLaunchdService(
     throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'launchd: the bootstrapped job is not this profile plist')
   }
   if (observed.service.pid !== undefined) return
+  assertLaunchdFileIdentity(unit, facts, deps)
   await kickstartLaunchdJob(unit, deps)
 }
 
@@ -891,7 +911,11 @@ export async function stopLaunchdService(
   facts: LaunchdUnitFacts,
   unit: OwnedLaunchdUnit,
   deps: LaunchdAdapterDeps = {},
+  /** The authenticated live Host PID the caller verified, when one exists.
+   *  A loaded job that now runs a DIFFERENT real PID is never booted out. */
+  expectedPid?: number,
 ): Promise<{ readonly stopped: boolean }> {
+  assertLaunchdFileIdentity(unit, facts, deps)
   const observed = await inspectLaunchdService(unit, deps)
   if (observed.kind === 'not-loaded') return { stopped: false }
   if (observed.kind === 'unknown') {
@@ -900,7 +924,16 @@ export async function stopLaunchdService(
   if (!launchdServiceMatches(facts, unit, observed.service)) {
     throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'launchd: the loaded job does not match this profile plist; refusing to stop an unknown process')
   }
+  if (expectedPid !== undefined) {
+    if (observed.service.state === 'running' && observed.service.pid === undefined) {
+      throw new LocalScopeError('HOST_MANAGER_START_FAILED', 'launchd: the loaded job reports running without a PID; refusing to stop')
+    }
+    if (observed.service.pid !== undefined && observed.service.pid !== expectedPid) {
+      throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'launchd: the loaded job PID changed before the stop; refusing to bootout an unverified process')
+    }
+  }
   const stopped = observed.service.pid !== undefined || observed.service.state === 'running' || observed.service.state === 'spawn scheduled'
+  assertLaunchdFileIdentity(unit, facts, deps)
   const uid = effectiveUid(deps)
   const launchctl = deps.launchctl ?? runLaunchctl
   const result = await launchctl(['bootout', `gui/${String(uid)}/${unit.label}`])
@@ -920,7 +953,12 @@ export async function uninstallLaunchdUnit(
   facts: LaunchdUnitFacts,
   unit: OwnedLaunchdUnit,
   deps: LaunchdAdapterDeps = {},
+  /** The authenticated live Host PID the caller verified, when one exists. */
+  expectedPid?: number,
 ): Promise<void> {
+  // Prove the captured file identity BEFORE any bootout: a changed plist must
+  // never stop a job and only then discover the change.
+  assertLaunchdFileIdentity(unit, facts, deps)
   const observed = await inspectLaunchdService(unit, deps)
   if (observed.kind === 'unknown') {
     throw new LocalScopeError('HOST_MANAGER_START_FAILED', 'launchd: the loaded job state is not recognizable; refusing to uninstall')
@@ -929,7 +967,7 @@ export async function uninstallLaunchdUnit(
     if (!launchdServiceMatches(facts, unit, observed.service)) {
       throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'launchd: the loaded job does not match this profile plist; refusing to remove the job')
     }
-    await stopLaunchdService(facts, unit, deps)
+    await stopLaunchdService(facts, unit, deps, expectedPid)
   }
   assertLaunchdFileIdentity(unit, facts, deps)
   try {

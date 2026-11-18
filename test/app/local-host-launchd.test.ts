@@ -399,6 +399,16 @@ test('install refuses a same-label job loaded from another source and writes not
   assert.equal(existsSync(plistPathOf(fx)), false, 'no plist may be written while a foreign job owns the label')
 })
 
+test('install refuses a same-path loaded job when the owned plist is absent', async t => {
+  const fx = fixture(t)
+  const launchctl = fakeLaunchctl(fx, { loaded: true })
+  await assert.rejects(
+    installLaunchdUnit(fx.facts, depsOf(fx, { launchctl: launchctl.run })),
+    (error: unknown) => error instanceof LocalScopeError && error.code === 'HOST_MANAGER_UNIT_CONFLICT',
+  )
+  assert.equal(existsSync(plistPathOf(fx)), false, 'a loaded job whose source file is gone must not receive a new unproven plist')
+})
+
 test('install fails closed when the user GUI domain is unavailable', async t => {
   const fx = fixture(t)
   const run: LaunchctlRunner = async args => {
@@ -437,9 +447,12 @@ test('start bootstraps then kickstarts exactly once and prepares private 0600 lo
 
 test('start reuses a running job without bootstrap or kickstart', async t => {
   const fx = fixture(t)
-  const launchctl = fakeLaunchctl(fx, { loaded: true, state: 'running', pid: 4242 })
+  const launchctl = fakeLaunchctl(fx, { loaded: false })
   const deps = depsOf(fx, { launchctl: launchctl.run })
   await installLaunchdUnit(fx.facts, deps)
+  launchctl.job.loaded = true
+  launchctl.job.state = 'running'
+  launchctl.job.pid = 4242
   const unit = ownedUnitOf(fx, deps)
   launchctl.calls.length = 0
   await startLaunchdService(fx.facts, unit, deps)
@@ -448,9 +461,13 @@ test('start reuses a running job without bootstrap or kickstart', async t => {
 
 test('start refuses a loaded job whose fixed facts differ from the installed plist', async t => {
   const fx = fixture(t)
-  const launchctl = fakeLaunchctl(fx, { loaded: true, state: 'not running', pid: undefined, program: '/usr/bin/other' })
+  const launchctl = fakeLaunchctl(fx, { loaded: false })
   const deps = depsOf(fx, { launchctl: launchctl.run })
   await installLaunchdUnit(fx.facts, deps)
+  launchctl.job.loaded = true
+  launchctl.job.state = 'not running'
+  delete launchctl.job.pid
+  launchctl.job.program = '/usr/bin/other'
   const unit = ownedUnitOf(fx, deps)
   launchctl.calls.length = 0
   await assert.rejects(
@@ -460,11 +477,37 @@ test('start refuses a loaded job whose fixed facts differ from the installed pli
   assert.deepEqual(launchctl.calls, [['print', `gui/${String(UID)}/${unit.label}`]], 'a stale definition is never kickstarted')
 })
 
+test('start re-proves the plist identity after the async inspection and before bootstrap', async t => {
+  const fx = fixture(t)
+  const base = fakeLaunchctl(fx, { loaded: false })
+  const deps = depsOf(fx, { launchctl: base.run })
+  const installed = await installLaunchdUnit(fx.facts, deps)
+  const unit = ownedUnitOf(fx, deps)
+  const changed = `${readFileSync(installed.filePath, 'utf8')}\n<!-- changed during start inspection -->\n`
+  let changedNow = false
+  const launchctl: LaunchctlRunner = async args => {
+    if (args[0] === 'print' && !changedNow) {
+      changedNow = true
+      writeFileSync(installed.filePath, changed, { mode: 0o600 })
+    }
+    return await base.run(args)
+  }
+  base.calls.length = 0
+  await assert.rejects(
+    startLaunchdService(fx.facts, unit, depsOf(fx, { launchctl })),
+    (error: unknown) => error instanceof LocalScopeError && error.code === 'HOST_MANAGER_UNIT_CONFLICT',
+  )
+  assert.equal(base.calls.some(args => args[0] === 'bootstrap' || args[0] === 'kickstart'), false, 'a plist changed after inspection is never bootstrapped')
+})
+
 test('stop boots out only a matched job, verifies removal and never signals twice', async t => {
   const fx = fixture(t)
-  const launchctl = fakeLaunchctl(fx, { loaded: true, state: 'running', pid: 4242 })
+  const launchctl = fakeLaunchctl(fx, { loaded: false })
   const deps = depsOf(fx, { launchctl: launchctl.run })
   await installLaunchdUnit(fx.facts, deps)
+  launchctl.job.loaded = true
+  launchctl.job.state = 'running'
+  launchctl.job.pid = 4242
   const unit = ownedUnitOf(fx, deps)
   launchctl.calls.length = 0
   const result = await stopLaunchdService(fx.facts, unit, { ...deps, sleep: async () => {}, now: () => 0 })
@@ -482,14 +525,13 @@ test('stop boots out only a matched job, verifies removal and never signals twic
 
 test('stop refuses to boot out a foreign or mismatched loaded job', async t => {
   const fx = fixture(t)
-  const launchctl = fakeLaunchctl(fx, {
-    loaded: true,
-    state: 'running',
-    pid: 4242,
-    environment: { DSH_HOME: '/other', SPLIT_PROCESS_DSH_ANCHOR: '/other', SPLIT_PROCESS_PROFILE: 'other' },
-  })
+  const launchctl = fakeLaunchctl(fx, { loaded: false })
   const deps = depsOf(fx, { launchctl: launchctl.run })
   await installLaunchdUnit(fx.facts, deps)
+  launchctl.job.loaded = true
+  launchctl.job.state = 'running'
+  launchctl.job.pid = 4242
+  launchctl.job.environment = { DSH_HOME: '/other', SPLIT_PROCESS_DSH_ANCHOR: '/other', SPLIT_PROCESS_PROFILE: 'other' }
   const unit = ownedUnitOf(fx, deps)
   launchctl.calls.length = 0
   await assert.rejects(
@@ -499,11 +541,57 @@ test('stop refuses to boot out a foreign or mismatched loaded job', async t => {
   assert.equal(launchctl.calls.some(args => args[0] === 'bootout'), false, 'a mismatched job is never booted out')
 })
 
+test('stop refuses a loaded job whose real PID changed before bootout', async t => {
+  const fx = fixture(t)
+  const launchctl = fakeLaunchctl(fx, { loaded: false })
+  const deps = depsOf(fx, { launchctl: launchctl.run })
+  await installLaunchdUnit(fx.facts, deps)
+  launchctl.job.loaded = true
+  launchctl.job.state = 'running'
+  launchctl.job.pid = 4242
+  const unit = ownedUnitOf(fx, deps)
+  launchctl.calls.length = 0
+  await assert.rejects(
+    stopLaunchdService(fx.facts, unit, { ...deps, sleep: async () => {}, now: () => 0 }, 5151),
+    (error: unknown) => error instanceof LocalScopeError && error.code === 'HOST_MANAGER_UNIT_CONFLICT',
+  )
+  assert.deepEqual(launchctl.calls, [['print', `gui/${String(UID)}/${unit.label}`]], 'a changed real PID is never booted out')
+})
+
+test('stop re-proves the plist identity after the async inspection and before bootout', async t => {
+  const fx = fixture(t)
+  const base = fakeLaunchctl(fx, { loaded: false })
+  const deps = depsOf(fx, { launchctl: base.run })
+  const installed = await installLaunchdUnit(fx.facts, deps)
+  base.job.loaded = true
+  base.job.state = 'running'
+  base.job.pid = 4242
+  const unit = ownedUnitOf(fx, deps)
+  const changed = `${readFileSync(installed.filePath, 'utf8')}\n<!-- changed during stop inspection -->\n`
+  let changedNow = false
+  const launchctl: LaunchctlRunner = async args => {
+    if (args[0] === 'print' && !changedNow) {
+      changedNow = true
+      writeFileSync(installed.filePath, changed, { mode: 0o600 })
+    }
+    return await base.run(args)
+  }
+  base.calls.length = 0
+  await assert.rejects(
+    stopLaunchdService(fx.facts, unit, depsOf(fx, { launchctl, sleep: async () => {}, now: () => 0 }), 4242),
+    (error: unknown) => error instanceof LocalScopeError && error.code === 'HOST_MANAGER_UNIT_CONFLICT',
+  )
+  assert.equal(base.calls.some(args => args[0] === 'bootout'), false, 'a plist changed after inspection is never booted out')
+})
+
 test('uninstall removes only the verified plist and leaves the private logs', async t => {
   const fx = fixture(t)
-  const launchctl = fakeLaunchctl(fx, { loaded: true, state: 'running', pid: 4242 })
+  const launchctl = fakeLaunchctl(fx, { loaded: false })
   const deps = depsOf(fx, { launchctl: launchctl.run })
   const installed = await installLaunchdUnit(fx.facts, deps)
+  launchctl.job.loaded = true
+  launchctl.job.state = 'running'
+  launchctl.job.pid = 4242
   const logs = launchdLogPaths(fx.facts.scopeDir)
   writeFileSync(logs.stdout, 'stdout retained\n', { mode: 0o600 })
   writeFileSync(logs.stderr, 'stderr retained\n', { mode: 0o600 })
@@ -528,6 +616,34 @@ test('uninstall refuses a plist whose captured identity changed and keeps the fi
     (error: unknown) => error instanceof LocalScopeError && error.code === 'HOST_MANAGER_UNIT_CONFLICT',
   )
   assert.equal(existsSync(installed.filePath), true, 'a changed plist is never removed')
+})
+
+test('uninstall re-proves the plist identity after inspection and before any bootout', async t => {
+  const fx = fixture(t)
+  const base = fakeLaunchctl(fx, { loaded: false })
+  const deps = depsOf(fx, { launchctl: base.run })
+  const installed = await installLaunchdUnit(fx.facts, deps)
+  base.job.loaded = true
+  base.job.state = 'running'
+  base.job.pid = 4242
+  const unit = ownedUnitOf(fx, deps)
+  const changed = `${readFileSync(installed.filePath, 'utf8')}\n<!-- changed during uninstall inspection -->\n`
+  let changedNow = false
+  const launchctl: LaunchctlRunner = async args => {
+    if (args[0] === 'print' && !changedNow) {
+      changedNow = true
+      writeFileSync(installed.filePath, changed, { mode: 0o600 })
+    }
+    return await base.run(args)
+  }
+  base.calls.length = 0
+  await assert.rejects(
+    uninstallLaunchdUnit(fx.facts, unit, depsOf(fx, { launchctl, sleep: async () => {}, now: () => 0 }), 4242),
+    (error: unknown) => error instanceof LocalScopeError && error.code === 'HOST_MANAGER_UNIT_CONFLICT',
+  )
+  assert.equal(base.calls.some(args => args[0] === 'bootout'), false, 'a changed plist is never booted out first')
+  assert.equal(existsSync(installed.filePath), true)
+  assert.equal(readFileSync(installed.filePath, 'utf8'), changed)
 })
 
 // ── the public-start wiring ────────────────────────────────────────────────

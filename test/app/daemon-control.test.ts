@@ -1421,6 +1421,49 @@ test('darwin logs keeps host.log for an independent Host beside an installed but
   assert.match(result.stdout, /independent host line/u)
 })
 
+test('darwin logs keeps host.log for an independent Host beside a loaded but not-running owned job', async t => {
+  const fx = fixture(t)
+  writeOwnedLaunchd(fx)
+  const record = darwinRecordOf(fx.scope)
+  const launchctl = fakeLaunchd(fx, { loaded: true, state: 'not running', pid: undefined })
+  const reads: string[] = []
+  const result = await runDaemonControl({ verb: 'logs', lines: 20 }, fx.profile, darwinDepsOf(fx, {
+    launchctl: launchctl.run,
+    readRecord: () => record,
+    inspectProcess: () => 'alive',
+    authenticate: async () => ({ record, cookie: 'c', identity: record }),
+    hostLogTail: async (path, lines) => {
+      reads.push(path)
+      assert.equal(path, join(fx.scope.dir, 'host.log'))
+      assert.equal(lines, 20)
+      return 'independent host line\n'
+    },
+  }))
+  assertCode(result, 0)
+  assert.match(result.stdout, /independent host line/u)
+  assert.deepEqual(reads, [join(fx.scope.dir, 'host.log')], 'a loaded not-running job does not govern the authenticated independent Host')
+})
+
+test('darwin logs refuses to attribute a different running launchd job to the authenticated Host', async t => {
+  const fx = fixture(t)
+  writeOwnedLaunchd(fx)
+  const record = darwinRecordOf(fx.scope)
+  const launchctl = fakeLaunchd(fx, { loaded: true, state: 'running', pid: record.hostPid + 1 })
+  let hostLogReads = 0
+  const result = await runDaemonControl({ verb: 'logs', lines: 20 }, fx.profile, darwinDepsOf(fx, {
+    launchctl: launchctl.run,
+    readRecord: () => record,
+    inspectProcess: () => 'alive',
+    authenticate: async () => ({ record, cookie: 'c', identity: record }),
+    hostLogTail: async () => {
+      hostLogReads += 1
+      return 'must not be read\n'
+    },
+  }))
+  assertCode(result, 4, /LOG_SOURCE_UNAVAILABLE/u)
+  assert.equal(hostLogReads, 0, 'a conflicting running job never falls back to host.log')
+})
+
 test('darwin logs reports an unavailable launchd source without inventing one', async t => {
   const fx = fixture(t)
   writeOwnedLaunchd(fx)

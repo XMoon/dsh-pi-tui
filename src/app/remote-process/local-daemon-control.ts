@@ -7,16 +7,17 @@
  * existing authenticated `/connect` Cookie + identity echo + fresh kernel
  * identity handshake (Linux `/proc` starttime, macOS Darwin schema 2), and a
  * Host stop remains the existing `runProfile` shutdown owner reached either
- * through the verified profile unit's manager SIGTERM or a single verified-PID
- * POSIX SIGTERM when the authenticated Host is independent.
+ * through the verified profile unit's manager SIGTERM, a verified user-level
+ * launchd job's `bootout`, or a single verified-PID POSIX SIGTERM when the
+ * authenticated Host is independent.
  *
  * `status` and `logs` are strictly read-only: they never create the profile run
- * directory, never write a unit, never start a Host and never touch a Session.
- * The four mutating verbs are serialized by one short-lived profile-scoped
- * admin seat: Linux holds the abstract-socket name, macOS holds the Darwin
- * `O_EXLOCK` `admin` seat file beside the Host singleton seat. The kernel
- * releases it when the command dies, so there is no persistent lock file or
- * second state machine.
+ * directory, never write a service definition, never start a Host and never
+ * touch a Session. The five mutating verbs (start, stop, restart, install and
+ * uninstall) are serialized by one short-lived profile-scoped admin seat: Linux
+ * holds the abstract-socket name, macOS holds the Darwin `O_EXLOCK` `admin` seat
+ * file beside the Host singleton seat. The kernel releases it when the command
+ * dies, so there is no persistent lock file or second state machine.
  *
  * @module app/remote-process/local-daemon-control
  */
@@ -1067,7 +1068,9 @@ async function stopDarwinFromSnapshot(snapshot: Snapshot, deps: DaemonControlDep
         throw new DaemonControlError('IDENTITY_OR_OWNERSHIP_REFUSED', 'the launchd job PID is not the authenticated Host; refusing to signal an unknown process')
       }
       assertNotAborted(deps.signal)
-      await stopLaunchdService(launchdFacts, launchdUnit, launchdDepsOf(deps))
+      // Pass the authenticated Host PID: a job that changed PID between this
+      // observation and the adapter's re-inspection must not be booted out.
+      await stopLaunchdService(launchdFacts, launchdUnit, launchdDepsOf(deps), record.hostPid)
       try {
         await waitForHostStopped(record, loaded.pid, deps)
       } catch (error) {
@@ -1465,7 +1468,8 @@ async function runDarwinUninstall(profile: DaemonControlProfile, deps: DaemonCon
     }
     assertNotAborted(deps.signal)
     try {
-      await uninstallLaunchdUnit(pre.launchdFacts, pre.launchdUnit, launchdDepsOf(deps))
+      const expectedPid = running && liveHost && pre.record !== undefined ? pre.record.hostPid : undefined
+      await uninstallLaunchdUnit(pre.launchdFacts, pre.launchdUnit, launchdDepsOf(deps), expectedPid)
       if (running && liveHost && pre.record !== undefined) {
         await waitForHostStopped(pre.record, loadedService?.pid ?? pre.record.hostPid, deps)
       }
@@ -1629,42 +1633,79 @@ async function runDarwinLogs(
   }
   const lines = intent.lines ?? 100
   const { launchdUnit, launchdFacts, launchdService, record, processAlive, authenticated } = snapshot
-  if (launchdUnit !== undefined) {
+  const liveHost = processAlive && record !== undefined
+  const loadedService = launchdService?.kind === 'loaded' ? launchdService.service : undefined
+  let launchdSource: LaunchdUnitFacts | undefined
+  if (liveHost) {
+    if (authenticated === undefined) {
+      throw new DaemonControlError('LOG_SOURCE_UNAVAILABLE', 'the authenticated Host is unavailable; refusing to guess a log source')
+    }
+    if (snapshot.status.manager === 'launchd') {
+      if (launchdUnit === undefined || launchdFacts === undefined || loadedService === undefined) {
+        throw new DaemonControlError('LOG_SOURCE_UNAVAILABLE', 'the launchd-managed Host facts are unavailable; refusing to guess a log source')
+      }
+      if (!launchdServiceMatches(launchdFacts, launchdUnit, loadedService)) {
+        throw new DaemonControlError('LOG_SOURCE_UNAVAILABLE', 'the launchd job does not match the profile plist; refusing to guess a log source')
+      }
+      if (loadedService.pid !== record?.hostPid) {
+        throw new DaemonControlError('LOG_SOURCE_UNAVAILABLE', 'the launchd job PID is not the authenticated Host; refusing to guess a log source')
+      }
+      launchdSource = launchdFacts
+    } else if (snapshot.status.manager === 'process') {
+      // The authenticated Host is independent. A loaded job that is actually
+      // running/scheduled beside it is a conflicting supervisor; a merely
+      // loaded, not-running job does not govern this Host, so host.log is the
+      // current source (plan L08).
+      if (launchdUnit !== undefined && launchdFacts === undefined) {
+        throw new DaemonControlError('LOG_SOURCE_UNAVAILABLE', 'the launchd job facts are unavailable; refusing to guess a log source')
+      }
+      if (launchdService?.kind === 'unknown') {
+        throw new DaemonControlError('LOG_SOURCE_UNAVAILABLE', 'the launchd job state is not recognizable; refusing to guess a log source')
+      }
+      if (launchdUnit !== undefined && launchdFacts !== undefined && loadedService !== undefined) {
+        if (!launchdServiceMatches(launchdFacts, launchdUnit, loadedService)) {
+          throw new DaemonControlError('LOG_SOURCE_UNAVAILABLE', 'the launchd job does not match the profile plist; refusing to guess a log source')
+        }
+        if (loadedService.pid !== undefined || loadedService.state === 'running' || loadedService.state === 'spawn scheduled') {
+          throw new DaemonControlError('LOG_SOURCE_UNAVAILABLE', 'the loaded launchd job does not supervise the authenticated Host; refusing to guess a log source')
+        }
+      }
+    } else {
+      throw new DaemonControlError('LOG_SOURCE_UNAVAILABLE', `the Host supervision is ${snapshot.status.manager}; refusing to guess a log source`)
+    }
+  } else if (launchdUnit !== undefined) {
     if (launchdFacts === undefined) {
       throw new DaemonControlError('LOG_SOURCE_UNAVAILABLE', 'the launchd job facts are unavailable; refusing to guess a log source')
     }
     if (launchdService?.kind === 'unknown') {
       throw new DaemonControlError('LOG_SOURCE_UNAVAILABLE', 'the launchd job state is not recognizable; refusing to guess a log source')
     }
-    if (launchdService?.kind === 'loaded') {
-      const service = launchdService.service
-      if (!launchdServiceMatches(launchdFacts, launchdUnit, service)) {
+    if (loadedService !== undefined) {
+      if (!launchdServiceMatches(launchdFacts, launchdUnit, loadedService)) {
         throw new DaemonControlError('LOG_SOURCE_UNAVAILABLE', 'the launchd job does not match the profile plist; refusing to guess a log source')
       }
-      const liveHost = processAlive && record !== undefined
-      if (liveHost
-        && (authenticated === undefined || record === undefined || service.pid === undefined || service.pid !== record.hostPid)) {
-        throw new DaemonControlError('LOG_SOURCE_UNAVAILABLE', 'the launchd job PID is not the authenticated Host; refusing to guess a log source')
-      }
-      const logs = launchdLogPaths(launchdFacts.scopeDir)
-      const tail = deps.hostLogTail ?? tailHostLog
-      const stdout = await tail(logs.stdout, lines)
-      const stderr = await tail(logs.stderr, lines)
-      const sections: string[] = []
-      if (stdout !== undefined && stdout.trim() !== '') {
-        sections.push(`[dsh-pi-tui daemon: launchd stdout]\n${sanitizeLogText(stdout).replace(/\n*$/u, '\n')}`)
-      }
-      if (stderr !== undefined && stderr.trim() !== '') {
-        sections.push(`[dsh-pi-tui daemon: launchd stderr]\n${sanitizeLogText(stderr).replace(/\n*$/u, '\n')}`)
-      }
-      if (sections.length === 0) {
-        throw new DaemonControlError('LOG_SOURCE_UNAVAILABLE', 'no launchd Host log output is available for this profile')
-      }
-      return { code: 0, stdout: sections.join(''), stderr: LOG_SANITIZATION_NOTICE }
+      launchdSource = launchdFacts
     }
   }
-  // No loaded LaunchAgent: the Host, if any, is independent and writes the
-  // scope host.log. An installed-but-not-loaded job is not the Host's source.
+  if (launchdSource !== undefined) {
+    const logs = launchdLogPaths(launchdSource.scopeDir)
+    const tail = deps.hostLogTail ?? tailHostLog
+    const stdout = await tail(logs.stdout, lines)
+    const stderr = await tail(logs.stderr, lines)
+    const sections: string[] = []
+    if (stdout !== undefined && stdout.trim() !== '') {
+      sections.push(`[dsh-pi-tui daemon: launchd stdout]\n${sanitizeLogText(stdout).replace(/\n*$/u, '\n')}`)
+    }
+    if (stderr !== undefined && stderr.trim() !== '') {
+      sections.push(`[dsh-pi-tui daemon: launchd stderr]\n${sanitizeLogText(stderr).replace(/\n*$/u, '\n')}`)
+    }
+    if (sections.length === 0) {
+      throw new DaemonControlError('LOG_SOURCE_UNAVAILABLE', 'no launchd Host log output is available for this profile')
+    }
+    return { code: 0, stdout: sections.join(''), stderr: LOG_SANITIZATION_NOTICE }
+  }
+  // No live launchd-managed Host: the independent Host (or the last stopped
+  // independent Host) writes the scope host.log.
   const path = join(scope.dir, 'host.log')
   const tail = deps.hostLogTail ?? tailHostLog
   const value = await tail(path, lines)
