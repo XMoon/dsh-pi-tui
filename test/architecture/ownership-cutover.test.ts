@@ -2,9 +2,9 @@
  * Session ownership/currentness guards: publication flows through the
  * injected SessionOwnerAccess provider and core; callers must not reconstruct
  * authority from the Direct attachment or a sessionId→Agent lookup.
- * State placement is specified by the concurrency contract and validated by
- * composition uniqueness and executable lifecycle tests, not a frozen roster
- * of historical Runner names or private core declarations.
+ * State placement is defined by the concurrency contract. Construction-site
+ * uniqueness and executable lifecycle tests protect concrete owner behavior;
+ * they do not prove the absence of arbitrarily named shadow state.
  * @module @xmoon76/dsh-pi-tui/ownership-cutover.test
  */
 
