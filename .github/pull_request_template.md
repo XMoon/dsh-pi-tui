@@ -39,6 +39,14 @@ Do not infer higher evidence tiers from test names or CI success.
 | <!-- command or manual witness --> | <!-- PASS / FAIL / NOT_RUN --> | <!-- scope, output or link --> |
 
 <!--
+If tests were added, materially rewritten, retained as acceptance requirements
+or retired, briefly identify their distinct observable failure class and why
+existing evidence does not already cover it, or which surviving proof protects
+the contract after retirement. One sentence is enough for routine changes;
+omit this explanation when tests are unaffected. Do not add per-case paperwork.
+-->
+
+<!--
 For user-visible changes, provide before/after frames or screenshots as appropriate.
 For TSP changes, distinguish headless evidence from real Tern GUI verification.
 For Host/Client changes, identify affected Direct / Remote paths and qualification coverage.
