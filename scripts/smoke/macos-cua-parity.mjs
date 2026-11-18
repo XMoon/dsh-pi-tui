@@ -532,9 +532,11 @@ function createOperatorConsole() {
       closed = true
       readline.close()
     },
-    async gate(stage, instructions, timeoutMs = OPERATOR_GATE_TIMEOUT_MS) {
+    async gate(stage, instructions, expected, timeoutMs = OPERATOR_GATE_TIMEOUT_MS) {
       if (closed) throw new CuaOperatorTimeoutError('the operator console is closed')
-      process.stderr.write(`\n[MACOS_CUA operator] ${stage}\n${instructions}\n[MACOS_CUA operator] type "continue" + Enter in this terminal when done.\n`)
+      // A stage-specific token, not a bare "continue": a line typed before this
+      // prompt cannot satisfy a later gate and silently advance the scene.
+      process.stderr.write(`\n[MACOS_CUA operator] ${stage}\n${instructions}\n[MACOS_CUA operator] type "${expected}" + Enter in this terminal when done.\n`)
       let timer
       const deadline = new Promise((_, reject) => {
         timer = setTimeout(() => {
@@ -551,15 +553,15 @@ function createOperatorConsole() {
         closed = true
         throw new CuaOperatorTimeoutError(`the operator console closed during "${stage}"`)
       }
-      if (next.value.trim() !== 'continue') {
-        throw new CuaOperatorTimeoutError(`operator action "${stage}" was not confirmed with "continue"`)
+      if (next.value.trim() !== expected) {
+        throw new CuaOperatorTimeoutError(`operator action "${stage}" was not confirmed with "${expected}"`)
       }
     },
   }
 }
 
-async function operatorGate(operator, tui, stage, lines, timeoutMs) {
-  return await operator.gate(stage, [`TUI attach command: ${attachCommand(tui)}`, '', ...lines].join('\n'), timeoutMs)
+async function operatorGate(operator, tui, stage, token, lines, timeoutMs) {
+  return await operator.gate(stage, [`TUI attach command: ${attachCommand(tui)}`, '', ...lines].join('\n'), token, timeoutMs)
 }
 
 function logOperator(lines) {
@@ -1053,7 +1055,7 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
   // reports `Host default`. Record the observed fact rather than asserting the
   // outdated plan wording.
   setCase(report, 'MAC09-01')
-  await operatorGate(operator, tui, 'MAC09-01 default plugin list', [
+  await operatorGate(operator, tui, 'MAC09-01 default plugin list', 'continue mac09-01-list', [
     'Run /plugins and wait for the Settings → Plugins list. Do NOT search yet.',
     'Return here when the default list is painted.',
   ])
@@ -1062,7 +1064,7 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
     'MAC09-01: the Plugin Manager did not paint its explicit hidden-bundle search route')
   const defaultListDigest = sha16(frame)
   const defaultCardVisible = frame.includes('Computer use')
-  await operatorGate(operator, tui, 'MAC09-01 explicit CUA search + Details', [
+  await operatorGate(operator, tui, 'MAC09-01 explicit CUA search + Details', 'continue mac09-01-search', [
     'Press "/" (the explicit hidden-bundle search), type the exact name',
     `${CUA_BUNDLE}, press Enter, select the Computer use card and press Enter`,
     'to open its Details panel. Return here when the Details facts are painted.',
@@ -1088,7 +1090,7 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
     providerRowsLive: false,
     crossPlatformNegative: 'covered by the existing Host catalog owner test, not by this macOS Host',
   })
-  await operatorGate(operator, tui, 'MAC09-01 close Plugins', [
+  await operatorGate(operator, tui, 'MAC09-01 close Plugins', 'continue mac09-01-close', [
     'Press Esc to leave the Details panel, then Esc again to leave the Plugins',
     'page and return to the normal composer. Do not enable the bundle yet.',
   ])
@@ -1109,7 +1111,7 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
 
   // MAC09-02 POSITIVE: the operator enables the official bundle and switches a
   // new session to the PTC preset through the real UI.
-  await operatorGate(operator, tui, 'MAC09-02 enable Computer use + PTC', [
+  await operatorGate(operator, tui, 'MAC09-02 enable Computer use + PTC', 'continue mac09-02-enable', [
     'In the Plugins page search for the Computer use card again and choose its',
     'Install/Enable action (use "Set to PTC" if the card offers it).',
     'Press Esc to leave the Plugins page, then run /preset default ptc (the',
@@ -1154,7 +1156,7 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
   report.observedPermissions = { source: 'official cua.getCapabilities result', digest: sha16(capabilityText) }
   const grantApp = profileCuaHelper(installation.profileDir)?.appPath ?? helperAppPath
   report.helperAppPathUsed = grantApp
-  await operatorGate(operator, tui, 'MAC09-03 macOS TCC grants', [
+  await operatorGate(operator, tui, 'MAC09-03 macOS TCC grants', 'continue mac09-03-tcc', [
     'Grant BOTH permissions to the OFFICIAL helper application:',
     `  ${grantApp}`,
     'Open System Settings → Privacy & Security → Accessibility and add the app,',
@@ -1672,7 +1674,7 @@ async function main() {
     // consent storage remain untouched.
     setCase(report, 'MAC09-11')
     const storageBefore = permissionStoreFingerprint(installation.dshHome)
-    await operatorGate(operator, splitTui, 'MAC09-11 disable Computer use', [
+    await operatorGate(operator, splitTui, 'MAC09-11 disable Computer use', 'continue mac09-11-disable', [
       'Open /plugins, search the Computer use card, open its Details and choose',
       'Disable. Wait until the card reports disabled. Then start a NEW session',
       'with /new and return here from the composer.',
