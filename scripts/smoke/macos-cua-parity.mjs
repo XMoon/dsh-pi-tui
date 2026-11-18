@@ -784,8 +784,17 @@ async function expandNestedToolCard(session, needle, label) {
   const line = lines[rowIndex]
   const marker = line.search(/[▶▸]/u)
   assert(marker >= 0, `${label}: the nested ${needle} card has no painted disclosure marker`)
+  // tmux only forwards SGR mouse sequences when the client pane enables the
+  // mouse protocol; a bare literal injection is not, so drive the SAME
+  // disclosure through the pane's real keyboard mapping first (the arrow
+  // disclosure key) and verify the expansion from the painted frame.
+  const expandedAt = async () => tmuxCapture(session, `${label} after expand`)
+    .split('\n')
+    .some(row => row.includes(needle) && /[▼▾]/u.test(row))
+  // The pane enables mouse reporting (tmux forwards SGR clicks), so the click
+  // is the real per-card toggle; keep the painted expansion as the proof.
   sendMouseClick(session, rowIndex + 1, marker + 1, `${label} disclosure click`)
-  await sleep(500)
+  await waitFor(expandedAt, `${label} the nested ${needle} card expanded`, 10_000)
 }
 
 async function closeTui(session, label) {
