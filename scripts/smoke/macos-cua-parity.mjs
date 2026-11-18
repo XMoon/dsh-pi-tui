@@ -764,6 +764,30 @@ function startTui({ installation, workRoot, backend, sessionName, args = [] }) {
   return sessionName
 }
 
+/** Send one SGR left-button click at a 1-based pane cell (no Enter). */
+function sendMouseClick(session, row, col, label) {
+  const sequence = `\x1b[<0;${String(col)};${String(row)}M\x1b[<0;${String(col)};${String(row)}m`
+  tmux(['send-keys', '-t', session, '-l', sequence], label)
+}
+
+/**
+ * Expand the collapsed nested tool card whose header names `needle`: the
+ * existing TSP image identity row is only painted inside the child's expanded
+ * body. A pointer click on the painted disclosure marker is the same user
+ * action, not a second transcript owner.
+ */
+async function expandNestedToolCard(session, needle, label) {
+  const frame = tmuxCapture(session, `${label} before expand`)
+  const lines = frame.split('\n')
+  const rowIndex = lines.findIndex(line => line.includes(needle) && /[▶▸]/u.test(line))
+  assert(rowIndex >= 0, `${label}: the collapsed nested ${needle} card is not painted`)
+  const line = lines[rowIndex]
+  const marker = line.search(/[▶▸]/u)
+  assert(marker >= 0, `${label}: the nested ${needle} card has no painted disclosure marker`)
+  sendMouseClick(session, rowIndex + 1, marker + 1, `${label} disclosure click`)
+  await sleep(500)
+}
+
 async function closeTui(session, label) {
   if (!tmuxSessionExists(session)) return
   sendKeys(session, '/exit', label)
@@ -1344,6 +1368,7 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
   assert(bytes.length > 0, 'MAC09-07: the official Host Attachment object is empty')
   const dimensions = imageDimensions(bytes)
   assert(dimensions !== undefined, 'MAC09-07: the official Host Attachment object is not a supported image')
+  await expandNestedToolCard(tui, 'cua · screenshot', 'MAC09-07 screenshot result')
   const imageFrame = await waitFrameText(tui, '🖼️', 'MAC09-07 Client image identity row', TIMEOUTS.mount)
   assert(imageFrame.includes(`${String(dimensions.width)}×${String(dimensions.height)}`),
     'MAC09-07: the Client image row does not name the admitted screenshot dimensions')
