@@ -1444,12 +1444,13 @@ watch is never dropped. The target width is derived from the real content grant
 4M-pixel budget), never from a fixed size and never by upscaling the thumbnail.
 Preview pixels render on Kitty, on Direct SIXEL once the terminal's own live
 DA1, cell-size and background facts admit it, and on Direct iTerm2 through the
-fork's OSC 1337 `Image` path (X079). Multiplexer panes and `PI_IMAGE_PROTOCOL=none`
+fork's OSC 1337 `Image` path (X080). Multiplexer panes and `PI_IMAGE_PROTOCOL=none`
 remain text-only. Without a usable protocol the page says `Preview unavailable`
 while Source and Copy remain fully usable. A Direct SIXEL thumbnail's clickable
 body is the Screen-committed footprint read at hit time, never the component's
-render-time candidate; iTerm2 thumbnail pixels are intentionally non-clickable
-because OSC 1337 has no last-committed geometry authority in this surface.
+render-time candidate; SVG iTerm2 thumbnail pixels are intentionally
+non-clickable because OSC 1337 has no last-committed geometry authority in that
+surface, while the ordinary raster thumbnail keeps its legacy iTerm2 hit body.
 
 The isolated raster child runs on Linux under the verified virtual-memory cap.
 On macOS the tested finite `RLIMIT_AS` / `RLIMIT_DATA` settings returned
@@ -1678,9 +1679,9 @@ independent occurrences with independent fold state.
 - **Protocol scope.** The leased AltScreen renders real pixels
   through Kitty and through Direct SIXEL after the terminal's own live DA1,
   cell-size and background observations admit it, or through Direct iTerm2's
-  OSC 1337 `Image` path (X079). The pinned AltScreen no longer mutates the
+  OSC 1337 `Image` path (X080). The pinned AltScreen no longer mutates the
   process-wide iTerm2 capability. Multiplexer panes and
-  `PI_IMAGE_PROTOCOL=none` remain text-only. Transcript iTerm2 thumbnail
+  `PI_IMAGE_PROTOCOL=none` remain text-only. Transcript SVG iTerm2 thumbnail
   pixels are painted without clickable pixel-body geometry; the explicit View
   action remains the viewer entry. On Kitty and Direct SIXEL both JPEG/WebP
   bodies and the Viewer use the SAME bounded derivative above; Direct iTerm2

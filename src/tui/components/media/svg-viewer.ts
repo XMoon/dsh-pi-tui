@@ -279,6 +279,19 @@ export class SvgViewerPanel implements Component {
   render(width: number): string[] {
     const safeWidth = Math.max(1, Math.floor(width))
     const rows = Math.max(1, Math.floor(this.maxRows))
+    // Reconcile the VISIBLE grant before deriving the bar/hits: the bar must
+    // describe the variant this frame can actually paint. A 1-2 row frame has
+    // no Preview body, so the old variant is released instead of staying an
+    // actionable Retry target; a width/height change re-subscribes first so a
+    // stale A-width Retry can never be advertised beside a B-width request.
+    const grantedBodyRows = Math.max(0, rows - 2)
+    if (this.page === 'preview') {
+      if (this.previewSupported() && grantedBodyRows > 0) {
+        this.ensureVariant(safeWidth, grantedBodyRows)
+      } else {
+        this.releaseVariant()
+      }
+    }
     const bar = this.barRow(safeWidth)
     if (rows === 1) {
       this.painted = { width: safeWidth, termRows: rows, hits: this.barHits(bar.plain) }

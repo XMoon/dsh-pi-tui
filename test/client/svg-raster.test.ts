@@ -393,6 +393,56 @@ test('a raster child that outlives the 3 s bound is classified as a timeout afte
     'the real child answered nothing, so no stdout boundary is recorded')
 })
 
+test('a real timeout -> loader retry -> real successor PNG is ONE chain', { skip: nativeRasterSkip }, async () => {
+  // §5 item 1 joins three boundaries on the PRODUCTION rasterizer: a real child
+  // that outlives the 3 s bound, the loader's typed retry eligibility, and a
+  // real successor render on the same single lane. No fake rasterizer, no sleep.
+  let spawns = 0
+  const spawnProcess = ((...args: Parameters<typeof spawn>): ReturnType<typeof spawn> => {
+    spawns += 1
+    if (spawns === 1) {
+      return spawn(process.execPath, ['-e', 'setInterval(() => {}, 60_000)'], {
+        stdio: ['pipe', 'pipe', 'pipe'],
+        windowsHide: true,
+      })
+    }
+    return spawn(...args)
+  }) as typeof spawn
+  const loader = new SvgRasterLoader(createSvgRasterizer(spawnProcess))
+  const digest = 'real-retry-chain'
+  const width = 128
+  const waitFor = async <T>(read: () => T | undefined, label: string): Promise<T> => {
+    const deadline = Date.now() + 20_000
+    for (;;) {
+      const value = read()
+      if (value !== undefined) return value
+      if (Date.now() > deadline) assert.fail(`timed out waiting for ${label}`)
+      await new Promise(resolve => setTimeout(resolve, 25))
+    }
+  }
+  try {
+    loader.subscribe(digest, width, () => {})
+    loader.load(digest, SVG_SOURCE, width)
+    const errored = await waitFor(() => {
+      const state = loader.get(digest, width)
+      return state.state === 'error' ? state : undefined
+    }, 'the real child timeout classification')
+    assert.ok(errored.error instanceof SvgRasterFailure, `the real timeout is the typed failure: ${errored.error.message}`)
+    assert.equal(isRetryableRasterFailure(errored.error), true, 'a real timeout is retryable')
+    assert.equal(loader.canRetryFailed(digest, width), true, 'the loader exposes Retry for the settled timeout')
+    assert.equal(loader.retryFailed(digest, SVG_SOURCE, width), true, 'the ONE retry lane accepts the real failure')
+    const ready = await waitFor(() => {
+      const state = loader.get(digest, width)
+      return state.state === 'ready' ? state : undefined
+    }, 'the real successor render')
+    assert.equal(spawns, 2, 'exactly one successor child on the same lane')
+    assert.ok(ready.base64.startsWith('iVBOR'), 'the successor carries a real PNG payload')
+    assert.ok(ready.widthPx > 0 && ready.heightPx > 0, 'the successor carries real raster dimensions')
+  } finally {
+    loader.dispose()
+  }
+})
+
 test('a raster child that exits with an error keeps its real stderr, not its milestone lines', { skip: nativeRasterSkip }, async () => {
   // `rp native abort` is a genuine native error line that only LOOKS like the
   // milestone prefix: filtering by prefix would delete it from the one message

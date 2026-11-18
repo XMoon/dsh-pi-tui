@@ -1088,7 +1088,7 @@ modal-pre-emption, exactly-once close and final-dispose rules.
   cache or read service. The workspace Viewer paints real pixels on Kitty and
   on Direct SIXEL once the terminal's own live DA1, cell-size and background
   facts admit it, and Direct iTerm2 paints through the fork's OSC 1337 `Image`
-  path (X079). Multiplexer panes and `PI_IMAGE_PROTOCOL=none` remain text-only;
+  path (X080). Multiplexer panes and `PI_IMAGE_PROTOCOL=none` remain text-only;
   AltScreen no longer mutates the process-wide iTerm2 capability. Transcript
   iTerm2 thumbnails may paint pixels but do not publish clickable pixel-body
   geometry; the explicit View action remains the viewer entry.

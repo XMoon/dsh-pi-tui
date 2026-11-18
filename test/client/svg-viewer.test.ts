@@ -849,6 +849,65 @@ test('a revoked preview capability hides Retry and never starts another raster',
   }
 })
 
+test('a resize never advertises the old width Retry beside the new request', async () => {
+  capabilities('kitty')
+  try {
+    const recorder = failingLoader()
+    const panel = panelOf({ loader: recorder.loader })
+    panel.setMaxRows(20)
+    panel.render(60)
+    recorder.settleNext({ error: timeoutFailure() })
+    await drain()
+    assert.ok(stripSgr(panel.render(60).at(-1) ?? '').includes('r retry'), 'the A-width failure offers Retry')
+    const oldWidth = recorder.calls[0]!.width
+
+    // Resize to B: the frame must reconcile B BEFORE the bar/hits are derived.
+    const resized = panel.render(120)
+    const bar = stripSgr(resized.at(-1) ?? '')
+    assert.ok(!bar.includes('r retry'), `the B-width frame never advertises the A Retry:\n${bar}`)
+    assert.equal(recorder.calls.length, 2, 'the resize subscribes the B variant once')
+    assert.notEqual(recorder.calls[1]!.width, oldWidth, 'the new request is a different variant')
+    assert.ok(stripSgr(resized.slice(1, -1).join('\n')).includes('Rendering preview'), 'B is loading')
+
+    // A key press is a no-op for the released A variant: it cannot start a child.
+    panel.handleInput('r')
+    await drain()
+    assert.equal(recorder.calls.length, 2, 'r never retries the retired A variant')
+    recorder.loader.dispose()
+  } finally {
+    resetCapabilitiesCache()
+  }
+})
+
+test('a 1-2 row grant releases the variant, hides Retry and starts no child', async () => {
+  capabilities('kitty')
+  try {
+    const recorder = failingLoader()
+    const panel = panelOf({ loader: recorder.loader })
+    panel.setMaxRows(20)
+    panel.render(60)
+    recorder.settleNext({ error: timeoutFailure() })
+    await drain()
+    assert.ok(stripSgr(panel.render(60).at(-1) ?? '').includes('r retry'))
+
+    panel.setMaxRows(2)
+    const bar = stripSgr(panel.render(60).at(-1) ?? '')
+    assert.ok(!bar.includes('r retry'), `a 2-row grant offers no Retry:\n${bar}`)
+    panel.handleInput('r')
+    await drain()
+    assert.equal(recorder.calls.length, 1, 'the key cannot start a child for an unviewable variant')
+
+    // Restoring a real body grant subscribes a fresh visible variant.
+    panel.setMaxRows(10)
+    panel.render(60)
+    assert.equal(recorder.calls.length, 2, 'the restored grant re-subscribes exactly once')
+    assert.ok(!stripSgr(panel.render(60).at(-1) ?? '').includes('r retry'), 'the fresh variant is not retryable yet')
+    recorder.loader.dispose()
+  } finally {
+    resetCapabilitiesCache()
+  }
+})
+
 test('a permanent error and a loading variant give no Retry: r is a no-op on both', async () => {
   capabilities('kitty')
   try {

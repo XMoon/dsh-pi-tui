@@ -8185,24 +8185,27 @@
    ],
    "risk": "HIGH",
    "files": [
-    "src/tui-alt-screen.ts"
+    "src/tui-alt-screen.ts",
+    "src/tui.ts"
    ],
-   "why": "The fork suppressed the process-wide iTerm2 image capability whenever AltScreen started, then restored it on stop. That made the existing Image OSC 1337 path unavailable in every leased Viewer and caused stale capability state to cross the screen boundary. Direct iTerm2 now keeps its authoritative capability unchanged across AltScreen entry/exit so host callers can explicitly admit the protocol.",
+   "why": "The fork suppressed the process-wide iTerm2 image capability whenever AltScreen started, then restored it on stop. That made the existing Image OSC 1337 path unavailable in every leased Viewer and caused stale capability state to cross the screen boundary. Direct iTerm2 now keeps its authoritative capability unchanged across AltScreen entry/exit so host callers can explicitly admit the protocol. A visible overlay that intersects an iTerm2 image block must also win the frame: the image yields while covered and returns after close, so overlay text is never painted over by pixels.",
    "changedSurface": [
     "TuiAltScreen.beforeTerminalStart no longer replaces getCapabilities().images=\"iterm2\" with null.",
     "TuiAltScreen.afterTerminalStop no longer restores a saved process-wide capability snapshot; AltScreen never mutates that cache.",
     "The root ImageViewer, SvgViewer and SvgThumbnail admit effective protocol=\"iterm2\" through the existing fork Image OSC 1337 renderer.",
     "SVG thumbnail iTerm2 pixel rows remain non-clickable because the component has no committed physical geometry authority; View/Copy actions remain available.",
-    "PI_IMAGE_PROTOCOL=none still creates no graphics owner and paints truthful text fallback with no OSC 1337 bytes."
+    "PI_IMAGE_PROTOCOL=none still creates no graphics owner and paints truthful text fallback with no OSC 1337 bytes.",
+    "TuiBase.compositeOverlays preempts a Direct iTerm2 OSC 1337 image block whose painted rows are intersected by a visible overlay: the anchor is dropped and every covered row becomes an empty base so the overlay text is readable; the owning component re-emits the same image on the next frame after the overlay closes."
    ],
    "dependencies": {
     "vendorInternal": {
      "audited": true,
      "items": [
       "The change is confined to AltScreen capability lifetime; Kitty upload/placement and SIXEL screen ownership remain unchanged.",
-      "The single process-wide capability cache remains the fork terminal-image authority; no second detector or cache was added."
+      "The single process-wide capability cache remains the fork terminal-image authority; no second detector or cache was added.",
+      "TuiBase.compositeOverlays (src/tui.ts) iTerm2 block preemption"
      ],
-     "notes": "The old suppression and saved snapshot were the only X080-owned fork hunk."
+     "notes": "X080 owns TWO fork hunks: the AltScreen capability-lifetime change in src/tui-alt-screen.ts and the Direct iTerm2 overlay-block preemption in src/tui.ts. Kitty upload/placement and SIXEL screen ownership remain X077/X074 territory and are unchanged."
     },
     "inheritanceStructural": {
      "audited": true,
