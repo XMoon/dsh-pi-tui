@@ -70,7 +70,7 @@ import { basename, dirname, join, resolve } from 'node:path'
 
 import { inspectSplitCandidate, createSplitSmokeProfile } from '../lib/split-smoke-profile.mjs'
 import { SplitSmokeAssertionError } from '../lib/split-smoke-diagnostics.mjs'
-import { hostSessionEvents, hostSessionLogCount, hostSessionHeader } from '../lib/split-smoke-sessions.mjs'
+import { hostSessionEvents, hostSessionLogCount, hostSessionHeader, waitForHostSessionHeader } from '../lib/split-smoke-sessions.mjs'
 
 const KEEP = process.env.SPLIT_PROCESS_SMOKE_KEEP === '1'
 const TMUX_SOCKET = `dsh-macos-pr2-${randomUUID().slice(0, 8)}`
@@ -1672,13 +1672,12 @@ async function runD2AcpScene({ installation, workRoot, report, start, projectA, 
     `M06: session/new must return a real sessionId (got ${JSON.stringify(created?.error ?? created?.result)})`)
   const sessionB = created.result.sessionId
   assert(sessionB !== sessionA, 'M06: session/new must create a distinct Session')
-  const headerB = hostSessionHeader(dshHome, sessionB)
-  assert(headerB !== undefined, 'M06: the created Session has no durable header')
-  assert(realpathSync(headerB.cwd) === acpWorkspaceReal,
-    `M06: Session B cwd ${JSON.stringify(headerB.cwd)} is not the requested workspace`)
   const closeB = await connNew.request(3, 'session/close', { sessionId: sessionB })
   assert(isEmptyAcpResult(closeB), `M06: session/close(B) must return {} (got ${JSON.stringify(closeB?.error ?? closeB?.result)})`)
-  assert(hostSessionEvents(dshHome, sessionB) !== undefined, 'M06: session/close must not delete the official Session')
+  // The official persistence materializes a newly created Session's header on
+  // its FIRST durable append, so a create-only Session may have no log file yet:
+  // the close/resume checks below prove the Session identity exists, and M07's
+  // first prompt settles the durable header with the requested Workspace cwd.
   const badCwd = await connNew.request(4, 'session/new', { cwd: 'relative/path', mcpServers: [] })
   assert(badCwd?.error?.code === -32602 && badCwd?.error?.data?.code === 'LOCAL_ACP_VIEW_INVALID_REQUEST',
     `M06: a relative cwd must be LOCAL_ACP_VIEW_INVALID_REQUEST (got ${JSON.stringify(badCwd?.error ?? badCwd?.result)})`)
@@ -1700,11 +1699,9 @@ async function runD2AcpScene({ installation, workRoot, report, start, projectA, 
   await connResumeB.initialize(1)
   const resumeB = await connResumeB.request(2, 'session/resume', { sessionId: sessionB, cwd: acpWorkspaceReal })
   assert(isEmptyAcpResult(resumeB), `M06: B must stay resumable after close (got ${JSON.stringify(resumeB?.error ?? resumeB?.result)})`)
-  connResumeB.close()
-  await connResumeB.closed
   row('M06', {
     createdSession: sessionB,
-    durableCwd: 'requested-workspace',
+    durableHeader: 'settled by the first append in M07',
     closeReleasesViewOnly: true,
     resumableAfterClose: true,
     invalidCwdRejected: true,
@@ -1713,20 +1710,21 @@ async function runD2AcpScene({ installation, workRoot, report, start, projectA, 
   })
 
   // ── M07: a real ACP text prompt through the official Host writer ─────────
-  const connPrompt = await openAcp('M07 prompt connection')
-  await connPrompt.initialize(1)
-  const createdC = await connPrompt.request(2, 'session/new', { cwd: acpWorkspaceReal, mcpServers: [] })
-  assert(typeof createdC?.result?.sessionId === 'string', 'M07: session/new must create a Session for the prompt')
-  const sessionC = createdC.result.sessionId
+  // The M06 View is already resumed on Session B; its FIRST prompt is the first
+  // durable append, which must carry the requested official Workspace cwd.
+  const connPrompt = connResumeB
   const promptText = 'd2acp acp prompt marker'
   const promptResponse = await connPrompt.request(3, 'session/prompt', {
-    sessionId: sessionC,
+    sessionId: sessionB,
     prompt: [{ type: 'text', text: promptText }],
   })
   assert(promptResponse?.error === undefined, `M07: session/prompt failed (${JSON.stringify(promptResponse?.error)})`)
   assert(promptResponse.result?.stopReason === 'end_turn',
     `M07: the prompt must settle with end_turn, saw ${JSON.stringify(promptResponse.result)}`)
-  const eventsC = hostSessionEvents(dshHome, sessionC)
+  const headerB = await waitForHostSessionHeader(dshHome, sessionB, 'M07: Session B durable header', TIMEOUTS.process)
+  assert(realpathSync(headerB.cwd) === acpWorkspaceReal,
+    `M07: Session B cwd ${JSON.stringify(headerB.cwd)} is not the requested Workspace`)
+  const eventsC = hostSessionEvents(dshHome, sessionB)
   assert(eventsC !== undefined, 'M07: the prompted Session has no durable log')
   const userTexts = eventsC.filter(event => event.type === 'user/message' && JSON.stringify(event).includes(promptText))
   assert(userTexts.length === 1, `M07: exactly ONE durable user message must carry the prompt, saw ${String(userTexts.length)}`)
@@ -1735,9 +1733,9 @@ async function runD2AcpScene({ installation, workRoot, report, start, projectA, 
   assert(eventsC.some(event => event.type === 'turn/end'), 'M07: the durable turn must end')
   const updates = connPrompt.received.filter(message => message.method === 'session/update')
   assert(updates.length > 0, 'M07: the ACP peer must receive its own session/update notifications')
-  assert(updates.every(message => message.params?.sessionId === sessionC),
+  assert(updates.every(message => message.params?.sessionId === sessionB),
     'M07: the ACP connection must receive updates ONLY for its own Session')
-  assert(connA.received.every(message => message.method !== 'session/update' || message.params?.sessionId !== sessionC),
+  assert(connA.received.every(message => message.method !== 'session/update' || message.params?.sessionId !== sessionB),
     'M07: an unrelated ACP connection must not receive this Session updates')
   connPrompt.close()
   await connPrompt.closed
@@ -1764,8 +1762,9 @@ async function runD2AcpScene({ installation, workRoot, report, start, projectA, 
   assert(hostAfterPrompt.hostPid === hostAtStart.hostPid && hostAfterPrompt.instanceId === hostAtStart.instanceId,
     'M07: the ACP prompt must never replace the Host')
   row('M07', {
-    sessionId: sessionC,
+    sessionId: sessionB,
     stopReason: promptResponse.result.stopReason,
+    durableHeaderCwd: 'requested-workspace',
     durableUserMessages: userTexts.length,
     ownUpdatesOnly: true,
     tuiTurnAfterAcp: true,
