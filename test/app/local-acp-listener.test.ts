@@ -216,25 +216,31 @@ async function bindRawServerAtPublicPath(
   if (IS_DARWIN) {
     const paths = darwinAcpSocketPaths(scope, process.getuid?.() as number)
     mkdirSync(join(paths.privateRoot, '.acp-priv'), { recursive: true, mode: 0o700 })
-    let bindIno: number | undefined
+    let bindStat: ReturnType<typeof lstatSync> | undefined
     try {
       await new Promise<void>((resolveListen, rejectListen) => {
         server.once('error', rejectListen)
         server.listen(paths.privateBindPath, () => { server.off('error', rejectListen); resolveListen() })
       })
-      bindIno = lstatSync(paths.privateBindPath).ino
+      bindStat = lstatSync(paths.privateBindPath)
       chmodSync(paths.privateBindPath, 0o600)
       linkSync(paths.privateBindPath, paths.publicPath)
       unlinkSync(paths.privateBindPath)
       return { close: () => new Promise<void>(resolveClose => server.close(() => resolveClose())) }
     } catch (error) {
-      // A failed post-listen publication must settle the live server and remove
-      // ONLY the inode this helper published; a foreign public path survives.
+      // A failed listen never bound this name, so the catch must NOT unlink it;
+      // after a successful bind the server close owns the private name, and any
+      // extra removal is limited to the exact (dev,ino,uid) this helper published.
       if (server.listening) await new Promise<void>(resolveClose => server.close(() => resolveClose()))
-      if (bindIno !== undefined && pathExists(paths.publicPath)) {
-        try { if (lstatSync(paths.publicPath).ino === bindIno) unlinkSync(paths.publicPath) } catch {}
+      if (bindStat !== undefined) {
+        for (const path of [paths.privateBindPath, paths.publicPath]) {
+          if (!pathExists(path)) continue
+          try {
+            const current = lstatSync(path)
+            if (current.dev === bindStat.dev && current.ino === bindStat.ino && current.uid === bindStat.uid) unlinkSync(path)
+          } catch { /* gone or unreadable: never guess */ }
+        }
       }
-      try { rmSync(paths.privateBindPath, { force: true }) } catch {}
       throw error
     }
   }
@@ -618,6 +624,24 @@ test('a post-listen publish failure settles the raw server and preserves a forei
       'the failed publish must not overwrite the foreign public path')
     const paths = darwinAcpSocketPaths(scope, process.getuid?.() as number)
     assert.equal(pathExists(paths.privateBindPath), false, 'the failed publish must settle the private bind name')
+
+    // Failure BEFORE the bind: a live private occupant must keep its inode and
+    // remain connectable; this helper never acquired it and must not unlink it.
+    const { scope: occupiedScope } = newScope(t)
+    const occupiedPaths = darwinAcpSocketPaths(occupiedScope, process.getuid?.() as number)
+    mkdirSync(join(occupiedPaths.privateRoot, '.acp-priv'), { recursive: true, mode: 0o700 })
+    const occupant = createServer(socket => socket.destroy())
+    await new Promise<void>((resolveListen, rejectListen) => {
+      occupant.once('error', rejectListen)
+      occupant.listen(occupiedPaths.privateBindPath, () => { occupant.off('error', rejectListen); resolveListen() })
+    })
+    t.after(() => new Promise<void>(resolveClose => occupant.close(() => resolveClose())))
+    const occupantInode = lstatSync(occupiedPaths.privateBindPath).ino
+    await assert.rejects(bindRawServerAtPublicPath(occupiedScope, socket => socket.destroy()))
+    assert.equal(lstatSync(occupiedPaths.privateBindPath).ino, occupantInode,
+      'a live private occupant must keep its inode after a failed listen')
+    assert.equal(lstatSync(occupiedPaths.privateBindPath).isSocket(), true,
+      'a live private occupant must keep its socket name after a failed listen')
     return
   }
   // Linux: a live owner of the logical path makes the helper's /proc-fd listen
@@ -634,6 +658,12 @@ test('a post-listen publish failure settles the raw server and preserves a forei
   try {
     await assert.rejects(bindRawServerAtPublicPath(scope, socket => socket.destroy()))
     assert.equal(openScopeFds().length, before, 'the failed raw bind must close its scope directory fd')
+    // The live path this helper failed to bind must still accept a connection.
+    const probe = connect(publicPath)
+    await new Promise<void>((resolveConnect, rejectConnect) => {
+      probe.once('connect', () => { probe.destroy(); resolveConnect() })
+      probe.once('error', rejectConnect)
+    })
   } finally {
     await new Promise<void>(resolveClose => blocker.close(() => resolveClose()))
   }

@@ -1449,13 +1449,13 @@ async function bindForeignAcpEndpoint(endpoint) {
   const privateDir = join(endpoint.privateRoot, '.acp-priv')
   mkdirSync(privateDir, { recursive: true, mode: 0o700 })
   const server = createServer(socket => socket.destroy())
-  let bindIno
+  let bindStat
   try {
     await new Promise((resolveListen, rejectListen) => {
       server.once('error', rejectListen)
       server.listen(endpoint.privateBindPath, () => { server.off('error', rejectListen); resolveListen() })
     })
-    bindIno = lstatSync(endpoint.privateBindPath).ino
+    bindStat = lstatSync(endpoint.privateBindPath)
     chmodSync(endpoint.privateBindPath, 0o600)
     linkSync(endpoint.privateBindPath, endpoint.publicPath)
     unlinkSync(endpoint.privateBindPath)
@@ -1465,13 +1465,20 @@ async function bindForeignAcpEndpoint(endpoint) {
     }
   } catch (error) {
     // Settle every resource this helper acquired: close the in-process server
-    // (the enclosing scene never received it), then remove ONLY the inode this
-    // helper published, never a pre-existing foreign public file.
+    // (the enclosing scene never received it). A failed listen never bound this
+    // name, so the catch must NOT unlink it; after a successful bind the server
+    // close owns the private name, and any extra removal is limited to the exact
+    // (dev,ino,uid) this helper published.
     if (server.listening) await new Promise(resolveClose => server.close(() => resolveClose()))
-    if (bindIno !== undefined && existsSync(endpoint.publicPath)) {
-      try { if (lstatSync(endpoint.publicPath).ino === bindIno) unlinkSync(endpoint.publicPath) } catch { /* gone */ }
+    if (bindStat !== undefined) {
+      for (const path of [endpoint.privateBindPath, endpoint.publicPath]) {
+        if (!existsSync(path)) continue
+        try {
+          const current = lstatSync(path)
+          if (current.dev === bindStat.dev && current.ino === bindStat.ino && current.uid === bindStat.uid) unlinkSync(path)
+        } catch { /* gone or unreadable: never guess */ }
+      }
     }
-    try { rmSync(endpoint.privateBindPath, { force: true }) } catch { /* gone */ }
     throw error
   }
 }
