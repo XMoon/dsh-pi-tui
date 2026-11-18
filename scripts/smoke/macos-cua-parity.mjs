@@ -831,6 +831,12 @@ function dispatchMethod(dispatch) {
   return dispatchArguments(dispatch)?.method
 }
 
+/** The method params of one official cua dispatch/result event. */
+function dispatchParams(dispatch) {
+  const args = dispatchArguments(dispatch)
+  return args?.params !== undefined && typeof args.params === 'object' ? args.params : undefined
+}
+
 function dispatchErrorCode(result) {
   const text = JSON.stringify(result?.content ?? result ?? '')
   const match = /"code"\s*:\s*"([A-Z0-9_]+)"/u.exec(text)
@@ -840,6 +846,15 @@ function dispatchErrorCode(result) {
 function dispatchContentText(result) {
   const parts = Array.isArray(result?.content) ? result.content : []
   return parts.map(part => typeof part?.text === 'string' ? part.text : '').join('\n')
+}
+
+/** Parse the official cua result's JSON text when it carries one. */
+function dispatchJsonContent(result) {
+  try {
+    return JSON.parse(dispatchContentText(result))
+  } catch {
+    return undefined
+  }
 }
 
 function attachmentRefs(value, found = new Set()) {
@@ -963,11 +978,17 @@ async function stopBlankTextEdit(textEdit) {
     try {
       await waitFor(() => (!alive(textEdit.pid) ? true : undefined), 'the qualification TextEdit instance stops', 15_000)
     } catch {
-      try { process.kill(textEdit.pid, 'SIGKILL') } catch { /* already gone */ }
-      try {
-        await waitFor(() => (!alive(textEdit.pid) ? true : undefined), 'the qualification TextEdit instance is reaped', 10_000)
-      } catch {
-        errors.push(`the qualification TextEdit pid ${String(textEdit.pid)} survived cleanup`)
+      // A PID can be reused while waiting. Never escalate to SIGKILL unless the
+      // CURRENT process at that pid is still this run's TextEdit.
+      if (!processIsTextEdit(textEdit.pid)) {
+        errors.push(`the qualification TextEdit pid ${String(textEdit.pid)} changed identity before SIGKILL; refusing to signal it`)
+      } else {
+        try { process.kill(textEdit.pid, 'SIGKILL') } catch { /* already gone */ }
+        try {
+          await waitFor(() => (!alive(textEdit.pid) ? true : undefined), 'the qualification TextEdit instance is reaped', 10_000)
+        } catch {
+          errors.push(`the qualification TextEdit pid ${String(textEdit.pid)} survived cleanup`)
+        }
       }
     }
   }
@@ -1220,6 +1241,8 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
     label: 'MAC09-04 consent request',
     method: 'getApp',
   })
+  assert(dispatchParams(consent.dispatch)?.selector === String(textEditPid),
+    'MAC09-04: the official getApp did not select this run\'s exact TextEdit PID')
   const questionFrame = await waitFrameText(tui, 'Allow computer use', 'MAC09-04 official consent Question', TIMEOUTS.consent)
   const questionDigest = sha16(questionFrame)
   logOperator([`MAC09-04 consent Question is painted. Attach now: ${attachCommand(tui)}`,
@@ -1262,6 +1285,24 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
     method: 'screenshot',
     timeoutMs: TIMEOUTS.screenshot,
   })
+  const shotEvents = eventsOf(dshHome, screenshot.sessionId)
+  const shotDispatches = cuaDispatches(shotEvents, screenshot.afterIndex)
+    .filter(dispatch => dispatch.rootCallId === screenshot.dispatch.rootCallId)
+  const shotGetApp = shotDispatches.find(dispatch => dispatchMethod(dispatch) === 'getApp')
+  const shotWindows = shotDispatches.find(dispatch => dispatchMethod(dispatch) === 'listWindows')
+  const shotDispatch = shotDispatches.find(dispatch => dispatchMethod(dispatch) === 'screenshot')
+  assert(shotGetApp !== undefined && dispatchParams(shotGetApp)?.selector === String(textEditPid),
+    'MAC09-07: the official getApp did not select this run\'s exact TextEdit PID')
+  const shotWindowId = dispatchParams(shotDispatch)?.windowId
+  assert(typeof shotWindowId === 'number',
+    'MAC09-07: the official screenshot did not name a concrete window')
+  const windowsResult = cuaResults(shotEvents, 0).find(result => result.subCallId === shotWindows?.subCallId)
+  const windows = dispatchJsonContent(windowsResult)
+  const controlledWindow = Array.isArray(windows)
+    ? windows.find(window => window?.windowId === shotWindowId && String(window?.title ?? '').includes('cua-blank'))
+    : undefined
+  assert(controlledWindow !== undefined,
+    'MAC09-07: the screenshot window is not this run\'s controlled cua-blank document')
   const screenshotResult = await waitCuaResult(dshHome, screenshot.sessionId, screenshot.dispatch.subCallId,
     'MAC09-07 official screenshot result', TIMEOUTS.screenshot)
   assert(screenshotResult.result.isError !== true,
@@ -1307,7 +1348,29 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
     'MAC09-08 typeText result', TIMEOUTS.turn)
   assert(inputResult.result.isError !== true,
     `MAC09-08: the controlled typeText failed: ${dispatchErrorCode(inputResult.result) ?? 'unknown error'}`)
-  const markerResult = await waitFor(() => cuaResults(eventsOf(dshHome, input.sessionId), 0)
+  // Bind the WHOLE controlled chain, not just the requested prompt text: the
+  // official getApp must select this run's exact PID, the show/typeText/getState
+  // window ids must agree, and the typed marker must be the exact argument.
+  const inputEvents = eventsOf(dshHome, input.sessionId)
+  const inputDispatches = cuaDispatches(inputEvents, input.afterIndex)
+    .filter(dispatch => dispatch.rootCallId === input.dispatch.rootCallId)
+  const getAppDispatch = inputDispatches.find(dispatch => dispatchMethod(dispatch) === 'getApp')
+  const showDispatch = inputDispatches.find(dispatch => dispatchMethod(dispatch) === 'show')
+  const typeDispatch = inputDispatches.find(dispatch => dispatchMethod(dispatch) === 'typeText')
+  const stateDispatch = inputDispatches.find(dispatch => dispatchMethod(dispatch) === 'getState')
+  assert(getAppDispatch !== undefined && dispatchParams(getAppDispatch)?.selector === String(textEditPid),
+    'MAC09-08: the official getApp did not select this run\'s exact TextEdit PID')
+  const typeParams = dispatchParams(typeDispatch)
+  const stateParams = dispatchParams(stateDispatch)
+  assert(typeDispatch !== undefined && typeParams?.text === marker,
+    'MAC09-08: the official typeText argument is not the exact random marker')
+  assert(typeof typeParams?.appHandle === 'string' && typeParams.appHandle !== ''
+    && typeParams.appHandle === stateParams?.appHandle,
+    'MAC09-08: typeText and getState do not target the same official app handle')
+  assert(typeof typeParams?.windowId === 'number' && typeParams.windowId === stateParams?.windowId
+    && dispatchParams(showDispatch)?.windowId === typeParams.windowId,
+    'MAC09-08: show/typeText/getState do not target the same controlled window id')
+  const markerResult = await waitFor(() => cuaResults(inputEvents, 0)
     .find(result => result.rootCallId === input.dispatch.rootCallId
       && dispatchMethod(result) === 'getState'
       && dispatchContentText(result).includes(marker)),
@@ -1317,6 +1380,8 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
     rootCallId: sha16(input.dispatch.rootCallId),
     method: 'typeText',
     markerDigest: sha16(marker),
+    windowId: typeParams.windowId,
+    appBound: true,
     observedInAccessibilityTree: dispatchContentText(markerResult).includes(marker),
   })
   await waitTurnEnd(dshHome, input.sessionId, input.afterIndex, 'MAC09-08 input turn completed')
@@ -1413,12 +1478,33 @@ async function sceneSplit({ installation, workRoot, report, textEditPid }) {
     'Split consent resumes the dispatch', TIMEOUTS.consent)
   assert(splitConsent.result.isError !== true,
     `Split consent failed: ${dispatchErrorCode(splitConsent.result) ?? 'unknown error'}`)
+  assert(dispatchParams(screenshot.dispatch)?.selector === String(textEditPid),
+    'Split MAC09-10: the official getApp did not select this run\'s exact TextEdit PID')
   const splitShot = await waitFor(() => cuaDispatches(eventsOf(dshHome, screenshot.sessionId), screenshot.afterIndex)
+    .filter(dispatch => dispatch.rootCallId === screenshot.dispatch.rootCallId)
     .find(candidate => dispatchMethod(candidate) === 'screenshot'), 'Split official screenshot dispatch', TIMEOUTS.screenshot)
   const splitShotResult = await waitCuaResult(dshHome, screenshot.sessionId, splitShot.subCallId,
     'Split screenshot result', TIMEOUTS.screenshot)
   assert(splitShotResult.result.isError !== true,
     `Split screenshot failed: ${dispatchErrorCode(splitShotResult.result) ?? 'unknown error'}`)
+  const splitEvents = eventsOf(dshHome, screenshot.sessionId)
+  const splitDispatches = cuaDispatches(splitEvents, screenshot.afterIndex)
+    .filter(dispatch => dispatch.rootCallId === screenshot.dispatch.rootCallId)
+  const splitGetApp = splitDispatches.find(dispatch => dispatchMethod(dispatch) === 'getApp')
+  const splitWindowsDispatch = splitDispatches.find(dispatch => dispatchMethod(dispatch) === 'listWindows')
+  const splitAppResult = cuaResults(splitEvents, 0).find(result => result.subCallId === splitGetApp?.subCallId)
+  const splitAppHandle = dispatchJsonContent(splitAppResult)?.appHandle
+  assert(typeof splitAppHandle === 'string' && splitAppHandle !== ''
+    && dispatchParams(splitShot)?.appHandle === splitAppHandle,
+    'Split MAC09-10: the screenshot does not use the approved getApp handle')
+  const splitWindowId = dispatchParams(splitShot)?.windowId
+  const splitWindowsResult = cuaResults(splitEvents, 0)
+    .find(result => result.subCallId === splitWindowsDispatch?.subCallId)
+  const splitWindows = dispatchJsonContent(splitWindowsResult)
+  assert(typeof splitWindowId === 'number' && Array.isArray(splitWindows)
+    && splitWindows.some(window => window?.windowId === splitWindowId
+      && String(window?.title ?? '').includes('cua-blank')),
+  'Split MAC09-10: the screenshot window is not this run\'s controlled cua-blank document')
   const splitRefs = [...attachmentRefs(splitShotResult.result)]
   assert(splitRefs.length > 0, 'Split screenshot carried no durable attachment reference')
   const splitDimensions = imageDimensions(readFileSync(attachmentObjectPath(dshHome, splitRefs[0])))
@@ -1530,23 +1616,28 @@ async function cleanup({ workRoot, dshHome, report, textEdit, helperAppPath }) {
     ? undefined
     : owned.find(row => row.pid === registry.record.hostPid && roleOf(row) === 'host')
   const targets = [
-    ...(registryHost === undefined ? [] : [{ pid: registryHost.pid, command: 'published Host' }]),
+    ...(registryHost === undefined ? [] : [{ pid: registryHost.pid, command: registryHost.command }]),
     ...owned.filter(row => alive(row.pid)).map(row => ({ pid: row.pid, command: row.command })),
   ]
+  // Re-read the work-root ownership before EVERY signal: a bare pid is not an
+  // identity. A target whose pid now names another command is left untouched.
+  const currentOwnedTarget = (target) => ownedProcessRows(workRoot)
+    .find(row => row.pid === target.pid && row.command === target.command && roleOf(row) !== undefined)
   for (const target of targets) {
+    if (currentOwnedTarget(target) === undefined) continue
     try { process.kill(target.pid, 'SIGTERM') } catch { /* already gone */ }
   }
   const deadline = Date.now() + 10_000
   while (Date.now() < deadline) {
-    if (targets.every(target => !alive(target.pid))) break
+    if (targets.every(target => currentOwnedTarget(target) === undefined || !alive(target.pid))) break
     await sleep(120)
   }
   for (const target of targets) {
-    if (!alive(target.pid)) continue
+    if (currentOwnedTarget(target) === undefined || !alive(target.pid)) continue
     try { process.kill(target.pid, 'SIGKILL') } catch { /* gone */ }
   }
   await sleep(250)
-  const survivors = targets.filter(target => alive(target.pid))
+  const survivors = targets.filter(target => currentOwnedTarget(target) !== undefined && alive(target.pid))
   if (survivors.length > 0) {
     report.notQuiesced = { survivors: survivors.map(target => target.pid) }
     errors.push(`NOT_QUIESCED: ${String(survivors.length)} owned process(es) survived cleanup`)
