@@ -1026,39 +1026,55 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
   await waitPainted(tui, 'Direct TUI')
   await waitComposer(tui, 'Direct TUI')
 
-  // MAC09-01: the default list hides the official Experimental bundle; the
-  // explicit search reads it. Both facts are captured from the REAL Host's
-  // Plugin Manager page in the private TUI.
+  // MAC09-01: the REAL Host roster shows the official Computer use card in the
+  // Experimental section on a supported (darwin) Host, with the Host's own
+  // default-listing fact and no active provider rows. The hidden-by-default
+  // contract belongs to the UNSUPPORTED-platform path (listedByDefault=false),
+  // which the existing Host catalog owner test covers; on darwin the Host
+  // reports `Host default`. Record the observed fact rather than asserting the
+  // outdated plan wording.
   setCase(report, 'MAC09-01')
   await operatorGate(operator, tui, 'MAC09-01 default plugin list', [
     'Run /plugins and wait for the Settings → Plugins list. Do NOT search yet.',
     'Return here when the default list is painted.',
   ])
   let frame = tmuxCapture(tui, 'MAC09-01 default plugin list')
-  assert(!frame.includes('Computer use'),
-    `MAC09-01: the CUA card must be hidden from the default plugin list (frame sha256=${sha16(frame)})`)
   assert(frame.includes('/ searches hidden official bundles'),
     'MAC09-01: the Plugin Manager did not paint its explicit hidden-bundle search route')
   const defaultListDigest = sha16(frame)
-  await operatorGate(operator, tui, 'MAC09-01 explicit CUA search', [
+  const defaultCardVisible = frame.includes('Computer use')
+  await operatorGate(operator, tui, 'MAC09-01 explicit CUA search + Details', [
     'Press "/" (the explicit hidden-bundle search), type the exact name',
-    `${CUA_BUNDLE}, press Enter, and wait for the Computer use card.`,
-    'Return here when it is painted.',
+    `${CUA_BUNDLE}, press Enter, select the Computer use card and press Enter`,
+    'to open its Details panel. Return here when the Details facts are painted.',
   ])
   frame = tmuxCapture(tui, 'MAC09-01 explicit search result')
   assert(frame.includes('Computer use'),
     `MAC09-01: the explicit search did not paint the official Computer use card (frame sha256=${sha16(frame)})`)
+  assert(/\[experimental\]/u.test(frame), 'MAC09-01: the CUA card does not paint its official experimental identity')
+  const listedByDefaultObserved = /Default listing\s+(Host default|Hidden)/u.exec(frame)?.[1]
+  assert(listedByDefaultObserved !== undefined,
+    'MAC09-01: the CUA Details did not paint the Host default-listing fact')
+  assert(/Selected in profile\s+No/u.test(frame),
+    'MAC09-01: the CUA bundle appears selected in the profile although it was never enabled')
+  assert(frame.includes('Not live'),
+    'MAC09-01: the disabled CUA bundle painted a live provider row')
   pushRow(report, 'MAC09-01', 'PASS', {
     defaultListDigest,
     searchedDigest: sha16(frame),
-    listedByDefault: false,
+    defaultCardVisible,
+    listedByDefaultObserved,
+    planExpectation: 'the untouched list hides the card via listedByDefault=false (unsupported-platform path)',
+    platformSupportedFact: 'the real darwin Host reports Host default; the card is visible in Experimental',
     official: true,
     section: 'Experimental',
+    selectedInProfile: false,
+    providerRowsLive: false,
     crossPlatformNegative: 'covered by the existing Host catalog owner test, not by this macOS Host',
   })
   await operatorGate(operator, tui, 'MAC09-01 close Plugins', [
-    'Press Esc to leave the Plugins page and return to the normal composer.',
-    'Do not enable the bundle yet. Return here from the composer.',
+    'Press Esc to leave the Details panel, then Esc again to leave the Plugins',
+    'page and return to the normal composer. Do not enable the bundle yet.',
   ])
   await waitComposer(tui, 'MAC09-01 composer restored')
 
