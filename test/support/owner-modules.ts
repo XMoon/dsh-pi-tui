@@ -57,9 +57,9 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
  * module is REQUIRED to exist.
  */
 
-export type OwnerRole = 'composition' | 'owner'
+type OwnerRole = 'composition' | 'owner'
 
-export interface OwnerModule {
+interface OwnerModule {
   readonly rel: string
   readonly role: OwnerRole
 }
@@ -157,7 +157,7 @@ function read(rel: string): string {
 }
 
 /** The owner-surface contents with each module's role, in composition order. */
-export function ownerSources(): Array<OwnerModule & { source: string }> {
+function ownerSources(): Array<OwnerModule & { source: string }> {
   return OWNER_MODULES.map((m) => ({ ...m, source: read(m.rel) }))
 }
 

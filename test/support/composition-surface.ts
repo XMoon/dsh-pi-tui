@@ -49,14 +49,9 @@ export function compositionFilesUnder(root: string): string[] {
   return [...COMPOSITION_ROOTS, ...productionFilesUnder(root, BOOTSTRAP_ZONE)]
 }
 
-/** {@link compositionFilesUnder} bound to this repository root. */
-export function compositionFiles(): string[] {
-  return compositionFilesUnder(ROOT)
-}
-
 /** Read one composition-surface file. Throws when it is not part of the surface. */
 export function compositionFile(rel: string): string {
-  if (!compositionFiles().includes(rel)) throw new Error(`${rel} is not part of the composition surface`)
+  if (!compositionFilesUnder(ROOT).includes(rel)) throw new Error(`${rel} is not part of the composition surface`)
   return readFileSync(join(ROOT, rel), 'utf8')
 }
 
