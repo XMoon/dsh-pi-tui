@@ -4,16 +4,19 @@
  * This is the ONE module that turns a typed `DaemonControlIntent` into a real
  * local OS observation or an explicit supervision transition for ONE official
  * Profile. It owns no Host business object: Host readiness is always the
- * existing authenticated `/connect` Cookie + identity echo + `/proc` starttime
- * handshake, and a Host stop remains the existing `runProfile` shutdown owner
- * reached either through the verified profile unit's manager SIGTERM or a
- * single verified-PID SIGTERM when the authenticated Host is independent.
+ * existing authenticated `/connect` Cookie + identity echo + fresh kernel
+ * identity handshake (Linux `/proc` starttime, macOS Darwin schema 2), and a
+ * Host stop remains the existing `runProfile` shutdown owner reached either
+ * through the verified profile unit's manager SIGTERM or a single verified-PID
+ * POSIX SIGTERM when the authenticated Host is independent.
  *
  * `status` and `logs` are strictly read-only: they never create the profile run
  * directory, never write a unit, never start a Host and never touch a Session.
  * The four mutating verbs are serialized by one short-lived profile-scoped
- * Linux abstract admin seat; the kernel releases it when the command dies, so
- * there is no persistent lock file or second state machine.
+ * admin seat: Linux holds the abstract-socket name, macOS holds the Darwin
+ * `O_EXLOCK` `admin` seat file beside the Host singleton seat. The kernel
+ * releases it when the command dies, so there is no persistent lock file or
+ * second state machine.
  *
  * @module app/remote-process/local-daemon-control
  */
@@ -22,7 +25,13 @@ import { spawn } from 'node:child_process'
 import { closeSync, constants, existsSync, fstatSync, lstatSync, openSync, readFileSync, readSync, realpathSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import {
+  readKernelProcess,
+  sameKernelProcess,
+  type KernelObservation,
+} from '../../runtime/native-process/identity.ts'
+import {
   assertClientHostCompatible,
+  assertRecordedHostKernelIdentityCurrent,
   authenticateLocalHost,
   ensureLocalHost,
   inspectHostProcess,
@@ -32,7 +41,9 @@ import {
   type VerifiedLocalHost,
 } from './local-discovery.ts'
 import {
+  bindDarwinKernelSeat,
   bindProcessSeat,
+  darwinHostProfileSeatDir,
   inspectInstalledProfileScope,
   LocalScopeError,
   readLinuxStarttime,
@@ -174,11 +185,16 @@ export interface DaemonControlDeps {
   readonly kill?: (pid: number, signal: NodeJS.Signals) => void
   readonly readStarttime?: (pid: number) => string | undefined
   readonly readCmdline?: (pid: number) => string | undefined
+  /** Fresh kernel-identity reader; production uses the platform-native one. */
+  readonly readKernel?: (pid: number) => KernelObservation
   readonly journal?: (unit: string, lines: number) => Promise<{ code: number; stdout: string; stderr: string }>
   readonly hostLogTail?: (path: string, lines: number) => Promise<string | undefined>
   readonly sleep?: (ms: number) => Promise<void>
   readonly now?: () => number
   readonly stopTimeoutMs?: number
+  /** Explicit OS account home seam for the Darwin admin seat; production uses
+   *  the real account home (never `$HOME`/`DSH_HOME`). */
+  readonly darwinAccountHome?: string
   /** Supervisor shutdown signal: refuse to COMMIT a new OS transition once set. */
   readonly signal?: AbortSignal
 }
@@ -226,7 +242,7 @@ function toDaemonControlError(error: unknown): DaemonControlError {
   if (error instanceof LocalScopeError) {
     switch (error.code) {
       case 'B1_PLATFORM_UNSUPPORTED':
-        return new DaemonControlError('UNSUPPORTED_PLATFORM', 'this daemon command requires Linux')
+        return new DaemonControlError('UNSUPPORTED_PLATFORM', 'this daemon command requires Linux or macOS')
       case 'HOST_MANAGER_UNIT_CONFLICT':
       case 'HOST_IDENTITY_MISMATCH':
       case 'HOST_PROTOCOL_INCOMPATIBLE':
@@ -280,8 +296,9 @@ function uidOf(deps: DaemonControlDeps): number {
 
 /** Compute the read-only scope; no directory is created. */
 function inspectScope(profile: DaemonControlProfile, deps: DaemonControlDeps): LocalScope {
-  if (platformOf(deps) !== 'linux') {
-    throw new DaemonControlError('UNSUPPORTED_PLATFORM', 'this daemon command requires Linux')
+  const platform = platformOf(deps)
+  if (platform !== 'linux' && platform !== 'darwin') {
+    throw new DaemonControlError('UNSUPPORTED_PLATFORM', 'this daemon command requires Linux or macOS')
   }
   try {
     return inspectInstalledProfileScope({
@@ -312,8 +329,7 @@ function runtimeDirOf(deps: DaemonControlDeps): string | undefined {
  * beside a foreign unit while still exiting nonzero.
  */
 async function readSnapshot(profile: DaemonControlProfile, deps: DaemonControlDeps, scope: LocalScope): Promise<Snapshot> {
-  const systemctl = deps.systemctl ?? runSystemctl
-  const runtimeDir = runtimeDirOf(deps)
+  const platform = platformOf(deps)
   let unit: OwnedProfileUnit | undefined
   let unitState: DaemonUnitState = 'not-found'
   /** The manager's raw ActiveState; `unitState` is the coarse presentation. */
@@ -322,35 +338,43 @@ async function readSnapshot(profile: DaemonControlProfile, deps: DaemonControlDe
   let userManager: 'not-checked' | 'available' | 'error' = 'not-checked'
   let unitInspectionFailure: DaemonControlError | undefined
   let unitQueryFailure: DaemonControlError | undefined
-  try {
-    const inspected = inspectOwnedProfileUnit(scope, profile.name, deps.unitDir)
-    if (inspected.kind === 'owned') {
-      unit = inspected
-      unitInspectionFailure = undefined
-      try {
-        const state = await queryOwnedProfileUnit(inspected, runtimeDir, systemctl)
-        userManager = 'available'
-        unitMainPid = state.mainPid
-        unitActiveState = state.loadState === 'not-found' ? '' : state.activeState
-        unitState = state.loadState === 'not-found'
-          ? 'not-found'
-          : state.activeState === 'active'
-            ? 'active'
-            : state.activeState === 'inactive' || state.activeState === 'failed'
-              ? 'inactive'
-              : 'unknown'
-      } catch (error) {
-        userManager = 'error'
-        unitQueryFailure = toDaemonControlError(error)
-        unitState = 'unknown'
+  if (platform === 'linux') {
+    // Only Linux has the verified systemd user unit. Darwin has no unit fact at
+    // all in this stage, so it must not inspect a unit path, resolve a runtime
+    // dir or invoke systemctl: the fixed no-unit facts below are the truth, not
+    // a fake "manager absent" observation.
+    const systemctl = deps.systemctl ?? runSystemctl
+    const runtimeDir = runtimeDirOf(deps)
+    try {
+      const inspected = inspectOwnedProfileUnit(scope, profile.name, deps.unitDir)
+      if (inspected.kind === 'owned') {
+        unit = inspected
+        unitInspectionFailure = undefined
+        try {
+          const state = await queryOwnedProfileUnit(inspected, runtimeDir, systemctl)
+          userManager = 'available'
+          unitMainPid = state.mainPid
+          unitActiveState = state.loadState === 'not-found' ? '' : state.activeState
+          unitState = state.loadState === 'not-found'
+            ? 'not-found'
+            : state.activeState === 'active'
+              ? 'active'
+              : state.activeState === 'inactive' || state.activeState === 'failed'
+                ? 'inactive'
+                : 'unknown'
+        } catch (error) {
+          userManager = 'error'
+          unitQueryFailure = toDaemonControlError(error)
+          unitState = 'unknown'
+        }
       }
+    } catch (error) {
+      // A named unit path exists but is not this Profile's verified unit. The
+      // refusal owns the management decision; the Host observation below still
+      // runs so `status` reports the authenticated Host truthfully.
+      unitInspectionFailure = toDaemonControlError(error)
+      unitState = 'unknown'
     }
-  } catch (error) {
-    // A named unit path exists but is not this Profile's verified unit. The
-    // refusal owns the management decision; the Host observation below still
-    // runs so `status` reports the authenticated Host truthfully.
-    unitInspectionFailure = toDaemonControlError(error)
-    unitState = 'unknown'
   }
   let failure = unitInspectionFailure ?? unitQueryFailure
   let exitCode = failure?.exitCode ?? 0
@@ -522,15 +546,23 @@ export function formatDaemonStatus(status: DaemonControlStatus): string {
  * Acquire the ONE profile-scoped admin seat for a mutating verb. The seat is
  * held for exactly the lifetime of THIS command's operation: two concurrently
  * running management commands of the same Profile cannot interleave, and the
- * kernel releases the abstract name when the process exits. There is no
- * persistent lock file and no in-memory shadow of OS operations — a command
- * that dies with the process releases the seat, and the next command re-reads
- * the real systemd/Host state.
+ * kernel releases the claim when the process exits. Linux keeps its abstract
+ * socket name; Darwin claims the existing `admin` `O_EXLOCK` file beside the
+ * Host singleton seat. There is no persistent lock file and no in-memory shadow
+ * of OS operations — a command that dies with the process releases the seat,
+ * and the next command re-reads the real systemd/Host state.
  */
-async function withAdminSeat<T>(scope: LocalScope, operation: () => Promise<T>): Promise<T> {
+async function withAdminSeat<T>(scope: LocalScope, deps: DaemonControlDeps, operation: () => Promise<T>): Promise<T> {
   let seat
   try {
-    seat = await bindProcessSeat(`${ADMIN_SEAT_PREFIX}${scope.scopeId.slice(0, 40)}`, 'DAEMON_CONTROL_BUSY')
+    seat = platformOf(deps) === 'linux'
+      ? await bindProcessSeat(`${ADMIN_SEAT_PREFIX}${scope.scopeId.slice(0, 40)}`, 'DAEMON_CONTROL_BUSY')
+      : await bindDarwinKernelSeat(
+        darwinHostProfileSeatDir(scope.scopeId, deps.darwinAccountHome),
+        scope.scopeId,
+        'admin',
+        'DAEMON_CONTROL_BUSY',
+      )
   } catch (error) {
     throw toDaemonControlError(error)
   }
@@ -563,7 +595,10 @@ function refuseHostState(status: DaemonControlStatus): DaemonControlError {
   return new DaemonControlError('TRANSITION_UNCERTAIN', `the Host is ${status.host}; refusing to change supervision`)
 }
 
-/** The bounded post-stop wait: the old PID/starttime must actually disappear. */
+/** The bounded post-stop wait: the old process identity must actually
+ *  disappear. Linux keeps its frozen `/proc` starttime proof; Darwin requires
+ *  the recorded schema-2 kernel identity to become `gone`/`different`. An
+ *  `unknown` kernel read is uncertainty and never proves a stop. */
 async function waitForHostStopped(
   record: LocalInstanceRecord | undefined,
   mainPid: number,
@@ -571,10 +606,24 @@ async function waitForHostStopped(
 ): Promise<void> {
   const now = deps.now ?? Date.now
   const sleep = deps.sleep ?? (ms => new Promise(resolve => setTimeout(resolve, ms)))
+  const deadline = now() + (deps.stopTimeoutMs ?? 20_000)
+  if (platformOf(deps) === 'darwin') {
+    if (record === undefined || record.schema !== 2) {
+      throw new DaemonControlError('IDENTITY_OR_OWNERSHIP_REFUSED', 'the Host kernel identity is unavailable for the stop proof')
+    }
+    const readKernel = deps.readKernel ?? readKernelProcess
+    for (;;) {
+      const classification = sameKernelProcess(record.hostKernelIdentity, readKernel(record.hostPid))
+      if (classification === 'gone' || classification === 'different') return
+      if (now() >= deadline) {
+        throw new DaemonControlError('TRANSITION_UNCERTAIN', 'the old Host process did not exit within the bounded window')
+      }
+      await sleep(100)
+    }
+  }
   const readStarttime = deps.readStarttime ?? ((pid: number) => {
     try { return readLinuxStarttime(pid) } catch { return undefined }
   })
-  const deadline = now() + (deps.stopTimeoutMs ?? 20_000)
   for (;;) {
     // The stop request is already committed: await its real bounded settlement
     // instead of turning a shutdown signal into a premature "unknown".
@@ -628,6 +677,36 @@ function assertProcessHostOwnership(record: LocalInstanceRecord, deps: DaemonCon
   }
 }
 
+/**
+ * Verify a live independent Darwin Host really is the recorded kernel process
+ * before one SIGTERM. The registry schema, the authenticated instance and a
+ * FRESH kernel read must all agree; the read is repeated immediately before the
+ * signal so a pid that exited/was reused between the handshake and the signal
+ * is refused with zero signal. `unknown` is never a kill permit.
+ */
+function assertDarwinHostOwnership(
+  record: LocalInstanceRecord,
+  authenticated: VerifiedLocalHost,
+  deps: DaemonControlDeps,
+): void {
+  if (record.schema !== 2) {
+    throw new DaemonControlError('IDENTITY_OR_OWNERSHIP_REFUSED', 'the Host registry is not a macOS kernel identity')
+  }
+  if (authenticated.record.instanceId !== record.instanceId
+    || authenticated.record.hostPid !== record.hostPid) {
+    throw new DaemonControlError('IDENTITY_OR_OWNERSHIP_REFUSED', 'the authenticated Host is not the recorded instance')
+  }
+  const readKernel = deps.readKernel ?? readKernelProcess
+  try {
+    assertRecordedHostKernelIdentityCurrent(record, readKernel)
+  } catch (error) {
+    throw toDaemonControlError(error)
+  }
+  if (sameKernelProcess(record.hostKernelIdentity, readKernel(record.hostPid)) !== 'same') {
+    throw new DaemonControlError('IDENTITY_OR_OWNERSHIP_REFUSED', 'the Host kernel identity changed before the signal')
+  }
+}
+
 /** Bounded read-to-EOF for procfs text files: `/proc` entries report
  *  `st_size = 0` even when the content is readable, so the length must come
  *  from reading until EOF under an explicit byte cap, never from `fstat.size`. */
@@ -658,9 +737,10 @@ function readFileString(path: string): string {
  * - a loaded active/activating unit whose MainPID IS the authenticated Host is
  *   stopped through that unit and its exit is awaited;
  * - an independent authenticated Host (no unit, or a loaded unit that systemd
- *   reports as inactive/failed/not-found) is re-authenticated, its procfs
- *   starttime and exact product Host entry are re-checked, and exactly that PID
- *   receives one SIGTERM;
+ *   reports as inactive/failed/not-found) is re-authenticated, its platform
+ *   ownership proof (Linux procfs starttime + exact product Host entry, Darwin
+ *   schema-2 kernel identity) is re-checked, and exactly that PID receives one
+ *   SIGTERM;
  * - a live Host beside an active unit with a different MainPID, a unit in flux,
  *   or an unreadable manager is refused WITHOUT trying the other stop method.
  */
@@ -696,17 +776,22 @@ async function stopFromSnapshot(
     }
     if (!running) {
       const authenticate = deps.authenticate ?? authenticateLocalHost
+      let authenticated: VerifiedLocalHost
       try {
-        await authenticate(record, snapshot.scope)
+        authenticated = await authenticate(record, snapshot.scope)
       } catch (error) {
         throw toDaemonControlError(error)
       }
-      assertProcessHostOwnership(record, deps)
-      const readStarttime = deps.readStarttime ?? ((pid: number) => {
-        try { return readLinuxStarttime(pid) } catch { return undefined }
-      })
-      if (record.schema !== 1 || readStarttime(record.hostPid) !== record.hostStarttime) {
-        throw new DaemonControlError('IDENTITY_OR_OWNERSHIP_REFUSED', 'the Host process start identity changed before the signal')
+      if (platformOf(deps) === 'darwin') {
+        assertDarwinHostOwnership(record, authenticated, deps)
+      } else {
+        assertProcessHostOwnership(record, deps)
+        const readStarttime = deps.readStarttime ?? ((pid: number) => {
+          try { return readLinuxStarttime(pid) } catch { return undefined }
+        })
+        if (record.schema !== 1 || readStarttime(record.hostPid) !== record.hostStarttime) {
+          throw new DaemonControlError('IDENTITY_OR_OWNERSHIP_REFUSED', 'the Host process start identity changed before the signal')
+        }
       }
       assertNotAborted(deps.signal)
       const kill = deps.kill ?? process.kill
@@ -750,7 +835,7 @@ async function runStatus(profile: DaemonControlProfile, deps: DaemonControlDeps)
 /** The `start` handler. */
 async function runStart(profile: DaemonControlProfile, deps: DaemonControlDeps): Promise<DaemonControlResult> {
   const inspected = inspectScope(profile, deps)
-  return await withAdminSeat(inspected, async () => {
+  return await withAdminSeat(inspected, deps, async () => {
     const pre = await readSnapshot(profile, deps, inspected)
     // The snapshot's failure set is the STATUS contract (a manager error is a
     // nonzero diagnostic). `start` owns a different question — does THIS
@@ -805,7 +890,7 @@ async function runStart(profile: DaemonControlProfile, deps: DaemonControlDeps):
 /** The `stop` handler. */
 async function runStop(profile: DaemonControlProfile, deps: DaemonControlDeps): Promise<DaemonControlResult> {
   const inspected = inspectScope(profile, deps)
-  return await withAdminSeat(inspected, async () => {
+  return await withAdminSeat(inspected, deps, async () => {
     const pre = await readSnapshot(profile, deps, inspected)
     if (pre.failure !== undefined && !verifiedUnitManagementAdmitted(pre)) throw pre.failure
     assertNotAborted(deps.signal)
@@ -824,7 +909,7 @@ async function runStop(profile: DaemonControlProfile, deps: DaemonControlDeps): 
 /** The `restart` handler: stop -> confirmed exit -> controlled unit refresh -> start. */
 async function runRestart(profile: DaemonControlProfile, deps: DaemonControlDeps): Promise<DaemonControlResult> {
   const inspected = inspectScope(profile, deps)
-  return await withAdminSeat(inspected, async () => {
+  return await withAdminSeat(inspected, deps, async () => {
     const pre = await readSnapshot(profile, deps, inspected)
     const unitFailureRecovery = verifiedUnitManagementAdmitted(pre)
       && (pre.record === undefined || !pre.processAlive || pre.unitMainPid === pre.record.hostPid)
@@ -890,8 +975,11 @@ async function runRestart(profile: DaemonControlProfile, deps: DaemonControlDeps
 
 /** The `install` handler: explicit unit installation only, never host control. */
 async function runInstall(profile: DaemonControlProfile, deps: DaemonControlDeps): Promise<DaemonControlResult> {
+  if (platformOf(deps) === 'darwin') {
+    throw new DaemonControlError('UNSUPPORTED_PLATFORM', 'daemon install is not supported on macOS; the basic daemon uses a detached Host process')
+  }
   const inspected = inspectScope(profile, deps)
-  return await withAdminSeat(inspected, async () => {
+  return await withAdminSeat(inspected, deps, async () => {
     const pre = await readSnapshot(profile, deps, inspected)
     // An install owns exactly one question: may this Profile write/verify its
     // unit? A foreign unit or an unreadable manager blocks it; a Host that is
@@ -942,8 +1030,11 @@ async function runInstall(profile: DaemonControlProfile, deps: DaemonControlDeps
 
 /** The `uninstall` handler: remove this Profile's service definition only. */
 async function runUninstall(profile: DaemonControlProfile, deps: DaemonControlDeps): Promise<DaemonControlResult> {
+  if (platformOf(deps) === 'darwin') {
+    throw new DaemonControlError('UNSUPPORTED_PLATFORM', 'daemon uninstall is not supported on macOS; the basic daemon uses a detached Host process')
+  }
   const inspected = inspectScope(profile, deps)
-  return await withAdminSeat(inspected, async () => {
+  return await withAdminSeat(inspected, deps, async () => {
     const pre = await readSnapshot(profile, deps, inspected)
     // A named unit that is NOT this Profile's verified unit stays a hard
     // refusal. Uninstall owns ONLY the service definition, so with no owned

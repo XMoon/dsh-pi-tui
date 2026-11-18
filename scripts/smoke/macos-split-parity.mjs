@@ -19,6 +19,10 @@
  *       created and the surface stays unselected.
  *   A20 the workspace-object route refuses an unauthenticated request.
  *   no-TTY the public daemon selector fails closed before any Host side effect.
+ *   P01/P02/P03/P04/P05/P06/P07/P09 the public macOS daemon management
+ *       lifecycle: read-only no-Host status/logs, warm reuse, verified stop,
+ *       cold start, admin-seat race, restart into a new instance and the
+ *       unsupported (no launchd) install/uninstall verbs.
  *
  * Every wait is a bounded condition wait on a real fact (published registry,
  * painted tmux frame, durable zstd Session log, process table). The tmux server
@@ -35,7 +39,7 @@
  * @module smoke/macos-split-parity
  */
 
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import {
   existsSync,
@@ -69,6 +73,7 @@ const TIMEOUTS = {
   turn: 120_000,
   exit: 45_000,
   negativeWindow: 30_000,
+  daemon: 120_000,
 }
 
 function assert(condition, message) {
@@ -77,6 +82,37 @@ function assert(condition, message) {
 
 function sleep(ms) {
   return new Promise(resolveSleep => setTimeout(resolveSleep, ms))
+}
+
+/**
+ * Bound a helper promise for a NEGATIVE CONTROL: if the helper under test
+ * regresses into never settling, the control must report a failure instead of
+ * hanging the whole smoke. The guard timer is always cleared.
+ */
+function settleWithin(promise, deadlineMs) {
+  let timer
+  const deadline = new Promise(resolve => {
+    timer = setTimeout(() => resolve({ kind: 'hung' }), deadlineMs)
+  })
+  return Promise.race([
+    promise.then(() => ({ kind: 'settled' }), error => ({ kind: 'error', error })),
+    deadline,
+  ]).finally(() => clearTimeout(timer))
+}
+
+function describeOutcome(outcome) {
+  return outcome.kind === 'error' ? outcome.error.message : outcome.kind
+}
+
+/** Kill and await one probe child this smoke created itself (not a management
+ *  child): used even when the probe's own guard assertion is about to fail. */
+async function reapOwnedProbeChild(pid) {
+  if (pid === undefined) return
+  if (alive(pid)) {
+    try { process.kill(pid, 'SIGKILL') } catch { /* already gone */ }
+  }
+  await waitFor(() => (!alive(pid) ? true : undefined),
+    `owned probe child ${String(pid)} is reaped`, TIMEOUTS.process)
 }
 
 /** Bounded poll on one real observable fact. */
@@ -220,6 +256,154 @@ function startSession({ name, cwd, installation, backend, args = [], dshHome = i
   ].map(shellQuote).join(' ')
   tmux(['new-session', '-d', '-s', name, '-x', '110', '-y', '34', '-c', cwd, command], `new-session ${name}`)
   return name
+}
+
+// ── public daemon management commands (real CLI processes) ──────────────────
+
+/** The public `dsh --profile pi-tui daemon ...` invocation for this profile. */
+function daemonInvocation(installation, args) {
+  const { dshInvocation } = installation
+  return [dshInvocation[0], ...dshInvocation.slice(1), '--profile', 'pi-tui', 'daemon', ...args]
+}
+
+function daemonEnvironment(installation) {
+  return { ...installation.env, NO_COLOR: '1' }
+}
+
+/** Run one management command to completion and keep its real exit/stdout/stderr. */
+function runDaemonCommand(installation, args) {
+  const result = spawnSync(daemonInvocation(installation, args)[0], daemonInvocation(installation, args).slice(1), {
+    cwd: installation.profileDir,
+    env: daemonEnvironment(installation),
+    encoding: 'utf8',
+    timeout: TIMEOUTS.daemon,
+  })
+  if (result.error !== undefined) {
+    throw new SplitSmokeAssertionError(`daemon ${args.join(' ')}: could not run: ${result.error.message}`)
+  }
+  return { status: result.status, stdout: result.stdout ?? '', stderr: result.stderr ?? '' }
+}
+
+/**
+ * Start one bounded child process. The deadline rejects only after the OS
+ * reaped the child; the one exception is an already-reaped child whose
+ * inherited stdout/stderr pipes are still held by a grandchild — the helper
+ * owns those stream copies, so it releases them and settles at the deadline
+ * instead of waiting for a `close` that may never come. So neither a hung
+ * command nor a surviving pipe holder can block the smoke's cleanup/evidence
+ * path or leave an owned subprocess behind.
+ */
+function startBoundedProcess(label, file, args, options) {
+  const child = spawn(file, args, {
+    cwd: options.cwd,
+    env: options.env,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  let stdout = ''
+  let stderr = ''
+  let settled = false
+  /** The child's own process exit was observed; its pipes may still be held. */
+  let reaped = false
+  /** The deadline fired. */
+  let timedOut = false
+  /** The race coordinator asked to stop a still-pending child. */
+  let terminating = false
+  let settle
+  const result = new Promise((resolve, reject) => { settle = { resolve, reject } })
+  const finish = (fn, value) => {
+    if (settled) return
+    settled = true
+    clearTimeout(timer)
+    fn(value)
+  }
+  const releaseStreams = () => {
+    child.stdout?.destroy()
+    child.stderr?.destroy()
+  }
+  const finishTimedOut = () => {
+    releaseStreams()
+    finish(settle.reject, new SplitSmokeAssertionError(
+      `${label}: did not settle within ${String(options.timeoutMs)}ms (pid ${String(child.pid)})`,
+    ))
+  }
+  const finishTerminated = () => {
+    releaseStreams()
+    finish(settle.resolve, { status: null, signal: 'SIGKILL', stdout, stderr, pid: child.pid, terminated: true })
+  }
+  const timer = setTimeout(() => {
+    timedOut = true
+    // A child that already exited must not be waited on again: the inherited
+    // pipes are the only reason `close` is missing, and they are ours to drop.
+    if (reaped) {
+      finishTimedOut()
+      return
+    }
+    try {
+      // SIGKILL cannot be ignored; `exit` below proves the reap.
+      child.kill('SIGKILL')
+    } catch {
+      finishTimedOut()
+    }
+  }, options.timeoutMs)
+  child.stdout?.on('data', chunk => { stdout += chunk })
+  child.stderr?.on('data', chunk => { stderr += chunk })
+  child.once('error', error => {
+    finish(settle.reject, new SplitSmokeAssertionError(`${label}: could not run: ${error.message}`))
+  })
+  child.once('exit', () => {
+    reaped = true
+    if (timedOut) finishTimedOut()
+    else if (terminating) finishTerminated()
+  })
+  child.once('close', (status, signal) => {
+    reaped = true
+    if (timedOut) {
+      finishTimedOut()
+      return
+    }
+    if (terminating) {
+      finishTerminated()
+      return
+    }
+    finish(settle.resolve, { status, signal, stdout, stderr, pid: child.pid })
+  })
+  return {
+    child,
+    result,
+    /** Stop an owned child that is still pending and await its settlement. */
+    async dispose() {
+      if (!settled) {
+        terminating = true
+        if (reaped) {
+          // The process is already gone; only inherited pipes remain.
+          finishTerminated()
+        } else {
+          try { child.kill('SIGKILL') } catch { finishTerminated() }
+        }
+      }
+      return result.then(() => undefined, () => undefined)
+    },
+  }
+}
+
+/** Start one management command without waiting: two of these race the admin seat. */
+function startDaemonCommand(installation, args) {
+  const invocation = daemonInvocation(installation, args)
+  return startBoundedProcess(`daemon ${args.join(' ')}`, invocation[0], invocation.slice(1), {
+    timeoutMs: TIMEOUTS.daemon,
+    cwd: installation.profileDir,
+    env: daemonEnvironment(installation),
+  })
+}
+
+/** Parse the fixed `key=value` status block without trusting line order. */
+function statusFields(text) {
+  const fields = {}
+  for (const line of text.split('\n')) {
+    const match = /^([a-z-]+)=(.*)$/u.exec(line)
+    if (match !== null) fields[match[1]] = match[2]
+  }
+  return fields
 }
 
 // ── process table (macOS `ps`, no /proc) ────────────────────────────────────
@@ -372,6 +556,40 @@ async function runScene({ installation, workRoot, report }) {
     sessions.add(name)
     return startSession({ ...options, name })
   }
+
+  // ── P01/P06-NOLOG/P07: no-Host management is read-only and macOS-specific ─
+  // This runs BEFORE any Host or Client exists, so "no Host" is a real cold
+  // state. The account-home seat root is the real OS account home (never
+  // `$HOME`), so the negative control snapshots its entries instead of
+  // guessing a scope id before the Host publishes one.
+  const accountRunRoot = join(homedir(), '.dsh-pi-tui', 'run')
+  const accountSeatsBefore = existsSync(accountRunRoot) ? readdirSync(accountRunRoot).sort() : []
+  assert(scopeDir(dshHome) === undefined, 'P01: the isolated DSH home must start without a profile run scope')
+  const noHostStatus = runDaemonCommand(installation, ['status'])
+  const noHost = statusFields(noHostStatus.stdout)
+  assert(noHostStatus.status === 0,
+    `P01: daemon status with no Host exited ${String(noHostStatus.status)}: ${(noHostStatus.stderr).slice(-800)}`)
+  assert(noHost.manager === 'unmanaged' && noHost['user-manager'] === 'not-checked'
+    && noHost.host === 'stopped' && noHost.unit === 'none' && noHost['unit-state'] === 'not-found',
+    `P01: unexpected no-Host status ${JSON.stringify(noHost)}`)
+  assert(scopeDir(dshHome) === undefined, 'P01: status must not create the profile run scope')
+  const noLogs = runDaemonCommand(installation, ['logs', '--lines', '20'])
+  assert(noLogs.status === 4 && /LOG_SOURCE_UNAVAILABLE/u.test(noLogs.stderr),
+    `P06-NOLOG: missing host.log must be LOG_SOURCE_UNAVAILABLE/4, saw ${String(noLogs.status)}: ${noLogs.stderr.slice(-800)}`)
+  for (const verb of ['install', 'uninstall']) {
+    const unsupported = runDaemonCommand(installation, [verb])
+    assert(unsupported.status === 3 && /UNSUPPORTED_PLATFORM/u.test(unsupported.stderr),
+      `P07: daemon ${verb} must be UNSUPPORTED_PLATFORM/3 on macOS, saw ${String(unsupported.status)}: ${unsupported.stderr.slice(-800)}`)
+  }
+  assert(scopeDir(dshHome) === undefined, 'P07: unsupported unit verbs must not create the profile run scope')
+  const accountSeatsAfter = existsSync(accountRunRoot) ? readdirSync(accountRunRoot).sort() : []
+  assert(accountSeatsAfter.join('\0') === accountSeatsBefore.join('\0'),
+    `P01/P07: read-only or unsupported commands created an account-home seat directory: ${JSON.stringify({ before: accountSeatsBefore, after: accountSeatsAfter })}`)
+  report.rows.push(
+    { id: 'P01', status: 'PASS', noHost, readOnlyScope: true, managerQueries: 0 },
+    { id: 'P06-NOLOG', status: 'PASS', exitCode: noLogs.status, code: 'LOG_SOURCE_UNAVAILABLE' },
+    { id: 'P07-NOHOST', status: 'PASS', verbs: ['install', 'uninstall'], exitCode: 3, launchdPlist: false },
+  )
 
   // ── A01/A02: two SIMULTANEOUS cold public daemon Clients ─────────────────
   // Both start before any Host registry exists, so both race the Host seat
@@ -707,7 +925,219 @@ async function runScene({ installation, workRoot, report }) {
   await waitFor(() => (!alive(clientB.pid) ? true : undefined), 'A05 Client B process is gone', TIMEOUTS.process)
   assert(alive(registryA.record.hostPid), 'A05: the Host exited when its last Client exited')
   report.rows.push({ id: 'A05-B', status: 'PASS', hostSurvivedLastClient: true })
-  return { hostPid: registryA.record.hostPid }
+
+  // ── P02/P03/P04/P05/P06/P09: the public macOS management lifecycle ───────
+  // A05/A05-B already proved that Client exit does NOT stop the Host; every
+  // stop below is an explicit management command, and the final cleanup
+  // SIGTERM is the smoke's own reclaim rather than a management result.
+  const original = registryA.record
+  const readyStatus = runDaemonCommand(installation, ['status'])
+  const ready = statusFields(readyStatus.stdout)
+  assert(readyStatus.status === 0, `P02 status: exited ${String(readyStatus.status)}: ${readyStatus.stderr.slice(-800)}`)
+  assert(ready.host === 'ready' && ready.manager === 'process' && ready.unit === 'none'
+    && ready['user-manager'] === 'not-checked' && ready.pid === String(original.hostPid),
+  `P02: unexpected ready status ${JSON.stringify(ready)}`)
+  assert(ready.instance === original.instanceId.slice(0, 8), 'P02: status reported a different instance')
+  const warm = runDaemonCommand(installation, ['start'])
+  const warmFields = statusFields(warm.stdout)
+  assert(warm.status === 0, `P02 warm start: exited ${String(warm.status)}: ${warm.stderr.slice(-800)}`)
+  assert(warmFields.instance === original.instanceId.slice(0, 8),
+    `P02: warm start changed the instance (${String(original.instanceId.slice(0, 8))} -> ${String(warmFields.instance)})`)
+  assert(readRegistry(dshHome)?.record.instanceId === original.instanceId,
+    'P02: warm start published a different Host instance')
+  const daemonLogs = runDaemonCommand(installation, ['logs', '--lines', '20'])
+  assert(daemonLogs.status === 0, `P06: daemon logs exited ${String(daemonLogs.status)}: ${daemonLogs.stderr.slice(-800)}`)
+  assert(daemonLogs.stdout.trim() !== '', 'P06: daemon logs returned no Host log output')
+  assert(!/connectUrl=\S|token=\S/iu.test(daemonLogs.stdout), 'P06: log output leaked unsanitized token material')
+  report.rows.push(
+    { id: 'P02-WARM', status: 'PASS', hostPid: original.hostPid, instance: original.instanceId, reused: true },
+    { id: 'P06', status: 'PASS', source: 'scope/host.log', lines: 20, sanitized: true },
+  )
+
+  const stopped = runDaemonCommand(installation, ['stop'])
+  assert(stopped.status === 0, `P03 stop: exited ${String(stopped.status)}: ${stopped.stderr.slice(-800)}`)
+  assert(/^host=stopped$/mu.test(stopped.stdout), 'P03: stop did not report a stopped Host')
+  assert(!alive(original.hostPid), 'P03: the original Host process identity is still alive after stop')
+  const registryAfterStop = readRegistry(dshHome)
+  assert(registryAfterStop === undefined || registryAfterStop.record.instanceId !== original.instanceId,
+    'P03: the stopped Host registry still claims the original instance')
+  const stoppedAgain = runDaemonCommand(installation, ['stop'])
+  assert(stoppedAgain.status === 0 && /^host=stopped$/mu.test(stoppedAgain.stdout),
+    `P03: a second stop is not an idempotent success (${String(stoppedAgain.status)})`)
+  report.rows.push(
+    { id: 'P03', status: 'PASS', oldHostPid: original.hostPid, oldIdentityGone: true, idempotentStop: true },
+    { id: 'P09', status: 'PASS', clientDetachKeptHost: true, managementStopStoppedHost: true },
+  )
+
+  const cold = runDaemonCommand(installation, ['start'])
+  const coldFields = statusFields(cold.stdout)
+  assert(cold.status === 0, `P02 cold start: exited ${String(cold.status)}: ${cold.stderr.slice(-800)}`)
+  assert(coldFields.host === 'ready' && coldFields.instance !== original.instanceId.slice(0, 8),
+    'P02: a cold start did not publish a new authenticated instance')
+  const coldRegistry = readRegistry(dshHome)
+  assert(coldRegistry !== undefined, 'P02: the cold-started Host published no registry')
+  assert(coldRegistry.record.instanceId !== original.instanceId, 'P02: the cold start reused the stopped instance')
+  assert(alive(coldRegistry.record.hostPid), 'P02: the cold-started Host PID is not alive')
+  report.rows.push({ id: 'P02-COLD', status: 'PASS', hostPid: coldRegistry.record.hostPid, instance: coldRegistry.record.instanceId })
+
+  // P05: from a cold state two REAL management processes race the Darwin admin
+  // seat; the winner cold-starts the Host while the loser must be BUSY before
+  // any Host/unit mutation.
+  const preRaceStop = runDaemonCommand(installation, ['stop'])
+  assert(preRaceStop.status === 0, `P05: pre-race stop failed (${String(preRaceStop.status)})`)
+  // Negative controls for the bounded race helper itself. Control 1: a child
+  // that never exits must be reaped by the deadline, not merely abandoned by a
+  // race. Control 2: a child that exits BEFORE the deadline but leaves a
+  // grandchild holding the inherited stdout/stderr pipes must settle at its
+  // deadline (a `close` may never come), and its owned streams are released.
+  const hung = startBoundedProcess('P05 reaping control', process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+    timeoutMs: 500,
+    cwd: workRoot,
+    env: daemonEnvironment(installation),
+  })
+  const hungPid = hung.child.pid
+  let hungFailure
+  try {
+    const outcome = await settleWithin(hung.result, 5_000)
+    assert(outcome.kind === 'error' && /did not settle within 500ms/u.test(outcome.error.message),
+      `P05: a never-exiting child must fail at its deadline, saw ${describeOutcome(outcome)}`)
+    hungFailure = outcome.error
+    assert(hungPid !== undefined && !alive(hungPid),
+      `P05: the timed-out child pid ${String(hungPid)} was not reaped`)
+  } finally {
+    if (hungPid !== undefined && alive(hungPid)) {
+      try { process.kill(hungPid, 'SIGKILL') } catch { /* already gone */ }
+    }
+  }
+  assert(hungFailure !== undefined, 'P05: the reaping control did not settle')
+  report.rows.push({ id: 'P05-REAP', status: 'PASS', timeoutMs: 500, reapedPid: hungPid })
+
+  const pipePidFile = join(workRoot, 'p05-inherited-pipe-grandchild.pid')
+  const pipeParent = [
+    "const { spawn } = require('node:child_process')",
+    "const fs = require('node:fs')",
+    "const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: ['ignore', 'inherit', 'inherit'] })",
+    'fs.writeFileSync(process.argv[1], String(child.pid))',
+    'process.exit(0)',
+    '',
+  ].join('\n')
+  const pipeControl = startBoundedProcess('P05 inherited-pipe control', process.execPath, ['-e', pipeParent, pipePidFile], {
+    timeoutMs: 500,
+    cwd: workRoot,
+    env: daemonEnvironment(installation),
+  })
+  let pipeGrandchildPid
+  try {
+    // Register the control's own grandchild BEFORE any assertion can fail: the
+    // parent writes this pid synchronously at startup, so a helper regression
+    // still leaves the finally a real identity to kill and reap.
+    pipeGrandchildPid = await waitFor(() => {
+      if (!existsSync(pipePidFile)) return undefined
+      const value = Number(readFileSync(pipePidFile, 'utf8'))
+      return Number.isSafeInteger(value) && value > 0 ? value : undefined
+    }, 'P05 inherited-pipe control grandchild pid', TIMEOUTS.process)
+    const outcome = await settleWithin(pipeControl.result, 5_000)
+    assert(outcome.kind === 'error' && /did not settle within 500ms/u.test(outcome.error.message),
+      `P05: an exited child with inherited pipes must settle at its deadline, saw ${describeOutcome(outcome)}`)
+    assert(alive(pipeGrandchildPid), 'P05: the control grandchild should still hold the inherited pipes')
+    const disposeOutcome = await settleWithin(pipeControl.dispose(), 5_000)
+    assert(disposeOutcome.kind === 'settled', 'P05: dispose did not complete for an already-reaped child')
+    report.rows.push({
+      id: 'P05-PIPE',
+      status: 'PASS',
+      timeoutMs: 500,
+      grandchildPid: pipeGrandchildPid,
+      disposed: true,
+    })
+  } finally {
+    // This grandchild is the control's own resource, not the management race's
+    // child. If the guard was already hung, the pid above is still registered;
+    // when even that registration failed, re-read the file once more.
+    if (pipeGrandchildPid === undefined && existsSync(pipePidFile)) {
+      try {
+        const value = Number(readFileSync(pipePidFile, 'utf8'))
+        if (Number.isSafeInteger(value) && value > 0) pipeGrandchildPid = value
+      } catch { /* no registered pid */ }
+    }
+    await reapOwnedProbeChild(pipeGrandchildPid)
+  }
+
+  // Prove the P05-PIPE guard-FAILURE branch itself: a registered grandchild is
+  // still killed and reaped even when the guarded promise never settles.
+  const guardPidFile = join(workRoot, 'p05-guard-regression-grandchild.pid')
+  const guardParent = spawn(process.execPath, ['-e', pipeParent, guardPidFile], {
+    cwd: workRoot,
+    env: daemonEnvironment(installation),
+    stdio: 'ignore',
+  })
+  const guardParentExit = new Promise(resolve => {
+    guardParent.once('exit', resolve)
+    guardParent.once('error', resolve)
+  })
+  let guardGrandchildPid
+  try {
+    guardGrandchildPid = await waitFor(() => {
+      if (!existsSync(guardPidFile)) return undefined
+      const value = Number(readFileSync(guardPidFile, 'utf8'))
+      return Number.isSafeInteger(value) && value > 0 ? value : undefined
+    }, 'P05 guard-regression grandchild pid', TIMEOUTS.process)
+    const guardOutcome = await settleWithin(new Promise(() => {}), 250)
+    assert(guardOutcome.kind === 'hung',
+      `P05: the guard-regression probe expected a hung guard, saw ${describeOutcome(guardOutcome)}`)
+    await reapOwnedProbeChild(guardGrandchildPid)
+    assert(!alive(guardGrandchildPid), 'P05: the guard-failure branch did not reap its grandchild')
+    report.rows.push({ id: 'P05-GUARD', status: 'PASS', guardMs: 250, grandchildPid: guardGrandchildPid })
+  } finally {
+    await reapOwnedProbeChild(guardGrandchildPid)
+    await guardParentExit
+  }
+  const raceOne = startDaemonCommand(installation, ['start'])
+  const raceTwo = startDaemonCommand(installation, ['start'])
+  let raceOutcomes
+  try {
+    raceOutcomes = await Promise.all([raceOne.result, raceTwo.result])
+  } finally {
+    // Every owned race child is either already settled or is killed and
+    // awaited here, so a failure still reaches the normal cleanup/evidence path.
+    await Promise.all([raceOne.dispose(), raceTwo.dispose()])
+  }
+  const winners = raceOutcomes.filter(outcome => outcome.status === 0)
+  const busyLosers = raceOutcomes.filter(outcome => outcome.status === 5 && /DAEMON_CONTROL_BUSY/u.test(outcome.stderr))
+  assert(winners.length === 1 && busyLosers.length === 1,
+    `P05: expected one winner and one DAEMON_CONTROL_BUSY, saw ${JSON.stringify(raceOutcomes.map(outcome => ({ status: outcome.status, stderr: outcome.stderr.slice(-400) })))}`)
+  const raceRegistry = readRegistry(dshHome)
+  assert(raceRegistry !== undefined && alive(raceRegistry.record.hostPid), 'P05: the winning start published no live Host')
+  const liveHostsAfterRace = ownedRoles(workRoot).hosts.filter(row => alive(row.pid))
+  assert(liveHostsAfterRace.length === 1, `P05: the seat race produced ${String(liveHostsAfterRace.length)} Hosts`)
+  report.rows.push({ id: 'P05', status: 'PASS', winnerExit: 0, loserExit: 5, loserCode: 'DAEMON_CONTROL_BUSY', hostCount: liveHostsAfterRace.length })
+
+  const restarted = runDaemonCommand(installation, ['restart'])
+  const restartFields = statusFields(restarted.stdout)
+  assert(restarted.status === 0, `P04 restart: exited ${String(restarted.status)}: ${restarted.stderr.slice(-800)}`)
+  assert(/^previous=/mu.test(restarted.stdout), 'P04: restart did not report the previous instance')
+  assert(restartFields.host === 'ready', 'P04: the restarted Host is not ready')
+  const restartRegistry = readRegistry(dshHome)
+  assert(restartRegistry !== undefined, 'P04: restart published no registry')
+  assert(restartRegistry.record.instanceId !== raceRegistry.record.instanceId, 'P04: restart reused the previous instance')
+  assert(!alive(raceRegistry.record.hostPid), 'P04: the previous Host process is still alive')
+  assert(alive(restartRegistry.record.hostPid), 'P04: the restarted Host PID is not alive')
+  report.rows.push({ id: 'P04', status: 'PASS', oldInstance: raceRegistry.record.instanceId, newInstance: restartRegistry.record.instanceId })
+
+  // P07: unit verbs stay unsupported on a LIVE profile and never disturb it.
+  for (const verb of ['install', 'uninstall']) {
+    const unsupported = runDaemonCommand(installation, [verb])
+    assert(unsupported.status === 3 && /UNSUPPORTED_PLATFORM/u.test(unsupported.stderr),
+      `P07: daemon ${verb} beside a live Host must be UNSUPPORTED_PLATFORM/3, saw ${String(unsupported.status)}`)
+  }
+  assert(alive(restartRegistry.record.hostPid), 'P07: an unsupported unit verb disturbed the live Host')
+  assert(readRegistry(dshHome)?.record.instanceId === restartRegistry.record.instanceId,
+    'P07: an unsupported unit verb changed the live Host instance')
+  const isolatedLaunchAgents = join(installation.home, 'Library', 'LaunchAgents')
+  assert(!existsSync(isolatedLaunchAgents) || readdirSync(isolatedLaunchAgents).length === 0,
+    'P07: a macOS unit verb wrote a launchd plist')
+  report.rows.push({ id: 'P07-LIVE', status: 'PASS', exitCode: 3, hostUnchanged: true, launchdPlists: 0 })
+
+  return { hostPid: restartRegistry.record.hostPid }
 }
 
 // ── cleanup ────────────────────────────────────────────────────────────────
