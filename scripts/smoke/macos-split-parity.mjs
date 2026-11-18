@@ -1780,47 +1780,44 @@ async function runD2AcpScene({ installation, workRoot, report, start, projectA, 
     'M07: an unrelated ACP connection must not receive this Session updates')
   connPrompt.close()
   await connPrompt.closed
-  // Negative: an ACP View on Session B is physically disconnected while a real
-  // TUI turn on the SAME Session is accepted. The TUI work must still settle:
-  // the accepted user message exists BEFORE the disconnect, and the answering
-  // assistant message plus turn/end must appear AFTER it.
+  // Negative: a TUI prompt on the SAME Session is submitted while the Host is
+  // SIGSTOPped (queued pending work), the ACP View is physically disconnected in
+  // that same pending window, and only then is the Host resumed. The queued TUI
+  // work must still be accepted and settle on the official Host writer; a
+  // disconnect that clears pending TUI work fails this witness.
   const connDisconnect = await openAcp('M07 disconnect View')
   await connDisconnect.initialize(1)
   const resumeBForDisconnect = await connDisconnect.request(2, 'session/resume', { sessionId: sessionB, cwd: acpWorkspaceReal })
   assert(isEmptyAcpResult(resumeBForDisconnect),
     `M07: the disconnect probe must attach Session B first (got ${JSON.stringify(resumeBForDisconnect?.error ?? resumeBForDisconnect?.result)})`)
-  const bTurnText = 'd2acp m07 tui during acp disconnect'
-  const bQueuedText = 'd2acp m07 queued tui during disconnect'
-  sendKeys(tuiB, bTurnText, 'M07 TUI turn on the ACP-attached Session')
-  // Establish ACCEPTED TUI work BEFORE the disconnect: the durable user message
-  // proves the Host admitted it. A second prompt, submitted while the first turn
-  // is still settling, is the same-Session queued work whose survival the
-  // disconnect must not clear.
-  const bUserIndex = await waitFor(() => {
-    const events = hostSessionEvents(dshHome, sessionB)
-    if (events === undefined) return undefined
-    const index = events.findIndex(event => event.type === 'user/message' && JSON.stringify(event).includes(bTurnText))
-    return index < 0 ? undefined : index
-  }, 'M07 accepted TUI user message before the ACP disconnect', TIMEOUTS.turn)
-  sendKeys(tuiB, bQueuedText, 'M07 second TUI prompt on the ACP-attached Session')
+  const bQueuedText = 'd2acp m07 queued tui during acp disconnect'
+  const frozenHost = requireHost('M07 host before the frozen window')
+  process.kill(frozenHost.hostPid, 'SIGSTOP')
+  try {
+    sendKeys(tuiB, bQueuedText, 'M07 TUI prompt submitted while the Host is frozen')
+    // Let the client-side submit reach the frozen Host's kernel socket; the pass
+    // predicate remains the durable Host result after SIGCONT, never this delay.
+    await sleep(200)
+    connDisconnect.close()
+    await connDisconnect.closed
+  } finally {
+    process.kill(frozenHost.hostPid, 'SIGCONT')
+  }
   const queuedIndex = await waitFor(() => {
     const events = hostSessionEvents(dshHome, sessionB)
     if (events === undefined) return undefined
     const index = events.findIndex(event => event.type === 'user/message' && JSON.stringify(event).includes(bQueuedText))
     return index < 0 ? undefined : index
-  }, 'M07 second accepted TUI user message before the ACP disconnect', TIMEOUTS.turn)
-  connDisconnect.close()
-  await connDisconnect.closed
+  }, 'M07 frozen-window TUI prompt accepted after the Host resumes', TIMEOUTS.turn)
   await waitFor(() => {
     const events = hostSessionEvents(dshHome, sessionB)
     if (events === undefined) return undefined
     const rest = events.slice(queuedIndex + 1)
     return rest.some(event => event.type === 'assistant/message' && JSON.stringify(event).includes('stub answer'))
       && rest.some(event => event.type === 'turn/end') ? events : undefined
-  }, 'M07 same-Session TUI turn settles after the ACP disconnect', TIMEOUTS.turn)
-  const frameAfterDisconnect = tmuxCapture(tuiB, 'M07 TUI frame after the disconnect')
-  assert(frameAfterDisconnect.includes(bTurnText) && frameAfterDisconnect.includes(bQueuedText),
-    'M07: the TUI must still show its same-Session and queued work after the ACP View disconnect')
+  }, 'M07 queued TUI turn settles after the ACP disconnect', TIMEOUTS.turn)
+  assert(tmuxSessionExists(tuiB) && tmuxCapture(tuiB, 'M07 TUI frame after the disconnect').includes(bQueuedText),
+    'M07: the TUI must still show its queued same-Session work after the ACP View disconnect')
   sendKeys(tuiB, '/exit', 'M07 exit the Session-B TUI')
   await waitFor(() => (!tmuxSessionExists(tuiB) ? true : undefined), 'M07 Session-B TUI exits', TIMEOUTS.exit)
   const hostAfterPrompt = requireHost('M07 host')
@@ -1833,8 +1830,8 @@ async function runD2AcpScene({ installation, workRoot, report, start, projectA, 
     durableUserMessages: userTexts.length,
     ownUpdatesOnly: true,
     disconnectSameSessionTuiTurnSettled: true,
-    tuiWorkAcceptedBeforeDisconnect: true,
-    secondTuiPromptAcceptedBeforeDisconnect: true,
+    queuedWhileHostFrozen: true,
+    acpDisconnectInSamePendingWindow: true,
     modelRoute: 'isolated scripted stub',
   })
 
@@ -1934,9 +1931,14 @@ async function runD2AcpScene({ installation, workRoot, report, start, projectA, 
     `M09: the CURRENT Host boot (pid ${String(afterUnsafe.hostPid)}) must log exactly ONE acp-autostart-unavailable diagnostic, saw ${String(autostartDiagnostics.length)}`)
   assert(typeof autostartDiagnostics[0].failure === 'string' && autostartDiagnostics[0].failure !== '',
     'M09: the autostart diagnostic must carry a fixed failure category')
-  const diagnosticLine = unsafeLog.text.split('\n').find(line => line.includes('acp-autostart-unavailable'))
+  // Select the diagnostic of the CURRENT boot by its parsed record, never the
+  // first historical line that happens to contain the code.
+  const diagnosticLine = unsafeLog.text.split('\n').find(line => {
+    if (!line.includes('acp-autostart-unavailable')) return false
+    try { return JSON.parse(line).pid === afterUnsafe.hostPid } catch { return false }
+  })
   assert(diagnosticLine !== undefined && !diagnosticLine.includes('acp.sock') && !diagnosticLine.includes('dpt-') && !diagnosticLine.includes('token='),
-    'M09: the autostart diagnostic must stay redacted (no endpoint/path/secret)')
+    'M09: the CURRENT boot autostart diagnostic must stay redacted (no endpoint/path/secret)')
   assert(!unsafeLog.text.includes(`dpt-${String(uid)}-`), 'M09: the endpoint root must never appear in the Host log')
   assert(readdirSync(unsafeTarget).length === 0, 'M09: the failed autostart must not write through the symlink')
   const peer3 = await startPeer('M09 peer after the unsafe boot')
