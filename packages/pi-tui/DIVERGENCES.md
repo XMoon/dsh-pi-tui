@@ -6786,16 +6786,17 @@ The fork suppressed the process-wide iTerm2 image capability whenever AltScreen 
 - Audit note: AltScreen capability lifetime is not part of the public extension surface.
 
 **Behavioral coupling**
-- Direct iTerm2 emits OSC 1337 Image bytes inside AltScreen and restores MainScreen without raw OSC leakage in cell text.
-- Source/Copy/Esc and 44x20/30x10 resize remain usable in the SVG Viewer.
-- PI_IMAGE_PROTOCOL=none remains text-only.
-- Audit note: Physical qualification is recorded in temp/mac/plan/pr4b-evidence/PR4B-4BD-ITERM2-REAL-MACHINE-20261118.md.
+- Direct iTerm2 emits OSC 1337 Image bytes inside AltScreen when the static capability is retained; the fork Image path handles cursor-up placement without the old process-wide suppression.
+- PI_IMAGE_PROTOCOL=none remains text-only and the root SVG/Image viewer gates fail closed when no protocol is admitted.
+- The root Retry affordance and sink re-check live preview permission, so capability revocation cannot expose Retry or start another raster.
+- Audit note: Unit/fork wire tests and root viewer tests guard the protocol and live-permission behavior. Physical fullscreen Source/resize/Esc qualification remains NOT_VERIFIED in the current evidence report.
 
 #### Guarding tests
 
-- packages/pi-tui/test/tui-alt-screen.test.ts: X079 - iTerm2 emits OSC 1337 and does not emit Kitty/OSC133 zone commands.
-- packages/pi-tui/test/tui-alt-screen.test.ts: X079 - AltScreen leaves the process capability unchanged across an instance Kitty override.
-- temp/mac/plan/pr4b-evidence/iterm2-shots/08-iterm2-osc1337-preview-C4.png: real iTerm2 3.7.7 screenshot of C4 SVG Preview under PI_IMAGE_PROTOCOL=iterm2.
+- packages/pi-tui/test/tui-alt-screen.test.ts: X079 — iTerm2 emits OSC 1337 and does not emit Kitty/OSC133 zone commands.
+- packages/pi-tui/test/tui-alt-screen.test.ts: X079 — AltScreen leaves the process capability unchanged across an instance Kitty override.
+- test/client/svg-viewer.test.ts: live capability revocation hides Retry and starts no new raster.
+- test/client/transcript-image-viewer.test.ts: Direct iTerm2 preserves original JPEG MIME and exact OSC 1337 payload bytes.
 
 #### Upstream comparison
 
@@ -6824,4 +6825,4 @@ The fork suppressed the process-wide iTerm2 image capability whenever AltScreen 
 #### Audit record
 
 - Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
-- Notes: Audited after C4 implementation against the pinned v1.5.0 source. Real macOS arm64 iTerm2 3.7.7 evidence covers installed tarball, Regular SVG, Fullscreen Preview, Source, resize, Esc, and PI_IMAGE_PROTOCOL=none. The C4 screenshot proves direct OSC 1337 pixels after the suppression removal.
+- Notes: Audited against pinned upstream f9a26365568127461c47a07a37dcb42c140a3ac5, which contains the old iTerm2 suppression/save/restore behavior. X079 is therefore a real fork divergence. Root/fork tests and Regular SVG iTerm2 evidence pass; final fullscreen Source/resize/Esc physical qualification remains NOT_VERIFIED and is recorded outside repository docs.

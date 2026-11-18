@@ -365,7 +365,7 @@ export class SvgViewerPanel implements Component {
     // PR-4B: the Retry affordance is painted ONLY for a currently recoverable
     // failure of THIS viewer's own subscribed variant, below Copy and above
     // the read-only browsing hint.
-    if (this.page === 'preview' && this.subscribedWidth !== undefined
+    if (this.page === 'preview' && this.previewSupported() && this.subscribedWidth !== undefined
       && (this.input.loader?.canRetryFailed(this.input.source.digest, this.subscribedWidth) ?? false)) {
       segments.push({ text: `${chords.retry.label} retry`, short: `${chords.retry.label} retry`, priority: 3 })
     }
@@ -494,7 +494,7 @@ export class SvgViewerPanel implements Component {
    */
   private retryPreview(): void {
     const loader = this.input.loader
-    if (loader === undefined || this.subscribedWidth === undefined) return
+    if (!this.previewSupported() || loader === undefined || this.subscribedWidth === undefined) return
     if (loader.retryFailed(this.input.source.digest, this.input.source.svgSource, this.subscribedWidth)) {
       this.invalidate()
       this.input.requestRender()

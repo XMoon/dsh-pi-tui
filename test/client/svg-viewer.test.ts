@@ -817,6 +817,38 @@ test('the painted r retry cell runs the same retry sink; close matches Esc; body
   }
 })
 
+test('a revoked preview capability hides Retry and never starts another raster', async () => {
+  capabilities('kitty')
+  try {
+    const recorder = failingLoader()
+    const graphicsState = { canPaint: true }
+    const graphics = {
+      mode: 'native',
+      canPaint: () => graphicsState.canPaint,
+      image: () => ({ render: () => [], invalidate: () => {}, dispose: () => {} }),
+      terminal: {} as never,
+      screen: {} as never,
+      observeScreen: () => {},
+      resample: () => {},
+      dispose: () => {},
+    } as unknown as ImageGraphics
+    const panel = panelOf({ loader: recorder.loader, graphics })
+    panel.setMaxRows(20)
+    panel.render(80)
+    recorder.settleNext({ error: timeoutFailure() })
+    await drain()
+    graphicsState.canPaint = false
+    const revoked = stripSgr(panel.render(80).at(-1) ?? '')
+    assert.ok(!revoked.includes('r retry'), `revoked capability has no Retry affordance:\n${revoked}`)
+    panel.handleInput('r')
+    await drain()
+    assert.equal(recorder.calls.length, 1, 'revoked capability never starts another raster')
+    recorder.loader.dispose()
+  } finally {
+    resetCapabilitiesCache()
+  }
+})
+
 test('a permanent error and a loading variant give no Retry: r is a no-op on both', async () => {
   capabilities('kitty')
   try {
