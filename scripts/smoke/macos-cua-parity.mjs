@@ -1424,7 +1424,7 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
     tui,
     dshHome,
     sessionId: consent.sessionId,
-    prompt: `Run exactly this in run_code: const app = await tools.cua({ method: 'getApp', params: { selector: '${String(textEditPid)}' } }); const windows = await tools.cua({ method: 'listWindows', params: { appHandle: app.appHandle } }); const window = windows.find(item => String(item.title ?? '').includes('cua-blank')); if (!window) throw new Error('the controlled TextEdit window was not found'); await tools.cua({ method: 'show', params: { appHandle: app.appHandle, windowId: window.windowId } }); await tools.cua({ method: 'activate', params: { appHandle: app.appHandle } }); await app.typeText('${marker}'); const tree = await app.getState(); return JSON.stringify(tree).includes('${marker}') ? 'MARKER_PRESENT' : 'MARKER_MISSING'`,
+    prompt: `Run exactly this in run_code: const app = await tools.cua({ method: 'getApp', params: { selector: '${String(textEditPid)}' } }); const windows = await tools.cua({ method: 'listWindows', params: { appHandle: app.appHandle } }); const window = windows.find(item => String(item.title ?? '').includes('cua-blank')); if (!window) throw new Error('the controlled TextEdit window was not found'); await tools.cua({ method: 'show', params: { appHandle: app.appHandle, windowId: window.windowId } }); await tools.cua({ method: 'activate', params: { appHandle: app.appHandle } }); await app.typeText('${marker}'); const tree = await app.getAccessibilityTree(); return JSON.stringify(tree).includes('${marker}') ? 'MARKER_PRESENT' : 'MARKER_MISSING'`,
     label: 'MAC09-08 controlled input',
     method: 'typeText',
     timeoutMs: TIMEOUTS.turn,
