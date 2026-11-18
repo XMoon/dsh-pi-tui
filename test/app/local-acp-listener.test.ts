@@ -548,6 +548,41 @@ test('a regular file or a symlink at the socket path is refused without being de
     (error: unknown) => error instanceof LocalAcpError && error.code === 'LOCAL_ACP_UNSAFE_SOCKET',
   )
   assert.equal(lstatSync(linkPath).isSymbolicLink(), true, 'the symlink must not be removed')
+
+  if (IS_DARWIN) {
+    // The Darwin endpoint root has its own admission: a same-UID symlink, file
+    // or existing non-0700 directory is refused without being written through or
+    // silently repaired. (The Linux contract has no separate /private/tmp root.)
+    const { scope } = newScope(t)
+    const endpoint = darwinAcpSocketPaths(scope, process.getuid?.() as number)
+    rmSync(endpoint.privateRoot, { recursive: true, force: true })
+    const target = testLifecycle(t).tempDir('acp-root-target-')
+    symlinkSync(target, endpoint.privateRoot)
+    await assert.rejects(
+      startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG }),
+      (error: unknown) => error instanceof LocalAcpError && error.code === 'LOCAL_ACP_UNSAFE_SOCKET',
+    )
+    assert.equal(lstatSync(endpoint.privateRoot).isSymbolicLink(), true, 'the symlink root must survive the refusal')
+    assert.equal(readdirSync(target).length, 0, 'the refusal must not write through the symlink')
+
+    rmSync(endpoint.privateRoot, { force: true })
+    writeFileSync(endpoint.privateRoot, 'not a directory')
+    await assert.rejects(
+      startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG }),
+      (error: unknown) => error instanceof LocalAcpError && error.code === 'LOCAL_ACP_UNSAFE_SOCKET',
+    )
+    assert.equal(lstatSync(endpoint.privateRoot).isFile(), true, 'the foreign file root must survive the refusal')
+
+    rmSync(endpoint.privateRoot, { force: true })
+    mkdirSync(endpoint.privateRoot, { mode: 0o755 })
+    chmodSync(endpoint.privateRoot, 0o755)
+    await assert.rejects(
+      startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG }),
+      (error: unknown) => error instanceof LocalAcpError && error.code === 'LOCAL_ACP_UNSAFE_SOCKET',
+    )
+    assert.equal(lstatSync(endpoint.privateRoot).mode & 0o777, 0o755,
+      'the existing non-private root mode must not be rewritten')
+  }
 })
 
 test('a live listener on the socket path is refused as in-use and never unlinked', async t => {
@@ -600,24 +635,54 @@ test('a stale socket left by a killed owner is reclaimed only after its identity
   }
 })
 
-test('a long logical socket path still binds through the fd-shortened kernel path', {
-  skip: IS_DARWIN
-    ? 'Linux /proc/self/fd fd-shortened bind only; Darwin has no /proc and uses its short /private/tmp endpoint (covered by the Darwin endpoint test)'
-    : false,
-}, async t => {
-  // Build a nested 0700 directory whose FULL logical acp.sock path exceeds the
-  // Linux sun_path byte limit; the listener must bind and the client must
-  // connect through their own directory fd.
-  let dir = testLifecycle(t).tempDir('acp-base-')
-  while (dir.length + '/acp.sock'.length <= 200) {
-    dir = join(dir, `segment-${'x'.repeat(40)}`)
+test('a long DSH_HOME binds through the platform short endpoint', async t => {
+  // A deeply nested, non-standard scope directory whose own `acp.sock` path is
+  // far above the kernel sun_path limit must still serve a real ACP connection:
+  // Linux shortens the scope through /proc/self/fd; Darwin publishes the short
+  // profile-scoped /private/tmp endpoint instead.
+  let dir = testLifecycle(t).tempDir('acp-long-home-')
+  while (Buffer.byteLength(join(dir, 'acp.sock'), 'utf8') + 1 <= 200) {
+    dir = join(dir, `segment-${'x'.repeat(32)}`)
     mkdirSync(dir, { mode: 0o700 })
   }
   const scope = makeScope(dir)
+
+  if (IS_DARWIN) {
+    ownDarwinRoot(t, scope)
+    const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG })
+    t.after(() => listener.close())
+    const endpoint = darwinAcpSocketPaths(scope, process.getuid?.() as number)
+    assert.equal(listener.socketPath, endpoint.publicPath, 'the listener must publish the computed short endpoint')
+    assert.ok(Buffer.byteLength(listener.socketPath, 'utf8') + 1 <= 104, 'the public endpoint must fit sun_path[104]')
+    assert.equal(listener.isListening(), true, 'the short endpoint must report listening')
+
+    const rootInfo = lstatSync(endpoint.privateRoot)
+    assert.equal(rootInfo.isDirectory(), true, 'the endpoint root must be a real directory')
+    assert.equal(rootInfo.uid, process.getuid?.(), 'the endpoint root must be owned by this uid')
+    assert.equal(rootInfo.mode & 0o777, 0o700, 'the endpoint root must be 0700')
+    assert.equal(pathExists(endpoint.privateBindPath), false,
+      'the private bind name must be gone after the hard-link publish')
+
+    const socketInfo = lstatSync(listener.socketPath)
+    assert.equal(socketInfo.isSocket(), true, 'the public endpoint must be a socket')
+    assert.equal(socketInfo.uid, process.getuid?.(), 'the public endpoint must be owned by this uid')
+    assert.equal(socketInfo.mode & 0o777, 0o600, 'the public endpoint must be 0600')
+    assert.equal(socketInfo.nlink, 1, 'the published socket must have exactly ONE name after the private unlink')
+
+    const client = await RawClient.open(listener.socketPath)
+    try {
+      initialize(client, 1)
+      const response = (await client.next()) as { result?: { protocolVersion: number } }
+      assert.equal(response.result?.protocolVersion, 1)
+    } finally {
+      client.close()
+    }
+    return
+  }
+
   const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG })
   t.after(() => listener.close())
   assert.ok(listener.socketPath.length > 108, 'the logical path must exceed the sun_path limit')
-
   // The client has the same sun_path limit, so it connects via its own fd.
   const clientDirFd = openSync(dir, 'r')
   t.after(() => { try { closeSync(clientDirFd) } catch {} })
@@ -649,53 +714,7 @@ test('the Darwin endpoint formula is deterministic, profile-scoped and short', a
   assert.notEqual(darwinAcpSocketPaths(other, uid).privateRoot, first.privateRoot)
 })
 
-test('Darwin: a long DSH_HOME still binds the short profile endpoint that a raw peer can initialize', {
-  skip: !IS_DARWIN ? 'Darwin-only short endpoint contract' : false,
-}, async t => {
-  // A deeply nested, non-standard scope directory whose own `acp.sock` path is
-  // far above sun_path[104] must NOT leak into the physical endpoint.
-  let dir = testLifecycle(t).tempDir('acp-long-home-')
-  while (Buffer.byteLength(join(dir, 'acp.sock'), 'utf8') + 1 <= 200) {
-    dir = join(dir, `segment-${'x'.repeat(32)}`)
-    mkdirSync(dir, { mode: 0o700 })
-  }
-  const scope = makeScope(dir)
-  ownDarwinRoot(t, scope)
-  const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG })
-  t.after(() => listener.close())
-
-  const endpoint = darwinAcpSocketPaths(scope, process.getuid?.() as number)
-  assert.equal(listener.socketPath, endpoint.publicPath, 'the listener must publish the computed short endpoint')
-  assert.ok(Buffer.byteLength(listener.socketPath, 'utf8') + 1 <= 104, 'the public endpoint must fit sun_path[104]')
-  assert.equal(listener.isListening(), true, 'the short endpoint must report listening')
-
-  const rootInfo = lstatSync(endpoint.privateRoot)
-  assert.equal(rootInfo.isDirectory(), true, 'the endpoint root must be a real directory')
-  assert.equal(rootInfo.uid, process.getuid?.(), 'the endpoint root must be owned by this uid')
-  assert.equal(rootInfo.mode & 0o777, 0o700, 'the endpoint root must be 0700')
-  assert.equal(pathExists(endpoint.privateBindPath), false,
-    'the private bind name must be gone after the hard-link publish')
-
-  const socketInfo = lstatSync(listener.socketPath)
-  assert.equal(socketInfo.isSocket(), true, 'the public endpoint must be a socket')
-  assert.equal(socketInfo.uid, process.getuid?.(), 'the public endpoint must be owned by this uid')
-  assert.equal(socketInfo.mode & 0o777, 0o600, 'the public endpoint must be 0600')
-  assert.equal(socketInfo.nlink, 1, 'the published socket must have exactly ONE name after the private unlink')
-
-  // A raw independent peer connects through the SHORT physical path (no /proc).
-  const client = await RawClient.open(listener.socketPath)
-  try {
-    initialize(client, 1)
-    const response = (await client.next()) as { result?: { protocolVersion: number } }
-    assert.equal(response.result?.protocolVersion, 1)
-  } finally {
-    client.close()
-  }
-})
-
-test('Darwin: two different profile scopes bind their own endpoints at the same time', {
-  skip: !IS_DARWIN ? 'Darwin-only short endpoint contract' : false,
-}, async t => {
+test('two different profile scopes bind their own endpoints at the same time', async t => {
   const first = newScope(t)
   const second = newScope(t)
   const firstListener = await startLocalAcpListener({ scope: first.scope, maxConnections: 4, diag: QUIET_DIAG })
@@ -718,43 +737,6 @@ test('Darwin: two different profile scopes bind their own endpoints at the same 
   }
   await firstListener.close()
   assert.equal(secondListener.isListening(), true, 'closing one scope must not disturb the other')
-})
-
-test('Darwin: a symlink or regular file at the endpoint root is refused without being written through', {
-  skip: !IS_DARWIN ? 'Darwin-only endpoint root admission' : false,
-}, async t => {
-  const { scope } = newScope(t)
-  const endpoint = darwinAcpSocketPaths(scope, process.getuid?.() as number)
-  // The root was created by newScope; a symlink replacing it must be refused.
-  rmSync(endpoint.privateRoot, { recursive: true, force: true })
-  const target = testLifecycle(t).tempDir('acp-root-target-')
-  symlinkSync(target, endpoint.privateRoot)
-  await assert.rejects(
-    startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG }),
-    (error: unknown) => error instanceof LocalAcpError && error.code === 'LOCAL_ACP_UNSAFE_SOCKET',
-  )
-  assert.equal(lstatSync(endpoint.privateRoot).isSymbolicLink(), true, 'the symlink root must survive the refusal')
-  assert.equal(readdirSync(target).length, 0, 'the refusal must not write through the symlink')
-
-  rmSync(endpoint.privateRoot, { force: true })
-  writeFileSync(endpoint.privateRoot, 'not a directory')
-  await assert.rejects(
-    startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG }),
-    (error: unknown) => error instanceof LocalAcpError && error.code === 'LOCAL_ACP_UNSAFE_SOCKET',
-  )
-  assert.equal(lstatSync(endpoint.privateRoot).isFile(), true, 'the foreign file root must survive the refusal')
-
-  // An EXISTING same-UID root is never silently repaired: a non-private mode is a
-  // contract mismatch, not something this owner may chmod into shape.
-  rmSync(endpoint.privateRoot, { force: true })
-  mkdirSync(endpoint.privateRoot, { mode: 0o755 })
-  chmodSync(endpoint.privateRoot, 0o755)
-  await assert.rejects(
-    startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG }),
-    (error: unknown) => error instanceof LocalAcpError && error.code === 'LOCAL_ACP_UNSAFE_SOCKET',
-  )
-  assert.equal(lstatSync(endpoint.privateRoot).mode & 0o777, 0o755,
-    'the existing non-private root mode must not be rewritten')
 })
 
 test('cleanupSync removes only this listener own socket inode and is a no-op after close', async t => {
