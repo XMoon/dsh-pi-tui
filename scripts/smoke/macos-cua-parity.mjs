@@ -1429,7 +1429,7 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
   const inputResult = await waitCuaResult(dshHome, input.sessionId, input.dispatch.subCallId,
     'MAC09-08 typeText result', TIMEOUTS.turn)
   assert(inputResult.result.isError !== true,
-    `MAC09-08: the controlled typeText failed: ${dispatchErrorCode(inputResult.result) ?? 'unknown error'}`)
+    `MAC09-08: the controlled typeText failed: ${dispatchErrorCode(inputResult.result) ?? 'unknown error'} :: ${dispatchContentText(inputResult.result).slice(0, 400)}`)
   // Bind the WHOLE controlled chain, not just the requested prompt text: the
   // official getApp must select this run's exact PID, the show/typeText/getState
   // window ids must agree, and the typed marker must be the exact argument.
