@@ -216,6 +216,35 @@ async function settle(app: TuiApp, vt: VirtualTerminal): Promise<void> {
   }
 }
 
+/**
+ * Wait for the production rendering path to paint an authoritative terminal
+ * result, rather than always spending 20 forced-render rounds before a
+ * positive assertion. A changed controller flag is not a painted-frame proof.
+ *
+ * Re-render three more times AFTER the witness is visible, so a late duplicate
+ * transmission/placement remains observable by the caller's wire assertions.
+ * The tests for no emission, delayed denial, and the exact-once PNG upload keep
+ * the original 20-round settle() observation window below.
+ */
+async function settlePainted(
+  app: TuiApp,
+  vt: VirtualTerminal,
+  label: string,
+  painted: () => boolean,
+): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    app.requestRender()
+    await vt.waitForRender()
+    if (!painted()) continue
+    for (let redraw = 0; redraw < 3; redraw += 1) {
+      app.requestRender()
+      await vt.waitForRender()
+    }
+    return
+  }
+  assert.fail(`the physical terminal never painted ${label}`)
+}
+
 function apcs(text: string): NonNullable<ReturnType<typeof parseKittyApc>>[] {
   const found: NonNullable<ReturnType<typeof parseKittyApc>>[] = []
   let index = 0
@@ -314,10 +343,10 @@ test('the real TuiApp stays text-only until the live OK, then paints one Native 
     const clickColumn = Math.max(1, Math.min(4, body.endCol))
     vt.sendInput(`\x1b[<0;${clickColumn};${infoRow + 2}M`)
     vt.sendInput(`\x1b[<0;${clickColumn};${infoRow + 2}m`)
-    await settle(h.app, vt)
+    await settlePainted(h.app, vt, 'PNG viewer is physically painted', () => vt.getViewport().join('\n').includes('Image · zellij.png'))
     assert.ok(vt.getViewport().join('\n').includes('Image · zellij.png'), 'the Viewer opened from the real body')
     vt.sendInput('\x1b')
-    await settle(h.app, vt)
+    await settlePainted(h.app, vt, 'PNG viewer closes to the transcript', () => vt.getViewport().join('\n').includes('🖼️ zellij.png') && !vt.getViewport().join('\n').includes('Image · zellij.png'))
     assert.ok(vt.getViewport().join('\n').includes('🖼️ zellij.png'), 'Esc restored the transcript')
     h.app.setFullscreen(false)
     await settle(h.app, vt)
@@ -342,7 +371,7 @@ test('JPEG and WebP transcript images read once each and convert through the liv
       vt.writes.length = 0
       h.app.setTranscript(transcriptOf(ref).messages())
       await until(() => h.reads.get(id) === 1, `the ${mediaType} read`)
-      await settle(h.app, vt)
+      await settlePainted(h.app, vt, 'transcript image is transmitted and placed', () => hasManagedWire(vt.writes.join('')))
       const wire = vt.writes.join('')
       assert.ok(hasManagedWire(wire), `${mediaType} painted through the managed handle`)
       assert.equal(wire.includes('a=T,'), false, `${mediaType} never used the legacy form`)
@@ -362,10 +391,10 @@ test('JPEG and WebP transcript images read once each and convert through the liv
       const clickColumn = Math.max(1, Math.min(4, body.endCol))
       vt.sendInput(`\x1b[<0;${clickColumn};${infoRow + 2}M`)
       vt.sendInput(`\x1b[<0;${clickColumn};${infoRow + 2}m`)
-      await settle(h.app, vt)
+      await settlePainted(h.app, vt, 'image viewer is physically painted', () => vt.getViewport().join('\n').includes(`Image · ${name}`))
       assert.ok(vt.getViewport().join('\n').includes(`Image · ${name}`), `${mediaType}: the Viewer opened`)
       vt.sendInput('\x1b')
-      await settle(h.app, vt)
+      await settlePainted(h.app, vt, 'image viewer closes to the transcript', () => vt.getViewport().join('\n').includes(`🖼️ ${name}`) && !vt.getViewport().join('\n').includes(`Image · ${name}`))
       assert.ok(vt.getViewport().join('\n').includes(`🖼️ ${name}`), `${mediaType}: Esc restored the transcript`)
       h.app.setFullscreen(false)
       await settle(h.app, vt)
@@ -391,7 +420,7 @@ test('the draft preview paints through the live handle and undo restores the ima
       name: 'draft.png',
     })
     h.app.setDraft(image.placeholder)
-    await settle(h.app, vt)
+    await settlePainted(h.app, vt, 'draft preview is transmitted and placed', () => hasManagedWire(vt.writes.join('')))
     const draftWire = vt.writes.join('')
     assert.ok(hasManagedWire(draftWire), 'the draft card painted real pixels through the same handle')
     assert.equal(h.reads.size, 0, 'the draft card never touched the durable loader')
@@ -404,11 +433,11 @@ test('the draft preview paints through the live handle and undo restores the ima
     // The x control sits on the far-right cell of the identity row.
     vt.sendInput(`\x1b[<0;120;${identityRow + 1}M`)
     vt.sendInput(`\x1b[<0;120;${identityRow + 1}m`)
-    await settle(h.app, vt)
+    await settlePainted(h.app, vt, 'draft removal is committed', () => h.app.getDraft() === '' && h.store.size() === 1)
     assert.equal(h.app.getDraft(), '', 'the x control removed the image placeholder')
     assert.equal(h.store.size(), 1, 'the removed draft is retained for undo')
     vt.sendInput('\x1b[45;5u')
-    await settle(h.app, vt)
+    await settlePainted(h.app, vt, 'draft undo is painted', () => h.app.getDraft().includes(image.placeholder) && vt.getViewport().join('\n').includes('#1/1 · 120×80'))
     assert.ok(h.app.getDraft().includes(image.placeholder), 'Undo restored the canonical placeholder')
     assert.ok(vt.getViewport().join('\n').includes('#1/1 · 120×80'), 'the preview came back')
     h.app.setFullscreen(false)
@@ -479,7 +508,7 @@ test('a published SVG uses the app raster loader for Preview and paints raw text
     }, [publication as never])
     h.app.setTranscript([message])
     await until(() => h.rasterCalls() >= 1, 'the app rasterized the published SVG')
-    await settle(h.app, vt)
+    await settlePainted(h.app, vt, 'SVG thumbnail is transmitted and placed', () => hasManagedWire(vt.writes.join('')))
     assert.ok(hasManagedWire(vt.writes.join('')), 'the published thumbnail painted through the live handle')
 
     const handles = [...(h.app as unknown as {
@@ -489,7 +518,7 @@ test('a published SVG uses the app raster loader for Preview and paints raw text
     vt.writes.length = 0
     const beforeViewer = h.rasterCalls()
     ;(h.app as unknown as { openSvgViewer(handle: unknown): void }).openSvgViewer(handles[0])
-    await settle(h.app, vt)
+    await settlePainted(h.app, vt, 'SVG viewer has its own placement', () => apcs(vt.writes.join('')).some(entry => entry.controls.a === 'p'))
     const viewerWire = vt.writes.join('')
     const viewerApcs = apcs(viewerWire)
     assert.ok(viewerApcs.some(entry => entry.controls.a === 'p'),
@@ -499,7 +528,7 @@ test('a published SVG uses the app raster loader for Preview and paints raw text
 
     vt.writes.length = 0
     vt.sendInput('\t')
-    await settle(h.app, vt)
+    await settlePainted(h.app, vt, 'SVG Source is physically painted', () => vt.getViewport().join('\n').includes('<svg') && vt.getViewport().join('\n').includes('<rect'))
     const sourceWire = vt.writes.join('')
     const sourceView = vt.getViewport().join('\n')
     assert.ok(sourceView.includes('<svg') && sourceView.includes('<rect'), `the Source page shows raw SVG:\n${sourceView}`)
@@ -511,10 +540,10 @@ test('a published SVG uses the app raster loader for Preview and paints raw text
     assert.equal(sourceWire.includes('a=T,'), false, 'the Source page never used the legacy image form')
     const beforeSource = h.rasterCalls()
     vt.sendInput('\t')
-    await settle(h.app, vt)
+    await settlePainted(h.app, vt, 'SVG Preview is physically placed after Source', () => apcs(vt.writes.join('')).some(entry => entry.controls.a === 'p'))
     assert.equal(h.rasterCalls(), beforeSource, 'returning to Preview reuses the cached raster')
     vt.sendInput('\x1b')
-    await settle(h.app, vt)
+    await settlePainted(h.app, vt, 'SVG viewer closes to the transcript', () => vt.getViewport().join('\n').includes('Service topology'))
     assert.ok(vt.getViewport().join('\n').includes('Service topology'), 'Esc restored the transcript')
   } finally {
     h.app.dispose()
@@ -650,7 +679,7 @@ test('every Zellij host and static capability class gets one live query, then pa
         vt.sendInput(probeReply(vt))
         await until(() => h.graphics.canPaint(), `${entry.name}: the live OK admission`)
         await until(() => h.reads.get(ref.attachmentId) === 1, `${entry.name}: the real read after admission`)
-        await settle(h.app, vt)
+        await settlePainted(h.app, vt, 'Zellij host receives managed image', () => hasManagedWire(vt.writes.join('')))
         const wire = vt.writes.join('')
         assert.ok(hasManagedWire(wire), `${entry.name}: the managed transmission and placement reached the screen`)
         assert.equal(wire.includes('a=T,'), false, `${entry.name}: no legacy combined form`)
@@ -689,14 +718,14 @@ test('a Zellij live OK keeps Main and Alt managed when the fork capability is nu
         const ref = imageRef(`att-zellij-main-alt-${entry.name}`, 'main-alt.png', 'image/png')
         h.app.setTranscript(transcriptOf(ref).messages())
         await until(() => h.reads.get(ref.attachmentId) === 1, `${entry.name}: the real read`)
-        await settle(h.app, vt)
+        await settlePainted(h.app, vt, 'Zellij Main receives managed image', () => hasManagedWire(vt.writes.join('')))
         const mainWire = vt.writes.join('')
         assert.ok(hasManagedWire(mainWire), `${entry.name}: Main paints the managed image`)
         assert.equal(mainWire.includes('\x1b]1337;File='), false, `${entry.name}: no iTerm2 image on Main`)
 
         vt.writes.length = 0
         h.app.setFullscreen(true)
-        await settle(h.app, vt)
+        await settlePainted(h.app, vt, 'Zellij Alt receives managed image', () => hasManagedWire(vt.writes.join('')))
         const altWire = vt.writes.join('')
         assert.ok(hasManagedWire(altWire), `${entry.name}: Alt re-transmits and re-places through the managed facade`)
         assert.equal(altWire.includes('\x1b]1337;File='), false, `${entry.name}: no iTerm2 image on Alt`)
@@ -705,14 +734,14 @@ test('a Zellij live OK keeps Main and Alt managed when the fork capability is nu
 
         vt.writes.length = 0
         h.app.setFullscreen(false)
-        await settle(h.app, vt)
+        await settlePainted(h.app, vt, 'Zellij Main restores managed image', () => hasManagedWire(vt.writes.join('')))
         assert.ok(hasManagedWire(vt.writes.join('')), `${entry.name}: Main restores the image after the Alt switch`)
         assert.equal(vt.writes.join('').includes('\x1b]1337;File='), false, `${entry.name}: no iTerm2 fallback after the switch`)
 
         for (const cycle of [1] as const) {
           vt.writes.length = 0
           h.app.setFullscreen(true)
-          await settle(h.app, vt)
+          await settlePainted(h.app, vt, 'Zellij Alt repeats managed image', () => hasManagedWire(vt.writes.join('')))
           assert.ok(hasManagedWire(vt.writes.join('')), `${entry.name}: Alt entry ${cycle} repaints the managed image`)
           assert.equal(vt.writes.join('').includes('d=A'), false, `${entry.name}: Alt entry ${cycle} has no global delete`)
           assert.equal((h.app as unknown as { graphics: unknown }).graphics, h.graphics,
@@ -761,7 +790,7 @@ test('a delayed Zellij OK pre-arms the Alt cleanup protocol and releases only ow
         vt.sendInput(reply)
         await until(() => h.graphics.canPaint(), `${entry.name}: the delayed live OK admission`)
         await until(() => h.reads.get(ref.attachmentId) === 1, `${entry.name}: the real read after admission`)
-        await settle(h.app, vt)
+        await settlePainted(h.app, vt, 'delayed Zellij OK admits managed image', () => hasManagedWire(vt.writes.join('')))
         const shown = vt.writes.join('')
         assert.ok(hasManagedWire(shown), `${entry.name}: the admitted Alt paints the managed image`)
         const shownImageId = apcs(shown).filter(entry => entry.controls.a === 'p').at(-1)?.controls.i
@@ -769,7 +798,7 @@ test('a delayed Zellij OK pre-arms the Alt cleanup protocol and releases only ow
 
         vt.writes.length = 0
         h.app.setTranscript([])
-        await settle(h.app, vt)
+        await settlePainted(h.app, vt, 'Alt removal emits scoped image deletion', () => vt.writes.join('').includes(`a=d,d=i,i=${shownImageId}`))
         const removal = vt.writes.join('')
         assert.ok(removal.includes(`a=d,d=i,i=${shownImageId}`), `${entry.name}: Alt removal removes the own placement`)
         assert.equal(/a=d,d=A|a=d,d=a/.test(removal), false, `${entry.name}: Alt removal never sends a global delete`)
@@ -781,13 +810,13 @@ test('a delayed Zellij OK pre-arms the Alt cleanup protocol and releases only ow
         const secondRef = imageRef(`att-zellij-delayed-${entry.name}-2`, 'delayed-2.png', 'image/png')
         vt.writes.length = 0
         h.app.setTranscript(transcriptOf(secondRef).messages())
-        await settle(h.app, vt)
+        await settlePainted(h.app, vt, 'Alt restoration places the new image', () => apcs(vt.writes.join('')).some(entry => entry.controls.a === 'p'))
         const restoredImageId = apcs(vt.writes.join('')).filter(entry => entry.controls.a === 'p').at(-1)?.controls.i
         assert.ok(restoredImageId, `${entry.name}: the Alt re-place names an image id`)
 
         vt.writes.length = 0
         h.app.setFullscreen(false)
-        await settle(h.app, vt)
+        await settlePainted(h.app, vt, 'Alt stop releases the owned image id', () => vt.writes.join('').includes(`a=d,d=I,i=${restoredImageId}`))
         const stop = vt.writes.join('')
         assert.ok(stop.includes(`a=d,d=I,i=${restoredImageId}`), `${entry.name}: Alt stop releases the own managed id`)
         assert.equal(/a=d,d=A|a=d,d=a/.test(stop), false, `${entry.name}: Alt stop never sends a global delete`)
