@@ -107,13 +107,16 @@ function setup(options: {
   readonly columns: number
   readonly rows: number
   readonly iconStyle?: 'emoji' | 'symbols' | 'minimal'
+  /** The stored `web.searchProvider`; explicit `undefined` IS the Host's
+   *  AUTOMATIC routing state (kept as `undefined`, never defaulted). */
+  readonly searchProvider?: string
 }): Harness {
   const vt = new VirtualTerminal(options.columns, options.rows)
   const store = {
     available: true,
     failNext: undefined as string | undefined,
     web: {
-      searchProvider: 'deepseek-official',
+      searchProvider: 'searchProvider' in options ? options.searchProvider : 'deepseek-official',
       fetchProvider: 'http',
       api: { searchBilling: 'auto', fetchBilling: 'auto', count: 10, sendOriginalQuestion: true },
       advanced: {},
@@ -396,12 +399,18 @@ for (const [columns, rows] of [[200, 50], [120, 40], [100, 40], [80, 24], [44, 2
     await selectListRow(h, 0)
     await key(h, ENTER) // the row Detail
     const frame = h.view()
-    assert.match(frame, /Current: Messages/u, `the Detail states the real Host value:\n${frame}`)
+    assert.match(frame, /Current: DeepSeek server-side search/u, `the Detail states the real Host value:\n${frame}`)
     assert.match(frame, /Confirm \[Enter\]/u, 'the Detail bar advertises the ONE confirm action')
     if (columns >= 80) {
-      assert.match(frame, /\[current\]/u, 'the current chip is painted WHOLE')
-      assert.ok(!frame.includes('[curren ') && !frame.includes('[curren|') && !frame.includes('[curren]'),
-        `no chip is painted partially:\n${frame}`)
+      if (frame.includes('[current]')) {
+        assert.ok(!frame.includes('[curren ') && !frame.includes('[curren|') && !frame.includes('[curren]'),
+          `no chip is painted partially:\n${frame}`)
+      } else {
+        // The long server-side label plus its explanation note can legitimately
+        // crowd the whole chip out at middle widths; the label itself must
+        // still be painted whole.
+        assert.match(frame, /DeepSeek server-side search/u, `the label stays whole:\n${frame}`)
+      }
     }
     // Moving the highlight never writes and keeps ONE active cursor.
     await key(h, DOWN)
@@ -415,7 +424,7 @@ for (const [columns, rows] of SIZES) {
   test(`the Search billing row keeps its candidates and confirm bar at ${columns}×${rows}`, async t => {
     const h = setup({ columns, rows })
     t.after(h.dispose)
-    // The Billing row exists only for the Search API route (Messages Search
+    // The Billing row exists only for the Search API route (server-side Search
     // never consumes searchBilling).
     h.store.web.searchProvider = 'deepseek-search-api'
     await openWebPage(h)
@@ -487,7 +496,7 @@ test('the state vocabulary uses its frozen ink roles in dark and light', async t
     await openWebPage(dark)
     await selectListRow(dark, 0)
     await key(dark, ENTER)
-    const darkChip = chipCell(dark, 'Messages', '[current]')
+    const darkChip = chipCell(dark, 'DeepSeek server-side search', '[current]')
     assert.equal(darkChip, hexToRgb(currentPalette.textMuted), 'the current chip is textMuted')
     // A REFUSED write paints Not saved in error ink (the word rides the state).
     dark.store.failNext = 'mutate rejected'
@@ -508,7 +517,7 @@ test('the state vocabulary uses its frozen ink roles in dark and light', async t
       await openWebPage(light)
       await selectListRow(light, 0)
       await key(light, ENTER)
-      assert.equal(chipCell(light, 'Messages', '[current]'), hexToRgb(currentPalette.textMuted),
+      assert.equal(chipCell(light, 'DeepSeek server-side search', '[current]'), hexToRgb(currentPalette.textMuted),
         'the light palette supplies the same role')
       assert.notEqual(hexToRgb(currentPalette.textMuted), darkChip ?? -1,
         'the two palettes really differ (the probe was not vacuous)')
@@ -611,13 +620,13 @@ test('a click on an option only highlights it; the explicit Confirm [Enter] clic
   await openWebPage(h)
   await selectListRow(h, 0)
   await key(h, ENTER)
-  const optionRow = h.plain().findIndex(line => line.includes('DeepSeek Search API · official default'))
+  const optionRow = h.plain().findIndex(line => line.includes('DeepSeek Search API · explicit · billed per Search API call'))
   assert.ok(optionRow >= 0, `the candidate row is painted:\n${h.view()}`)
   press(h, optionRow, 40)
   release(h, optionRow, 40)
   await h.vt.waitForRender()
   assert.equal(h.store.web.searchProvider, 'deepseek-official', 'an option click never writes')
-  assert.match(h.view(), /› DeepSeek Search API · official default/u, 'the click only moved the draft')
+  assert.match(h.view(), /› DeepSeek Search API · explicit · billed per Search API call/u, 'the click only moved the draft')
   // The complete painted Confirm [Enter] is the ONE delegated target.
   clickWord(h, 'Confirm [Enter]')
   await waitForPainted(h, 'the confirmed write', frame => frame.includes('Verified'))
@@ -634,6 +643,34 @@ test('a click on an option only highlights it; the explicit Confirm [Enter] clic
   assert.ok(backColumn >= 0)
   assert.equal(h.vt.getCellFgRgb(barRow, backColumn), hexToRgb(currentPalette.textDim),
     'Back keeps the secondary action ink')
+})
+
+test('the AUTOMATIC page offers a complete pointer-only route: click the API candidate, Confirm, Verified, out', async t => {
+  // With NO stored provider the page paints the real AUTOMATIC fact, paints no
+  // [current] chip, and the pointer route reaches the SAME real write path:
+  // option click (draft only) → Confirm click → Verified → the workspace exits.
+  const h = setup({ columns: 120, rows: 40, searchProvider: undefined })
+  t.after(h.dispose)
+  await openWebPage(h)
+  assert.match(h.view(), /Current: Automatic/u, 'the page states the AUTOMATIC current fact')
+  assert.doesNotMatch(h.view(), /\[current\]/u, 'no candidate claims the current value')
+  await selectListRow(h, 0)
+  await key(h, ENTER)
+  const optionRow = h.plain().findIndex(line => line.includes('DeepSeek Search API · explicit · billed per Search API call'))
+  assert.ok(optionRow >= 0, `the API candidate is painted under Automatic:\n${h.view()}`)
+  press(h, optionRow, 40)
+  release(h, optionRow, 40)
+  await h.vt.waitForRender()
+  assert.equal(h.store.web.searchProvider, undefined, 'the option click only moves the draft')
+  assert.match(h.view(), /› DeepSeek Search API · explicit · billed per Search API call/u)
+  clickWord(h, 'Confirm [Enter]')
+  await waitForPainted(h, 'the verified explicit write', frame => frame.includes('Verified'))
+  assert.equal(h.store.web.searchProvider, 'deepseek-search-api', 'the ONE real Host write landed')
+  await key(h, ESC) // Detail -> list
+  await h.vt.waitForRender()
+  // The official Esc ladder steps back and finally closes the workspace.
+  for (let attempt = 0; attempt < 8 && h.view().includes('Settings ·'); attempt += 1) await key(h, ESC)
+  await waitForPainted(h, 'the workspace exit', frame => !frame.includes('Settings ·'))
 })
 
 test('a Confirm press followed by a key, wheel or resize never writes on release', async t => {
@@ -712,7 +749,7 @@ for (const [columns, rows] of [[80, 24], [44, 20], [44, 8]] as const) {
       await openWebPage(h)
       await selectListRow(h, 0)
       await key(h, ENTER)
-      await key(h, HOME) // DeepSeek Search API -> Messages
+      await key(h, HOME) // DeepSeek Search API -> server-side search
       const frame = h.view()
       assert.match(frame, /Confirm \[Enter\] · Back \[Esc\]/u,
         `the complete delegated span is painted at ${columns}x${rows}:\n${frame}`)

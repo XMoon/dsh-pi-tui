@@ -79,13 +79,13 @@ test('the overlay keeps its explicit authorization dependency on the surface row
 
 test('the base keeps the shipped web defaults and the overlay adds no web provider row', () => {
   const web = base.get('web')
-  assert.ok(web, 'the 0.2.1-rc.2 base must declare the web row')
+  assert.ok(web, 'the base must declare the web row')
   assert.equal(web.name, '@deepseek-ai/dsh-web')
-  // rc.2 changed the shipped Search default to the separately billed Search
-  // API; the Messages route remains an explicit stored choice and HTTP fetch is
-  // unchanged.
-  assert.deepEqual(web.config, { searchProvider: 'deepseek-search-api', fetchProvider: 'http' },
-    'the base web row must keep the rc.2 Search API + HTTP-fetch defaults')
+  // The shipped base configures ONLY the fetch provider: `web.searchProvider`
+  // stays unset (the Host's AUTOMATIC routing state), so no Search provider is
+  // pre-pinned by the composition and HTTP fetch is unchanged.
+  assert.deepEqual(web.config, { fetchProvider: 'http' },
+    'the base web row must keep the shipped HTTP-fetch-only defaults (no stored searchProvider)')
   // Every web provider row belongs to the base; a TUI copy would be a second
   // provider registry (and `web-deepseek-api` must never be re-mounted here).
   for (const id of ['web', 'web-search-deepseek', 'web-deepseek-api']) {

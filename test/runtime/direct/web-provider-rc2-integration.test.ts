@@ -112,6 +112,9 @@ async function boot(
     readonly providers?: 'messages' | 'base-defaults'
     /** Whether the official credential reference is pre-configured. */
     readonly credential?: boolean
+    /** The official `request/context` Session event appended INSIDE the seeded
+     *  turn (the real Agent-loop authority `tool-web` reads per execution). */
+    readonly requestContext?: { readonly provider: string; readonly model: string }
   } = {},
 ): Promise<Booted> {
   const workRoot = life.tempDir('dsh-s2b-web-')
@@ -132,6 +135,12 @@ async function boot(
     content: [{ type: 'text', text: QUESTION }],
     source: { kind: 'user' },
   } as never, { surfaceOp: 'append' } as never)
+  if (options.requestContext !== undefined) {
+    // The REAL request-context authority (`session.requestContext()` folds
+    // exactly this event type; the real Agent loop appends it from the step's
+    // resolved model selection — never a separate fake wire).
+    agent.session.append('request/context', { ...options.requestContext })
+  }
   agent.session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
   if (options.credential !== false) {
     await (ctx.get('credentials') as { set(ref: unknown, secret: string): Promise<unknown> })
@@ -151,22 +160,24 @@ function searchAsInitiator(booted: Booted, query: string): Promise<{ sources: re
       .search({ query }))
 }
 
-test('the pure rc.2 defaults read ready and route the default search to the Search API', async t => {
-  // The EXACT rc.2 `dsh-base` patch (no stored provider, no web-deepseek-api
-  // config at all) and NO configured credential: the read is ready with the
-  // official defaults, the YAML-only overrides are unset, and the missing
+test('the shipped base defaults read ready with AUTOMATIC search routing', async t => {
+  // The EXACT official `dsh-base` patch (fetchProvider: http ONLY — no stored
+  // provider, no web-deepseek-api config at all) and NO configured credential:
+  // the read is ready with `searchProvider: undefined` (the Host's AUTOMATIC
+  // routing state), the YAML-only overrides are unset, and the missing
   // DEEPSEEK_API_KEY does NOT make the Web settings unavailable.
   const life = testLifecycle(t)
   const booted = await boot(life, { providers: 'base-defaults', credential: false })
   assert.deepEqual(await booted.config.read(), {
-    searchProvider: 'deepseek-search-api',
+    searchProvider: undefined,
     fetchProvider: 'http',
     api: { searchBilling: 'auto', fetchBilling: 'auto', count: 10, sendOriginalQuestion: true },
     advanced: {},
     credential: { configured: false },
-  }, 'the official rc.2 defaults are the read authority (no single-endpoint requirement)')
-  // The default search is the DeepSeek Search API (billed separately): without
-  // a credential the real call fails closed instead of falling back.
+  }, 'the official shipped base is the read authority (no stored search provider at all)')
+  // A search OUTSIDE a model request context prefers the DeepSeek Search API
+  // (the automatic routing rule): without a credential the real call fails
+  // closed instead of falling back to another provider.
   await assert.rejects(searchAsInitiator(booted, 'default route probe'), (error: unknown) => {
     assert.equal((error as { code?: string }).code, 'WEB_PROVIDER_CREDENTIAL_MISSING')
     assert.match((error as { message?: string }).message ?? '', /DEEPSEEK_API_KEY/u)
@@ -175,7 +186,7 @@ test('the pure rc.2 defaults read ready and route the default search to the Sear
   assert.deepEqual(booted.transport.requests, [], 'no request is dispatched without a credential')
 })
 
-test('a stored Messages selection keeps applying over the rc.2 shipped default', async t => {
+test('a stored Messages selection keeps applying over the automatic routing', async t => {
   const life = testLifecycle(t)
   const booted = await boot(life)
 
@@ -290,6 +301,110 @@ test('the real web_search tool delivers the selected provider result to the mode
   assert.match(text, /https:\/\/example\.test\/api/u, `the tool result carries the selected provider's source:\n${text}`)
   assert.equal(booted.transport.requests.length, 1)
   assert.equal(booted.transport.requests[0]?.url, SEARCH_ENDPOINT)
+})
+
+// ── rc.5 automatic-routing qualification (source → decision → sink) ─────────
+// The official `request/context` Session event is the ONLY provider authority
+// `tool-web` reads for `llmProvider`; each case boots its OWN fixture/Session
+// so no fake request context or HTTP traffic crosses tests.
+
+test('AUTOMATIC routing reads the REAL Session request context: a DeepSeek model takes the server-side search', async t => {
+  const life = testLifecycle(t)
+  const booted = await boot(life, {
+    providers: 'base-defaults',
+    requestContext: { provider: 'deepseek-official', model: 'deepseek-chat' },
+  })
+
+  const signal = new AbortController().signal
+  const toolSet = await booted.ctx.tools.resolve({
+    agent: booted.agent,
+    modelSelection: { provider: 'deepseek-official', model: 'deepseek-chat' },
+    signal,
+  })
+  const agents = booted.ctx.get('agents') as { withInitiator<T>(agent: Agent, operation: () => T): T }
+  const result = await agents.withInitiator(booted.agent, () =>
+    executeModelToolFixture(booted.ctx, {
+      signal,
+      callId: ToolCallId('web-l5-auto-deepseek'),
+      name: 'web_search',
+      arguments: { queries: ['harness release'] },
+      agent: booted.agent,
+      toolSet,
+    }))
+  const text = ((result.content ?? []) as readonly { readonly text?: string }[]).map(block => block.text ?? '').join('\n')
+  assert.match(text, /https:\/\/example\.test\/messages/u, `the DeepSeek route reached the server-side search:\n${text}`)
+  assert.deepEqual(booted.transport.requests.map(request => request.url), [MESSAGES_ENDPOINT],
+    'the server-side provider answered the DeepSeek-model request')
+  const events = booted.agent.session.snapshotEvents() as readonly { readonly type?: string }[]
+  assert.equal(events.some(event => event.type === 'web/deepseek-search-llm-request'), true,
+    'the real server-side search reports its request on the official Session event')
+})
+
+test('AUTOMATIC routing sends a non-DeepSeek model to the Search API with no server-side event', async t => {
+  const life = testLifecycle(t)
+  const booted = await boot(life, {
+    providers: 'base-defaults',
+    requestContext: { provider: 'mock', model: 'model' },
+  })
+
+  const signal = new AbortController().signal
+  const toolSet = await booted.ctx.tools.resolve({
+    agent: booted.agent,
+    modelSelection: { provider: 'mock', model: 'model' },
+    signal,
+  })
+  const agents = booted.ctx.get('agents') as { withInitiator<T>(agent: Agent, operation: () => T): T }
+  const result = await agents.withInitiator(booted.agent, () =>
+    executeModelToolFixture(booted.ctx, {
+      signal,
+      callId: ToolCallId('web-l5-auto-other'),
+      name: 'web_search',
+      arguments: { queries: ['harness release'] },
+      agent: booted.agent,
+      toolSet,
+    }))
+  const text = ((result.content ?? []) as readonly { readonly text?: string }[]).map(block => block.text ?? '').join('\n')
+  assert.match(text, /https:\/\/example\.test\/api/u, `the non-DeepSeek route reached the Search API:\n${text}`)
+  assert.deepEqual(booted.transport.requests.map(request => request.url), [SEARCH_ENDPOINT],
+    'the Search API provider answered the non-DeepSeek request')
+  const events = booted.agent.session.snapshotEvents() as readonly { readonly type?: string }[]
+  assert.equal(events.some(event => event.type === 'web/deepseek-search-llm-request'), false,
+    'the Search API route never emits the server-side Messages request event')
+})
+
+test('an explicit ConfigPort pin overrides the model route preference and reads back the raw id', async t => {
+  const life = testLifecycle(t)
+  const booted = await boot(life, {
+    providers: 'base-defaults',
+    requestContext: { provider: 'deepseek-official', model: 'deepseek-chat' },
+  })
+  await booted.config.setSearchProvider('deepseek-search-api')
+  assert.equal((await booted.config.read())?.searchProvider, 'deepseek-search-api',
+    'the official ConfigPort write reads back the RAW configured id')
+
+  const signal = new AbortController().signal
+  const toolSet = await booted.ctx.tools.resolve({
+    agent: booted.agent,
+    modelSelection: { provider: 'deepseek-official', model: 'deepseek-chat' },
+    signal,
+  })
+  const agents = booted.ctx.get('agents') as { withInitiator<T>(agent: Agent, operation: () => T): T }
+  const result = await agents.withInitiator(booted.agent, () =>
+    executeModelToolFixture(booted.ctx, {
+      signal,
+      callId: ToolCallId('web-l5-pin-override'),
+      name: 'web_search',
+      arguments: { queries: ['harness release'] },
+      agent: booted.agent,
+      toolSet,
+    }))
+  const text = ((result.content ?? []) as readonly { readonly text?: string }[]).map(block => block.text ?? '').join('\n')
+  assert.match(text, /https:\/\/example\.test\/api/u, `the explicit pin beats the DeepSeek route preference:\n${text}`)
+  assert.deepEqual(booted.transport.requests.map(request => request.url), [SEARCH_ENDPOINT],
+    'the pinned Search API provider answered the DeepSeek-model request')
+  const events = booted.agent.session.snapshotEvents() as readonly { readonly type?: string }[]
+  assert.equal(events.some(event => event.type === 'web/deepseek-search-llm-request'), false,
+    'the pinned route produces no server-side Messages search event')
 })
 
 test('a missing credential fails with the official error and NEVER falls back to the other provider', async t => {

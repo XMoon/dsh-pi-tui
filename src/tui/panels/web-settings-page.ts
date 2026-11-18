@@ -54,18 +54,20 @@ export const WEB_SETTINGS_PAGE_TITLE = 'Web Search / Fetch'
  * The official search-provider candidates, in their frozen order. `id` is the
  * ONLY value ever written (`label` is presentation); a configured id outside
  * this table is a CUSTOM route: it is reported verbatim and is not selectable
- * here. rc.2's official default (an absent `web.searchProvider`) is the
- * DeepSeek Search API; a stored `deepseek-official` selection keeps applying.
+ * here. An absent `web.searchProvider` is the Host's AUTOMATIC routing state
+ * (DSH rc.5: the usable DeepSeek provider assigned to the model request's
+ * route) — the Host selection is authoritative and this page never precomputes
+ * it; a stored selection keeps applying.
  */
 export const WEB_SEARCH_PROVIDER_CANDIDATES = [
-  { id: 'deepseek-official', label: 'Messages', default: false },
-  { id: 'deepseek-search-api', label: 'DeepSeek Search API', default: true },
+  { id: 'deepseek-official', label: 'DeepSeek server-side search' },
+  { id: 'deepseek-search-api', label: 'DeepSeek Search API' },
 ] as const
 
 /** The official fetch-provider candidates (same identity contract). */
 export const WEB_FETCH_PROVIDER_CANDIDATES = [
-  { id: 'http', label: 'HTTP', default: true },
-  { id: 'deepseek-fetch-api', label: 'DeepSeek Fetch API', default: false },
+  { id: 'http', label: 'HTTP' },
+  { id: 'deepseek-fetch-api', label: 'DeepSeek Fetch API' },
 ] as const
 
 /** The four recommended result-count presets. The official `count` domain is
@@ -761,12 +763,14 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
   }
 
   /** Whether the capability's API provider is the selected route. Only the
-   *  official Search/Fetch API consumes its billing mode; Messages Search and
-   *  HTTP Fetch never do. An absent value takes the official default (Search
-   *  API / HTTP respectively). */
+   *  official Search/Fetch API consumes its billing mode; server-side Search
+   *  and HTTP Fetch never do. An absent value is the Host's AUTOMATIC routing
+   *  state, which may still execute the billed API for other models' requests,
+   *  so it does NOT make the billing row editable here (the official Client's
+   *  product policy). */
   private billingProviderSelected(settings: WebProviderSettings, capability: 'search' | 'fetch'): boolean {
     return capability === 'search'
-      ? settings.searchProvider === undefined || settings.searchProvider === 'deepseek-search-api'
+      ? settings.searchProvider === 'deepseek-search-api'
       : settings.fetchProvider === 'deepseek-fetch-api'
   }
 
@@ -777,9 +781,9 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
   }
 
   /** Whether the configured provider id is one of the official candidates this
-   *  page may select. `undefined` = no explicit selection (the official default
-   *  applies), which IS selectable; any other id is a CUSTOM route and offers
-   *  no candidate at all. */
+   *  page may select. `undefined` = the Host's AUTOMATIC routing state, which
+   *  IS selectable (an explicit Confirm writes the real pin); any other id is
+   *  a CUSTOM route and offers no candidate at all. */
   private providerSelectable(
     current: string | undefined,
     candidates: readonly { readonly id: string }[],
@@ -830,11 +834,11 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     const settings = facts.settings
     switch (rowId) {
       case 'web-search-provider': {
-        if (settings.searchProvider === undefined) return 'not selected · official default applies'
+        if (settings.searchProvider === undefined) return 'Automatic'
         return sanitizedPhysicalLine(this.providerLabel(WEB_SEARCH_PROVIDER_CANDIDATES, settings.searchProvider) ?? settings.searchProvider)
       }
       case 'web-fetch-provider': {
-        if (settings.fetchProvider === undefined) return 'not selected · official default applies'
+        if (settings.fetchProvider === undefined) return 'Automatic'
         return sanitizedPhysicalLine(this.providerLabel(WEB_FETCH_PROVIDER_CANDIDATES, settings.fetchProvider) ?? settings.fetchProvider)
       }
       case 'web-search-count': return String(settings.api.count)
@@ -1425,9 +1429,9 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
   private optionNote(rowId: WebSettingRowId, value: string): string {
     switch (rowId) {
       case 'web-search-provider':
-        return value === 'deepseek-search-api' ? 'official default · billed per call' : 'Messages route'
+        return value === 'deepseek-search-api' ? 'explicit · billed per Search API call' : 'server-side · model-token billed'
       case 'web-fetch-provider':
-        return value === 'http' ? 'official default · anonymous' : 'separately billed'
+        return value === 'http' ? 'anonymous · no billed API' : 'separately billed'
       case 'web-search-count':
         return value === '10' ? 'packed default' : ''
       case 'web-send-original-question':
@@ -1469,11 +1473,14 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
           && !this.providerSelectable(facts.settings.searchProvider, WEB_SEARCH_PROVIDER_CANDIDATES)
         notes.push(custom
           ? 'The configured search provider is a CUSTOM route: it is displayed as-is and is not selectable here. '
-            + 'The official candidates are Messages and DeepSeek Search API.'
-          : 'With no explicit selection the official default is the DeepSeek Search API: it is billed separately per '
-            + 'Search API call (a Messages plan does not guarantee coverage). A stored Messages selection keeps '
-            + 'applying and does not call the billed Search API. The choice applies to the NEXT search. '
-            + 'No write happens without an explicit Enter.')
+            + 'The official candidates are DeepSeek server-side search and DeepSeek Search API.'
+          : 'With no explicit selection the Host routes AUTOMATICALLY (DSH rc.5): a request on a DeepSeek model route '
+            + 'uses DeepSeek server-side search (no per-search charge), while other models and requests outside a '
+            + 'model route prefer the DeepSeek Search API (billed per Search API call; a Messages plan does not '
+            + 'guarantee coverage). An explicit selection always overrides the automatic routing. When no preferred '
+            + 'provider is usable the Host may pick another single usable provider or fail with an explicit error; '
+            + 'this page states the configured fact, never which provider one request actually consumed. '
+            + 'The choice applies to the NEXT search. No write happens without an explicit Enter.')
         break
       }
       case 'web-fetch-provider': {
@@ -1482,8 +1489,10 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
         notes.push(custom
           ? 'The configured fetch provider is a CUSTOM route: it is displayed as-is and is not selectable here. '
             + 'The official candidates are HTTP and DeepSeek Fetch API.'
-          : 'HTTP is the official default and calls no billed API. DeepSeek Fetch API is the opt-in alternative and '
-            + 'is separately billed: a Messages plan does not guarantee coverage. The choice applies to the NEXT fetch.')
+          : 'With no explicit selection the Host auto-selects: exactly one usable fetch provider runs, otherwise the '
+            + 'fetch fails with an explicit error. HTTP calls no billed API. DeepSeek Fetch API is the opt-in '
+            + 'alternative and is separately billed: a Messages plan does not guarantee coverage. The choice applies '
+            + 'to the NEXT fetch.')
         break
       }
       case 'web-search-count':
@@ -1503,11 +1512,13 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
         const overrides = settings === undefined ? [] : webAdvancedOverrideFields(settings.advanced, capability)
         if (settings !== undefined && !this.billingProviderSelected(settings, capability)) {
           notes.push(capability === 'search'
-            ? 'Not selected: only the DeepSeek Search API uses Search Billing. The current Search route is Messages, '
-              + 'which has its own endpoint/credential path; select the DeepSeek Search API provider first. '
-              + 'This row cannot write here.'
-            : 'Not selected: only the DeepSeek Fetch API uses Fetch Billing. The current Fetch route is HTTP, '
-              + 'which calls no billed API; select the DeepSeek Fetch API provider first. This row cannot write here.')
+            ? 'Not selected: Search Billing applies only while the DeepSeek Search API is the explicitly selected '
+              + 'provider. Under Automatic the Host may still execute the Search API for other models\' requests, and '
+              + 'any stored Billing stays a Host setting that can apply then; this page follows the official Client '
+              + 'and does not offer its Billing editor here. This row cannot write.'
+            : 'Not selected: Fetch Billing applies only while the DeepSeek Fetch API is the explicitly selected '
+              + 'provider; under Automatic the Host auto-selects one usable fetch provider, and HTTP calls no billed '
+              + 'API. This row cannot write.')
           if (overrides.length > 0) {
             notes.push(`Configured override: ${this.overrideFactsLine(overrides)}`)
           }

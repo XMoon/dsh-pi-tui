@@ -847,7 +847,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
    *  the first frame already carries authoritative values; a missing or failed
    *  read is stated, never defaulted. */
   const webWorkspaceRowFacts = (): { summary: string; freshness: SettingsWorkspaceFreshness; description: string } => {
-    const description = 'Host Web settings for the base profile, not an Optional Bundle. Defaults: DeepSeek Search API search · HTTP fetch; other bundles never change them. The DeepSeek Search API is billed separately per call (a Messages plan does not guarantee coverage). Share Original Question is on by default: it sends up to 128 characters of the human question as ori_question (never the full history or system prompt); the HTTP fetch default calls no billed API. Each Search/Fetch API billing mode (Automatic/Account/API key) is one explicit choice; the YAML-only Search/Fetch endpoint overrides are read-only facts here and, when set, own their capability over the billing choice. Old baseURL/apiKeyEnv/apiKey keys no longer control Search/Fetch. The key stays in the official credential reference and is never shown. Enter opens the Web Search / Fetch page in this same workspace: each value is written only by its own explicit Confirm and reads Verified only after the Host write and authoritative read-back agree.'
+    const description = 'Host Web settings for the base profile, not an Optional Bundle. Search: with no explicit provider the Host routes AUTOMATICALLY (DSH rc.5; older Host versions may decide differently) — DeepSeek model routes use DeepSeek server-side search (no per-search charge), while other models and requests outside a model route prefer the DeepSeek Search API (billed separately per call; a Messages plan does not guarantee coverage), and an explicit provider always overrides the automatic routing. Fetch: the official Host base configures HTTP (no billed API); DeepSeek Fetch API is the opt-in, separately billed alternative; other bundles never change these settings. Share Original Question is on by default: it sends up to 128 characters of the human question as ori_question (never the full history or system prompt). Each Search/Fetch API billing mode (Automatic/Account/API key) is one explicit choice; the YAML-only Search/Fetch endpoint overrides are read-only facts here and, when set, own their capability over the billing choice. Old baseURL/apiKeyEnv/apiKey keys no longer control Search/Fetch. The key stays in the official credential reference and is never shown. Enter opens the Web Search / Fetch page in this same workspace: each value is written only by its own explicit Confirm and reads Verified only after the Host write and authoritative read-back agree.'
     if (!webSettingsAvailable()) {
       return { summary: 'Unavailable', freshness: 'unavailable', description: `${description} Not supported on this backend.` }
     }
@@ -860,7 +860,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
         : { summary: 'Loading…', freshness: 'runtime', description }
     }
     return {
-      summary: `Search: ${providerLabel(WEB_SEARCH_PROVIDER_VALUES, webSettings.searchProvider) ?? 'unavailable'} · Fetch: ${providerLabel(WEB_FETCH_PROVIDER_VALUES, webSettings.fetchProvider) ?? 'unavailable'}`,
+      summary: `Search: ${providerLabel(WEB_SEARCH_PROVIDER_VALUES, webSettings.searchProvider) ?? 'Automatic'} · Fetch: ${providerLabel(WEB_FETCH_PROVIDER_VALUES, webSettings.fetchProvider) ?? 'Automatic'}`,
       freshness: 'ready',
       description,
     }
@@ -1022,10 +1022,12 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
             reason: `the configured provider is a custom route (${currentId}); only the official candidates are selectable here`,
           }
         }
-        const candidate = candidates.find(entry => entry.id === requestedIdentity)
-        // The official auto-selection already applies the default candidate:
-        // confirming it is a zero-write Verified, never a redundant pin.
-        if (currentId === requestedIdentity || (currentId === undefined && candidate?.default === true)) {
+        // The authority ALREADY holding the requested identity satisfies the
+        // request with zero writes (this is not a pin promise). An AUTOMATIC
+        // (undefined) current value never satisfies an explicit candidate:
+        // confirming one always issues the real official write and verifies
+        // from a fresh read-back.
+        if (currentId === requestedIdentity) {
           return { kind: 'verified', actual: requestedIdentity }
         }
       } else if (webCommittedIdentity(base, id) === requestedIdentity) {
@@ -1037,16 +1039,17 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
       if (id === 'web-search-billing' || id === 'web-fetch-billing') {
         const capability = id === 'web-search-billing' ? 'search' : 'fetch'
         const providerSelected = capability === 'search'
-          ? base.searchProvider === undefined || base.searchProvider === 'deepseek-search-api'
+          ? base.searchProvider === 'deepseek-search-api'
           : base.fetchProvider === 'deepseek-fetch-api'
-        // Only the official Search/Fetch API consumes its billing mode. A
-        // Messages/HTTP (or custom) route makes this row inert: an explicit
-        // Enter must never store a billing choice that does not apply now.
+        // Only the explicitly selected official API consumes its billing mode
+        // (the official Client's product policy). An AUTOMATIC route may still
+        // execute the Search API for other models' requests, so the stored
+        // Billing stays a Host setting — but this page refuses to edit it here.
         if (!providerSelected) {
           return {
             kind: 'not-saved',
             reason: capability === 'search'
-              ? 'the Search route is not the DeepSeek Search API; Search Billing applies only to that API'
+              ? 'Search API billing is editable here only when DeepSeek Search API is explicitly selected; Automatic routes at request time'
               : 'the Fetch route is not the DeepSeek Fetch API; Fetch Billing applies only to that API',
           }
         }

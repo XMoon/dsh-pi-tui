@@ -14,7 +14,7 @@
  *      nine-row page, and Client B reads the same Host facts — neither Client
  *      paints a locally guessed value (the page stays `Loading…` until the
  *      Host read answers, and `Unavailable` when it does not);
- *   2. both providers are edited through the real page (`Messages` and
+ *   2. both providers are edited through the real page (`DeepSeek server-side search` and
  *      `HTTP`, then back to the two API providers): each is ONE verified
  *      official Settings CAS mutation, and a Billing row whose API provider is
  *      not the current route shows `Not selected` and offers no write;
@@ -157,7 +157,7 @@ const SEARCH_OVERRIDE_FACT = `searchBaseURL=${SEED_BASE_URL_MASKED}`
 const OVERRIDE_UNSET_FACT = 'Host YAML: not set'
 const SEARCH_API_PROVIDER_LABEL = 'DeepSeek Search API'
 const FETCH_API_PROVIDER_LABEL = 'DeepSeek Fetch API'
-const MESSAGES_PROVIDER_LABEL = 'Messages'
+const MESSAGES_PROVIDER_LABEL = 'DeepSeek server-side search'
 const HTTP_PROVIDER_LABEL = 'HTTP'
 const COUNT_CANDIDATES = ['5', '10', '20', '50']
 const QUESTION_ON = 0
@@ -537,15 +537,17 @@ function assertNamespaceWrite(documentPath, ns, before, assertConfig, label) {
   return snapshot(after)
 }
 
-/** The official Settings service PRUNES a `web` user layer when every value
- *  equals the shipped default. The effective value is then the default; a
- *  missing section is a PASS, not a lost write. */
+/** The official Settings service persists the EXACT requested field; the
+ *  assertion compares the field's PRESENCE (own property) AND its raw
+ *  content, because an ABSENT `web.searchProvider` is the rc.5 Host's
+ *  AUTOMATIC routing state — "absent before, explicit API now" must never
+ *  read as no-change (and no legacy default is substituted anywhere). */
 function assertWebEffective(documentPath, expected, label) {
   const after = namespaceConfig(documentPath, WEB_NS) ?? {}
-  assert((after.searchProvider ?? 'deepseek-search-api') === expected.searchProvider,
-    `${label}: effective searchProvider must be ${expected.searchProvider}: ${JSON.stringify(after)}`)
-  assert((after.fetchProvider ?? 'http') === expected.fetchProvider,
-    `${label}: effective fetchProvider must be ${expected.fetchProvider}: ${JSON.stringify(after)}`)
+  assert(Object.hasOwn(after, 'searchProvider') && after.searchProvider === expected.searchProvider,
+    `${label}: effective searchProvider must be the explicit ${expected.searchProvider}: ${JSON.stringify(after)}`)
+  assert(Object.hasOwn(after, 'fetchProvider') && after.fetchProvider === expected.fetchProvider,
+    `${label}: effective fetchProvider must be the explicit ${expected.fetchProvider}: ${JSON.stringify(after)}`)
 }
 
 /** The rc.2 `web-deepseek-api` schema NEVER writes the retired single-endpoint
@@ -779,15 +781,16 @@ export async function runWebProviderSettingsF3(context) {
     await confirmCandidate(clientA, MESSAGES_PROVIDER_LABEL, 'UI_L6 A search provider write')
     assertNamespaceWrite(documentPath, WEB_NS, beforeSearchProvider, config => {
       assert(config.searchProvider === 'deepseek-official',
-        `UI_L6 A search provider: the official "web" user layer must hold Messages: ${JSON.stringify(config)}`)
+        `UI_L6 A search provider: the official "web" user layer must hold DeepSeek server-side search: ${JSON.stringify(config)}`)
       assert(config.fetchProvider === 'deepseek-fetch-api',
         `UI_L6 A search provider: the Fetch provider must stay unchanged: ${JSON.stringify(config)}`)
       assertNoLegacyEndpointKeys(config, 'UI_L6 A search provider')
     }, 'UI_L6 A search provider')
-    // Messages Search is not the billed Search API: its Billing row is inert
+    // Server-side Search is not the billed Search API: its Billing row is inert
     // and says so instead of pretending to be writable.
     await assertInertBilling(clientA, documentPath, ROW.searchBilling, 'Not selected',
-      'only the DeepSeek Search API uses Search Billing', 'UI_L6 A search billing route gate')
+      'Search Billing applies only while the DeepSeek',
+      'UI_L6 A search billing route gate')
 
     const beforeSearchProviderBack = sectionsSnapshot(documentPath)
     await openWebRow(clientA, ROW.searchProvider, 'UI_L6 A search provider back')
@@ -805,7 +808,8 @@ export async function runWebProviderSettingsF3(context) {
     assertWebEffective(documentPath, { searchProvider: 'deepseek-search-api', fetchProvider: 'http' },
       'UI_L6 A fetch provider')
     await assertInertBilling(clientA, documentPath, ROW.fetchBilling, 'Not selected',
-      'only the DeepSeek Fetch API uses Fetch Billing', 'UI_L6 A fetch billing route gate')
+      'Fetch Billing applies only while the DeepSeek',
+      'UI_L6 A fetch billing route gate')
 
     const beforeFetchProviderBack = sectionsSnapshot(documentPath)
     await openWebRow(clientA, ROW.fetchProvider, 'UI_L6 A fetch provider back')
@@ -1052,18 +1056,21 @@ export async function runWebProviderSettingsF3(context) {
       'UI_L6 negative: an invalid provider/count write reached the official API section')
     const webAfterNegative = namespaceConfig(documentPath, WEB_NS) ?? {}
     const webBeforeNegative = JSON.parse(beforeNegativeWeb === 'undefined' ? '{}' : beforeNegativeWeb)
-    assert((webAfterNegative.searchProvider ?? 'deepseek-search-api') === (webBeforeNegative.searchProvider ?? 'deepseek-search-api'),
+    // Presence AND content: an absent field (the AUTOMATIC state) and an
+    // explicit id are different facts the negative probe must not conflate.
+    assert(Object.hasOwn(webAfterNegative, 'searchProvider') === Object.hasOwn(webBeforeNegative, 'searchProvider')
+      && webAfterNegative.searchProvider === webBeforeNegative.searchProvider,
       `UI_L6 negative: the web section's search provider changed during the negative probe: before=${beforeNegativeWeb} after=${JSON.stringify(webAfterNegative)}`)
     const customRouteSeeded = negative.customRouteSeeded === true
     if (customRouteSeeded) {
-      assert((webAfterNegative.fetchProvider ?? 'http') === 'http',
+      assert(webAfterNegative.fetchProvider === 'http',
         `UI_L6 negative: the custom-route restore did not return the official fetch provider: ${JSON.stringify(webAfterNegative)}`)
       assert(negative.customRouteRefusal?.rejected === true,
         `UI_L6 negative: the port accepted replacing a CUSTOM provider route: ${JSON.stringify(negative.customRouteRefusal)}`)
       assert(/custom route/u.test(negative.customRouteRefusal?.message ?? ''),
         `UI_L6 negative: the custom-route refusal lacks the official reason: ${JSON.stringify(negative.customRouteRefusal)}`)
     } else {
-      assert((webAfterNegative.fetchProvider ?? 'deepseek-fetch-api') === 'deepseek-fetch-api',
+      assert(webAfterNegative.fetchProvider === 'deepseek-fetch-api',
         `UI_L6 negative: the refused custom-route seed still changed the fetch provider: before=${beforeNegativeWeb} after=${JSON.stringify(webAfterNegative)}`)
       trace('f3.ui-l6', {
         verdict: 'UI_L6_PASS',
@@ -1149,7 +1156,7 @@ export async function runWebProviderSettingsF3(context) {
     await openWebRow(clientA, ROW.sendOriginalQuestion, 'UI_L6 restore original question')
     await selectCandidate(clientA, QUESTION_OFF, 'UI_L6 restore original question', 'off')
     await confirmCandidate(clientA, 'off', 'UI_L6 restore original question write')
-    // Providers back to the shipped stored defaults (Messages / HTTP).
+    // Providers back to the explicit restored selection (server-side / HTTP).
     await openWebRow(clientA, ROW.searchProvider, 'UI_L6 restore search provider')
     await selectCandidate(clientA, 0, 'UI_L6 restore search provider', MESSAGES_PROVIDER_LABEL)
     await confirmCandidate(clientA, MESSAGES_PROVIDER_LABEL, 'UI_L6 restore search provider write')
@@ -1161,7 +1168,7 @@ export async function runWebProviderSettingsF3(context) {
       fetchProviderLabel: HTTP_PROVIDER_LABEL,
       count: SEED_COUNT,
       sendOriginalQuestion: false,
-      // Messages/HTTP are not the billed API providers: both Billing rows are
+      // Server-side/HTTP are not the billed API providers: both Billing rows are
       // correctly inert on the restored route. The stored values are `auto`.
       searchBilling: 'Not selected',
       fetchBilling: 'Not selected',
@@ -1171,9 +1178,10 @@ export async function runWebProviderSettingsF3(context) {
     }
     const restoredWeb = namespaceConfig(documentPath, WEB_NS) ?? {}
     const restoredApi = namespaceConfig(documentPath, WEB_API_NS) ?? {}
-    assert((restoredWeb.searchProvider ?? 'deepseek-official') === 'deepseek-official'
-      && (restoredWeb.fetchProvider ?? 'http') === 'http',
-    `UI_L6 restore: the "web" section still holds a non-default value: ${JSON.stringify(restoredWeb)}`)
+    // The restore confirms were REAL writes: the explicit ids must be present.
+    assert(restoredWeb.searchProvider === 'deepseek-official'
+      && restoredWeb.fetchProvider === 'http',
+    `UI_L6 restore: the "web" section does not hold the explicit restored values: ${JSON.stringify(restoredWeb)}`)
     assert((restoredApi.count ?? SEED_COUNT) === SEED_COUNT
       && (restoredApi.sendOriginalQuestion ?? false) === false
       && (restoredApi.searchBilling ?? 'auto') === 'auto'

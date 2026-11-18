@@ -123,6 +123,9 @@ function setup(options: {
   readonly columns?: number
   readonly rows?: number
   readonly available?: boolean
+  /** The stored `web.searchProvider`. Explicit `undefined` IS the Host's
+   *  AUTOMATIC routing state and is kept as `undefined` — never replaced by
+   *  the historical default provider; omit the field for the stored default. */
   readonly searchProvider?: string
   /** The stored `web-deepseek-api.count` (a value outside the presets stays). */
   readonly count?: number
@@ -158,7 +161,7 @@ function setup(options: {
     writeDelayMs: 0,
     keptProviderValue: undefined as string | undefined,
     web: {
-      searchProvider: options.searchProvider ?? 'deepseek-official',
+      searchProvider: 'searchProvider' in options ? options.searchProvider : 'deepseek-official',
       fetchProvider: 'http',
       api: { searchBilling: 'auto', fetchBilling: 'auto', count: options.count ?? 10, sendOriginalQuestion: true },
       advanced: options.advanced ?? {},
@@ -604,7 +607,7 @@ test('the workspace row reports the configured providers and opens the Web page 
   await highlightWebRow(h)
   const rowView = h.view()
   const compactRow = (): string => rowView.replace(/[\u2500-\u257f│]/gu, ' ').replace(/\s+/gu, ' ')
-  assert.match(rowView, /Search: Messages · Fetch: HTTP/u, 'the launcher shows the authoritative provider summary')
+  assert.match(rowView, /Search: DeepSeek server-side search · Fetch: HTTP/u, 'the launcher shows the authoritative provider summary')
   assert.match(rowView, /Configure Web…/u, 'the row Detail paints the ONE page entry')
   assert.match(compactRow(), /billed separately/u)
   assert.match(compactRow(), /not an Optional.*?Bundle/u)
@@ -630,14 +633,14 @@ test('the workspace row reports the configured providers and opens the Web page 
     assert.ok(at > previous, `the frozen row order holds (${label}):\n${page}`)
     previous = at
   }
-  assert.match(page, /Current: Messages/u, 'the selected row states the real Host value')
-  assert.match(page, /› Messages · Messages route \[current\]/u,
+  assert.match(page, /Current: DeepSeek server-side search/u, 'the selected row states the real Host value')
+  assert.match(page, /› DeepSeek server-side search · server-side · model-token billed \[current\]/u,
     'the current candidate carries the [current] chip')
   assert.equal(h.readCount() >= 1, true, 'opening the page really read the Host')
 
   // Enter opens the Detail, the highlight moves, Enter confirms EXACTLY once.
   await key(h, ENTER)
-  await chooseCandidate(h, 1) // Messages -> DeepSeek Search API
+  await chooseCandidate(h, 1) // server-side -> DeepSeek Search API
   assert.equal(h.writes.length, 0, 'choosing a candidate never writes')
   await key(h, ENTER)
   await awaitWriteSettlement(h, 'search:deepseek-search-api', 0)
@@ -648,7 +651,7 @@ test('the workspace row reports the configured providers and opens the Web page 
   assert.match(h.view(), /Verified/u, 'the write is verified by the read-back')
   assert.match(h.view(), /› DeepSeek Search API .*\[current\]/u,
     'the [current] chip follows the verified read-back')
-  assert.doesNotMatch(h.view(), /› Messages .*\[current\]/u, 'the old candidate loses the chip')
+  assert.doesNotMatch(h.view(), /› DeepSeek server-side search .*\[current\]/u, 'the old candidate loses the chip')
 })
 
 test('a failed write is reported as Not saved and never claims a save', async t => {
@@ -664,7 +667,7 @@ test('a failed write is reported as Not saved and never claims a save', async t 
   assert.equal(h.store.web.searchProvider, 'deepseek-official', 'the Host store keeps the previous value')
   assert.match(refused, /Not saved · settings mutate rejected/u, `the failure is reported as Not saved:\n${refused}`)
   assert.doesNotMatch(refused, /Verified/u, 'a rejected write is never Verified')
-  assert.match(refused, /Current: Messages/u, 'the Detail states the value the Host still holds')
+  assert.match(refused, /Current: DeepSeek server-side search/u, 'the Detail states the value the Host still holds')
 })
 
 test('two confirmed intents commit in FIFO order and never overlap', async t => {
@@ -707,9 +710,9 @@ test('a resolved provider mutation the Host does not commit is Not saved, never 
     frame.includes('Not saved') && !frame.includes('Saving…'))
   assert.deepEqual(h.writes, ['search:deepseek-search-api'], 'the mutation really ran')
   assert.equal(h.store.web.searchProvider, 'deepseek-official', 'the Host kept its own value')
-  assert.match(refused, /the Host keeps "Messages" instead of the submitted value/u,
+  assert.match(refused, /the Host keeps "DeepSeek server-side search" instead of the submitted value/u,
     `the verdict names the value the Host keeps:\n${refused}`)
-  assert.match(refused, /Current: Messages/u, 'the Detail reports the Host value, never the request')
+  assert.match(refused, /Current: DeepSeek server-side search/u, 'the Detail reports the Host value, never the request')
   assert.doesNotMatch(refused, /Verified/u)
 
   // The highlight returns to the value the Host HOLDS: confirming again submits
@@ -729,7 +732,7 @@ test('two confirmed selections end on the Host value when the second is not comm
   t.after(h.dispose)
   await openWebPage(h)
 
-  // First: Messages -> DeepSeek Search API (verified).
+  // First: server-side -> DeepSeek Search API (verified).
   await openWebRow(h, 0)
   await chooseCandidate(h, 1)
   const markFirst = settledWritesMark(h)
@@ -740,7 +743,7 @@ test('two confirmed selections end on the Host value when the second is not comm
   assert.deepEqual(h.writes, ['search:deepseek-search-api'])
   assert.equal(h.store.web.searchProvider, 'deepseek-search-api')
 
-  // Second: back to Messages, but the Host keeps the first selection.
+  // Second: back to server-side, but the Host keeps the first selection.
   await webListTop(h)
   await openWebRow(h, 0)
   h.store.keptProviderValue = 'deepseek-search-api'
@@ -839,6 +842,51 @@ test('the credential row shows the reference and hands the Models deeplink to th
   assert.deepEqual(h.delegated, [], 'no /login command line was executed by the Web page')
 })
 
+test('the AUTOMATIC search state reads `Search: Automatic` and an explicit Confirm writes ONCE', async t => {
+  // `searchProvider: undefined` IS the Host's AUTOMATIC routing state: the
+  // launcher and page state it truthfully (never `unavailable`, never a fixed
+  // Search API default, no candidate painted as current), and the FIRST
+  // explicit Confirm issues exactly ONE real Host write verified by read-back.
+  const h = setup({ searchProvider: undefined })
+  t.after(h.dispose)
+  await openOtherRows(h)
+  await highlightWebRow(h)
+  assert.match(h.view(), /Search: Automatic/u, 'the launcher summary states the Automatic state')
+  assert.doesNotMatch(h.view(), /Search: unavailable/u)
+  await key(h, ENTER)
+  const page = await settleWebPage(h)
+  assert.match(page, /Current: Automatic/u, 'the page states the Automatic current fact')
+  assert.doesNotMatch(page, /\[current\]/u, 'no candidate is painted as the current value')
+  await openWebRow(h, 0)
+  await chooseCandidate(h, 1) // Automatic -> DeepSeek Search API
+  await key(h, ENTER)
+  await awaitWriteSettlement(h, 'search:deepseek-search-api', 0)
+  await settlePainted(h, 'the verified explicit write', frame =>
+    frame.includes('Current: DeepSeek Search API') && frame.includes('Verified'))
+  assert.deepEqual(h.writes, ['search:deepseek-search-api'],
+    'exactly ONE real Host write, never the retired zero-write default verdict')
+  assert.equal(h.store.web.searchProvider, 'deepseek-search-api')
+})
+
+test('the Search Billing row is inert while AUTOMATIC: a stale Confirm writes nothing', async t => {
+  // The official Client offers the dedicated Billing control only while the
+  // DeepSeek Search API is explicitly selected; under Automatic this page
+  // offers NO candidate and a stale Confirm produces ZERO Host writes while
+  // the stored Billing mode stays untouched.
+  const h = setup({ searchProvider: undefined })
+  t.after(h.dispose)
+  await openWebPage(h)
+  await openWebRow(h, 4) // the Search Billing row
+  const detail = h.view()
+  assert.match(detail, /Current: Not selected/u, 'the Billing row states the unselected fact')
+  assert.doesNotMatch(detail, /› /u, 'no billing candidate is offered while Automatic')
+  await key(h, ENTER)
+  await new Promise(resolve => setTimeout(resolve, 10))
+  await h.vt.waitForRender()
+  assert.deepEqual(h.writes, [], 'the Billing row writes nothing while Automatic')
+  assert.equal(h.store.web.api.searchBilling, 'auto', 'the stored Billing mode is kept, never reset')
+})
+
 test('a configured custom provider id stays visible and offers no candidate', async t => {
   const h = setup({ searchProvider: 'acme-search' })
   t.after(h.dispose)
@@ -893,7 +941,7 @@ test('an unreadable authority after a successful read drops to Unavailable, neve
   h.store.readThrows = true
   await openOtherRows(h)
   assert.match(h.view(), /Unavailable/u, 'the launcher states the failure')
-  assert.doesNotMatch(h.view(), /Search: Messages/u, 'the old summary never survives as current')
+  assert.doesNotMatch(h.view(), /Search: DeepSeek ser/u, 'the old summary never survives as current')
   await highlightWebRow(h)
   await key(h, ENTER)
   const page = await settlePainted(h, 'the page to paint the failed read', frame =>
@@ -933,7 +981,7 @@ test('a workspace opened while the authority is pending paints Loading…, never
   await key(h, ENTER)
   const firstFrame = h.view()
   assert.match(firstFrame, /Loading…/u, `the reopened workspace is pending:\n${firstFrame}`)
-  assert.doesNotMatch(firstFrame, /Search: Messages/u,
+  assert.doesNotMatch(firstFrame, /Search: DeepSeek ser/u,
     'the previous summary is never presented as the current state')
 
   // Entering the page starts its OWN fresh read, which is held too: the page's
@@ -947,7 +995,7 @@ test('a workspace opened while the authority is pending paints Loading…, never
 
   release()
   const settled = await settlePainted(h, 'the held reads to settle the page', frame =>
-    frame.includes('Current: Messages') && !frame.includes('Loading…'))
+    frame.includes('Current: DeepSeek server-side search') && !frame.includes('Loading…'))
   assert.match(settled, /\[current\]/u)
 })
 
@@ -974,7 +1022,7 @@ test('a new read clears the previous read ERROR: pending, not a stale Unavailabl
   assert.doesNotMatch(webLauncherLine, /Unavailable/u, 'the previous error state does not survive into the new read')
   release()
   await settlePainted(h, 'the new read to paint the facts', frame =>
-    frame.includes('Search: Messages') && !frame.includes('Loading…'))
+    frame.includes('Search: DeepSeek ser') && !frame.includes('Loading…'))
 })
 
 test('the workspace `r` refresh re-enters pending instead of repainting the cached summary', async t => {
@@ -983,17 +1031,17 @@ test('the workspace `r` refresh re-enters pending instead of repainting the cach
   await openWebPage(h)
   await key(h, ESC) // list -> Tools rows (the Web row stays selected)
   assert.match(h.view(), /Settings · Tools/u, 'Esc restored the Workspace rows level')
-  assert.match(h.view(), /Search: Messages/u, 'the settled summary is visible on the rows level')
+  assert.match(h.view(), /Search: DeepSeek ser/u, 'the settled summary is visible on the rows level (the row value column truncates the long label with an ellipsis)')
 
   const release = h.holdAllReads()
   t.after(release)
   await key(h, 'r')
   const pending = h.view()
   assert.match(pending, /Loading…/u, `the refresh enters the pending state:\n${pending}`)
-  assert.doesNotMatch(pending, /Search: Messages/u, 'the cached summary is not repainted while the read is pending')
+  assert.doesNotMatch(pending, /Search: DeepSeek ser/u, 'the cached summary is not repainted while the read is pending')
   release()
   await settlePainted(h, 'the refreshed read to paint the facts', frame =>
-    frame.includes('Search: Messages') && !frame.includes('Loading…'))
+    frame.includes('Search: DeepSeek ser') && !frame.includes('Loading…'))
 })
 
 test('entering the Web page paints Loading…, never the last-known value', async t => {
@@ -1014,7 +1062,7 @@ test('entering the Web page paints Loading…, never the last-known value', asyn
     'no row claims a current value while the read is in flight')
   release()
   const settled = await settlePainted(h, 'the mounted read to repaint the verified state', frame =>
-    /\[current\]/u.test(frame) && frame.includes('Current: Messages'))
+    /\[current\]/u.test(frame) && frame.includes('Current: DeepSeek server-side search'))
   assert.doesNotMatch(settled, /Loading…/u)
 })
 
@@ -1035,14 +1083,14 @@ test('a page reopened after a FAILED read states Loading…, not the stale error
   assert.doesNotMatch(pending, /Current: Unavailable/u, 'the previous read error does not survive into the new read')
   release()
   await settlePainted(h, 'the reopened page to repaint the settled facts', frame =>
-    frame.includes('Current: Messages') && !frame.includes('Loading…'))
+    frame.includes('Current: DeepSeek server-side search') && !frame.includes('Loading…'))
 })
 
 test('an OLD read settling after a write never repaints the page with the pre-write state', async t => {
   const h = setup()
   t.after(h.dispose)
   await openWebPage(h)
-  assert.match(h.view(), /Current: Messages/u)
+  assert.match(h.view(), /Current: DeepSeek server-side search/u)
   await key(h, ESC) // list -> Tools rows
 
   // R1 observes the pre-write Host and is held; the page's own entry read (R2)
@@ -1053,7 +1101,7 @@ test('an OLD read settling after a write never repaints the page with the pre-wr
   assert.match(h.view(), /Loading…/u, 'R1 is pending on the rows level')
   await key(h, ENTER)
   const settledPage = await settlePainted(h, 'the page entry read R2 to settle', frame =>
-    frame.includes('Current: Messages') && !frame.includes('Loading…'))
+    frame.includes('Current: DeepSeek server-side search') && !frame.includes('Loading…'))
 
   // A real write, then the held R1 settles: its pre-write snapshot must not
   // overwrite the committed facts.
@@ -1069,7 +1117,7 @@ test('an OLD read settling after a write never repaints the page with the pre-wr
   await awaitReadSettlement(h, settledBeforeRelease + 1, 'the stale pre-write read to settle')
   const after = h.view()
   assert.match(after, /Current: DeepSeek Search API/u, `the committed facts survive the stale settlement:\n${after}`)
-  assert.doesNotMatch(after, /Current: Messages/u, 'the pre-write value never comes back')
+  assert.doesNotMatch(after, /Current: DeepSeek server-side search/u, 'the pre-write value never comes back')
 })
 
 test('a SUPERSEDED write readback never decides the verdict', async t => {
@@ -1349,7 +1397,7 @@ test('a stale backend keeps the readable facts but offers no candidate and dispa
   await pageListSelect(h, 0)
   await key(h, ENTER)
   const detail = h.view()
-  assert.match(detail, /Current: Messages/u, 'the readable fact is still painted')
+  assert.match(detail, /Current: DeepSeek server-side search/u, 'the readable fact is still painted')
   assert.match(detail, /read-only until it reconnects/u, `the refusal names the reason:\n${detail}`)
   assert.doesNotMatch(detail, /Confirm \[Enter\]/u, 'no Confirm affordance exists on a non-current backend')
   await key(h, ENTER)
@@ -1358,7 +1406,7 @@ test('a stale backend keeps the readable facts but offers no candidate and dispa
   h.setReadiness('ready')
   await key(h, 'r')
   await settlePainted(h, 'the recovered candidates', frame => frame.includes('Confirm [Enter]'))
-  await chooseCandidate(h, 1) // Messages (the current value) -> DeepSeek Search API
+  await chooseCandidate(h, 1) // server-side (the current value) -> DeepSeek Search API
   await key(h, ENTER)
   await settlePainted(h, 'the recovered verified write', frame => frame.includes('Verified'))
   assert.deepEqual(h.writes, ['search:deepseek-search-api'])
@@ -1419,7 +1467,7 @@ test('an EXTERNAL provider change after the page read is never overwritten by a 
   await openWebPage(h)
   // The page's Detail was built from the official read...
   await openWebRow(h, 0)
-  assert.match(h.view(), /Current: Messages/u)
+  assert.match(h.view(), /Current: DeepSeek server-side search/u)
   // ...another Host writer then installs a CUSTOM route while the page is open.
   h.store.web.searchProvider = 'acme-search'
   // Confirm without refreshing the page: the queue head must re-read the Host
@@ -1534,7 +1582,7 @@ test('a list wheel re-anchors the Detail on the NEW row authoritative candidates
   await h.vt.waitForRender()
   const after = h.view()
   assert.match(after, /Current: HTTP/u, 'the Detail followed the scrolled row')
-  assert.match(after, /› HTTP · official default · anonymous/u,
+  assert.match(after, /› HTTP · anonymous · no billed API/u,
     `the NEW row's current candidate is highlighted, never the stale index:\n${after}`)
   assert.doesNotMatch(after, /› DeepSeek Fetch API/u)
   // Enter confirms the NEW row's CURRENT value (already-current → zero writes).
@@ -1725,14 +1773,13 @@ test('a long Host failure reason is wholly readable in the Detail', async t => {
   assert.match(frame, /Not saved/u)
 })
 
-// ── D3-2: the page states the real rc.2 facts ──────────────────────────────
+// ── D3-2: the page states the real rc.5 facts ──────────────────────────────
 
-test('the page states the rc.2 defaults, billing and read-only overrides', async t => {
+test('the page states the automatic routing facts, billing and read-only overrides', async t => {
   const h = setup({ searchProvider: 'deepseek-search-api' })
   t.after(h.dispose)
   await openWebPage(h)
   const compact = (): string => h.view().replace(/[\u2500-\u257f│]/gu, ' ').replace(/\s+/gu, ' ')
-  assert.match(compact(), /official default is the DeepSeek Search API/u)
   assert.match(compact(), /a Messages plan does not guarantee coverage/u)
   assert.match(compact(), /No write happens without an explicit Enter/u)
   // The Share Original Question row states the packed ON default and the exact
@@ -1745,12 +1792,16 @@ test('the page states the rc.2 defaults, billing and read-only overrides', async
   assert.match(compact(), /up to 128 characters of the/u)
   assert.match(compact(), /triggering human question as ori_question/u)
   assert.match(compact(), /never the full history or the system prompt/u)
-  // The Search provider row states the rc.2 official default (the billed Search
-  // API) and the stored Messages route, never the retired "opt-in" default.
+  // The Search provider row states the rc.5 AUTOMATIC routing rule (DeepSeek
+  // models take the server-side search, other routes prefer the billed Search
+  // API) and that an explicit selection always overrides the automatic routing;
+  // it never claims a fixed official default.
   await pageListSelect(h, 0)
-  assert.match(compact(), /official default is the DeepSeek Search API/u)
-  assert.match(compact(), /billed separately per/u)
-  assert.doesNotMatch(compact(), /opt-in/u)
+  assert.match(compact(), /routes AUTOMATICALLY/u)
+  assert.match(compact(), /DeepSeek server-side search \(no per-search charge\)/u)
+  assert.match(compact(), /billed per Search API call/u)
+  assert.match(compact(), /An explicit selection always overrides the automatic routing/u)
+  assert.doesNotMatch(compact(), /official default is the/u)
   // The Search billing row states the three explicit modes' credential claims
   // and the per-call billing fact; Automatic is a persisted choice, not a reset.
   await pageListSelect(h, 4)
@@ -2168,7 +2219,9 @@ test('Billing rows are Not selected and inert when their API provider is not the
     page.handleInput('\r')
     const search = stripTerminalSequences(page.render(140).join('\n'))
     assert.match(search, /Current: Not selected/u)
-    assert.match(search, /only the DeepSeek Search API uses Search Billing/u)
+    assert.match(search, /Search Billing applies only while the DeepSeek Search API is the explicitly selected/u)
+    assert.match(search, /may still execute the Search API for other models' requests/u,
+      'the inert row explains the Automatic routing without claiming a fixed route')
     assert.doesNotMatch(search, /Automatic · follows/u,
       'a non-API Search route never paints the billing credential claim')
     page.handleInput('\r')
@@ -2179,7 +2232,7 @@ test('Billing rows are Not selected and inert when their API provider is not the
     page.handleInput('\r')
     const fetch = stripTerminalSequences(page.render(140).join('\n'))
     assert.match(fetch, /Current: Not selected/u)
-    assert.match(fetch, /only the DeepSeek Fetch API uses Fetch Billing/u)
+    assert.match(fetch, /Fetch Billing applies only while the DeepSeek Fetch API is the explicitly selected/u)
     page.handleInput('\r')
     assert.deepEqual(writes, [], 'the non-API Fetch route dispatches zero writes')
   } finally {
@@ -2266,7 +2319,7 @@ test('a delegated mouse Confirm is the ONE write through the existing Web FIFO',
   t.after(h.dispose)
   await openWebPage(h)
   await openWebRow(h, 0)
-  await chooseCandidate(h, 1) // Messages -> DeepSeek Search API (draft only)
+  await chooseCandidate(h, 1) // server-side -> DeepSeek Search API (draft only)
   assert.deepEqual(h.writes, [], 'moving the draft writes nothing')
   const mark = settledWritesMark(h)
   const point = paintedWordCell(h, 'Confirm [Enter]')
