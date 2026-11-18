@@ -258,15 +258,30 @@ function preflightEnvironment() {
     throw new CuaNotVerifiedError('the current macOS account could not be identified')
   }
   const manager = spawnSync('launchctl', ['managername'], { encoding: 'utf8', timeout: 10_000 })
-  if (manager.status !== 0 || manager.stdout.trim() !== 'Aqua') {
-    throw new CuaNotVerifiedError(`a real Aqua GUI login session is required, launchctl managername reported ${JSON.stringify(manager.stdout?.trim() ?? '')}`)
+  const managerName = manager.status === 0 ? manager.stdout.trim() : ''
+  // The lane runs inside a private tmux server, whose launchd manager is
+  // `Background` even when the owning console user is in `Aqua`; the native
+  // helper's own LaunchServices launch and TCC are proven later by the real
+  // capability/screenshot results, never by this label. What the lane DOES
+  // require is a real console login for the current account.
+  if (managerName !== 'Aqua' && managerName !== 'Background') {
+    throw new CuaNotVerifiedError(`a real logged-in macOS user session is required, launchctl managername reported ${JSON.stringify(managerName)}`)
+  }
+  const who = spawnSync('who', [], { encoding: 'utf8', timeout: 10_000 })
+  const consoleLine = who.status === 0
+    && who.stdout.split('\n').some(line => {
+      const columns = line.trim().split(/\s+/u)
+      return columns[0] === account.stdout.trim() && columns[1] === 'console'
+    })
+  if (!consoleLine) {
+    throw new CuaNotVerifiedError(`no console login exists for ${account.stdout.trim()}; the native qualification needs the real logged-in desktop session`)
   }
   const tmux = spawnSync('tmux', ['-V'], { encoding: 'utf8', timeout: 10_000 })
   if (tmux.status !== 0) throw new CuaNotVerifiedError('tmux is required for the private terminal scene')
   if (!existsSync('/System/Applications/TextEdit.app')) {
     throw new CuaNotVerifiedError('the controlled test application /System/Applications/TextEdit.app is missing')
   }
-  return { account: account.stdout.trim(), tmux: tmux.stdout.trim() }
+  return { account: account.stdout.trim(), tmux: tmux.stdout.trim(), guiSession: managerName }
 }
 
 // ── private tmux ───────────────────────────────────────────────────────────
@@ -945,7 +960,7 @@ function makeReport({ candidate, preflight, installation, model, helper }) {
     arch: process.arch,
     node: process.version,
     macos: macosProductVersion(),
-    account: { name: preflight.account, guiSession: 'Aqua', tmux: preflight.tmux },
+    account: { name: preflight.account, launchdSession: preflight.guiSession, consoleLogin: true, tmux: preflight.tmux },
     candidate: {
       path: resolve(candidate.tarball),
       sha256: candidate.candidateSha256,
