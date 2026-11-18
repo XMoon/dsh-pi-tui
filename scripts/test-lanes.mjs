@@ -3,8 +3,9 @@
  * The test LANES: which patterns each verification lane owns.
  *
  * A lane is a PATTERN SET, not a hand-maintained path list. The discovery
- * rule (`scripts/test-discovery.mjs`) resolves the patterns into the
- * explicit, sorted file list the runner executes, so:
+ * rule (`scripts/test-discovery.mjs`) resolves the patterns into a
+ * sorted membership list. Sharded product runs may deterministically
+ * reorder that input for scheduling without changing lane ownership, so:
  *
  *   - a test that moves into an ownership directory keeps being discovered;
  *   - a lane that matches nothing FAILS CLOSED instead of reporting green;

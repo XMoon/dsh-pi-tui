@@ -334,6 +334,8 @@ test('weighted product scheduling preserves every real product file in native sh
     'the experiment must actually reorder product tests on this checkout')
   assert.deepEqual(orderWeightedProductFiles(files, 1), files,
     'one shard must preserve the original discovered order')
+  assert.deepEqual(orderWeightedProductFiles(files, 128), files,
+    'native shard totals above the profiled CI range must retain the sorted order')
 })
 
 test('weighted interleaving preserves native slots when hinted bins have unequal capacities', () => {

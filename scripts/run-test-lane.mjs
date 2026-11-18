@@ -235,7 +235,9 @@ const PRODUCT_FILE_COST_SECONDS = new Map([
  * @returns {string[]} complete deterministic permutation of the same files.
  */
 export function orderWeightedProductFiles(files, total) {
-  if (total === 1) return files
+  // CI admits at most four product shards. Larger native shard counts must not
+  // allocate one scheduling bin per requested slot (which may be enormous).
+  if (total === 1 || total > 4) return files
   const weight = (file) => PRODUCT_FILE_COST_SECONDS.get(file) ?? 1
   const ranked = [...files].sort((a, b) =>
     weight(b) - weight(a) || (a < b ? -1 : a > b ? 1 : 0))
