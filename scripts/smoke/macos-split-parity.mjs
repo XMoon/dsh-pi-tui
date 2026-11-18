@@ -1510,6 +1510,18 @@ async function runD2AcpScene({ installation, workRoot, report, start, projectA, 
     assert(/^host=stopped$/mu.test(result.stdout), `${label}: stop did not report a stopped Host`)
     return result
   }
+  /** The Host log is append-only across boots; records are correlated by the
+   *  CURRENT boot's published Host pid, never by an independent substring. */
+  const hostLog = label => {
+    const result = runDaemonCommand(installation, ['logs', '--lines', '1000'])
+    assert(result.status === 0, `${label}: daemon logs exited ${String(result.status)}: ${result.stderr.slice(-500)}`)
+    const records = []
+    for (const line of result.stdout.split('\n')) {
+      if (line.trim() === '') continue
+      try { records.push(JSON.parse(line)) } catch { /* a non-record Host diagnostic line */ }
+    }
+    return { text: result.stdout, records }
+  }
 
   // ── M01/M02: the running public daemon Host + TWO real Clients ───────────
   const inherited = ['P01', 'P06-NOLOG', 'P07-NOHOST', 'A01', 'A02', 'P02-WARM', 'P02-COLD',
@@ -1597,9 +1609,12 @@ async function runD2AcpScene({ installation, workRoot, report, start, projectA, 
   await waitEndpointGone('M04 disable')
   const foreign = await bindForeignAcpEndpoint(endpoint)
   const foreignInode = lstatFacts(endpoint.publicPath).ino
+  let inUseWireCode
   try {
     const busy = await m04Peer.request({ op: 'qualification-acp-access', acpEnabled: true }, 'M04 enable over a foreign listener')
     assert(busy.ok === false, 'M04: enabling over a live foreign listener must be refused')
+    assert(busy.status === undefined, 'M04: a refused enable must not fabricate a status')
+    inUseWireCode = typeof busy.errorCode === 'string' ? busy.errorCode : null
     assert(lstatFacts(endpoint.publicPath).ino === foreignInode, 'M04: the foreign endpoint inode must be untouched')
     const probe = await probeAcpSocket(endpoint.publicPath)
     assert(probe.connected === true, 'M04: the foreign listener must keep answering')
@@ -1624,6 +1639,8 @@ async function runD2AcpScene({ installation, workRoot, report, start, projectA, 
     initialize: true,
     bundleVersion: manifest.version,
     inUseRejected: true,
+    inUseTaxonomy: 'unit-level LOCAL_ACP_SOCKET_IN_USE (test/app/local-acp-listener.test.ts)',
+    inUseWireCode,
     foreignPreserved: true,
     hostInstanceUnchanged: true,
   })
@@ -1659,7 +1676,7 @@ async function runD2AcpScene({ installation, workRoot, report, start, projectA, 
     writer: 'one official Host Session',
   })
 
-  // ── M06: session/new + session/close; close only releases the View ───────
+  // ── M06: session/new + a real TUI on B + a View-only close ───────────────
   // A fresh directory (never projectB, which the main scene already made a
   // Workspace) proves the official Workspace+Session creation path itself.
   const acpWorkspace = join(workRoot, 'd2acp-workspace')
@@ -1672,12 +1689,29 @@ async function runD2AcpScene({ installation, workRoot, report, start, projectA, 
     `M06: session/new must return a real sessionId (got ${JSON.stringify(created?.error ?? created?.result)})`)
   const sessionB = created.result.sessionId
   assert(sessionB !== sessionA, 'M06: session/new must create a distinct Session')
+  // The SAME real Session is opened by a real TUI while the ACP View still holds
+  // it. The TUI's prompt makes the first durable append, so the Session's real
+  // header and Workspace cwd are settled BEFORE the View-only close.
+  const tuiB = start({ name: 'd2acp-session-b', cwd: acpWorkspaceReal, installation, backend: 'daemon', args: ['--session', sessionB] })
+  await waitPainted(tuiB, 'M06 TUI on Session B paint')
+  await waitFrameText(tuiB, sessionB, 'M06 TUI shows the SAME Session id', TIMEOUTS.mount)
+  const bTuiText = 'd2acp m06 tui session b marker'
+  sendKeys(tuiB, bTuiText, 'M06 TUI prompt on Session B')
+  await waitFrameText(tuiB, 'stub answer', 'M06 TUI turn on Session B', TIMEOUTS.turn)
+  const headerB = await waitForHostSessionHeader(dshHome, sessionB, 'M06: Session B durable header', TIMEOUTS.process)
+  assert(realpathSync(headerB.cwd) === acpWorkspaceReal,
+    `M06: Session B cwd ${JSON.stringify(headerB.cwd)} is not the requested Workspace`)
+  const eventsB = hostSessionEvents(dshHome, sessionB)
+  assert(eventsB !== undefined
+    && eventsB.filter(event => event.type === 'user/message' && JSON.stringify(event).includes(bTuiText)).length === 1,
+    'M06: the TUI prompt must persist exactly ONE durable user message in Session B')
   const closeB = await connNew.request(3, 'session/close', { sessionId: sessionB })
   assert(isEmptyAcpResult(closeB), `M06: session/close(B) must return {} (got ${JSON.stringify(closeB?.error ?? closeB?.result)})`)
-  // The official persistence materializes a newly created Session's header on
-  // its FIRST durable append, so a create-only Session may have no log file yet:
-  // the close/resume checks below prove the Session identity exists, and M07's
-  // first prompt settles the durable header with the requested Workspace cwd.
+  // The close releases ONLY this ACP View: the same Session stays visible to the
+  // real TUI (same Session, same durable turn), and no Agent/Session is deleted.
+  assert(tmuxSessionExists(tuiB), 'M06: the real TUI must still be alive after the ACP View close')
+  assert(tmuxCapture(tuiB, 'M06 TUI frame after the View close').includes(bTuiText),
+    'M06: the real TUI must still show the same Session after the ACP View close')
   const badCwd = await connNew.request(4, 'session/new', { cwd: 'relative/path', mcpServers: [] })
   assert(badCwd?.error?.code === -32602 && badCwd?.error?.data?.code === 'LOCAL_ACP_VIEW_INVALID_REQUEST',
     `M06: a relative cwd must be LOCAL_ACP_VIEW_INVALID_REQUEST (got ${JSON.stringify(badCwd?.error ?? badCwd?.result)})`)
@@ -1699,9 +1733,13 @@ async function runD2AcpScene({ installation, workRoot, report, start, projectA, 
   await connResumeB.initialize(1)
   const resumeB = await connResumeB.request(2, 'session/resume', { sessionId: sessionB, cwd: acpWorkspaceReal })
   assert(isEmptyAcpResult(resumeB), `M06: B must stay resumable after close (got ${JSON.stringify(resumeB?.error ?? resumeB?.result)})`)
+  connResumeB.close()
+  await connResumeB.closed
   row('M06', {
     createdSession: sessionB,
-    durableHeader: 'settled by the first append in M07',
+    durableHeaderCwd: 'requested-workspace',
+    tuiSharesSameSession: true,
+    tuiVisibleAfterViewClose: true,
     closeReleasesViewOnly: true,
     resumableAfterClose: true,
     invalidCwdRejected: true,
@@ -1710,21 +1748,24 @@ async function runD2AcpScene({ installation, workRoot, report, start, projectA, 
   })
 
   // ── M07: a real ACP text prompt through the official Host writer ─────────
-  // The M06 View is already resumed on Session B; its FIRST prompt is the first
-  // durable append, which must carry the requested official Workspace cwd.
-  const connPrompt = connResumeB
+  const connPrompt = await openAcp('M07 prompt connection')
+  await connPrompt.initialize(1)
+  const createdC = await connPrompt.request(2, 'session/new', { cwd: acpWorkspaceReal, mcpServers: [] })
+  assert(createdC?.error === undefined && typeof createdC?.result?.sessionId === 'string',
+    `M07: session/new must create a Session for the prompt (got ${JSON.stringify(createdC?.error ?? createdC?.result)})`)
+  const sessionC = createdC.result.sessionId
   const promptText = 'd2acp acp prompt marker'
   const promptResponse = await connPrompt.request(3, 'session/prompt', {
-    sessionId: sessionB,
+    sessionId: sessionC,
     prompt: [{ type: 'text', text: promptText }],
   })
   assert(promptResponse?.error === undefined, `M07: session/prompt failed (${JSON.stringify(promptResponse?.error)})`)
   assert(promptResponse.result?.stopReason === 'end_turn',
     `M07: the prompt must settle with end_turn, saw ${JSON.stringify(promptResponse.result)}`)
-  const headerB = await waitForHostSessionHeader(dshHome, sessionB, 'M07: Session B durable header', TIMEOUTS.process)
-  assert(realpathSync(headerB.cwd) === acpWorkspaceReal,
-    `M07: Session B cwd ${JSON.stringify(headerB.cwd)} is not the requested Workspace`)
-  const eventsC = hostSessionEvents(dshHome, sessionB)
+  const headerC = await waitForHostSessionHeader(dshHome, sessionC, 'M07: Session C durable header', TIMEOUTS.process)
+  assert(realpathSync(headerC.cwd) === acpWorkspaceReal,
+    `M07: Session C cwd ${JSON.stringify(headerC.cwd)} is not the requested Workspace`)
+  const eventsC = hostSessionEvents(dshHome, sessionC)
   assert(eventsC !== undefined, 'M07: the prompted Session has no durable log')
   const userTexts = eventsC.filter(event => event.type === 'user/message' && JSON.stringify(event).includes(promptText))
   assert(userTexts.length === 1, `M07: exactly ONE durable user message must carry the prompt, saw ${String(userTexts.length)}`)
@@ -1733,42 +1774,67 @@ async function runD2AcpScene({ installation, workRoot, report, start, projectA, 
   assert(eventsC.some(event => event.type === 'turn/end'), 'M07: the durable turn must end')
   const updates = connPrompt.received.filter(message => message.method === 'session/update')
   assert(updates.length > 0, 'M07: the ACP peer must receive its own session/update notifications')
-  assert(updates.every(message => message.params?.sessionId === sessionB),
+  assert(updates.every(message => message.params?.sessionId === sessionC),
     'M07: the ACP connection must receive updates ONLY for its own Session')
-  assert(connA.received.every(message => message.method !== 'session/update' || message.params?.sessionId !== sessionB),
+  assert(connA.received.every(message => message.method !== 'session/update' || message.params?.sessionId !== sessionC),
     'M07: an unrelated ACP connection must not receive this Session updates')
   connPrompt.close()
   await connPrompt.closed
-  // Negative: a physical ACP disconnect during (or right after) a prompt never
-  // clears TUI work; the TUI Session A still commits a real turn afterwards.
-  const connDrop = await openAcp('M07 disconnect probe')
-  await connDrop.initialize(1)
-  const createdD = await connDrop.request(2, 'session/new', { cwd: realpathSync(projectB), mcpServers: [] })
-  assert(typeof createdD?.result?.sessionId === 'string', 'M07: session/new for the disconnect probe failed')
-  connDrop.send({
-    jsonrpc: '2.0',
-    id: 3,
-    method: 'session/prompt',
-    params: { sessionId: createdD.result.sessionId, prompt: [{ type: 'text', text: 'disconnect probe' }] },
-  })
-  // Let the frame leave this process before the physical teardown; the pass
-  // predicate remains the real TUI turn below, not this bounded delay.
-  await sleep(100)
-  connDrop.close()
-  await connDrop.closed
-  sendKeys(tui, 'd2acp tui after acp prompt', 'M07 TUI prompt after the ACP disconnect')
-  await waitSessionWithText(dshHome, 'd2acp tui after acp prompt', 'M07 durable TUI turn after the ACP disconnect')
+  // Negative: an ACP View on Session B is physically disconnected while a real
+  // TUI turn on the SAME Session is accepted. The TUI work must still settle:
+  // the accepted user message exists BEFORE the disconnect, and the answering
+  // assistant message plus turn/end must appear AFTER it.
+  const connDisconnect = await openAcp('M07 disconnect View')
+  await connDisconnect.initialize(1)
+  const resumeBForDisconnect = await connDisconnect.request(2, 'session/resume', { sessionId: sessionB, cwd: acpWorkspaceReal })
+  assert(isEmptyAcpResult(resumeBForDisconnect),
+    `M07: the disconnect probe must attach Session B first (got ${JSON.stringify(resumeBForDisconnect?.error ?? resumeBForDisconnect?.result)})`)
+  const bTurnText = 'd2acp m07 tui during acp disconnect'
+  const bQueuedText = 'd2acp m07 queued tui during disconnect'
+  sendKeys(tuiB, bTurnText, 'M07 TUI turn on the ACP-attached Session')
+  // Establish ACCEPTED TUI work BEFORE the disconnect: the durable user message
+  // proves the Host admitted it. A second prompt, submitted while the first turn
+  // is still settling, is the same-Session queued work whose survival the
+  // disconnect must not clear.
+  const bUserIndex = await waitFor(() => {
+    const events = hostSessionEvents(dshHome, sessionB)
+    if (events === undefined) return undefined
+    const index = events.findIndex(event => event.type === 'user/message' && JSON.stringify(event).includes(bTurnText))
+    return index < 0 ? undefined : index
+  }, 'M07 accepted TUI user message before the ACP disconnect', TIMEOUTS.turn)
+  sendKeys(tuiB, bQueuedText, 'M07 second TUI prompt on the ACP-attached Session')
+  const queuedIndex = await waitFor(() => {
+    const events = hostSessionEvents(dshHome, sessionB)
+    if (events === undefined) return undefined
+    const index = events.findIndex(event => event.type === 'user/message' && JSON.stringify(event).includes(bQueuedText))
+    return index < 0 ? undefined : index
+  }, 'M07 second accepted TUI user message before the ACP disconnect', TIMEOUTS.turn)
+  connDisconnect.close()
+  await connDisconnect.closed
+  await waitFor(() => {
+    const events = hostSessionEvents(dshHome, sessionB)
+    if (events === undefined) return undefined
+    const rest = events.slice(queuedIndex + 1)
+    return rest.some(event => event.type === 'assistant/message' && JSON.stringify(event).includes('stub answer'))
+      && rest.some(event => event.type === 'turn/end') ? events : undefined
+  }, 'M07 same-Session TUI turn settles after the ACP disconnect', TIMEOUTS.turn)
+  const frameAfterDisconnect = tmuxCapture(tuiB, 'M07 TUI frame after the disconnect')
+  assert(frameAfterDisconnect.includes(bTurnText) && frameAfterDisconnect.includes(bQueuedText),
+    'M07: the TUI must still show its same-Session and queued work after the ACP View disconnect')
+  sendKeys(tuiB, '/exit', 'M07 exit the Session-B TUI')
+  await waitFor(() => (!tmuxSessionExists(tuiB) ? true : undefined), 'M07 Session-B TUI exits', TIMEOUTS.exit)
   const hostAfterPrompt = requireHost('M07 host')
   assert(hostAfterPrompt.hostPid === hostAtStart.hostPid && hostAfterPrompt.instanceId === hostAtStart.instanceId,
     'M07: the ACP prompt must never replace the Host')
   row('M07', {
-    sessionId: sessionB,
+    sessionId: sessionC,
     stopReason: promptResponse.result.stopReason,
     durableHeaderCwd: 'requested-workspace',
     durableUserMessages: userTexts.length,
     ownUpdatesOnly: true,
-    tuiTurnAfterAcp: true,
-    disconnectPreservedTui: true,
+    disconnectSameSessionTuiTurnSettled: true,
+    tuiWorkAcceptedBeforeDisconnect: true,
+    secondTuiPromptAcceptedBeforeDisconnect: true,
     modelRoute: 'isolated scripted stub',
   })
 
@@ -1784,6 +1850,7 @@ async function runD2AcpScene({ installation, workRoot, report, start, projectA, 
   writeFileSync(endpoint.publicPath, 'FOREIGN-D2ACP', { mode: 0o600 })
   const unsafe = await peer.request({ op: 'qualification-acp-access', acpEnabled: true }, 'M08 enable over a foreign file')
   assert(unsafe.ok === false, 'M08: enabling over a foreign public file must be refused')
+  assert(unsafe.status === undefined, 'M08: the refused enable must not fabricate a status')
   assert(readFileSync(endpoint.publicPath, 'utf8') === 'FOREIGN-D2ACP', 'M08: the foreign file must be preserved')
   assertAcpAccess(await getAcp(peer, 'M08 status after the refusal'), 'disabled', 'M08 status after the refusal')
   unlinkSync(endpoint.publicPath)
@@ -1806,6 +1873,8 @@ async function runD2AcpScene({ installation, workRoot, report, start, projectA, 
     sameEndpointRebound: true,
     inodeChanged: true,
     foreignFilePreserved: true,
+    unsafeTaxonomy: 'unit-level LOCAL_ACP_UNSAFE_SOCKET (test/app/local-acp-listener.test.ts)',
+    unsafeWireCode: typeof unsafe.errorCode === 'string' ? unsafe.errorCode : null,
   })
 
   // ── M09: autoStart persistence across a real Host boot ──────────────────
@@ -1827,10 +1896,13 @@ async function runD2AcpScene({ installation, workRoot, report, start, projectA, 
   assert(autoInit?.result?.protocolVersion === 1, 'M09: the autostart endpoint must answer ACP initialize')
   autoConn.close()
   await autoConn.closed
-  const autoLogs = runDaemonCommand(installation, ['logs', '--lines', '400'])
-  assert(autoLogs.status === 0, `M09: daemon logs exited ${String(autoLogs.status)}`)
-  assert(/acp-autostart/u.test(autoLogs.stdout) && /pre-ready/u.test(autoLogs.stdout),
-    'M09: the Host log must prove the pre-Ready autostart bind')
+  const autoLog = hostLog('M09 autostart log')
+  const preReadyRecords = autoLog.records.filter(record => record.m4a0 === 'acp-autostart'
+    && record.processRole === 'host' && record.pid === afterRestart.hostPid
+    && record.phase === 'pre-ready' && record.status === 'enabled')
+  assert(preReadyRecords.length === 1,
+    `M09: the CURRENT Host boot (pid ${String(afterRestart.hostPid)}) must log exactly ONE acp-autostart/pre-ready record, saw ${String(preReadyRecords.length)}`)
+  assert(!autoLog.text.includes(`dpt-${String(uid)}-`), 'M09: the endpoint root must never appear in the Host log')
   await peer.dispose()
 
   const peer2 = await startPeer('M09 peer after restart')
@@ -1855,12 +1927,17 @@ async function runD2AcpScene({ installation, workRoot, report, start, projectA, 
   const afterUnsafe = requireHost('M09 host after the unsafe boot')
   assert(afterUnsafe.instanceId !== afterOffRestart.instanceId, 'M09: the unsafe boot must publish a new Host instance')
   assert(restartedUnsafe.host === 'ready', 'M09: the Host must stay Ready when the ACP autostart bind fails')
-  const unsafeLogs = runDaemonCommand(installation, ['logs', '--lines', '400'])
-  assert(unsafeLogs.status === 0, `M09: daemon logs exited ${String(unsafeLogs.status)}`)
-  const diagnosticLine = unsafeLogs.stdout.split('\n').find(line => line.includes('acp-autostart-unavailable'))
-  assert(diagnosticLine !== undefined, 'M09: the Host must emit acp-autostart-unavailable on a failed autostart bind')
-  assert(!diagnosticLine.includes('acp.sock') && !diagnosticLine.includes('dpt-') && !diagnosticLine.includes('token='),
+  const unsafeLog = hostLog('M09 failed autostart log')
+  const autostartDiagnostics = unsafeLog.records.filter(record => record.m4a0 === 'diagnostic'
+    && record.code === 'acp-autostart-unavailable' && record.pid === afterUnsafe.hostPid)
+  assert(autostartDiagnostics.length === 1,
+    `M09: the CURRENT Host boot (pid ${String(afterUnsafe.hostPid)}) must log exactly ONE acp-autostart-unavailable diagnostic, saw ${String(autostartDiagnostics.length)}`)
+  assert(typeof autostartDiagnostics[0].failure === 'string' && autostartDiagnostics[0].failure !== '',
+    'M09: the autostart diagnostic must carry a fixed failure category')
+  const diagnosticLine = unsafeLog.text.split('\n').find(line => line.includes('acp-autostart-unavailable'))
+  assert(diagnosticLine !== undefined && !diagnosticLine.includes('acp.sock') && !diagnosticLine.includes('dpt-') && !diagnosticLine.includes('token='),
     'M09: the autostart diagnostic must stay redacted (no endpoint/path/secret)')
+  assert(!unsafeLog.text.includes(`dpt-${String(uid)}-`), 'M09: the endpoint root must never appear in the Host log')
   assert(readdirSync(unsafeTarget).length === 0, 'M09: the failed autostart must not write through the symlink')
   const peer3 = await startPeer('M09 peer after the unsafe boot')
   assertAcpAccess(await getAcp(peer3, 'M09 status after the failed autostart'), 'disabled',
@@ -1872,10 +1949,11 @@ async function runD2AcpScene({ installation, workRoot, report, start, projectA, 
   await writeAutoStart(peer3, false, 'M09 reset autoStart Off')
   row('M09', {
     preReadyBind: true,
-    hostLogPreReady: true,
+    hostLogRecord: 'acp-autostart/pre-ready correlated to the current Host pid',
     autoStartOffNoBind: true,
     bindFailureHostReady: true,
-    redactedDiagnostic: true,
+    redactedDiagnostic: 'one acp-autostart-unavailable record, fixed failure category, no endpoint/path',
+    corruptedSettings: 'acp-startup-preference.test.ts (missing/non-boolean section fails startup loudly)',
     recovery: true,
   })
 
@@ -1929,6 +2007,7 @@ async function runD2AcpScene({ installation, workRoot, report, start, projectA, 
     sigkillStaleInodeStable: true,
     sigkillReclaimed: true,
     reclaimedEndpointInitialize: true,
+    staleToggleFence: 'settings-acp-controls.test.ts (generation mismatch refuses before dispatch)',
   })
   row('M11', {
     status: 'NOT_VERIFIED',
