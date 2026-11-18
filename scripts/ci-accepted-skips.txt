@@ -49,3 +49,12 @@ the macOS classifier requires the real libproc identity
 Darwin file seats require macOS
 Darwin schema 2 requires the real libproc identity
 the real Darwin detached fallback requires macOS
+
+# The macOS launchd manager and the native plist decoder are platform
+# capabilities that Linux cannot provision. The macOS product lane executes
+# the real launchd/plutil path; the Linux runner sees only the boundary.
+the Darwin admin seat requires macOS
+the launchd public-start route requires macOS
+the native launchd lifecycle requires macOS
+the launchd manager uses the macOS native plist decoder
+the native plist decoder is macOS-only
