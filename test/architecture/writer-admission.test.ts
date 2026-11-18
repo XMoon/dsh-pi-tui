@@ -36,10 +36,12 @@ import {
   deliverBusy,
   executeHostCommandSubmission,
   type HostCommandSubmissionDeps,
+  type PromptAttemptHooks,
   type PromptSubmission,
   type SteerSubmissionDeps,
   type SubmissionRuntimeSurface,
 } from '../../src/app/submission/runtime.ts'
+import { acceptSubmitAck, freshSubmitAckState, settleSubmitAck } from '../../src/app/submission/ack.ts'
 import { SessionOperationBarrier, TransitionInProgressError } from '../../src/app/session/operation-barrier.ts'
 import { SESSION_WRITER_HELD_GUIDANCE } from '../../src/runtime/remote/write-failure.ts'
 import { compositionSource } from '../support/composition-surface.ts'
@@ -286,6 +288,202 @@ test('negative control: an indeterminate prompt result never restores the draft'
     'ack:session write result indeterminate',
     'notify:error:session write result is indeterminate — do not retry automatically',
   ], 'an unproven post-dispatch result is not restored and not reclassified as a rejection')
+})
+
+// ── an ACCEPTED attempt's late terminal settle ────────────────────────────
+//
+// Regression: Issue #731 — the obsolete T35 `indeterminate` oracle and the
+// accepted-terminal submit-ack gap. The plan's AC mapping lives in the PR
+// body, not in these titles (docs/guides/testing.md §7 rule 1).
+//
+// Once the Host accepted the prompt, a late transport failure is an EXECUTION
+// problem, not a Composer problem: the draft never comes back, nothing is
+// re-sent, and the gesture's temporary submit ack must still reach its own
+// tokenized terminal (it can otherwise hang as `Submitting…`/`Queued…`).
+// These cases drive the REAL `bindSubmissionRuntime` and fire the acceptance
+// through the write's own `onAccepted` callback, never a preset boolean.
+
+interface AckSettle {
+  readonly reason: string
+  readonly token: number
+  readonly terminal: true
+}
+
+/** One attempt's hook log: the composer owner sees at most one settlement. */
+function attemptRecorder(): { hooks: PromptAttemptHooks; settled: string[] } {
+  const settled: string[] = []
+  return {
+    settled,
+    hooks: {
+      onAccepted: () => { settled.push('accepted') },
+      onRejected: () => { settled.push('rejected') },
+      onUnknown: () => { settled.push('unknown') },
+    },
+  }
+}
+
+/** A recording surface whose prompt callback fires the REAL acceptance first. */
+function acceptedOutcomeSurface(
+  outcome: 'indeterminate' | 'rejected' | 'throw' | 'cancelled' | 'committed',
+): {
+  surface: SubmissionRuntimeSurface
+  calls: string[]
+  ackSettles: AckSettle[]
+} {
+  const ackSettles: AckSettle[] = []
+  const { surface, calls } = recordingSurface({
+    prepareMessage: async () => undefined,
+    prompt: async (_sessionId, _message, options) => {
+      options?.onAccepted?.()
+      if (outcome === 'throw') throw new Error('writer exploded after acceptance')
+      if (outcome === 'indeterminate') {
+        return { kind: 'indeterminate' as const, error: { code: 'session/write-indeterminate', message: 'ACK dropped' } }
+      }
+      if (outcome === 'rejected') {
+        return { kind: 'rejected' as const, error: { code: 'session/agent-busy', message: 'busy' } }
+      }
+      if (outcome === 'cancelled') return { kind: 'cancelled' as const }
+      return { kind: 'committed' as const, value: undefined }
+    },
+    settleSubmitAck: (reason, options) => {
+      ackSettles.push({ reason, token: options.token, terminal: options.terminal })
+    },
+  })
+  return { surface, calls, ackSettles }
+}
+
+test('early Host acceptance + indeterminate settles this gesture\'s ACK once with no restore or replay', async () => {
+  const { surface, calls, ackSettles } = acceptedOutcomeSurface('indeterminate')
+  const { hooks, settled } = attemptRecorder()
+  let releases = 0
+  const runtime = bindSubmissionRuntime({ surface })
+  await runtime.submitPrompt(SUBMISSION, { attempt: hooks, releaseReservation: () => { releases += 1 } })
+  assert.deepEqual(settled, ['accepted'], 'the acceptance latch is the ONE attempt settlement')
+  assert.deepEqual(calls, [
+    'dispatch',
+    'consume',
+  ], 'the accepted gesture consumes once and settles only the temporary ACK — no echo removal, restore or uncertainty notice')
+  assert.deepEqual(ackSettles, [{
+    reason: 'session write settled after Host acceptance',
+    token: SUBMISSION.ackToken,
+    terminal: true,
+  }], 'the terminal settle carries the ORIGINAL gesture token, never a tokenless clear')
+  assert.equal(releases, 1, 'the reservation releases exactly once')
+})
+
+test('accepted + late rejected settles the ACK with the gesture token and no restore or notice', async () => {
+  const { surface, calls, ackSettles } = acceptedOutcomeSurface('rejected')
+  const { hooks, settled } = attemptRecorder()
+  const runtime = bindSubmissionRuntime({ surface })
+  await runtime.submitPrompt(SUBMISSION, { attempt: hooks, releaseReservation: () => {} })
+  assert.deepEqual(settled, ['accepted'], 'an early acceptance wins over the late error')
+  assert.deepEqual(calls, [
+    'dispatch',
+    'consume',
+  ], 'the accepted refusal keeps the committed draft gone and shows no refusal notice')
+  assert.deepEqual(ackSettles.map(settle => [settle.token, settle.terminal]),
+    [[SUBMISSION.ackToken, true]], 'the tokenized terminal ack survives the late refusal')
+})
+
+test('accepted + writer throw settles the ACK with the gesture token and no restore or notice', async () => {
+  const { surface, calls, ackSettles } = acceptedOutcomeSurface('throw')
+  const { hooks, settled } = attemptRecorder()
+  const runtime = bindSubmissionRuntime({ surface })
+  await runtime.submitPrompt(SUBMISSION, { attempt: hooks, releaseReservation: () => {} })
+  assert.deepEqual(settled, ['accepted'], 'the accepted attempt is not re-settled as rejected by the throw')
+  assert.deepEqual(calls, [
+    'dispatch',
+    'consume',
+  ], 'the throw path settles only the temporary ACK — the reserved-submit restore never runs')
+  assert.deepEqual(ackSettles.map(settle => [settle.token, settle.terminal]),
+    [[SUBMISSION.ackToken, true]], 'the catch path owns the same tokenized terminal settle')
+})
+
+test('accepted + cancelled keeps its existing echo + ACK settlement', async () => {
+  const { surface, calls, ackSettles } = acceptedOutcomeSurface('cancelled')
+  const { hooks, settled } = attemptRecorder()
+  const runtime = bindSubmissionRuntime({ surface })
+  await runtime.submitPrompt(SUBMISSION, { attempt: hooks })
+  assert.deepEqual(settled, ['accepted'], 'the acceptance latch already settled the attempt')
+  assert.deepEqual(calls, [
+    'dispatch',
+    'consume',
+    'settleLocal',
+  ], 'the cancelled-after-acceptance exit keeps its dedicated local echo + ACK settlement')
+  assert.deepEqual(ackSettles.map(settle => [settle.token, settle.terminal]),
+    [[SUBMISSION.ackToken, true]], 'the existing cancelled settle stays tokenized')
+})
+
+test('accepted + committed settles no temporary ACK inside the runtime', async () => {
+  // The normal committed path rides the official inbox/user-message/turn-start
+  // bridge; an unconditional early ACK settle here would change that feedback
+  // timing even though this issue proves nothing wrong with it.
+  const { surface, calls, ackSettles } = acceptedOutcomeSurface('committed')
+  const { hooks, settled } = attemptRecorder()
+  const runtime = bindSubmissionRuntime({ surface })
+  await runtime.submitPrompt(SUBMISSION, { attempt: hooks, releaseReservation: () => {} })
+  assert.deepEqual(settled, ['accepted'])
+  assert.deepEqual(calls, ['dispatch', 'consume'], 'the committed path consumes once and leaves the ACK to its existing event bridge')
+  assert.deepEqual(ackSettles, [], 'no unconditional ACK settle was added to the committed path')
+})
+
+test('an old gesture\'s accepted+indeterminate settle never clears the newer pending ack row', async () => {
+  // The real SubmitAckState + the runtime wiring: gesture A is accepted, then
+  // B supersedes its epoch while A's write is still in flight. A's late
+  // terminal settle must carry A's token, so the state machine ignores it.
+  const ack = freshSubmitAckState()
+  const tokenA = acceptSubmitAck(ack, { detail: 'submit', now: 1_000 })
+  const tokenB = acceptSubmitAck(ack, { detail: 'queued', now: 1_100 })
+  assert.equal(ack.epoch, tokenB)
+  let release!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  const settles: number[] = []
+  const { surface } = recordingSurface({
+    prepareMessage: async () => undefined,
+    prompt: async (_sessionId, _message, options) => {
+      options?.onAccepted?.()
+      await gate
+      return { kind: 'indeterminate' as const, error: { code: 'session/write-indeterminate', message: 'ACK dropped' } }
+    },
+    settleSubmitAck: (reason, options) => {
+      settles.push(options.token)
+      settleSubmitAck(ack, { now: 2_000, token: options.token })
+    },
+  })
+  const { hooks } = attemptRecorder()
+  const runtime = bindSubmissionRuntime({ surface })
+  const pending = runtime.submitPrompt({ ...SUBMISSION, ackToken: tokenA }, { attempt: hooks })
+  await flush()
+  release()
+  await pending
+  assert.deepEqual(settles, [tokenA], 'the late terminal settle names the ORIGINAL gesture token')
+  assert.equal(ack.detail, 'queued', 'the newer gesture still owns the pending row')
+})
+
+test('unaccepted + indeterminate keeps the draft, notifies and settles with the token', async () => {
+  const ackSettles: AckSettle[] = []
+  const { surface, calls } = recordingSurface({
+    prepareMessage: async () => undefined,
+    prompt: async () => ({ kind: 'indeterminate' as const, error: { code: 'session/write-indeterminate', message: 'carrier lost' } }),
+    settleSubmitAck: (reason, options) => {
+      ackSettles.push({ reason, token: options.token, terminal: options.terminal })
+    },
+  })
+  const { hooks, settled } = attemptRecorder()
+  const runtime = bindSubmissionRuntime({ surface })
+  await runtime.submitPrompt(SUBMISSION, { attempt: hooks })
+  assert.deepEqual(settled, ['unknown'], 'no acceptance proof means the attempt settles unknown')
+  assert.deepEqual(calls, [
+    'dispatch',
+    'settleLocal',
+    'notify:error:session write result is indeterminate — do not retry automatically',
+  ], 'the unaccepted result keeps the draft/echo path and its explicit uncertainty notice')
+  assert.deepEqual(ackSettles, [{
+    reason: 'session write result indeterminate',
+    token: SUBMISSION.ackToken,
+    terminal: true,
+  }], 'the unaccepted path keeps its existing tokenized terminal ACK')
+  assert.ok(!calls.includes('consume'), 'an unproven result consumes no attachment')
 })
 
 test('negative control: an unsupported prompt result keeps its generic failure path', async () => {
