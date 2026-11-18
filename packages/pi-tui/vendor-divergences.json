@@ -8131,7 +8131,7 @@
       "PI_IMAGE_PROTOCOL=none remains text-only and the root SVG/Image viewer gates fail closed when no protocol is admitted.",
       "The root Retry affordance and sink re-check live preview permission, so capability revocation cannot expose Retry or start another raster."
      ],
-     "notes": "Unit/fork wire tests and root viewer tests guard the protocol and live-permission behavior. On the installed tarball a real iTerm2 verifies the Regular SVG thumbnail, the fullscreen OSC 1337 Preview at 100x30/44x20/30x10/80x24, Tab to Source, CSI-u Escape back to the transcript, Copy of the exact source, the raster ImageViewer opened from the /view-image list with its Esc return to the list and transcript, and the PI_IMAGE_PROTOCOL=none text fallback. Remaining frozen-plan items (Source scroll past the viewport, overlay show/hide, multiplexer/protocol-mismatch negatives, session-switch release) stay unverified outside repository docs."
+     "notes": "Unit/fork wire tests and root viewer tests guard the protocol and live-permission behavior. On the installed tarball a real iTerm2 verifies the Regular SVG thumbnail, the fullscreen OSC 1337 Preview at 100x30/44x20/30x10/80x24, Tab to Source, CSI-u Escape back to the transcript, Copy of the exact source, the raster ImageViewer opened from the /view-image list with its Esc return, and the PI_IMAGE_PROTOCOL=none text fallback. A tmux 3.8 multiplexer run verifies the text-only negative, long Source scrolling, and session-switch release. The real-iTerm2 kitty mismatch and a host overlay round-trip remain partial and are recorded outside repository docs."
     }
    },
    "tests": [
