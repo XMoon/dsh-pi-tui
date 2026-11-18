@@ -17,10 +17,10 @@
  * frame. The loader's cache stays owned by the loader — `dispose()` only
  * releases this panel's subscription and its local `Image` instance.
  *
- * PIXELS: Kitty and Direct SIXEL both place PNG payloads through the ONE
- * managed `ImageGraphics` owner (Image-8 / I8-2B); iTerm2 keeps the intentional
- * workspace restriction and paints `Preview unavailable`. SIXEL readiness is
- * the owner's live `canPaint()` answer, never a process-wide capability.
+ * PIXELS: Kitty and Direct SIXEL place PNG payloads through the ONE managed
+ * `ImageGraphics` owner (Image-8 / I8-2B); Direct iTerm2 places the original
+ * MIME through the fork `Image` OSC 1337 path (X079). SIXEL readiness is the
+ * owner's live `canPaint()` answer, never a process-wide capability.
  *
  * KITTY/SIXEL JPEG/WEBP (Image-6B): neither transport can place JPEG/WebP bytes
  * directly, so this panel paints the SAME scoped 6A derived PNG the transcript
@@ -122,7 +122,7 @@ export class ImageViewerPanel implements Component {
   private readonly imageProtocolPreference: ImageProtocolPreference | undefined
   /** The exact inputs the local instance was built for. */
   private instanceAttachmentId: string | undefined
-  private instanceProtocol: 'kitty' | 'sixel' | undefined
+  private instanceProtocol: 'kitty' | 'sixel' | 'iterm2' | undefined
   private instanceKind: 'raw' | 'derived' | undefined
   private instanceWidth: number | undefined
   private instanceBodyRows: number | undefined
@@ -278,27 +278,18 @@ export class ImageViewerPanel implements Component {
       // managed admission): never start a pointless full-bytes read.
       return [this.failedStatus(width, 'Preview unavailable')]
     }
-    if (protocol !== 'kitty' && protocol !== 'sixel') {
-      // iTerm2 retains the intentional workspace restriction: the leased
-      // AltScreen disables its inline framing (cursor-up sequences the fork's
-      // ANSI width layer does not parse), so native iTerm2 pixels remain
-      // deferred to separate fork/protocol work. Metadata stays visible and
-      // the state is truthful.
-      return [this.failedStatus(width, 'Preview unavailable')]
-    }
     if (this.ref.mediaType === 'image/jpeg' || this.ref.mediaType === 'image/webp') {
-      // Image-6B: neither Kitty nor SIXEL places JPEG/WebP bytes directly, so
-      // JPEG/WebP reuse the SAME scoped 6A derivative the transcript thumbnail
-      // already derives. Never a second decoder, cache or re-read of the
-      // original bytes.
-      return this.derivedBodyLines(width, bodyRows, protocol)
+      // Image-6B: Kitty and SIXEL cannot place JPEG/WebP bytes directly, so
+      // they reuse the SAME scoped 6A derivative the transcript thumbnail
+      // already derives. iTerm2 carries the original MIME (see
+      // `imagePixelsSupported`), so it keeps the raw path below. Never a second
+      // decoder, cache or re-read of the original bytes.
+      if (protocol === 'kitty' || protocol === 'sixel') return this.derivedBodyLines(width, bodyRows, protocol)
     }
     if (!imagePixelsSupported(protocol, this.ref.mediaType)) {
-      // The shared protocol/MIME admission still rejects every other raster
-      // (GIF): both kitty and sixel accept PNG only and this repo installs no
-      // transcoder, so any other format would build an Image that silently
-      // degrades to a text fallback. JPEG/WebP never reach this check (they
-      // take the 6A branch).
+      // The shared protocol/MIME admission rejects every other raster (GIF):
+      // kitty/sixel accept PNG only and this repo installs no transcoder, so
+      // any other format would build an Image that silently degrades to text.
       return [this.failedStatus(width, 'Preview unavailable')]
     }
     const state = this.loader.get(this.ref, this.scope)
@@ -388,7 +379,7 @@ export class ImageViewerPanel implements Component {
   }
 
   /** Render one resolved PNG payload at `width` and clip the rows to the grant. */
-  private imageLines(width: number, bodyRows: number, pixel: ResolvedPixelSource, protocol: 'kitty' | 'sixel'): string[] {
+  private imageLines(width: number, bodyRows: number, pixel: ResolvedPixelSource, protocol: 'kitty' | 'sixel' | 'iterm2'): string[] {
     const image = this.imageFor(width, bodyRows, pixel, protocol)
     return image.render(width).slice(0, bodyRows)
   }
@@ -400,7 +391,7 @@ export class ImageViewerPanel implements Component {
    * base64 string and the payload's pixel dimensions. Any change rebuilds
    * instead of rendering stale cached lines from the wrong protocol/source.
    */
-  private imageFor(width: number, bodyRows: number, pixel: ResolvedPixelSource, protocol: 'kitty' | 'sixel'): PixelBody {
+  private imageFor(width: number, bodyRows: number, pixel: ResolvedPixelSource, protocol: 'kitty' | 'sixel' | 'iterm2'): PixelBody {
     const native = this.graphics !== undefined
     if (this.instance === undefined
       || this.instanceAttachmentId !== this.ref.attachmentId

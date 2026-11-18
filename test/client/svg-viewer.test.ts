@@ -651,18 +651,22 @@ test('a Direct SIXEL viewer paints the grant variant, keeps Source/Copy, and reu
   }
 })
 
-test('iTerm2 keeps the SVG Preview unavailable and starts no raster', () => {
+test('Direct iTerm2 paints the SVG Preview through OSC 1337 and keeps Source usable', async () => {
   capabilities('iterm2')
   try {
     const recorder = pendingLoader()
     const panel = panelOf({ loader: recorder.loader, rows: 24 })
     panel.setMaxRows(24)
+    const loading = panel.render(80)
+    assert.ok(loading.slice(1, -1).join('\n').includes('Rendering preview…'))
+    assert.equal(recorder.calls.length, 1, 'iTerm2 starts the admitted raster variant')
+    recorder.releaseNext()
+    await drain()
     const lines = panel.render(80)
-    assert.ok(lines.slice(1, -1).join('\n').includes('Preview unavailable'))
-    assert.equal(recorder.calls.length, 0, 'the excluded protocol reads/encodes nothing')
-    // Source stays fully usable.
+    assert.ok(lines.slice(1, -1).join('\n').includes('\x1b]1337;File='), 'iTerm2 paints OSC 1337 pixels')
+    assert.ok(!lines.slice(1, -1).join('\n').includes('Preview unavailable'))
     panel.handleInput('\t')
-    assert.ok(stripSgr(panel.render(80).slice(1, -1).join('\n')).includes('<svg'))
+    assert.ok(stripSgr(panel.render(80).slice(1, -1).join('\n')).includes('<svg'), 'Source stays usable')
     panel.dispose()
     recorder.loader.dispose()
   } finally {

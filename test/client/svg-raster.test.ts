@@ -904,17 +904,38 @@ test('the thumbnail reports the real painted pixel body only for an anchored Kit
   }
 })
 
-test('an iTerm2 or image-less surface paints no SVG pixel body and never starts a raster', () => {
-  for (const images of ['iterm2', null] as const) {
-    setCapabilities({ images, trueColor: true, hyperlinks: false })
+test('Direct iTerm2 paints SVG OSC 1337 pixels without publishing a clickable body', async () => {
+  setCapabilities({ images: 'iterm2', trueColor: true, hyperlinks: false })
+  try {
+    const recorder = widthRecordingRasterizer()
+    const loader = new SvgRasterLoader(recorder.rasterize)
+    const thumbnail = new SvgThumbnail('iterm2-digest', SVG_SOURCE, 320, loader, { fallbackColor: text => text }, () => {})
+    assert.ok(thumbnail.render(100).join('\n').includes('Rendering SVG image'))
+    assert.equal(recorder.calls.length, 1)
+    recorder.releaseNext()
+    await new Promise(resolve => setImmediate(resolve))
+    const ready = thumbnail.render(100).join('\n')
+    assert.ok(ready.includes('\x1b]1337;File='), 'Direct iTerm2 paints OSC 1337')
+    assert.equal(thumbnail.paintedImageBody(100), undefined, 'iTerm2 pixels never invent click geometry')
+    thumbnail.dispose()
+    loader.dispose()
+  } finally {
+    resetCapabilitiesCache()
+  }
+})
+
+test('an image-less surface paints no SVG pixel body and never starts a raster', () => {
+  setCapabilities({ images: null, trueColor: true, hyperlinks: false })
+  try {
     const recorder = widthRecordingRasterizer()
     const loader = new SvgRasterLoader(recorder.rasterize)
     const thumbnail = new SvgThumbnail('caps-digest', SVG_SOURCE, 320, loader, { fallbackColor: text => text }, () => {})
-    assert.deepEqual(thumbnail.render(100), [], `${String(images)}: no fake rows`)
+    assert.deepEqual(thumbnail.render(100), [], 'no fake rows')
     assert.equal(thumbnail.paintedImageBody(100), undefined)
-    assert.equal(recorder.calls.length, 0, `${String(images)}: no native child`)
+    assert.equal(recorder.calls.length, 0, 'no native child')
     thumbnail.dispose()
     loader.dispose()
+  } finally {
     resetCapabilitiesCache()
   }
 })

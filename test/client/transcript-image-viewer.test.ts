@@ -485,11 +485,7 @@ test('one and two granted rows start no read for a JPEG and keep the close chrom
   assert.equal(reads, 0, 'no I/O without a body grant')
 })
 
-test('iTerm2 keeps metadata + Preview unavailable (PR2 workspace scope) and never reads', async () => {
-  // Owner decision (2026-10-24): the leased workspace shows real pixels on
-  // Kitty only. The pinned AltScreen disables the iTerm2 image capability and
-  // its cursor-up framing is not understood by the fork's ANSI width layer, so
-  // native iTerm2 pixels are deferred to separate fork/protocol work.
+test('Direct iTerm2 paints the original JPEG through OSC 1337 in the workspace', async () => {
   capabilities('iterm2')
   let reads = 0
   const loader = new ImageLoader(async () => {
@@ -502,9 +498,9 @@ test('iTerm2 keeps metadata + Preview unavailable (PR2 workspace scope) and neve
   await drainLoaderSettle()
   const lines = panel.render(60)
   const text = lines.map(line => stripSgr(line)).join('\n')
-  assert.ok(text.includes('Preview unavailable'), `the workspace states the unavailable preview:\n${text}`)
-  assert.ok(!lines.join('\n').includes('\x1b]1337;File='), 'no iTerm2 inline sequence is painted')
-  assert.equal(reads, 0, 'an undisplayable protocol never reads the bytes')
+  assert.ok(!text.includes('Preview unavailable'), `the workspace paints the admitted preview:\n${text}`)
+  assert.ok(lines.join('\n').includes('\x1b]1337;File='), 'iTerm2 paints the original MIME through OSC 1337')
+  assert.equal(reads, 1, 'the admitted protocol reads the bytes exactly once')
   assert.ok(stripSgr(lines[lines.length - 1]!).includes('1024×768 · image/jpeg · 2.0 KiB'))
   assert.ok(stripSgr(lines[0]!).includes('Image · photo.jpg'))
 })
@@ -971,7 +967,7 @@ test('the local placement key includes the live protocol', async () => {
   panel.dispose()
 })
 
-test('iTerm2 stays Preview unavailable even when a loader is present', async () => {
+test('Direct iTerm2 paints the admitted original JPEG through OSC 1337', async () => {
   capabilities('iterm2')
   let reads = 0
   const loader = new ImageLoader(async () => {
@@ -983,8 +979,8 @@ test('iTerm2 stays Preview unavailable even when a loader is present', async () 
   panel.render(60)
   await drainLoaderSettle()
   const lines = panel.render(60)
-  assert.ok(stripSgr(lines[1]!).includes('Preview unavailable'))
-  assert.ok(!lines.join('\n').includes('\x1bP'), 'no SIXEL DCS on iTerm2')
-  assert.equal(reads, 0, 'the restricted surface reads nothing')
+  assert.ok(!stripSgr(lines[1]!).includes('Preview unavailable'))
+  assert.ok(lines.join('\n').includes('\x1b]1337;File='), 'no SIXEL DCS, but real OSC 1337 on Direct iTerm2')
+  assert.equal(reads, 1, 'the admitted surface reads once')
   panel.dispose()
 })
