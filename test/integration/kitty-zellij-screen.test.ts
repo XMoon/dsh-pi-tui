@@ -232,7 +232,9 @@ async function settlePainted(
   label: string,
   painted: () => boolean,
 ): Promise<void> {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
+  // At 20ms per VT render wait, 35 attempts preserve the original
+  // 20 × (15ms + 20ms) ~700ms positive-render observation budget.
+  for (let attempt = 0; attempt < 35; attempt += 1) {
     app.requestRender()
     await vt.waitForRender()
     if (!painted()) continue
