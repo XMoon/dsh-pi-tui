@@ -812,8 +812,23 @@ async function expandNestedToolCard(session, needle, label) {
   const expandedAt = () => tmuxCapture(session, `${label} after expand`)
     .split('\n')
     .some(row => row.includes(needle) && /[▼▾]/u.test(row))
-  sendMouseClick(session, rowIndex + 1, marker + 1, `${label} disclosure click`)
-  await waitFor(expandedAt, `${label} the nested ${needle} card expanded`, 10_000)
+  // A streaming transcript can move the card between the capture and the
+  // click; re-locate the CURRENT painted row and click again each tick until
+  // the painted expansion proves the toggle.
+  const deadline = Date.now() + 15_000
+  while (!expandedAt()) {
+    if (Date.now() > deadline) {
+      throw new Error(`${label}: the nested ${needle} card never expanded under the disclosure click`)
+    }
+    const lines = tmuxCapture(session, `${label} relocate`).split('\n')
+    const row = lines.findIndex(line => line.includes(needle) && /[▶▸]/u.test(line))
+    if (row >= 0) {
+      const marker = lines[row].search(/[▶▸]/u)
+      sendMouseClick(session, row + 1, marker + 1, `${label} disclosure click`)
+    }
+    await sleep(1_000)
+  }
+  await waitFor(expandedAt, `${label} the nested ${needle} card expanded`, 5_000)
   await waitFor(expandedAt, `${label} the nested ${needle} card expanded`, 10_000)
 }
 
