@@ -1357,13 +1357,17 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
   // Bind the WHOLE controlled chain, not just the requested prompt text: the
   // official getApp must select this run's exact PID, the show/typeText/getState
   // window ids must agree, and the typed marker must be the exact argument.
-  const inputEvents = eventsOf(dshHome, input.sessionId)
-  const inputDispatches = cuaDispatches(inputEvents, input.afterIndex)
+  const liveInputDispatches = () => cuaDispatches(eventsOf(dshHome, input.sessionId), input.afterIndex)
     .filter(dispatch => dispatch.rootCallId === input.dispatch.rootCallId)
-  const getAppDispatch = inputDispatches.find(dispatch => dispatchMethod(dispatch) === 'getApp')
-  const showDispatch = inputDispatches.find(dispatch => dispatchMethod(dispatch) === 'show')
-  const typeDispatch = inputDispatches.find(dispatch => dispatchMethod(dispatch) === 'typeText')
-  const stateDispatch = inputDispatches.find(dispatch => dispatchMethod(dispatch) === 'getState')
+  const getAppDispatch = liveInputDispatches().find(dispatch => dispatchMethod(dispatch) === 'getApp')
+  const showDispatch = liveInputDispatches().find(dispatch => dispatchMethod(dispatch) === 'show')
+  const typeDispatch = liveInputDispatches().find(dispatch => dispatchMethod(dispatch) === 'typeText')
+  // typeText settles BEFORE the sequential getState dispatch is durable: wait
+  // for the getState dispatch on the live event stream instead of freezing the
+  // list at the typeText result instant.
+  const stateDispatch = await waitFor(() => liveInputDispatches()
+    .find(dispatch => dispatchMethod(dispatch) === 'getState'),
+  'MAC09-08 official getState dispatch', TIMEOUTS.turn)
   assert(getAppDispatch !== undefined && dispatchParams(getAppDispatch)?.selector === String(textEditPid),
     'MAC09-08: the official getApp did not select this run\'s exact TextEdit PID')
   const typeParams = dispatchParams(typeDispatch)
@@ -1376,7 +1380,7 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
   assert(typeof typeParams?.windowId === 'number' && typeParams.windowId === stateParams?.windowId
     && dispatchParams(showDispatch)?.windowId === typeParams.windowId,
     'MAC09-08: show/typeText/getState do not target the same controlled window id')
-  const markerResult = await waitFor(() => cuaResults(inputEvents, 0)
+  const markerResult = await waitFor(() => cuaResults(eventsOf(dshHome, input.sessionId), 0)
     .find(result => result.rootCallId === input.dispatch.rootCallId
       && dispatchMethod(result) === 'getState'
       && dispatchContentText(result).includes(marker)),
