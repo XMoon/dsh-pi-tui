@@ -233,7 +233,13 @@ export async function runWebStartupPreference(context) {
     tui.send('\u001b')
     await tui.waitForScreenGone('Status: enabled', 'PC-06 menu closed')
     // The TUI keeps working on the serving Host.
-    tui.send('pc-06 tui works\r')
+    // Split typing from submitting: a batched `pc-06 tui works\r` may be
+    // consumed before the Composer paints it, so the release check below
+    // could pass on a baseline empty box. Prove the REAL Composer painted
+    // THIS input first, then submit.
+    tui.send('pc-06 tui works')
+    await tui.waitForComposerDraft('pc-06 tui works', 60_000)
+    tui.send('\r')
     await tui.waitForScreen('pc-06 tui works', 'PC-06 TUI prompt')
     // The next gesture is a second `/web`; it must not land inside the
     // submission hold that is still keeping this draft in the Composer.
