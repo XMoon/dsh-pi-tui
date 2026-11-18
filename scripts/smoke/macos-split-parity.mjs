@@ -2625,12 +2625,14 @@ async function runD4LaunchdScene({ installation, workRoot, report, start, projec
     'L05: the stopped Host registry still claims the old instance')
   report.rows.push({ id: 'L05', status: 'PASS', hostPid: restartedHost.record.hostPid, kernelIdentityGone: true, jobRemoved: true })
 
-  // Stopping the launchd Host keeps the plist and its private streams. `logs`
-  // must use those retained streams, never the older independent host.log.
+  // A stopped launchd job leaves two possible historical sources (retained
+  // launchd streams and an earlier host.log) and no live authority proving the
+  // most recent one. `logs` must fail closed instead of returning either file.
   const postStopLogs = daemon(['logs', '--lines', '20'])
-  assert(postStopLogs.status === 0 && /\[dsh-pi-tui daemon: launchd (stdout|stderr)\]/u.test(postStopLogs.stdout),
-    `L08-POSTSTOP: a stopped launchd Host must keep its retained stream source, saw exit ${String(postStopLogs.status)}: ${postStopLogs.stderr.slice(-500)}`)
-  report.rows.push({ id: 'L08-POSTSTOP', status: 'PASS', source: 'retained launchd streams after stop', staleHostLogIgnored: true })
+  assert(postStopLogs.status === 4 && /LOG_SOURCE_UNAVAILABLE/u.test(postStopLogs.stderr)
+    && !/retained launchd stdout|stale host\.log/u.test(postStopLogs.stdout),
+  `L08-POSTSTOP: a stopped launchd job must not guess a log source, saw exit ${String(postStopLogs.status)}: ${postStopLogs.stderr.slice(-500)}`)
+  report.rows.push({ id: 'L08-POSTSTOP', status: 'PASS', code: 'LOG_SOURCE_UNAVAILABLE', staleHostLogIgnored: true })
 
   // ── L09 (second profile install isolation, best-effort native) ──────────
   let secondProfileEvidence

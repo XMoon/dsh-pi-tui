@@ -265,6 +265,147 @@ function readPlistString(content: string, key: string): string {
   return decodePlistValue(matches[0][1] as string)
 }
 
+/** Top-level plist keys that can start the job or override its fixed execution identity. */
+const UNSAFE_FIXED_KEYS = [
+  'WatchPaths',
+  'QueueDirectories',
+  'StartInterval',
+  'StartCalendarInterval',
+  'StartOnMount',
+  'Sockets',
+  'MachServices',
+  'LaunchEvents',
+  'Program',
+  'BundleProgram',
+  'RootDirectory',
+  'UserName',
+  'GroupName',
+] as const
+
+interface PlistEntry {
+  readonly kind: 'string' | 'array' | 'dict' | 'true' | 'false' | 'integer'
+  readonly body: string
+}
+
+/** Read one key's value shape from an already comment-stripped plist. */
+function readPlistEntry(content: string, key: string, required: boolean): PlistEntry | undefined {
+  const escaped = key.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')
+  const pattern = new RegExp(`<key>${escaped}</key>\\s*`, 'gu')
+  const matches = [...content.matchAll(pattern)]
+  if (matches.length === 0) {
+    if (required) throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', `launchd: the plist has no ${key} value`)
+    return undefined
+  }
+  if (matches.length !== 1) {
+    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', `launchd: the plist has more than one ${key} value`)
+  }
+  const rest = content.slice((matches[0].index ?? 0) + matches[0][0].length)
+  if (rest.startsWith('<string>')) {
+    const end = rest.indexOf('</string>')
+    if (end < 0) throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', `launchd: ${key} is not a closed string`)
+    return { kind: 'string', body: rest.slice('<string>'.length, end) }
+  }
+  if (rest.startsWith('<array>')) {
+    const end = rest.indexOf('</array>')
+    if (end < 0) throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', `launchd: ${key} is not a closed array`)
+    return { kind: 'array', body: rest.slice('<array>'.length, end) }
+  }
+  if (rest.startsWith('<dict>')) {
+    const end = rest.indexOf('</dict>')
+    if (end < 0) throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', `launchd: ${key} is not a closed dictionary`)
+    return { kind: 'dict', body: rest.slice('<dict>'.length, end) }
+  }
+  if (rest.startsWith('<true/>')) return { kind: 'true', body: '' }
+  if (rest.startsWith('<false/>')) return { kind: 'false', body: '' }
+  if (rest.startsWith('<integer>')) {
+    const end = rest.indexOf('</integer>')
+    if (end < 0) throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', `launchd: ${key} is not a closed integer`)
+    return { kind: 'integer', body: rest.slice('<integer>'.length, end) }
+  }
+  throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', `launchd: ${key} has an unsupported value shape`)
+}
+
+function readFixedString(content: string, key: string): string {
+  const entry = readPlistEntry(content, key, true) as PlistEntry
+  if (entry.kind !== 'string') throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', `launchd: ${key} is not a string`)
+  return decodePlistValue(entry.body)
+}
+
+function readFixedArray(content: string, key: string): string[] {
+  const entry = readPlistEntry(content, key, true) as PlistEntry
+  if (entry.kind !== 'array') throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', `launchd: ${key} is not an array`)
+  const items = [...entry.body.matchAll(/<string>([\s\S]*?)<\/string>/gu)].map(match => decodePlistValue(match[1] as string))
+  const residual = entry.body.replace(/<string>[\s\S]*?<\/string>/gu, '').replace(/\s+/gu, '')
+  if (residual !== '') throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', `launchd: ${key} has a non-string element`)
+  return items
+}
+
+function readFixedDict(content: string, key: string): Map<string, string> {
+  const entry = readPlistEntry(content, key, true) as PlistEntry
+  if (entry.kind !== 'dict') throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', `launchd: ${key} is not a dictionary`)
+  const values = new Map<string, string>()
+  const pair = /<key>([\s\S]*?)<\/key>\s*<string>([\s\S]*?)<\/string>/gu
+  for (const match of entry.body.matchAll(pair)) {
+    const name = decodePlistValue(match[1] as string)
+    if (values.has(name)) throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', `launchd: ${key}.${name} is duplicated`)
+    values.set(name, decodePlistValue(match[2] as string))
+  }
+  const residual = entry.body.replace(pair, '').replace(/\s+/gu, '')
+  if (residual !== '') throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', `launchd: ${key} has a non-string value`)
+  return values
+}
+
+function readFixedInteger(content: string, key: string): number {
+  const entry = readPlistEntry(content, key, true) as PlistEntry
+  if (entry.kind !== 'integer' || !/^-?\d+$/u.test(entry.body.trim())) {
+    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', `launchd: ${key} is not an integer`)
+  }
+  return Number(entry.body.trim())
+}
+
+/**
+ * Prove the installed plist's FIXED launch definition before `bootstrap`.
+ *
+ * A full byte comparison would reject harmless user runtime edits, which the
+ * accepted contract preserves. A user-edited `RunAtLoad`, `KeepAlive`, program,
+ * argument, working directory, log sink, environment, umask or known execution
+ * trigger must never reach `bootstrap`: the native probe showed a
+ * `RunAtLoad=true` job executes its program during bootstrap, before any
+ * post-load check. Unknown non-trigger keys and comments remain user-owned.
+ */
+export function assertLaunchdFileDefinition(facts: LaunchdUnitFacts, content: string): void {
+  const cleaned = content.replace(/<!--[\s\S]*?-->/gu, '')
+  const label = buildLaunchdLabel(facts.scopeId)
+  const logs = launchdLogPaths(facts.scopeDir)
+  const reject = (reason: string): never => {
+    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', `launchd: the profile plist has a changed fixed launch definition (${reason}); refusing to bootstrap it`)
+  }
+  if (readFixedString(cleaned, 'Label') !== label) reject('Label')
+  const argv = readFixedArray(cleaned, 'ProgramArguments')
+  if (argv.length !== 2 || argv[0] !== facts.nodePath || argv[1] !== facts.hostEntryPath) reject('ProgramArguments')
+  if (readFixedString(cleaned, 'WorkingDirectory') !== facts.profileRealpath) reject('WorkingDirectory')
+  if (readFixedString(cleaned, 'StandardOutPath') !== logs.stdout) reject('StandardOutPath')
+  if (readFixedString(cleaned, 'StandardErrorPath') !== logs.stderr) reject('StandardErrorPath')
+  if (readFixedInteger(cleaned, 'Umask') !== LAUNCHD_UMASK) reject('Umask')
+  const env = readFixedDict(cleaned, 'EnvironmentVariables')
+  const expectedEnv: Readonly<Record<string, string>> = {
+    DSH_HOME: facts.dshHome,
+    SPLIT_PROCESS_DSH_ANCHOR: facts.dshAnchor,
+    SPLIT_PROCESS_PROFILE: facts.profile,
+  }
+  const envKeys = [...env.keys()]
+  if (envKeys.length !== Object.keys(expectedEnv).length || envKeys.some(key => env.get(key) !== expectedEnv[key])) {
+    reject('EnvironmentVariables')
+  }
+  for (const key of ['RunAtLoad', 'KeepAlive'] as const) {
+    const entry = readPlistEntry(cleaned, key, false)
+    if (entry !== undefined && entry.kind !== 'false') reject(key)
+  }
+  for (const key of UNSAFE_FIXED_KEYS) {
+    if (readPlistEntry(cleaned, key, false) !== undefined) reject(key)
+  }
+}
+
 /** The installed plist metadata of one owned unit. */
 function inspectLaunchdIdentity(content: string, facts: LaunchdUnitFacts, label: string): string {
   if (readPlistString(content, 'Label') !== label) {
@@ -848,14 +989,11 @@ export async function startLaunchdService(
   // mutation. Re-prove the captured file identity at the adapter boundary and
   // again immediately before each mutating request.
   assertLaunchdFileIdentity(unit, facts, deps)
-  // A user-edited plist can change RunAtLoad or ProgramArguments. `bootstrap`
-  // may execute such a definition IMMEDIATELY (verified by the native probe),
-  // so the fixed definition must be proven before any manager operation that
-  // could start it. User edits are preserved on disk; they are never
-  // bootstrapped by this product.
-  if (unit.content !== renderLaunchdPlist(facts)) {
-    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'launchd: the profile plist contains user edits; refusing to bootstrap an unverified definition')
-  }
+  // A user-edited plist can change RunAtLoad, KeepAlive or a trigger that makes
+  // launchd execute a modified program during bootstrap. Prove the fixed launch
+  // definition and reject those edits before any manager operation; harmless
+  // comments/runtime keys remain user-owned.
+  assertLaunchdFileDefinition(facts, unit.content)
   let observed = await inspectLaunchdService(unit, deps)
   if (observed.kind === 'unknown') {
     throw new LocalScopeError('HOST_MANAGER_START_FAILED', 'launchd: the loaded job state is not recognizable; refusing to start')

@@ -543,10 +543,12 @@ supported Daemon platform in this contract.
   `kickstart`s, enables or restarts a job, creates the profile runtime scope or
   migrates a running independent Host. A same-identity plist is reused
   byte-for-byte; a foreign identity, symlink, other scope/profile/build or
-  foreign loaded job is refused. `daemon start` proves the canonical fixed
-  definition before any `bootstrap`: a user-edited plist is preserved on disk
-  but refused rather than executed (a user-edited `RunAtLoad=true` can run a
-  modified program during bootstrap), and the command never rewrites it.
+  foreign loaded job is refused. `daemon start` proves the fixed launch
+  definition and known execution triggers before any `bootstrap`: changes to
+  the program, arguments, working directory, log sinks, environment, umask,
+  `RunAtLoad`, `KeepAlive` or a known trigger are refused rather than executed
+  (a user-edited `RunAtLoad=true` can run a modified program during bootstrap);
+  comments and harmless user runtime keys are preserved and never rewritten.
   `daemon uninstall` removes only that verified plist and, when the job is
   loaded from it, `bootout`s only that verified job; it keeps the private logs,
   Sessions, Workspace and credentials, and leaves a running independent Host
@@ -738,13 +740,13 @@ stdout/stderr.
   output is exit 4. On macOS a verified loaded LaunchAgent is the source:
   `daemon logs` reads its two private files (`launchd.stdout.log` and
   `launchd.stderr.log`) as separately bounded, separately labelled streams and
-  never pretends they are time-merged; after a launchd Host stops, its retained
-  private streams are the current source when they exist. An independent Host
-  (no plist, or an installed plist that never produced a launchd stream) keeps
-  the bounded/sanitized scope `host.log` tail. Missing output is exit 4; an
-  empty retained launchd stream is unavailable, never a stale `host.log`
-  substitute; a stale log from another process is never presented as the
-  current record. Output is bounded and
+  never pretends they are time-merged. After the launchd job is unloaded there
+  is no live authority proving whether the retained launchd streams or an older
+  `host.log` is the most recent Host: `daemon logs` returns
+  `LOG_SOURCE_UNAVAILABLE` and reads neither. A live independent Host keeps the
+  bounded/sanitized scope `host.log` tail; with no plist and no live Host,
+  `host.log` is the only remaining source. A stale log from another process is
+  never presented as the current record. Output is bounded and
   best-effort
   sanitized (ANSI/control sequences, token/cookie/Authorization and
   connect/launch URL material); the user-facing notice states that the

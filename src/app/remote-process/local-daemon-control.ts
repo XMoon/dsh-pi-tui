@@ -1620,10 +1620,10 @@ export function sanitizeLogText(text: string): string {
  * private `launchd.stdout.log` / `launchd.stderr.log` are read as two
  * separately bounded, separately labelled streams (never presented as one
  * time-merged log). A job that is installed but NOT loaded does not govern an
- * independent Host, so that Host keeps reading `host.log`. After a launchd Host
- * stops, its retained private streams are the current source when they exist;
- * a plist that never produced a launchd stream falls back to `host.log`, and an
- * empty retained stream is an explicit unavailable source, never a stale file.
+ * independent Host, so that Host keeps reading `host.log`. After the launchd
+ * job has stopped there is no live authority proving whether the retained
+ * launchd streams or an earlier `host.log` is the most recent Host; the source
+ * is unprovable and the command fails closed instead of guessing a file.
  */
 async function runDarwinLogs(
   scope: LocalScope,
@@ -1693,15 +1693,11 @@ async function runDarwinLogs(
       }
       launchdSource = launchdFacts
     } else if (launchdService?.kind === 'not-loaded') {
-      // A stopped launchd Host keeps its private streams. Prefer those over a
-      // possibly stale independent host.log; if neither stream was ever
-      // created, this profile never had a launchd run and host.log is the only
-      // remaining source.
-      const logs = launchdLogPaths(launchdFacts.scopeDir)
-      const tail = deps.hostLogTail ?? tailHostLog
-      const stdout = await tail(logs.stdout, lines)
-      const stderr = await tail(logs.stderr, lines)
-      if (stdout !== undefined || stderr !== undefined) launchdSource = launchdFacts
+      // A stopped job leaves two possible historical sources (the retained
+      // launchd streams and an earlier independent host.log) and no live
+      // authority that proves which one is the most recent Host. Never choose
+      // one by file existence; the caller can read the retained files directly.
+      throw new DaemonControlError('LOG_SOURCE_UNAVAILABLE', 'the last Host log source cannot be proven after the launchd job stopped; read the retained launchd logs or host.log directly')
     }
   }
   if (launchdSource !== undefined) {

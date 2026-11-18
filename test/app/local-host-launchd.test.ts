@@ -18,6 +18,7 @@ import { join } from 'node:path'
 import test, { type TestContext } from 'node:test'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
 import {
+  assertLaunchdFileDefinition,
   buildLaunchdLabel,
   inspectLaunchdService,
   inspectOwnedLaunchdUnit,
@@ -500,19 +501,83 @@ test('start re-proves the plist identity after the async inspection and before b
   assert.equal(base.calls.some(args => args[0] === 'bootstrap' || args[0] === 'kickstart'), false, 'a plist changed after inspection is never bootstrapped')
 })
 
-test('start refuses a user-edited plist before any launchctl call', async t => {
+test('start allows a comment-only plist edit and never rewrites the user bytes', async t => {
   const fx = fixture(t)
   const launchctl = fakeLaunchctl(fx, { loaded: false })
   const deps = depsOf(fx, { launchctl: launchctl.run })
   const installed = await installLaunchdUnit(fx.facts, deps)
-  writeFileSync(installed.filePath, `${readFileSync(installed.filePath, 'utf8')}\n<!-- user runtime edit -->\n`, { mode: 0o600 })
+  const edited = `${readFileSync(installed.filePath, 'utf8')}\n<!-- user runtime comment -->\n`
+  writeFileSync(installed.filePath, edited, { mode: 0o600 })
+  const unit = ownedUnitOf(fx, deps)
+  launchctl.calls.length = 0
+  await startLaunchdService(fx.facts, unit, deps)
+  assert.deepEqual(launchctl.calls, [
+    ['print', `gui/${String(UID)}/${unit.label}`],
+    ['bootstrap', `gui/${String(UID)}`, installed.filePath],
+    ['print', `gui/${String(UID)}/${unit.label}`],
+    ['kickstart', `gui/${String(UID)}/${unit.label}`],
+  ])
+  assert.equal(readFileSync(installed.filePath, 'utf8'), edited, 'starting never rewrites the user file')
+})
+
+test('start refuses a RunAtLoad=true edit before any launchctl call', async t => {
+  const fx = fixture(t)
+  const launchctl = fakeLaunchctl(fx, { loaded: false })
+  const deps = depsOf(fx, { launchctl: launchctl.run })
+  const installed = await installLaunchdUnit(fx.facts, deps)
+  const canonical = readFileSync(installed.filePath, 'utf8')
+  const changed = canonical.replace('<key>RunAtLoad</key>\n  <false/>', '<key>RunAtLoad</key>\n  <true/>')
+  assert.notEqual(changed, canonical)
+  writeFileSync(installed.filePath, changed, { mode: 0o600 })
   const unit = ownedUnitOf(fx, deps)
   launchctl.calls.length = 0
   await assert.rejects(
     startLaunchdService(fx.facts, unit, deps),
     (error: unknown) => error instanceof LocalScopeError && error.code === 'HOST_MANAGER_UNIT_CONFLICT',
   )
-  assert.deepEqual(launchctl.calls, [], 'an edited plist is refused before bootstrap can execute it')
+  assert.deepEqual(launchctl.calls, [], 'a bootstrap trigger edit is refused before launchctl can execute it')
+})
+
+test('start refuses a changed ProgramArguments before any launchctl call', async t => {
+  const fx = fixture(t)
+  const launchctl = fakeLaunchctl(fx, { loaded: false })
+  const deps = depsOf(fx, { launchctl: launchctl.run })
+  const installed = await installLaunchdUnit(fx.facts, deps)
+  const canonical = readFileSync(installed.filePath, 'utf8')
+  const changed = canonical.replace(fx.facts.hostEntryPath, '/usr/bin/true')
+  assert.notEqual(changed, canonical)
+  writeFileSync(installed.filePath, changed, { mode: 0o600 })
+  const unit = ownedUnitOf(fx, deps)
+  launchctl.calls.length = 0
+  await assert.rejects(
+    startLaunchdService(fx.facts, unit, deps),
+    (error: unknown) => error instanceof LocalScopeError && error.code === 'HOST_MANAGER_UNIT_CONFLICT',
+  )
+  assert.deepEqual(launchctl.calls, [], 'a changed program is refused before launchctl can execute it')
+})
+
+test('the fixed-definition reader keeps harmless edits and rejects execution triggers', t => {
+  const fx = fixture(t)
+  const canonical = renderLaunchdPlist(fx.facts)
+  assert.doesNotThrow(() => assertLaunchdFileDefinition(fx.facts, `${canonical}\n<!-- comment -->\n`))
+  assert.doesNotThrow(() => assertLaunchdFileDefinition(
+    fx.facts,
+    canonical.replace('\n</dict>\n</plist>', '\n  <key>ThrottleInterval</key>\n  <integer>10</integer>\n</dict>\n</plist>'),
+  ))
+  assert.throws(
+    () => assertLaunchdFileDefinition(
+      fx.facts,
+      canonical.replace('\n</dict>\n</plist>', '\n  <key>WatchPaths</key>\n  <array><string>/tmp</string></array>\n</dict>\n</plist>'),
+    ),
+    (error: unknown) => error instanceof LocalScopeError && error.code === 'HOST_MANAGER_UNIT_CONFLICT',
+  )
+  assert.throws(
+    () => assertLaunchdFileDefinition(
+      fx.facts,
+      canonical.replace('<key>RunAtLoad</key>\n  <false/>', '<key>RunAtLoad</key>\n  <true/>'),
+    ),
+    (error: unknown) => error instanceof LocalScopeError && error.code === 'HOST_MANAGER_UNIT_CONFLICT',
+  )
 })
 
 test('stop boots out only a matched job, verifies removal and never signals twice', async t => {
