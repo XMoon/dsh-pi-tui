@@ -784,16 +784,15 @@ async function expandNestedToolCard(session, needle, label) {
   const line = lines[rowIndex]
   const marker = line.search(/[▶▸]/u)
   assert(marker >= 0, `${label}: the nested ${needle} card has no painted disclosure marker`)
-  // tmux only forwards SGR mouse sequences when the client pane enables the
-  // mouse protocol; a bare literal injection is not, so drive the SAME
-  // disclosure through the pane's real keyboard mapping first (the arrow
-  // disclosure key) and verify the expansion from the painted frame.
-  const expandedAt = async () => tmuxCapture(session, `${label} after expand`)
+  // The per-card tool disclosure is MOUSE-OWNED on the full-screen Focus
+  // surface; the SGR click is the user's real toggle. The painted frame is the
+  // proof: the expansion must be visible before the image-row wait runs, and
+  // an unexpanded card fails HERE instead of inside the identity wait.
+  const expandedAt = () => tmuxCapture(session, `${label} after expand`)
     .split('\n')
     .some(row => row.includes(needle) && /[▼▾]/u.test(row))
-  // The pane enables mouse reporting (tmux forwards SGR clicks), so the click
-  // is the real per-card toggle; keep the painted expansion as the proof.
   sendMouseClick(session, rowIndex + 1, marker + 1, `${label} disclosure click`)
+  await waitFor(expandedAt, `${label} the nested ${needle} card expanded`, 10_000)
   await waitFor(expandedAt, `${label} the nested ${needle} card expanded`, 10_000)
 }
 
@@ -1380,7 +1379,13 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
   await expandNestedToolCard(tui, 'cua · screenshot', 'MAC09-07 screenshot result')
   // The TSP tool-result image identity line is the frozen `[IMAGE] name ·
   // W×H · bytes` row (`imageIdentityText`); `🖼️` is the DRAFT/queued
-  // attachment vocabulary, never the tool-result row.
+  // attachment vocabulary, never the tool-result row. Record the exact
+  // expanded body: if the settled child content ever stops carrying the
+  // image block, this digest is the evidence of what was really painted.
+  const expandedCard = tmuxCapture(tui, 'MAC09-07 expanded screenshot card')
+  const bodyStart = expandedCard.indexOf('cua · screenshot')
+  const expandedBody = bodyStart < 0 ? '' : expandedCard.slice(bodyStart, bodyStart + 2000)
+  report.macos07 = { expandedCardDigest: sha16(expandedBody), paintedIdentityRow: expandedBody.includes('[IMAGE]') }
   const identityText = `[IMAGE] ${dimensions.width}×${dimensions.height}`
   const imageFrame = await waitFrameText(tui, '[IMAGE]', 'MAC09-07 Client image identity row', TIMEOUTS.mount)
   assert(imageFrame.includes(identityText),
