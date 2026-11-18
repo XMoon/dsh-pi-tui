@@ -104,6 +104,17 @@ export class CuaAccessUnavailableError extends Error {
 }
 
 /**
+ * The Host observation basis of the CUA access port: a token that changes when
+ * the provider/service or the Split connection generation changes, plus the
+ * subscription that lets a per-open page discard an older observation before
+ * it can paint or dispatch against the new one.
+ */
+export interface CuaAccessObservation {
+  readSnapshot(): unknown
+  subscribe(listener: () => void): () => void
+}
+
+/**
  * The ONE Client-side access surface of the official CUA provider.
  *
  * Reads never mutate; every write is an explicit user action and its result is
@@ -111,6 +122,8 @@ export class CuaAccessUnavailableError extends Error {
  * permission state must perform a fresh read afterwards.
  */
 export interface CuaAccessPort {
+  /** The Host observation basis this port's reads and actions belong to. */
+  readonly observation: CuaAccessObservation
   /** Read the official platform-tagged permission observation. */
   readSystemStatus(): Promise<CuaSystemStatus>
   /** Read fresh stored application decisions without issuing a native request. */

@@ -5,12 +5,18 @@
  * the official bundle state, the two independent macOS privileges, the helper
  * identity, the PTC facts and the persisted application decisions. Every
  * action forwards to the per-open {@link CuaAccessSettingsController}; the page
- * owns only transient presentation state (cursor, scroll, confirmation, help)
- * and dies with the page instance.
+ * owns only transient presentation state (cursor, free scroll, confirmation,
+ * help) and dies with the page instance.
  *
- * The Host/provider is the only authority. A Request/Open action is painted as
- * an action receipt, never as an Allowed permission; only a fresh read may
- * paint Allowed. No TCC access, no local permission store, no second provider.
+ * Safety rules pinned here:
+ *  - a dispatched action requires the CURRENT painted frame (controller
+ *    revision/epoch identity) and a live re-read of the action's target;
+ *  - the controller rejects a second action while one is in flight;
+ *  - a confirmation is its OWN projection: the risk text must be fully visible
+ *    before y/Enter/confirm is paintable or dispatchable;
+ *  - the body scrolls freely (wheel/keys); the selected action is only revealed
+ *    when the user moves it, never by an automatic jump on the first frame;
+ *  - hit targets are the exact semantic label cells, never the fitted padding.
  *
  * @module @xmoon76/dsh-pi-tui/tui/panels/computer-use-settings-page
  */
@@ -30,7 +36,6 @@ import type {
 import type { CuaApplicationFact, CuaPermission, CuaSystemStatus } from '../../runtime/cua-access-port.ts'
 import { layoutActionBarRow, type ActionBarSegment } from '../presentation/action-bar.ts'
 import { sanitizedPhysicalLine } from '../presentation/lines.ts'
-import { paintActionSpan } from '../presentation/action-ink.ts'
 import { color } from '../theme/runtime.ts'
 import type { EmbeddedSpecialistPage } from './settings-workspace-panel.ts'
 
@@ -48,6 +53,7 @@ type PageActionKind =
   | 'persistent-ptc'
   | 'revoke'
   | 'retry'
+  | 'plugins'
 
 interface PageAction {
   readonly id: string
@@ -65,10 +71,11 @@ interface PageLine {
 }
 
 interface Confirmation {
-  readonly id: string
+  readonly action: PageAction
   readonly title: string
   readonly body: string
   readonly confirm: string
+  readonly offset: number
 }
 
 interface PaintedTarget {
@@ -103,6 +110,25 @@ function fit(text: string, width: number): string {
   return padding > 0 ? clamped + ' '.repeat(padding) : clamped
 }
 
+/** Wrap one physical text line by display cells; long unbreakable tokens split. */
+function wrapText(text: string, width: number): string[] {
+  if (width <= 0) return ['']
+  const clean = sanitizedPhysicalLine(text)
+  if (clean === '') return ['']
+  const lines: string[] = []
+  let current = ''
+  for (const char of clean) {
+    if (visibleWidth(current + char) > width) {
+      lines.push(current)
+      current = char
+    } else {
+      current += char
+    }
+  }
+  lines.push(current)
+  return lines
+}
+
 function readPhaseText<T>(read: CuaReadState<T>, fallback = 'Unknown'): string {
   switch (read.phase) {
     case 'idle': return 'Not read'
@@ -119,14 +145,18 @@ function permissionText(allowed: boolean): string {
   return allowed ? 'Allowed' : 'Not allowed'
 }
 
-function bundleText(snapshot: CuaAccessSettingsSnapshot): string {
+function bundleSummary(snapshot: CuaAccessSettingsSnapshot): string {
   const bundle = snapshot.bundle
   switch (bundle.phase) {
     case 'idle': return 'Not read'
     case 'loading': return 'Reading…'
     case 'disabled': return 'Disabled'
     case 'unknown': return `Unknown${bundle.reason === undefined ? '' : ` (${bundle.reason})`}`
-    case 'ready': return bundle.enabled ? 'Enabled (official provider selected)' : 'Disabled'
+    case 'ready':
+      if (!bundle.enabled) return 'Disabled'
+      return bundle.providerReady
+        ? 'Enabled (official provider selected)'
+        : `Enabled (provider unavailable: ${bundle.error ?? bundle.reason ?? 'unknown'})`
   }
 }
 
@@ -139,16 +169,26 @@ function platformName(status: CuaSystemStatus | undefined): string {
   return status.platform === 'darwin' ? 'macOS' : 'Unsupported platform (win32)'
 }
 
-function helperName(status: CuaSystemStatus | undefined): string {
-  if (status === undefined) return 'Unknown'
-  if (status.platform === 'win32') return status.helper.name ?? 'Unknown'
-  return status.launchApplication?.name ?? status.helper.name ?? 'Unknown'
+/** The official launch/responsible application; never the helper executable. */
+function responsibleApplication(status: CuaSystemStatus | undefined): string {
+  if (status === undefined) return 'Unknown (no observation yet)'
+  if (status.platform === 'win32') return 'Unsupported platform'
+  return status.launchApplication === undefined
+    ? 'Not reported by macOS (responsibility unknown)'
+    : `${status.launchApplication.name} · ${status.launchApplication.path}`
 }
 
-function helperPath(status: CuaSystemStatus | undefined): string {
+function helperIdentity(status: CuaSystemStatus | undefined): string {
   if (status === undefined) return 'Unknown'
-  if (status.platform === 'win32') return status.helper.path ?? 'Unknown'
-  return status.launchApplication?.path ?? status.helper.path ?? 'Unknown'
+  return status.platform === 'win32'
+    ? `${status.helper.name ?? 'helper'} · pid ${String(status.helper.pid)}`
+    : `${status.helper.name ?? 'DSH Computer Use'} · pid ${String(status.helper.pid)}`
+}
+
+function applicationLine(application: CuaApplicationFact): string {
+  return application.executablePath === undefined
+    ? sanitizedPhysicalLine(application.name)
+    : `${sanitizedPhysicalLine(application.name)} · ${sanitizedPhysicalLine(application.executablePath)}`
 }
 
 /** ONE embedded page; constructed only when the Settings lease opens it. */
@@ -156,6 +196,7 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
   private readonly controller: CuaAccessSettingsController
   private readonly requestRender: () => void
   private readonly done: () => void
+  private readonly openPlugins: (() => void) | undefined
   private readonly unsubscribe: () => void
 
   readonly title = COMPUTER_USE_PAGE_TITLE
@@ -165,13 +206,17 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
   private grantAwaitingPaintValue = true
   private cursor = 0
   private offset = 0
+  private contentLength = 0
   private confirmation: Confirmation | undefined
+  private confirmationVisible = false
   private help = false
   private notice: { readonly kind: 'info' | 'error'; readonly text: string } | undefined
   private revision = 0
   private disposed = false
   private paint: Paint | undefined
   private paintedActions: readonly PageAction[] = []
+  private paintedActionRows: readonly number[] = []
+  private visibleActions = new Set<PageAction>()
   private pressed: { readonly identity: string; readonly action: PageAction } | undefined
   private paintedEscapeSpanValue: { readonly startCol: number; readonly endCol: number } | undefined
   private paintedBarSpansValue: readonly { readonly id: string; readonly startCol: number; readonly endCol: number }[] = []
@@ -180,10 +225,12 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
     readonly controller: CuaAccessSettingsController
     readonly requestRender: () => void
     readonly done: () => void
+    readonly openPlugins?: () => void
   }) {
     this.controller = intents.controller
     this.requestRender = intents.requestRender
     this.done = intents.done
+    this.openPlugins = intents.openPlugins
     this.unsubscribe = this.controller.subscribe(() => {
       this.revision += 1
       this.requestRender()
@@ -218,8 +265,8 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
   }
 
   activateBarSpan(id: string): void {
-    if (this.paint === undefined || this.paint.identity !== this.gestureIdentity()) return
-    const span = this.paint.barSpans.find(candidate => candidate.id === id)
+    if (!this.frameCurrent()) return
+    const span = this.paintedBarSpansValue.find(candidate => candidate.id === id)
     if (span === undefined) return
     if (id === 'bar:refresh') this.runAction({ id: 'refresh', kind: 'refresh', label: 'Refresh', enabled: true })
     else if (id === 'bar:help') this.runAction({ id: 'help', kind: 'help', label: 'Help', enabled: true })
@@ -235,17 +282,20 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
       this.cursor,
       this.offset,
       this.help ? 'help' : 'no-help',
-      this.confirmation?.id ?? 'no-confirm',
+      this.confirmation?.title ?? 'no-confirm',
+      this.confirmation?.offset ?? 0,
       this.notice?.text ?? 'no-notice',
     ].join('|')
   }
 
   handleInput(data: string): void {
     if (this.disposed) return
+    const current = this.frameCurrent()
     if (this.notice !== undefined) {
       this.notice = undefined
       this.bump()
       if (matchesKey(data, 'escape')) return
+      if (!current) return
     }
     if (this.confirmation !== undefined) {
       if (matchesKey(data, 'escape') || data === 'n' || data === 'N') {
@@ -253,7 +303,21 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
         return
       }
       if (data === 'y' || data === 'Y' || matchesKey(data, 'enter')) {
+        if (!current) return
+        if (!this.confirmationVisible) {
+          this.notice = { kind: 'info', text: 'Resize so the full confirmation risk is visible before confirming.' }
+          this.bump()
+          return
+        }
         this.confirmCurrent()
+        return
+      }
+      if (matchesKey(data, 'up')) {
+        this.scrollConfirmation(-1)
+        return
+      }
+      if (matchesKey(data, 'down')) {
+        this.scrollConfirmation(1)
         return
       }
       return
@@ -267,6 +331,7 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
       this.done()
       return
     }
+    if (!current) return
     if (matchesKey(data, 'up')) {
       this.move(-1)
       return
@@ -277,7 +342,8 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
     }
     if (matchesKey(data, 'enter') || matchesKey(data, 'right')) {
       const action = this.paintedActions[this.cursor]
-      if (action !== undefined) this.runAction(action)
+      if (action === undefined || !this.visibleActions.has(action)) return
+      this.runAction(action)
       return
     }
     if (data === 'r' || data === 'R') {
@@ -297,13 +363,12 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
     if (event.type === 'wheel') {
       if (event.wheelDelta === undefined || event.wheelDelta === 0) return undefined
       if (event.y < 0 || event.y >= bodyRows) return undefined
-      this.move(event.wheelDelta < 0 ? -1 : 1)
-      this.revokePress()
+      if (!this.frameCurrent()) return undefined
+      this.scroll(event.wheelDelta < 0 ? -3 : 3)
       return { handled: true }
     }
     if (event.height !== bodyRows && event.height !== paint.rows) return undefined
-    const current = paint.identity === this.gestureIdentity()
-    if (!current) return undefined
+    if (!this.frameCurrent()) return undefined
     const target = paint.targets.find(candidate => candidate.row === event.y
       && event.x >= candidate.startCol && event.x < candidate.endCol)
     if (event.type === 'press') {
@@ -322,7 +387,6 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
     return undefined
   }
 
-  /** The page's own pane header (single-column page). */
   paneHeader(width: number): string {
     return fit(color.textStrong(`Computer Use ${color.textMuted('· official provider')}`), width)
   }
@@ -338,6 +402,8 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
     this.controller.close()
     this.paint = undefined
     this.pressed = undefined
+    this.paintedActions = []
+    this.visibleActions.clear()
     this.paintedBarSpansValue = []
     this.paintedEscapeSpanValue = undefined
   }
@@ -346,198 +412,229 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
     const snapshot = this.controller.getSnapshot()
     this.grantAwaitingPaintValue = false
     const bodyRows = Math.max(0, this.rowGrant - 1)
-    const targets: PaintedTarget[] = []
-    const lines: PageLine[] = []
-    const actionLines: PageLine[] = []
-    const push = (text: string, action?: PageAction): void => {
-      const line: PageLine = { text, action }
-      lines.push(line)
-      if (action !== undefined) actionLines.push(line)
-    }
-
-    push(color.textStrong('Computer Use bundle'), undefined)
-    push(`  ${bundleText(snapshot)}`, undefined)
-    if (snapshot.bundle.error !== undefined) push(`  Provider error: ${sanitizedPhysicalLine(snapshot.bundle.error)}`, undefined)
-    if (snapshot.bundle.phase === 'disabled') push(`  Enable it in Settings → Plugins; this page starts no CUA query while disabled.`, undefined)
-    push('', undefined)
-    push(color.textStrong('Host and helper'), undefined)
-    const system = systemOf(snapshot)
-    push(`  Host platform: ${platformName(system)}`, undefined)
-    push(`  Authorize this Mac: ${sanitizedPhysicalLine(helperName(system))}`, undefined)
-    const path = helperPath(system)
-    if (path !== 'Unknown') push(`  Helper path: ${sanitizedPhysicalLine(path)}`, undefined)
-    if (system !== undefined && system.platform === 'darwin') {
-      const launch = system.launchApplication
-      push(`  Responsible app: ${launch === undefined ? 'Unknown (macOS did not report it)' : sanitizedPhysicalLine(launch.name)}`, undefined)
-      push(`  Helper parent: ${sanitizedPhysicalLine(system.parent.path ?? system.parent.name ?? 'Unknown')}`, undefined)
-    }
-    push(`  Complete permission prompts on the HOST Mac. A Request/Open action does not grant permission.`, undefined)
-    push('', undefined)
-
-    push(color.textStrong('Authorize computer use'), undefined)
-    push(`  New Sessions: ${snapshot.preset.phase === 'ready' ? (snapshot.preset.value ?? 'unknown') : 'read failed'} (PTC required for Computer Use)`, undefined)
-    const setPreset: PageAction = {
-      id: 'preset',
-      kind: 'preset',
-      label: 'Set new Sessions to PTC',
-      enabled: snapshot.preset.phase === 'ready' && snapshot.preset.available && snapshot.preset.value !== 'ptc',
-      ...(snapshot.preset.phase !== 'ready' ? { reason: 'The saved default preset is not readable right now.' } : {}),
-      ...(snapshot.preset.phase === 'ready' && snapshot.preset.value === 'ptc' ? { reason: 'PTC is already the saved default preset.' } : {}),
-    }
-    push(`  ${setPreset.enabled ? '[Set to PTC]' : '[PTC is already the default]'}`, setPreset)
-    if (snapshot.preset.phase === 'ready' && snapshot.preset.value !== 'ptc' && setPreset.enabled) {
-      push('  This changes NEW Sessions only; the current Session keeps its preset.', undefined)
-    }
-
-    const ptc = snapshot.ptc.phase === 'ready' ? snapshot.ptc.value : undefined
-    push(`  PTC execution: ${ptc === undefined ? readPhaseText(snapshot.ptc) : (ptc.persistent ? 'Persistent' : 'Non-persistent')}${ptc?.writable === false ? ' (read-only)' : ''}`, undefined)
-    const persistent: PageAction = {
-      id: 'persistent-ptc',
-      kind: 'persistent-ptc',
-      label: 'Use persistent PTC mode…',
-      enabled: ptc !== undefined && !ptc.persistent && ptc.writable,
-      ...(ptc !== undefined && !ptc.writable ? { reason: 'The Host reports the PTC execution setting is read-only.' } : {}),
-      ...(ptc === undefined ? { reason: 'The Host PTC execution state is not readable right now.' } : {}),
-    }
-    push(`  ${persistent.enabled ? '[Use persistent mode…]' : '[Persistent mode unavailable]'}`, persistent)
-
-    const accessibility = system?.platform === 'darwin' ? system.accessibility : undefined
-    const accessibilityText = accessibility === undefined ? readPhaseText(snapshot.system) : permissionText(accessibility)
-    push(`  Accessibility: ${accessibilityText}`, undefined)
-    if (system?.platform === 'darwin') {
-      push(`    Reads and operates UI controls. ${system.accessibility ? 'Allowed.' : 'Not allowed yet.'}`, undefined)
-      push(`  ${system.accessibility ? '[Request permission again]' : '[Request permission]'}`, {
-        id: 'request-accessibility', kind: 'request-accessibility', label: 'Request Accessibility permission', enabled: true, permission: 'accessibility',
-      })
-      push('  [Open Accessibility settings]', {
-        id: 'open-accessibility', kind: 'open-accessibility', label: 'Open Accessibility settings', enabled: true, permission: 'accessibility',
-      })
-    }
-
-    const screenRecording = system?.platform === 'darwin' ? system.screenRecording : undefined
-    const screenText = screenRecording === undefined ? readPhaseText(snapshot.system) : permissionText(screenRecording)
-    push(`  Screen Recording: ${screenText}`, undefined)
-    if (system?.platform === 'darwin') {
-      push(`    Captures the selected application window. ${system.screenRecording ? 'Allowed.' : 'Not allowed yet.'}`, undefined)
-      push(`  ${system.screenRecording ? '[Request permission again]' : '[Request permission]'}`, {
-        id: 'request-screen-recording', kind: 'request-screen-recording', label: 'Request Screen Recording permission', enabled: true, permission: 'screenRecording',
-      })
-      push('  [Open Screen Recording settings]', {
-        id: 'open-screen-recording', kind: 'open-screen-recording', label: 'Open Screen Recording settings', enabled: true, permission: 'screenRecording',
-      })
-    }
-    if (snapshot.system.phase === 'loading' || snapshot.system.phase === 'idle') {
-      push('  Reading the official permission state…', undefined)
-    }
-    push('', undefined)
-
-    push(color.textStrong('Application access'), undefined)
-    push('  Persisted decisions only; this Session\'s temporary grants are not listed here.', undefined)
-    const applications = snapshot.applications.phase === 'ready' ? snapshot.applications.value : undefined
-    if (snapshot.applications.phase === 'loading' || snapshot.applications.phase === 'idle') {
-      push('  Reading persisted application decisions…', undefined)
-    } else if (applications === undefined) {
-      push(`  ${readPhaseText(snapshot.applications)}${snapshot.applications.reason === undefined ? '' : `: ${sanitizedPhysicalLine(snapshot.applications.reason)}`}`, undefined)
-    } else {
-      if (applications.allowedApps.length === 0) push('  Always allowed: none.', undefined)
-      for (const application of applications.allowedApps) {
-        push(`    ${applicationLine(application)}`, undefined)
-        push(`    [Revoke access…]`, {
-          id: `revoke:${application.id}`,
-          kind: 'revoke',
-          label: `Revoke ${application.name}`,
-          enabled: true,
-          applicationId: application.id,
-        })
-      }
-      if (applications.blockedApps.length === 0) push('  Refused: none.', undefined)
-      for (const application of applications.blockedApps) {
-        push(`    ${applicationLine(application)} (refused)`, undefined)
-        push(`    [Allow asking again…]`, {
-          id: `retry:${application.id}`,
-          kind: 'retry',
-          label: `Allow asking again for ${application.name}`,
-          enabled: true,
-          applicationId: application.id,
-        })
-      }
-      if (!applications.persistentAvailable) push('  The Host reports durable application storage is unavailable.', undefined)
-    }
-    push('', undefined)
-    if (this.help) {
-      push(color.textStrong('Help and recovery'), undefined)
-      for (const line of HELP_LINES) push(`  ${line}`, undefined)
-      push('', undefined)
-    }
-    if (snapshot.action !== undefined) {
-      push(`${snapshot.action.state === 'ok' ? 'Action' : 'Action failed'}: ${sanitizedPhysicalLine(snapshot.action.text)}`, undefined)
-    }
-    if (this.notice !== undefined) push(`${this.notice.kind === 'error' ? 'Error' : 'Notice'}: ${this.notice.text}`, undefined)
-
-    // The confirmation is rendered AT THE TOP of the page body so the target and
-    // the consequence are always reviewable before y/confirm.
-    const confirmationLines: PageLine[] = []
+    const all = this.confirmation === undefined
+      ? this.buildContent(snapshot, width)
+      : this.buildConfirmation(width)
+    this.contentLength = all.length
+    const actionLines = all
+      .map((line, index) => line.action === undefined ? undefined : { line, index, action: line.action })
+      .filter((candidate): candidate is { line: PageLine; index: number; action: PageAction } => candidate !== undefined)
+    this.paintedActions = actionLines.map(candidate => candidate.action)
+    this.paintedActionRows = actionLines.map(candidate => candidate.index)
+    this.cursor = this.confirmation === undefined
+      ? Math.max(0, Math.min(this.cursor, Math.max(0, this.paintedActions.length - 1)))
+      : 0
+    this.confirmationVisible = false
     if (this.confirmation !== undefined) {
-      confirmationLines.push({ text: color.warning(this.confirmation.title) })
-      confirmationLines.push({ text: `  ${this.confirmation.body}` })
-      confirmationLines.push({ text: '  y/Enter confirm · n/Esc cancel (no change yet)' })
-      confirmationLines.push({ text: '' })
+      const height = this.buildConfirmation(width).length
+      this.confirmationVisible = height <= bodyRows
+      const maxOffset = Math.max(0, height - bodyRows)
+      this.confirmation = { ...this.confirmation, offset: Math.max(0, Math.min(this.confirmation.offset, maxOffset)) }
     }
-
-    const all = [...confirmationLines, ...lines]
-    const actionLinesAll = actionLines.map(line => ({
-      line,
-      index: all.indexOf(line),
-      action: line.action as PageAction,
-    })).filter(candidate => candidate.index >= 0)
-    this.paintedActions = actionLinesAll.map(candidate => candidate.action)
-    this.cursor = Math.max(0, Math.min(this.cursor, Math.max(0, actionLinesAll.length - 1)))
-    const selectedAction = actionLinesAll[this.cursor]?.action
-    if (selectedAction !== undefined) {
-      // Keep the selected action visible in the granted body.
-      const selectedRow = actionLinesAll[this.cursor]!.index
-      if (selectedRow < this.offset) this.offset = selectedRow
-      if (selectedRow >= this.offset + Math.max(1, bodyRows)) this.offset = selectedRow - Math.max(1, bodyRows) + 1
-    }
-    this.offset = Math.max(0, Math.min(this.offset, Math.max(0, all.length - Math.max(1, bodyRows))))
-    const visible = all.slice(this.offset, this.offset + Math.max(0, bodyRows))
+    const activeOffset = this.confirmation?.offset ?? this.offset
+    const maxOffset = Math.max(0, all.length - bodyRows)
+    const offset = Math.max(0, Math.min(activeOffset, maxOffset))
+    if (this.confirmation === undefined) this.offset = offset
+    const visible = all.slice(offset, offset + Math.max(0, bodyRows))
     while (visible.length < Math.max(0, bodyRows)) visible.push({ text: '' })
-
+    const selected = this.paintedActions[this.cursor]
+    this.visibleActions = new Set(visible.flatMap(line => line.action === undefined ? [] : [line.action]))
+    const targets: PaintedTarget[] = []
     const out: string[] = []
-    // The ONE active signal of the action list is the `>` marker; a disabled
-    // action is still selectable so its exact reason can be read.
-    for (const line of visible) {
-      const text = line.action !== undefined && line.action === selectedAction
+    for (let index = 0; index < visible.length; index += 1) {
+      const line = visible[index]!
+      const semantic = line.action !== undefined && line.action === selected
         ? `> ${line.text.trimStart()}`
         : line.text
-      out.push(fit(text, width))
+      out.push(fit(semantic, width))
+      if (line.action === undefined) continue
+      // The semantic label, NOT the fit() right padding, is the pointer grant.
+      const start = semantic.lastIndexOf('[')
+      const close = start < 0 ? -1 : semantic.indexOf(']', start)
+      if (start < 0 || close < 0) continue
+      targets.push({
+        row: index,
+        startCol: visibleWidth(semantic.slice(0, start)),
+        endCol: visibleWidth(semantic.slice(0, close + 1)),
+        action: line.action,
+      })
     }
-    // Record the action rows in PAGE coordinates (the root translates a pointer
-    // cell into this page's own rows).
-    for (let index = 0; index < visible.length; index += 1) {
-      const action = visible[index]?.action
-      if (action === undefined) continue
-      const text = sanitizedPhysicalLine(out[index] ?? '')
-      const label = text.lastIndexOf('[')
-      if (label < 0) continue
-      targets.push({ row: index, startCol: label, endCol: Math.min(width, label + visibleWidth(text.slice(label))), action })
-    }
-    // The ONE physical last row is the page's action bar. Esc is the root's
-    // target; Refresh/Help are delegated non-Esc spans.
     const bar = this.renderBar(width, snapshot)
     this.paintedEscapeSpanValue = bar.escapeSpan
     this.paintedBarSpansValue = bar.spans
     out.push(fit(bar.text, width))
-    const identity = this.gestureIdentity()
     this.paint = {
       width,
       rows: this.rowGrant,
-      identity,
+      identity: this.gestureIdentity(),
       targets,
       barSpans: bar.spans,
       ...(bar.escapeSpan === undefined ? {} : { escapeSpan: bar.escapeSpan }),
     }
     return out.slice(0, this.rowGrant)
+  }
+
+  // ── content projections ──────────────────────────────────────────────────
+
+  private buildContent(snapshot: CuaAccessSettingsSnapshot, width: number): PageLine[] {
+    const lines: PageLine[] = []
+    const push = (text: string): void => { lines.push({ text }) }
+    const pushText = (text: string): void => {
+      for (const part of wrapText(text, width)) lines.push({ text: part })
+    }
+    const pushAction = (text: string, action: PageAction): void => { lines.push({ text, action }) }
+    const busy = snapshot.busy
+    const bundle = snapshot.bundle
+    const providerReady = bundle.phase === 'ready' && bundle.enabled && bundle.providerReady
+
+    if (this.rowGrant <= 9 || width < 56) {
+      // The short/narrow first screen: page identity, Host+bundle and the first
+      // missing permission/action remain reachable; the bar is the last line.
+      const shortBundle = bundle.phase === 'ready' && bundle.enabled
+        ? (bundle.providerReady ? 'Enabled' : 'Enabled · provider unavailable')
+        : bundleSummary(snapshot)
+      pushText(`Computer Use · ${shortBundle}`)
+      pushText(`Host: ${platformName(systemOf(snapshot))} · ${providerReady ? 'official provider' : (bundle.error ?? bundle.reason ?? 'provider unavailable')}`)
+      if (!providerReady) {
+        pushText('Open Settings → Plugins to enable the official bundle, then return here.')
+        pushAction('  [Open Settings → Plugins]', { id: 'plugins', kind: 'plugins', label: 'Open Settings Plugins', enabled: !busy })
+        return lines
+      }
+      const system = systemOf(snapshot)
+      if (system?.platform === 'darwin') {
+        push(`Accessibility: ${permissionText(system.accessibility)}`)
+        pushAction(`  ${system.accessibility ? '[Refresh permission]' : '[Request permission]'}`, {
+          id: 'request-accessibility', kind: 'request-accessibility', label: 'Request Accessibility permission',
+          enabled: !busy, permission: 'accessibility',
+        })
+        push(`Screen Recording: ${permissionText(system.screenRecording)}`)
+        pushAction(`  ${system.screenRecording ? '[Refresh permission]' : '[Request permission]'}`, {
+          id: 'request-screen-recording', kind: 'request-screen-recording', label: 'Request Screen Recording permission',
+          enabled: !busy, permission: 'screenRecording',
+        })
+      } else {
+        pushText(`Host platform: ${readPhaseText(snapshot.system)}`)
+      }
+      if (this.help) pushText(HELP_LINES[0]!)
+      return lines
+    }
+
+    push(color.textStrong('Computer Use bundle'))
+    pushText(`  ${bundleSummary(snapshot)}`)
+    if (bundle.phase === 'disabled' || !providerReady) {
+      const reason = bundle.error ?? bundle.reason
+      if (reason !== undefined) pushText(`  ${reason}`)
+      pushText('  Enable the official bundle in Settings → Plugins; this page starts no CUA query while it is disabled or the provider is unavailable.')
+      pushAction('  [Open Settings → Plugins]', { id: 'plugins', kind: 'plugins', label: 'Open Settings Plugins', enabled: !busy })
+      return lines
+    }
+
+    push('')
+    push(color.textStrong('Host and helper'))
+    const system = systemOf(snapshot)
+    pushText(`  Host platform: ${platformName(system)}`)
+    pushText(`  Helper: ${helperIdentity(system)}`)
+    pushText(`  Responsible app: ${responsibleApplication(system)}`)
+    if (system?.platform === 'darwin') pushText(`  Helper parent: ${system.parent.path ?? system.parent.name ?? 'Unknown'}`)
+    pushText('  Complete permission prompts on the HOST Mac. A Request/Open action does not grant permission.')
+    if (system?.platform === 'darwin' && system !== undefined && (!system.accessibility || !system.screenRecording)) {
+      pushText('  First use: grant the missing permissions above, then Refresh and read the fresh observation.')
+    }
+    push('')
+
+    push(color.textStrong('Authorize computer use'))
+    pushText(`  New Sessions: ${snapshot.preset.phase === 'ready' ? (snapshot.preset.value ?? 'unknown') : (snapshot.preset.reason ?? 'read failed')}${snapshot.preset.phase === 'ready' && snapshot.preset.value === 'ptc' ? ' (PTC is the saved default)' : ''}`)
+    pushAction(`  ${snapshot.preset.phase === 'ready' && snapshot.preset.available && snapshot.preset.value !== 'ptc' ? '[Set new Sessions to PTC]' : '[PTC already the default]'}`, {
+      id: 'preset', kind: 'preset', label: 'Set new Sessions to PTC',
+      enabled: !busy && snapshot.preset.phase === 'ready' && snapshot.preset.available && snapshot.preset.value !== 'ptc',
+      reason: snapshot.preset.phase !== 'ready'
+        ? (snapshot.preset.reason ?? 'The saved default preset is not readable right now.')
+        : snapshot.preset.value === 'ptc' ? 'PTC is already the saved default preset.' : 'The saved default preset is not available.',
+    })
+    const ptc = snapshot.ptc.phase === 'ready' ? snapshot.ptc.value : undefined
+    pushText(`  PTC execution: ${ptc === undefined ? (snapshot.ptc.reason ?? readPhaseText(snapshot.ptc)) : (ptc.persistent ? 'Persistent' : 'Non-persistent')}${ptc?.writable === false ? ' (read-only)' : ''}`)
+    pushAction(`  ${ptc !== undefined && !ptc.persistent && ptc.writable ? '[Use persistent mode…]' : '[Persistent mode unavailable]'}`, {
+      id: 'persistent-ptc', kind: 'persistent-ptc', label: 'Use persistent PTC mode…',
+      enabled: !busy && ptc !== undefined && !ptc.persistent && ptc.writable,
+      reason: ptc === undefined ? (snapshot.ptc.reason ?? 'The Host PTC execution state is not readable right now.') : 'Persistent PTC is already active or read-only.',
+    })
+
+    const accessibility = system?.platform === 'darwin' ? system.accessibility : undefined
+    pushText(`  Accessibility: ${accessibility === undefined ? (snapshot.system.reason ?? readPhaseText(snapshot.system)) : permissionText(accessibility)}`)
+    if (system?.platform === 'darwin') {
+      pushText(`    Reads and operates UI controls. ${system.accessibility ? 'Allowed.' : 'Not allowed yet.'}`)
+      pushAction(`  ${system.accessibility ? '[Request permission again]' : '[Request permission]'}`, {
+        id: 'request-accessibility', kind: 'request-accessibility', label: 'Request Accessibility permission',
+        enabled: !busy, permission: 'accessibility',
+      })
+      pushAction('  [Open Accessibility settings]', {
+        id: 'open-accessibility', kind: 'open-accessibility', label: 'Open Accessibility settings',
+        enabled: !busy, permission: 'accessibility',
+      })
+    }
+    const screenRecording = system?.platform === 'darwin' ? system.screenRecording : undefined
+    pushText(`  Screen Recording: ${screenRecording === undefined ? (snapshot.system.reason ?? readPhaseText(snapshot.system)) : permissionText(screenRecording)}`)
+    if (system?.platform === 'darwin') {
+      pushText(`    Captures the selected application window. ${system.screenRecording ? 'Allowed.' : 'Not allowed yet.'}`)
+      pushAction(`  ${system.screenRecording ? '[Request permission again]' : '[Request permission]'}`, {
+        id: 'request-screen-recording', kind: 'request-screen-recording', label: 'Request Screen Recording permission',
+        enabled: !busy, permission: 'screenRecording',
+      })
+      pushAction('  [Open Screen Recording settings]', {
+        id: 'open-screen-recording', kind: 'open-screen-recording', label: 'Open Screen Recording settings',
+        enabled: !busy, permission: 'screenRecording',
+      })
+    }
+    push('')
+
+    push(color.textStrong('Application access'))
+    pushText("  Persisted decisions only; this Session's temporary grants are not listed here.")
+    const applications = snapshot.applications.phase === 'ready' ? snapshot.applications.value : undefined
+    if (applications === undefined) {
+      pushText(`  ${snapshot.applications.reason ?? readPhaseText(snapshot.applications)}`)
+    } else {
+      if (applications.allowedApps.length === 0) pushText('  Always allowed: none.')
+      for (const application of applications.allowedApps) {
+        pushText(`    ${applicationLine(application)}`)
+        pushAction('    [Revoke access…]', {
+          id: `revoke:${application.id}`, kind: 'revoke', label: `Revoke ${application.name}`,
+          enabled: !busy, applicationId: application.id,
+        })
+      }
+      if (applications.blockedApps.length === 0) pushText('  Refused: none.')
+      for (const application of applications.blockedApps) {
+        pushText(`    ${applicationLine(application)} (refused)`)
+        pushAction('    [Allow asking again…]', {
+          id: `retry:${application.id}`, kind: 'retry', label: `Allow asking again for ${application.name}`,
+          enabled: !busy, applicationId: application.id,
+        })
+      }
+      if (!applications.persistentAvailable) pushText('  The Host reports durable application storage is unavailable.')
+    }
+    push('')
+    if (this.help) {
+      push(color.textStrong('Help and recovery'))
+      for (const item of HELP_LINES) pushText(`  ${item}`)
+      push('')
+    }
+    if (snapshot.action !== undefined) {
+      const prefix = snapshot.action.state === 'ok' ? 'Action' : snapshot.action.state === 'unknown' ? 'Action outcome unconfirmed' : 'Action failed'
+      pushText(`${prefix}: ${snapshot.action.text}`)
+    }
+    if (this.notice !== undefined) pushText(`${this.notice.kind === 'error' ? 'Error' : 'Notice'}: ${this.notice.text}`)
+    return lines
+  }
+
+  private buildConfirmation(width: number): PageLine[] {
+    const confirmation = this.confirmation
+    if (confirmation === undefined) return []
+    const lines: PageLine[] = []
+    for (const part of wrapText(confirmation.title, width)) lines.push({ text: color.warning(part) })
+    lines.push({ text: '' })
+    for (const part of wrapText(confirmation.body, width)) lines.push({ text: `  ${part}` })
+    lines.push({ text: '' })
+    lines.push({ text: '  y/Enter confirm · n/Esc cancel; no change has been made yet.' })
+    return lines
   }
 
   private renderBar(width: number, snapshot: CuaAccessSettingsSnapshot): {
@@ -547,7 +644,9 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
   } {
     if (this.confirmation !== undefined) {
       return this.layoutBar(width, [
-        { id: 'bar:confirm', text: `[y ${this.confirmation.confirm}]`, short: '[y Confirm]', priority: 100 },
+        ...(this.confirmationVisible
+          ? [{ id: 'bar:confirm', text: `[y ${this.confirmation.confirm}]`, short: '[y Confirm]', priority: 100 }]
+          : []),
         { id: 'bar:cancel', text: '[n Cancel]', short: '[n]', priority: 90 },
         { id: 'bar:escape', text: '[Esc Cancel]', short: '[Esc]', priority: 1000 },
       ])
@@ -559,9 +658,8 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
         { id: 'bar:escape', text: '[Esc Back]', short: '[Esc]', priority: 1000 },
       ])
     }
-    const busy = snapshot.busy
     return this.layoutBar(width, [
-      { id: 'bar:refresh', text: busy ? '[r Refresh (busy)]' : '[r Refresh]', short: '[r]', priority: 10 },
+      { id: 'bar:refresh', text: snapshot.busy ? '[r Refresh (busy)]' : '[r Refresh]', short: '[r]', priority: 10 },
       { id: 'bar:help', text: '[? Help]', short: '[?]', priority: 20 },
       { id: 'bar:escape', text: '[Esc Back]', short: '[Esc]', priority: 1000 },
     ])
@@ -584,22 +682,116 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
     return { text: layout.text, spans, ...(escapeSpan === undefined ? {} : { escapeSpan }) }
   }
 
+  // ── admission and currentness ────────────────────────────────────────────
+
+  private frameCurrent(): boolean {
+    return this.paint !== undefined && this.paint.identity === this.gestureIdentity()
+  }
+
   private move(delta: number): void {
     const count = this.paintedActions.length
     if (count === 0) return
     this.cursor = Math.max(0, Math.min(count - 1, this.cursor + delta))
+    const row = this.paintedActionRows[this.cursor]
+    const bodyRows = Math.max(0, this.rowGrant - 1)
+    if (row !== undefined) {
+      if (row < this.offset) this.offset = row
+      else if (row >= this.offset + Math.max(1, bodyRows)) this.offset = row - Math.max(1, bodyRows) + 1
+      this.offset = Math.max(0, Math.min(this.offset, Math.max(0, this.contentLength - Math.max(1, bodyRows))))
+    }
     this.bump()
   }
 
+  private scroll(delta: number): void {
+    if (this.confirmation !== undefined) {
+      this.scrollConfirmation(delta)
+      return
+    }
+    const bodyRows = Math.max(1, this.rowGrant - 1)
+    this.offset = Math.max(0, Math.min(this.offset + delta, Math.max(0, this.contentLength - bodyRows)))
+    this.bump()
+  }
+
+  private scrollConfirmation(delta: number): void {
+    if (this.confirmation === undefined) return
+    const bodyRows = Math.max(1, this.rowGrant - 1)
+    const maxOffset = Math.max(0, this.buildConfirmation(this.paint?.width ?? 80).length - bodyRows)
+    this.confirmation = { ...this.confirmation, offset: Math.max(0, Math.min(this.confirmation.offset + delta, maxOffset)) }
+    this.bump()
+  }
+
+  private liveAction(action: PageAction, snapshot: CuaAccessSettingsSnapshot): { ok: true } | { ok: false; reason: string } {
+    if (action.kind === 'refresh' || action.kind === 'help' || action.kind === 'plugins') return { ok: true }
+    if (snapshot.busy) return { ok: false, reason: 'An operation is already running; wait for it to settle.' }
+    if (snapshot.bundle.phase !== 'ready' || !snapshot.bundle.enabled || !snapshot.bundle.providerReady) {
+      return { ok: false, reason: snapshot.bundle.error ?? snapshot.bundle.reason ?? 'The official CUA provider is not ready.' }
+    }
+    switch (action.kind) {
+      case 'preset':
+        return snapshot.preset.phase === 'ready' && snapshot.preset.available && snapshot.preset.value !== 'ptc'
+          ? { ok: true }
+          : { ok: false, reason: snapshot.preset.reason ?? 'PTC is already the saved default preset.' }
+      case 'persistent-ptc': {
+        const ptc = snapshot.ptc.phase === 'ready' ? snapshot.ptc.value : undefined
+        return ptc !== undefined && !ptc.persistent && ptc.writable
+          ? { ok: true }
+          : { ok: false, reason: snapshot.ptc.reason ?? 'Persistent PTC is already active or read-only.' }
+      }
+      case 'request-accessibility':
+      case 'open-accessibility':
+      case 'request-screen-recording':
+      case 'open-screen-recording':
+      case 'revoke':
+      case 'retry': {
+        const system = snapshot.system.phase === 'ready' ? snapshot.system.value : undefined
+        if (system?.platform !== 'darwin') {
+          return { ok: false, reason: snapshot.system.reason ?? 'The official macOS permission observation is not current.' }
+        }
+        if (action.kind === 'revoke' || action.kind === 'retry') {
+          const applications = snapshot.applications.phase === 'ready' ? snapshot.applications.value : undefined
+          if (applications === undefined) {
+            return { ok: false, reason: snapshot.applications.reason ?? 'The official application list is not current.' }
+          }
+          const list = action.kind === 'revoke' ? applications.allowedApps : applications.blockedApps
+          if (action.applicationId === undefined || !list.some(application => application.id === action.applicationId)) {
+            return { ok: false, reason: 'That application decision is no longer in the official list; refresh before acting.' }
+          }
+        }
+        return { ok: true }
+      }
+    }
+  }
+
   private runAction(action: PageAction): void {
+    if (this.disposed) return
+    if (!this.frameCurrent()) {
+      this.notice = { kind: 'info', text: 'The Host facts changed; wait for the refreshed frame before acting.' }
+      this.bump()
+      return
+    }
+    const snapshot = this.controller.getSnapshot()
     if (!action.enabled) {
       this.notice = { kind: 'info', text: action.reason ?? `${action.label} is not available right now.` }
+      this.bump()
+      return
+    }
+    const live = this.liveAction(action, snapshot)
+    if (!live.ok) {
+      this.notice = { kind: 'info', text: live.reason }
       this.bump()
       return
     }
     switch (action.kind) {
       case 'refresh':
         void this.controller.refresh()
+        return
+      case 'plugins':
+        if (this.openPlugins === undefined) {
+          this.notice = { kind: 'info', text: 'The Plugin Manager is not available in this composition.' }
+          this.bump()
+          return
+        }
+        this.openPlugins()
         return
       case 'help':
         this.help = !this.help
@@ -622,28 +814,31 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
         return
       case 'persistent-ptc':
         this.confirmation = {
-          id: 'persistent-ptc',
+          action,
           title: 'Enable persistent PTC mode?',
           body: 'The official runtime may reload and interrupt in-flight Computer Use calls. The Host setting is re-read after the action; it is not assumed saved.',
           confirm: 'Use persistent mode',
+          offset: 0,
         }
         this.bump()
         return
       case 'revoke':
         this.confirmation = {
-          id: `revoke:${action.applicationId ?? ''}`,
+          action,
           title: 'Revoke this application decision?',
-          body: 'Affected Computer Use work may stop immediately; input already dispatched cannot be undone. The exact application id is passed to the Host; no other application is changed.',
+          body: 'Affected Computer Use work may stop immediately; input already dispatched cannot be undone. The exact application id painted below is passed to the Host; no other application is changed.',
           confirm: 'Revoke',
+          offset: 0,
         }
         this.bump()
         return
       case 'retry':
         this.confirmation = {
-          id: `retry:${action.applicationId ?? ''}`,
+          action,
           title: 'Allow this application to ask again?',
           body: 'This clears the persisted refusal only. The next selection will ask again and nothing is approved automatically.',
           confirm: 'Allow asking again',
+          offset: 0,
         }
         this.bump()
         return
@@ -653,10 +848,17 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
   private confirmCurrent(): void {
     const confirmation = this.confirmation
     if (confirmation === undefined) return
-    const action = this.paintedActions.find(candidate => candidate.id === confirmation.id)
+    if (!this.frameCurrent() || !this.confirmationVisible) return
+    const live = this.liveAction(confirmation.action, this.controller.getSnapshot())
+    if (!live.ok) {
+      this.confirmation = undefined
+      this.notice = { kind: 'info', text: live.reason }
+      this.bump()
+      return
+    }
+    const action = confirmation.action
     this.confirmation = undefined
     this.bump()
-    if (action === undefined) return
     if (action.kind === 'persistent-ptc') void this.controller.enablePersistentPtc()
     else if (action.kind === 'revoke' && action.applicationId !== undefined) void this.controller.revoke(action.applicationId)
     else if (action.kind === 'retry' && action.applicationId !== undefined) void this.controller.retryApproval(action.applicationId)
@@ -677,11 +879,3 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
     this.requestRender()
   }
 }
-
-function applicationLine(application: CuaApplicationFact): string {
-  return application.executablePath === undefined
-    ? sanitizedPhysicalLine(application.name)
-    : `${sanitizedPhysicalLine(application.name)} · ${sanitizedPhysicalLine(application.executablePath)}`
-}
-
-export type { PageActionKind }

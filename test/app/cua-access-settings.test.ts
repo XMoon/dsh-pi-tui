@@ -34,6 +34,7 @@ const PTC: CuaPtcConfiguration = { persistent: false, writable: true }
 function cuaPort(overrides: Partial<CuaAccessPort> = {}): { port: CuaAccessPort; calls: string[] } {
   const calls: string[] = []
   const port: CuaAccessPort = {
+        observation: { readSnapshot: () => 1, subscribe: () => () => {} },
     readSystemStatus: async () => { calls.push('system'); return STATUS },
     readApplications: async () => { calls.push('applications'); return APPLICATIONS },
     readApplicationIcons: async () => { calls.push('icons'); return { '/TextEdit': 'icon' } },
@@ -168,7 +169,7 @@ test('a superseded connection read becomes Unknown and never keeps a stale Allow
   await page.dispose()
 })
 
-test('revoke and retry pass the exact painted id and serialize writes', async () => {
+test('revoke and retry keep the exact painted id and admit ONE write at a time', async () => {
   const order: string[] = []
   let release: (() => void) | undefined
   const gate = new Promise<void>((resolve) => { release = resolve })
@@ -183,12 +184,14 @@ test('revoke and retry pass the exact painted id and serialize writes', async ()
     locale: () => 'zh',
   })
   const revoke = page.revoke('app-1')
-  const retry = page.retryApproval('app-2')
+  const duplicate = page.retryApproval('app-2')
   await new Promise(resolve => setTimeout(resolve, 5))
-  assert.deepEqual(order, ['revoke:app-1'], 'the second write must wait for the first')
+  assert.deepEqual(order, ['revoke:app-1'], 'the duplicate buffered action must not be queued')
   release?.()
-  await Promise.all([revoke, retry])
-  assert.deepEqual(order, ['revoke:app-1', 'revoke:done', 'retry:app-2'])
+  await Promise.all([revoke, duplicate])
+  assert.deepEqual(order, ['revoke:app-1', 'revoke:done'], 'exactly one Host write is dispatched')
+  await page.retryApproval('app-2')
+  assert.deepEqual(order, ['revoke:app-1', 'revoke:done', 'retry:app-2'], 'a later explicit action is admitted')
   await page.dispose()
 })
 

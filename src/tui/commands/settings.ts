@@ -1411,7 +1411,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
         // reads the official CUA access port and reuses the existing Plugin
         // Manager roster + preset-default writer; the page is disposed by the
         // Settings lease and owns no second permission store.
-        createComputerUsePage: (done) => {
+        createComputerUsePage: (done, openPlugins) => {
           const cuaAccess = runner.cuaAccess
           const pluginManager = runner.pluginManager
           if (cuaAccess === undefined || pluginManager === undefined) return undefined
@@ -1428,6 +1428,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
             controller,
             requestRender: () => { if (!app.isDisposed()) app.requestRender() },
             done,
+            openPlugins,
           })
         },
         // The About page's two version facts: read ONCE per workspace open on

@@ -54,6 +54,9 @@ export interface CuaReadState<T> {
 export interface CuaBundleState {
   readonly phase: 'idle' | 'loading' | 'ready' | 'disabled' | 'unknown'
   readonly enabled: boolean
+  /** True only when the official provider is selected AND no Host preparation
+   *  error is reported; CUA permission reads are queried only then. */
+  readonly providerReady: boolean
   readonly availability?: PluginAvailability
   readonly version?: string
   readonly error?: string
@@ -73,7 +76,7 @@ export type CuaActionKind = 'request' | 'open' | 'persistent-ptc' | 'preset' | '
 
 export interface CuaActionReceipt {
   readonly kind: CuaActionKind
-  readonly state: 'ok' | 'failed'
+  readonly state: 'ok' | 'failed' | 'unknown'
   readonly text: string
   readonly permission?: CuaPermission
   readonly applicationId?: CuaApplicationId
@@ -124,6 +127,8 @@ export class CuaAccessSettingsController {
   private readSequence = 0
   private readInFlight: Promise<void> = Promise.resolve()
   private closed = false
+  private actionInFlight = false
+  private unsubscribeObservation: () => void = () => {}
   private tail: Promise<void> = Promise.resolve()
   private disposed: Promise<void> | undefined
 
@@ -134,13 +139,18 @@ export class CuaAccessSettingsController {
     this.state = {
       epoch: this.epoch,
       busy: false,
-      bundle: { phase: 'idle', enabled: false },
+      bundle: { phase: 'idle', enabled: false, providerReady: false },
       preset: this.readPreset(),
       system: IDLE(),
       applications: IDLE(),
       icons: IDLE(),
       ptc: IDLE(),
     }
+    // The Split connection generation (or a Direct bundle-service change) is a
+    // real observation boundary: an older Allowed/application list must not
+    // remain actionable or paintable after it. The callback invalidates the
+    // current read epoch and immediately performs ONE fresh read.
+    this.unsubscribeObservation = deps.cuaAccess.observation.subscribe(() => this.invalidateObservation())
   }
 
   getSnapshot(): CuaAccessSettingsSnapshot {
@@ -179,9 +189,13 @@ export class CuaAccessSettingsController {
       const bundle = await this.readBundle(epoch, sequence)
       if (!this.current(epoch, sequence)) return
       this.patch({ bundle })
-      if (bundle.phase !== 'ready' || !bundle.enabled) {
-        const disabledPhase = bundle.phase === 'disabled' ? 'disabled' : 'unknown'
-        const reason = bundle.reason ?? (bundle.phase === 'disabled' ? 'the official Computer Use bundle is disabled' : 'the bundle state is unknown')
+      if (bundle.phase !== 'ready' || !bundle.enabled || !bundle.providerReady) {
+        const disabledPhase = bundle.phase === 'disabled'
+          ? 'disabled'
+          : bundle.phase === 'ready'
+            ? 'unavailable'
+            : 'unknown'
+        const reason = bundle.error ?? bundle.reason ?? (bundle.phase === 'disabled' ? 'the official Computer Use bundle is disabled' : 'the official CUA provider is not ready')
         this.patch({
           system: { phase: disabledPhase, reason },
           applications: { phase: disabledPhase, reason },
@@ -259,6 +273,7 @@ export class CuaAccessSettingsController {
     if (this.closed) return
     this.closed = true
     this.epoch++
+    this.unsubscribeObservation()
     this.listeners.clear()
   }
 
@@ -270,23 +285,57 @@ export class CuaAccessSettingsController {
     await this.disposed
   }
 
+  private invalidateObservation(): void {
+    if (this.closed) return
+    this.epoch += 1
+    this.readSequence += 1
+    this.patch({
+      system: { phase: 'unknown', reason: 'The Host observation basis changed; refresh to read the new generation.' },
+      applications: { phase: 'unknown', reason: 'The Host observation basis changed; refresh to read the new generation.' },
+      icons: { phase: 'unknown', reason: 'The Host observation basis changed; refresh to read the new generation.' },
+      ptc: { phase: 'unknown', reason: 'The Host observation basis changed; refresh to read the new generation.' },
+      busy: false,
+    })
+    void this.refresh()
+  }
+
   private async readBundle(epoch: number, sequence: number): Promise<CuaBundleState> {
     try {
       const snapshot = await this.deps.pluginManager.snapshot()
       if (!this.current(epoch, sequence)) return this.state.bundle
       const bundle = snapshot.bundles.find(candidate => candidate.name === CUA_BUNDLE_NAME)
       if (bundle === undefined) {
-        return { phase: 'unknown', enabled: false, reason: `the Host roster does not contain ${CUA_BUNDLE_NAME}` }
+        return { phase: 'unknown', enabled: false, providerReady: false, reason: `the Host roster does not contain ${CUA_BUNDLE_NAME}` }
+      }
+      const error = bundle.error === undefined
+        ? undefined
+        : [bundle.error.code, bundle.error.diagnostic].filter(part => part !== undefined && part !== '').join(' — ')
+      const providerReady = bundle.enabled && bundle.availability !== 'missing' && error === undefined
+      if (!bundle.enabled) {
+        return {
+          phase: 'disabled', enabled: false, providerReady: false,
+          availability: bundle.availability,
+          ...(bundle.version === undefined ? {} : { version: bundle.version }),
+          ...(error === undefined ? {} : { error }),
+          reason: error ?? 'The Computer Use bundle is disabled in this profile.',
+        }
+      }
+      if (!providerReady) {
+        return {
+          phase: 'ready', enabled: true, providerReady: false,
+          availability: bundle.availability,
+          ...(bundle.version === undefined ? {} : { version: bundle.version }),
+          ...(error === undefined ? {} : { error }),
+          reason: error ?? 'The official CUA provider is not installed for this profile.',
+        }
       }
       return {
-        phase: bundle.enabled ? 'ready' : 'disabled',
-        enabled: bundle.enabled,
+        phase: 'ready', enabled: true, providerReady: true,
         availability: bundle.availability,
         ...(bundle.version === undefined ? {} : { version: bundle.version }),
-        ...(bundle.error === undefined ? {} : { error: bundle.error.code }),
       }
     } catch (error) {
-      return { phase: 'unknown', enabled: false, reason: reasonOf(error) }
+      return { phase: 'unknown', enabled: false, providerReady: false, reason: reasonOf(error) }
     }
   }
 
@@ -323,7 +372,11 @@ export class CuaAccessSettingsController {
     receipt: Omit<CuaActionReceipt, 'state' | 'at'>,
     run: () => Promise<void>,
   ): Promise<void> {
-    if (this.closed) return
+    // ONE side effect per open/operation: a second buffered Enter/click is
+    // refused before it can enter the serial queue. The page also disables its
+    // actions while busy, but this admission is the authority.
+    if (this.closed || this.actionInFlight) return
+    this.actionInFlight = true
     const epoch = this.epoch
     const task = this.tail.then(async () => {
       if (this.closed || epoch !== this.epoch) return
@@ -335,14 +388,27 @@ export class CuaAccessSettingsController {
         await this.refresh()
       } catch (error) {
         if (this.closed || epoch !== this.epoch) return
+        const unknown = error instanceof SupersededReadError
         this.patch({
-          action: { ...receipt, kind, state: 'failed', text: reasonOf(error), at: Date.now() },
+          action: {
+            ...receipt,
+            kind,
+            state: unknown ? 'unknown' : 'failed',
+            text: unknown
+              ? 'The Host connection changed; the action outcome is unconfirmed. Refresh before retrying.'
+              : reasonOf(error),
+            at: Date.now(),
+          },
           busy: false,
         })
       }
     })
     this.tail = task.catch(() => {})
-    await task
+    try {
+      await task
+    } finally {
+      this.actionInFlight = false
+    }
   }
 
   private patch(partial: Partial<CuaAccessSettingsSnapshot>): void {

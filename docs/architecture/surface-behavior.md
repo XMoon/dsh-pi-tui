@@ -1880,8 +1880,25 @@ The persisted application decisions are listed from the official
 `Allow asking again…` use the exact opaque `CuaApplicationId` that was painted,
 require a reviewable confirmation (affected work may stop / no access is
 granted), never target an application by name re-resolution, and re-read the
-official list afterwards. Closing the page or a Host/connection generation
-change discards late results; a dispatched Host effect is not claimed undone.
+official list afterwards. A confirmation is its own projection: the confirm
+key is paintable only while the complete risk text and target fit the granted
+body; a short frame paints cancel/back only. Closing the page or a Host/
+connection generation change discards late results; a dispatched Host effect
+is not claimed undone.
+
+The short/narrow first screen (`44×8`) keeps the bundle/Host identity and the
+first missing permission action reachable; the body scrolls freely (wheel or
+keys) and is never jumped away from its first facts by an automatic selection
+scroll. Actions require the CURRENT painted frame and a live re-read of the
+target, and the controller admits ONE write per open (a second buffered
+Enter/click is refused). The page's `Open Settings → Plugins` action retires the
+specialist and switches the SAME lease to the Plugin Manager. After the first
+explicit bundle enable the Plugin Manager shows a one-shot recoverable next-step
+notice that points at this page; the Tools row and the card's
+`Manage Computer Use…` remain available later. The official application-consent
+Question keeps the existing Question seat and answer writer, and paints the
+official `Risks` card for the `cua-app-access` approval (no second Question
+owner or answer queue).
 
 Must-not: read or write the macOS TCC database, call `osascript`/`tccutil`, run
 `open` on the Client to fake the Host's System Settings, infer the responsible

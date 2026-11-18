@@ -15,6 +15,7 @@
 
 import {
   CuaAccessUnavailableError,
+  type CuaAccessObservation,
   type CuaAccessPort,
   type CuaApplicationId,
   type CuaApplicationState,
@@ -47,6 +48,14 @@ export const DIRECT_CUA_ACCESS_REASON = 'The official Computer Use bundle is not
 /** Forward the official Host service; resolve it lazily per call. */
 export class DirectCuaAccessPort implements CuaAccessPort {
   private readonly ctx: DirectCuaAccessContextLike
+
+  readonly observation: CuaAccessObservation = {
+    // The Direct process sees the bundle service appear/disappear through the
+    // same Context; a reload that keeps a service present is re-read on every
+    // call. There is no cross-process generation to subscribe to here.
+    readSnapshot: () => this.ctx.get('cuaAccess') === undefined ? 'absent' : 'present',
+    subscribe: () => () => {},
+  }
 
   constructor(ctx: DirectCuaAccessContextLike) {
     this.ctx = ctx

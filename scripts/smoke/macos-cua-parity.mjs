@@ -105,7 +105,6 @@ const CUA_BUNDLE = '@deepseek-ai/dsh-cua-bundle'
 const CUA_MACOS_PACKAGE = '@deepseek-ai/dsh-experimental-cua-macos'
 const CUA_PRESET = 'ptc'
 const TEXTEDIT_BUNDLE = 'com.apple.TextEdit'
-const HELPER_EXECUTABLE = join('Contents', 'MacOS', 'dsh-cua-native')
 
 /** Bounded waits: every one names the real fact it observes. */
 const TIMEOUTS = {
@@ -1258,7 +1257,7 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
     tui,
     dshHome,
     sessionId: consent.sessionId,
-    prompt: `Run exactly this in run_code: const app = await tools.cua({ method: 'getApp', params: { selector: '${TEXTEDIT_BUNDLE}' } }); const windows = await tools.cua({ method: 'listWindows', params: { appHandle: app.appHandle } }); const shot = await tools.cua({ method: 'screenshot', params: { appHandle: app.appHandle, windowId: windows[0].windowId } }); return { width: shot.pixelWidth, height: shot.pixelHeight }`,
+    prompt: `Run exactly this in run_code: const app = await tools.cua({ method: 'getApp', params: { selector: '${TEXTEDIT_BUNDLE}' } }); const windows = await tools.cua({ method: 'listWindows', params: { appHandle: app.appHandle } }); const window = windows.find(item => String(item.title ?? '').includes('cua-blank')); if (!window) throw new Error('the controlled TextEdit window was not found'); const shot = await tools.cua({ method: 'screenshot', params: { appHandle: app.appHandle, windowId: window.windowId } }); return { width: shot.pixelWidth, height: shot.pixelHeight }`,
     label: 'MAC09-07 screenshot',
     method: 'screenshot',
     timeoutMs: TIMEOUTS.screenshot,
@@ -1299,7 +1298,7 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
     tui,
     dshHome,
     sessionId: consent.sessionId,
-    prompt: `Run exactly this in run_code: const app = await tools.cua({ method: 'getApp', params: { selector: '${TEXTEDIT_BUNDLE}' } }); await tools.cua({ method: 'activate', params: { appHandle: app.appHandle } }); await tools.cua({ method: 'typeText', params: { appHandle: app.appHandle, text: '${marker}' } }); const tree = await tools.cua({ method: 'getState', params: { appHandle: app.appHandle } }); return JSON.stringify(tree).includes('${marker}') ? 'MARKER_PRESENT' : 'MARKER_MISSING'`,
+    prompt: `Run exactly this in run_code: const app = await tools.cua({ method: 'getApp', params: { selector: '${TEXTEDIT_BUNDLE}' } }); const windows = await tools.cua({ method: 'listWindows', params: { appHandle: app.appHandle } }); const window = windows.find(item => String(item.title ?? '').includes('cua-blank')); if (!window) throw new Error('the controlled TextEdit window was not found'); await tools.cua({ method: 'activate', params: { appHandle: app.appHandle } }); await tools.cua({ method: 'typeText', params: { appHandle: app.appHandle, windowId: window.windowId, text: '${marker}' } }); const tree = await tools.cua({ method: 'getState', params: { appHandle: app.appHandle, windowId: window.windowId } }); return JSON.stringify(tree).includes('${marker}') ? 'MARKER_PRESENT' : 'MARKER_MISSING'`,
     label: 'MAC09-08 controlled input',
     method: 'typeText',
     timeoutMs: TIMEOUTS.turn,
@@ -1309,14 +1308,16 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
   assert(inputResult.result.isError !== true,
     `MAC09-08: the controlled typeText failed: ${dispatchErrorCode(inputResult.result) ?? 'unknown error'}`)
   const markerResult = await waitFor(() => cuaResults(eventsOf(dshHome, input.sessionId), 0)
-    .find(result => result.subCallId !== input.dispatch.subCallId && dispatchContentText(result).includes('MARKER_PRESENT')),
-  'MAC09-08 the same cua call observes the typed marker', TIMEOUTS.turn)
+    .find(result => result.rootCallId === input.dispatch.rootCallId
+      && dispatchMethod(result) === 'getState'
+      && dispatchContentText(result).includes(marker)),
+  'MAC09-08 the same cua call observes the typed marker in its accessibility tree', TIMEOUTS.turn)
   pushRow(report, 'MAC09-08', 'PASS', {
     sessionId: sha16(input.sessionId),
     rootCallId: sha16(input.dispatch.rootCallId),
     method: 'typeText',
     markerDigest: sha16(marker),
-    observedInAccessibilityTree: dispatchContentText(markerResult).includes('MARKER_PRESENT'),
+    observedInAccessibilityTree: dispatchContentText(markerResult).includes(marker),
   })
   await waitTurnEnd(dshHome, input.sessionId, input.afterIndex, 'MAC09-08 input turn completed')
 
@@ -1400,7 +1401,7 @@ async function sceneSplit({ installation, workRoot, report }) {
     tui,
     dshHome,
     sessionId: capabilities.sessionId,
-    prompt: `Run exactly this in run_code: const app = await tools.cua({ method: 'getApp', params: { selector: '${TEXTEDIT_BUNDLE}' } }); const windows = await tools.cua({ method: 'listWindows', params: { appHandle: app.appHandle } }); const shot = await tools.cua({ method: 'screenshot', params: { appHandle: app.appHandle, windowId: windows[0].windowId } }); return { width: shot.pixelWidth, height: shot.pixelHeight }`,
+    prompt: `Run exactly this in run_code: const app = await tools.cua({ method: 'getApp', params: { selector: '${TEXTEDIT_BUNDLE}' } }); const windows = await tools.cua({ method: 'listWindows', params: { appHandle: app.appHandle } }); const window = windows.find(item => String(item.title ?? '').includes('cua-blank')); if (!window) throw new Error('the controlled TextEdit window was not found'); const shot = await tools.cua({ method: 'screenshot', params: { appHandle: app.appHandle, windowId: window.windowId } }); return { width: shot.pixelWidth, height: shot.pixelHeight }`,
     label: 'MAC09-10 Split screenshot selection',
     method: 'getApp',
     timeoutMs: TIMEOUTS.turn,
@@ -1551,27 +1552,12 @@ async function cleanup({ workRoot, dshHome, report, textEdit, helperAppPath }) {
     errors.push(`NOT_QUIESCED: ${String(survivors.length)} owned process(es) survived cleanup`)
     return errors
   }
-  // 4. The official helper keeps one shared runtime socket in /tmp keyed by
-  //    the helper executable digest. Remove only THIS helper's socket.
-  try {
-    if (typeof helperAppPath === 'string' && existsSync(helperAppPath)) {
-      const runtimeKey = sha256File(join(helperAppPath, HELPER_EXECUTABLE))
-      const runtimeDirectory = `/tmp/dsh-cua-${String(process.getuid())}`
-      const socketPath = join(runtimeDirectory, `${runtimeKey}.sock`)
-      if (existsSync(socketPath)) {
-        const directoryInfo = lstatSync(runtimeDirectory)
-        const socketInfo = lstatSync(socketPath)
-        if (directoryInfo.isDirectory() && directoryInfo.uid === process.getuid()
-          && (directoryInfo.mode & 0o777) === 0o700 && socketInfo.isSocket()) {
-          rmSync(socketPath, { force: true })
-        } else {
-          errors.push('refusing to remove an unexpected /tmp CUA runtime socket')
-        }
-      }
-    }
-  } catch (error) {
-    errors.push(`CUA runtime socket cleanup failed: ${boundedError(error)}`)
-  }
+  // 4. The official native helper's /tmp socket is provider-owned and SHARED by
+  //    every profile using the same uid and helper digest. Its path shape and
+  //    mode cannot prove THIS run created it, so the lane must never unlink it:
+  //    doing so can tear down another profile's live helper endpoint. The
+  //    official provider owns its socket lifecycle; the lane only reclaims the
+  //    processes/work root it actually started.
   // 5. This run's account-home Host seat, only when the registry named it.
   if (registry?.record?.scopeId !== undefined) {
     const seatDir = join(ACCOUNT_RUN_ROOT, registry.record.scopeId)

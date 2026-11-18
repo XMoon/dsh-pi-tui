@@ -39,6 +39,7 @@ function fakeCua(overrides: Partial<CuaAccessPort> = {}): { port: CuaAccessPort;
   return {
     calls,
     port: {
+            observation: { readSnapshot: () => 1, subscribe: () => () => {} },
       readSystemStatus: async () => { calls.push('read:system'); return STATUS },
       readApplications: async () => { calls.push('read:applications'); return APPLICATIONS },
       readApplicationIcons: async () => { calls.push('read:icons'); return {} },
@@ -134,7 +135,7 @@ test('the enabled denied Host paints the two independent permissions and their a
   const frame = await settle(mounted, 'Accessibility: Not allowed')
   const text = frame.join('\n')
   assert.match(text, /Screen Recording: Not allowed/u)
-  assert.match(text, /Authorize this Mac: DSH Computer Use\.app/u)
+  assert.match(text, /Responsible app: DSH Computer Use\.app/u)
   assert.match(text, /\[Request permission\]/u)
   assert.match(text, /\[Open Accessibility settings\]/u)
   assert.match(text, /\[Open Screen Recording settings\]/u)
@@ -215,5 +216,61 @@ test('Escape closes the page, the bar refresh delegates, and a short grant keeps
   assert.equal(short.at(-1)?.includes('[Esc Back]'), true, 'the physical bar remains the last granted row')
   mounted.page.handleInput('\x1b')
   assert.equal(mounted.done(), true, 'the page own Esc closes THIS page through the root factory')
+  mounted.page.dispose()
+})
+
+test('the 44x8 projection keeps the bundle, Host and first permission action on the first screen', async () => {
+  const mounted = mount()
+  await settle(mounted, 'Accessibility: Not allowed')
+  mounted.page.setMaxRows(5)
+  mounted.page.invalidate()
+  const frame = mounted.render(44)
+  const text = frame.join('\n')
+  assert.equal(frame.length, 5, 'the root 44x8 grant is five physical rows (4 body + 1 bar)')
+  assert.match(text, /Computer Use · Enabled/u)
+  assert.match(text, /Host: macOS/u)
+  assert.match(text, /Accessibility: Not allowed/u)
+  assert.match(text, /\[Request permission\]/u, 'the first missing permission action is paintable on the first screen')
+  assert.equal(frame.at(-1)?.includes('[Esc Back]'), true, 'the bar remains the last granted row')
+  mounted.page.dispose()
+})
+
+test('a short confirmation hides the confirm bar and cannot dispatch until the risk is fully visible', async () => {
+  const mounted = mount()
+  mounted.page.setMaxRows(80)
+  const frame = await settle(mounted, 'TextEdit')
+  const revokeRow = frame.findIndex(line => line.includes('[Revoke access…]'))
+  assert.ok(revokeRow >= 0)
+  const labelCol = frame[revokeRow]!.indexOf('[')
+  const event = { type: 'press', x: labelCol, y: revokeRow, width: 96, height: 79 } as TuiMouseEvent
+  mounted.page.handleMouse(event)
+  mounted.page.handleMouse({ ...event, type: 'click' } as TuiMouseEvent)
+  const confirmation = mounted.render().join('\n')
+  assert.match(confirmation, /\[y Revoke\]/u)
+  mounted.page.setMaxRows(1)
+  mounted.page.invalidate()
+  const short = mounted.render(44)
+  assert.equal(short.length, 1)
+  assert.doesNotMatch(short[0]!, /\[y /u, 'a one-row grant cannot paint a confirmation decision')
+  mounted.page.handleInput('y')
+  assert.deepEqual(mounted.calls.filter(call => call.startsWith('revoke:')), [], 'no revoke may dispatch without the risk')
+  mounted.page.dispose()
+})
+
+test('two buffered Enters admit exactly ONE Request dispatch and the stale frame is refused', async () => {
+  const mounted = mount()
+  await settle(mounted, 'Accessibility: Not allowed')
+  let frame = mounted.render(96)
+  for (let attempt = 0; attempt < 20 && !frame.some(line => line.trimStart().startsWith('> [Request permission]')); attempt += 1) {
+    mounted.page.handleInput('\x1b[B')
+    frame = mounted.render(96)
+  }
+  assert.ok(frame.some(line => line.trimStart().startsWith('> [Request permission]')))
+  const before = mounted.calls.filter(call => call.startsWith('request:')).length
+  mounted.page.handleInput('\r')
+  mounted.page.handleInput('\r')
+  await new Promise(resolve => setTimeout(resolve, 5))
+  assert.equal(mounted.calls.filter(call => call.startsWith('request:')).length, before + 1,
+    'the second buffered Enter is refused by the frame/admission fence')
   mounted.page.dispose()
 })

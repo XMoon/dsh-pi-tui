@@ -453,7 +453,10 @@ export interface SettingsWorkspacePanelIntents {
    * roster and the existing preset-default writer; `done` returns to the Tools
    * row that opened it. No second Settings lease or permission store.
    */
-  readonly createComputerUsePage?: (done: () => void) => EmbeddedSpecialistPage | undefined
+  readonly createComputerUsePage?: (
+    done: () => void,
+    openPlugins: () => void,
+  ) => EmbeddedSpecialistPage | undefined
   /** The live terminal row budget (the panel never reads the terminal itself). */
   readonly rows: () => number
   /** The live terminal column budget (the projection's width). */
@@ -1197,7 +1200,11 @@ export class SettingsWorkspacePanel implements Component {
   /** PR-5: an in-lease Plugin Manager → Tools · Computer Use navigation,
    *  consumed at the START of the next frame (before the direct projection is
    *  chosen) so the retired Plugin page cannot be painted by the old frame. */
-  private pendingComputerUseNavigation = false
+  private pendingComputerUseNavigation: {
+    readonly pluginPage: EmbeddedPluginPage
+    readonly categoryId: SettingsWorkspaceCategoryId
+    readonly view: import('../plugin-manager/workspace.ts').PluginWorkspaceView
+  } | undefined
   /** The ONE command-facing settlement of the typed deeplink: it resolves on
    *  the frame that really mounts the page (or on a failure/teardown), so the
    *  command can return a REAL error instead of a silent row fallback. */
@@ -3840,7 +3847,7 @@ export class SettingsWorkspacePanel implements Component {
         page = this.intents.createMcpServersPage?.(done)
         break
       case 'computer-use':
-        page = this.intents.createComputerUsePage?.(done)
+        page = this.intents.createComputerUsePage?.(done, () => this.navigateComputerUseToPlugins())
         break
       case 'agent-loop-settings':
         page = this.intents.createHostNumericSettingsPage?.('agent-loop', done, changed)
@@ -4148,8 +4155,10 @@ export class SettingsWorkspacePanel implements Component {
    */
   private requestComputerUseNavigation(): string | undefined {
     if (this.disposed) return 'The Settings workspace is closing.'
-    if (this.pendingComputerUseNavigation) return undefined
+    if (this.pendingComputerUseNavigation !== undefined) return undefined
     if (this.categoryId !== 'plugins') return 'The Plugin Manager page is not current.'
+    const pluginPage = this.pluginPage
+    if (pluginPage === undefined) return 'The Plugin Manager page is not open.'
     if (this.specialistPage !== undefined) return 'Another Settings page is already open.'
     if (this.pluginPageHasPendingMutation()) return 'The Plugin Manager is still saving a change; wait for it to settle.'
     if (this.intents.createComputerUsePage === undefined) return 'The Computer Use settings page is not available in this build.'
@@ -4158,7 +4167,11 @@ export class SettingsWorkspacePanel implements Component {
       return 'The Computer Use settings row is not available right now.'
     }
     if (this.bodyFloor() < 1) return 'The window is too small to show the Computer Use page.'
-    this.pendingComputerUseNavigation = true
+    this.pendingComputerUseNavigation = {
+      pluginPage,
+      categoryId: this.categoryId,
+      view: pluginPage.currentView(),
+    }
     this.intents.requestRender()
     return undefined
   }
@@ -4169,9 +4182,21 @@ export class SettingsWorkspacePanel implements Component {
    * commit the Tools row/focus SECOND, and mount the specialist THIRD.
    */
   private consumeComputerUseNavigation(): void {
-    if (!this.pendingComputerUseNavigation) return
-    this.pendingComputerUseNavigation = false
+    const pending = this.pendingComputerUseNavigation
+    if (pending === undefined) return
+    this.pendingComputerUseNavigation = undefined
     if (this.disposed) return
+    // The SAME child/view/category the user requested from must still be live:
+    // a newer input, a category change, a resize/notice or a replacement page
+    // makes this deferred navigation stale.
+    if (this.categoryId !== pending.categoryId) return
+    if (this.pluginPage !== pending.pluginPage) return
+    if (pending.pluginPage.currentView() !== pending.view) return
+    if (this.pluginPageHasPendingMutation()) return
+    const destination = this.snapshot.rows.find(candidate => candidate.id === 'computer-use')
+    if (destination === undefined || destination.specialist !== 'computer-use'
+      || destination.specialistAvailable === false || this.intents.createComputerUsePage === undefined) return
+    if (this.bodyFloor() < 1) return
     this.closePluginPage()
     this.categoryId = 'tools'
     this.rowId = 'computer-use'
@@ -4185,6 +4210,28 @@ export class SettingsWorkspacePanel implements Component {
     this.bumpRevision()
     const row = this.snapshot.rows.find(candidate => candidate.id === 'computer-use')
     if (row !== undefined) this.openSpecialist(row)
+  }
+
+  /**
+   * PR-5: the Computer Use page's explicit `Open Settings → Plugins` navigation.
+   * It retires THIS specialist first and switches the SAME Settings lease to
+   * the Plugins direct page; the lazy Plugin Manager mount then starts its one
+   * inventory read. Never a second settings surface.
+   */
+  private navigateComputerUseToPlugins(): void {
+    if (this.disposed || this.specialistRow !== 'computer-use') return
+    this.closeSpecialist()
+    this.categoryId = 'plugins'
+    this.focus = 'content'
+    this.rowId = undefined
+    this.rowOffset = 0
+    this.detailOffset = 0
+    this.resetChoice()
+    this.pressedGesture = undefined
+    this.contentPressed = undefined
+    this.specialistPressed = undefined
+    this.bumpRevision()
+    this.intents.requestRender()
   }
 
   /**
@@ -4377,6 +4424,10 @@ export class SettingsWorkspacePanel implements Component {
 
   handleInput(data: string): void {
     if (this.disposed) return
+    // PR-5: a newer keyboard input supersedes a deferred Plugin → Computer Use
+    // navigation. Without this, a buffered Enter+Esc (or a resize/notice before
+    // the next frame) would still teleport after the user backed out.
+    this.pendingComputerUseNavigation = undefined
     // A keyboard interaction SUPERSEDES any in-flight pointer gesture: the
     // press-time painted target may repaint into a different action, and a
     // hosted page may switch its own Question/Picker sub-view, before the
@@ -5263,6 +5314,8 @@ export class SettingsWorkspacePanel implements Component {
    *  through to the alt screen's `onCellPress`/`onCellClick` identity path. */
   handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
     if (this.disposed) return undefined
+    // PR-5: a newer pointer input also supersedes a deferred navigation.
+    this.pendingComputerUseNavigation = undefined
     // PR-D (Owner-approved scope amendment): a pending press recorded on the
     // physical Action Bar is retired by ANY effective wheel. That row is
     // outside the hosted body box, so the child never sees this wheel and could

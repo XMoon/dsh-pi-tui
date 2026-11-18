@@ -16,6 +16,7 @@
 
 import {
   CuaAccessUnavailableError,
+  type CuaAccessObservation,
   type CuaAccessPort,
   type CuaApplicationId,
   type CuaApplicationState,
@@ -50,6 +51,11 @@ function unwrap<T>(result: RemoteResultLike<T>): T {
 export class RemoteCuaAccessPort implements CuaAccessPort {
   private readonly namespace: RemoteCuaAccessNamespace | undefined
   private readonly generation: RemoteConnectionGenerationSource
+
+  readonly observation: CuaAccessObservation = {
+    readSnapshot: () => this.generation.getSnapshot(),
+    subscribe: listener => this.generation.subscribe(listener),
+  }
 
   constructor(
     namespace: RemoteCuaAccessNamespace | undefined,

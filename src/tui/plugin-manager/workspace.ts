@@ -1868,9 +1868,19 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
         if (card === undefined) return
         this.openUpdateFromDetail(card)
         return
-      case PLUGIN_ACTION.toggle:
-        if (card !== undefined && this.controller.toggleCard(card.value)) this.openConfirmation()
+      case PLUGIN_ACTION.toggle: {
+        if (card === undefined) return
+        const firstCuaEnable = card.name === '@deepseek-ai/dsh-cua-bundle' && !card.enabled
+        if (this.controller.toggleCard(card.value)) {
+          this.openConfirmation()
+        } else if (firstCuaEnable) {
+          // v2 §3.4: a one-shot, recoverable next step after the explicit
+          // enable. The generic mutation result stays; this notice never
+          // claims permissions were granted or forces a page change.
+          this.controller.explain('Computer Use is enabled. Next: open Settings → Tools → Computer Use (or this card’s Manage Computer Use…) and authorize Accessibility and Screen Recording on the Host Mac. You can do this later.')
+        }
         return
+      }
       case PLUGIN_ACTION.remove:
         if (card !== undefined && this.controller.requestRemove(card.value)) this.openConfirmation()
         return

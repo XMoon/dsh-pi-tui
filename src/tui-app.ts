@@ -2042,6 +2042,7 @@ export interface SettingsWorkspaceOpenOptions {
   /** PR-5/MAC-09 v2: the ONE same-lease Computer Use page factory. */
   readonly createComputerUsePage?: (
     done: () => void,
+    openPlugins: () => void,
   ) => import('./tui/panels/settings-workspace-panel.ts').EmbeddedSpecialistPage | undefined
 }
 

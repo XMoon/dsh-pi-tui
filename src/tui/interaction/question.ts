@@ -44,6 +44,13 @@ import { color } from '../theme/runtime.ts'
 
 const segmenter = getGraphemeSegmenter()
 
+/** Official rc.3 `cuaPermissions` risk copy for the application-consent card. */
+const CUA_APPROVAL_RISK_NOTICE = `The agent can access only apps you approve, and can read and control them in the background.
+
+Online games, messaging apps, and other applications may restrict automated control. Violating their rules can lead to your account with that app being suspended or banned.
+
+Proceed at your own risk. To stop automated control at any time, press Stop in DeepSeek Harness.`
+
 /** One question in a user-questions ask (dsh shape mirrored for testability). */
 export interface QuestionFlowQuestion {
   /** Stable caller-provided id, echoed in the answer. */
@@ -1232,6 +1239,17 @@ export class QuestionFlow implements Component, Focusable {
       left,
     )
     hits.push(...new Array(lines.length).fill(undefined))
+    // The official CUA application-consent card carries a separate Risks
+    // warning (rc.3 `ApplicationApproval.tsx`). The generic Question detail is
+    // only "manage permissions on the plugin page"; the warning is a distinct
+    // presentation-only branch on the SAME question seat/answer writer.
+    if (question.id === 'cua-app-access' && question.intent?.kind === 'approval') {
+      left = appendWrappedBudgeted(lines, '   ', '   ', color.warning('Risks · Computer use risks'), width, left)
+      for (const paragraph of CUA_APPROVAL_RISK_NOTICE.split('\n')) {
+        if (left <= 0) break
+        left = appendWrappedBudgeted(lines, '   ', '   ', color.warning(sanitizeDisplayText(paragraph)), width, left)
+      }
+    }
     if (question.detail !== undefined && question.detail !== '') {
       for (const line of question.detail.split('\n')) {
         if (left <= 1) {
