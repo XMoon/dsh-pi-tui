@@ -1744,6 +1744,40 @@ export async function apply(ctx) {
     })
   })
 
+  // FR8 team-board: after every durable `team/task` write, record the OFFICIAL
+  // `agentTeam` projection of the owning Session. This is a test-only OBSERVER of
+  // the real authority (the same projection the Client's Team page reads) — it
+  // writes nothing and creates no second Team service.
+  if (scenario === 'team-board') {
+    const recordTeamProjection = (sessionId) => {
+      try {
+        const agent = ctx.agents.get(sessionId)
+        if (agent === undefined) return
+        const projections = ctx.get('sessionProjections')
+        const state = projections?.stateOf(agent.session, 'agentTeam')
+        if (state === undefined) return
+        record('team-projection', {
+          sessionId: String(sessionId),
+          enabled: state.enabled,
+          tasks: (state.tasks ?? []).map(task => ({
+            id: task.id,
+            revision: task.revision,
+            subject: task.subject,
+            status: task.status,
+            ownerName: task.ownerName,
+          })),
+        })
+      } catch {
+        // A projection read that fails is simply not recorded; the durable
+        // team/task event stays the write authority.
+      }
+    }
+    ctx.effect(() => ctx.on('session/event', (session, event) => {
+      if (event?.type !== 'team/task' && event?.type !== 'team/mode') return
+      recordTeamProjection(String(session.id))
+    }), 'fr8-team-projection-observer')
+  }
+
   // Observe the official Question/Approval waterfalls without claiming them:
   // each listener records the exact Host request/answer identity and then
   // delegates with `next()`, so the real C2 PiTui answerer remains the only

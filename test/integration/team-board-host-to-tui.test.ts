@@ -122,7 +122,7 @@ interface Harness {
   readonly typeLine: (line: string) => Promise<void>
 }
 
-async function startHarness(t: Parameters<typeof startS4D3Application>[0]): Promise<Harness> {
+async function startHarness(t: Parameters<typeof startS4D3Application>[0]): Promise<Harness & { secondProjections: { stateOf(session: unknown, key: string): unknown } }> {
   const adapter = new ScriptedAdapter()
   const app = await startS4D3Application(t, {
     bundles: [],
@@ -140,6 +140,7 @@ async function startHarness(t: Parameters<typeof startS4D3Application>[0]): Prom
     agent,
     adapter,
     team: app.host.ctx.get('agentTeams') as TeamModeService,
+    secondProjections: projections,
     board: () => projections.stateOf(agent.session, 'agentTeam') as AgentTeamProjection,
     events,
     toolResult(callId): string | undefined {
@@ -272,7 +273,7 @@ test('the official team_task_create/update projection renders on the mounted Tea
 
 test('a Team-Off Session keeps the durable board but a different Session never borrows it', async t => {
   const harness = await startHarness(t)
-  const { app, agent } = harness
+  const { app, agent, secondProjections } = harness
   await enableTeamThroughModelPicker(harness)
   await runToolTurn(harness, {
     kind: 'tool',
@@ -312,12 +313,30 @@ test('a Team-Off Session keeps the durable board but a different Session never b
   await app.waitFor(() => app.agent() !== undefined && String(app.agent()!.session.id) !== String(agent.session.id),
     'the production /new Session transition')
   const second = app.requireAgent()
+  assert.notEqual(String(second.session.id), String(agent.session.id))
+  // The second Session's OWN official board is the positive control that makes
+  // the negative meaningful: it must be a READY, enabled board with NO task.
+  const secondBoard = (): AgentTeamProjection =>
+    secondProjections.stateOf(second.session, 'agentTeam') as AgentTeamProjection
+  await app.waitFor(() => Array.isArray(secondBoard()?.tasks), 'the second Session board is readable')
+  assert.deepEqual(secondBoard().tasks, [], 'the second Session owns an EMPTY board')
+  // The official projection omits `enabled` until a team/mode write exists, so
+  // an absent flag is the "no Team selection recorded" state, never "on".
+  assert.notEqual(secondBoard().enabled, true, 'the second Session has no enabled Team selection')
+  assert.equal(harness.team.isEnabled(second), false, 'the official Team service reads the second Session as OFF')
+
   await harness.typeLine('/tasks')
   await app.waitFor(() => app.view().includes('Tasks · [Work]  Team'), 'the Tasks panel opens on the new Session')
   app.vt.sendInput('\t')
-
-  await app.settle(40) // bounded observation window for a negative fact
-  assert.doesNotMatch(app.view(), new RegExp(SUBJECT, 'u'),
-    'the previous Root Session\'s shared task never leaks into the new Session')
-  assert.notEqual(String(second.session.id), String(agent.session.id))
+  // Wait for the Team page to be PAINTED with the second Session's own OFF
+  // fact — that frame is the proof the read completed for THIS subject.
+  await app.waitFor(() => app.view().includes('Agent Team: Off'), 'the second Session Team page is painted')
+  const secondPage = app.view()
+  assert.doesNotMatch(secondPage, new RegExp(SUBJECT, 'u'),
+    'the previous Root Session\'s shared task never leaks into the new Session page')
+  // The OFF page states the OFF fact instead of an empty-task line (the frozen
+  // page contract), and it lists NO shared task row for this subject.
+  assert.match(secondPage, /Tasks · Work  \[Team\]/u, 'the second Session Team page is the painted page')
+  assert.match(secondPage, /Team is Off · Enable it from \/model/u, 'the second Session page states its own OFF board')
+  assert.doesNotMatch(secondPage, /in_progress\s+FR8_BOARD_TASK/u, 'no shared task row belongs to the second Session')
 })

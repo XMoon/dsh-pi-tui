@@ -96,22 +96,24 @@ interface PlanProjection {
   readonly running: { readonly wanted: boolean } | null
 }
 
-/** The official `userQuestions` projection view (open + settled calls). */
-interface QuestionProjection {
-  readonly questions?: {
-    readonly active?: readonly {
-      readonly callId: string
-      readonly questions: readonly {
-        readonly id: string
-        readonly detail?: string
-        readonly intent?: { readonly kind?: string; readonly approve?: string; readonly callId?: string }
-      }[]
-    }[]
-    readonly settled?: readonly {
-      readonly callId: string
-      readonly answers: readonly { readonly id: string; readonly selected: readonly string[]; readonly custom?: string }[]
+/** One official `userQuestions.ask` settlement: the exact Answer the OFFICIAL
+ *  service resolved, plus whether it rejected instead. */
+interface AskSettlement {
+  readonly answer?: {
+    readonly answers: readonly {
+      readonly id: string
+      readonly selected: readonly string[]
+      readonly custom?: string
     }[]
   }
+  readonly rejectionCode?: string
+}
+
+/** One official Session-event boundary, with the plan projection read AT that
+ *  boundary (the projection is the authority, not the event itself). */
+interface Boundary {
+  readonly type: string
+  readonly active: boolean
 }
 
 interface ToolOutcome {
@@ -126,7 +128,10 @@ interface Harness {
   readonly adapter: ScriptedAdapter
   readonly events: () => readonly DurableEvent[]
   readonly plan: () => PlanProjection
-  readonly questions: () => QuestionProjection
+  /** Every official `userQuestions.ask` settlement of this run, in order. */
+  readonly asks: () => readonly AskSettlement[]
+  /** The official Session-event boundaries observed WITH their plan projection. */
+  readonly boundaries: () => readonly Boundary[]
   readonly toolOutcome: (callId: string) => ToolOutcome | undefined
   readonly indexOf: (callId: string, type: 'tool/call' | 'tool/result') => number
   readonly typeLine: (line: string) => Promise<void>
@@ -155,6 +160,36 @@ async function startHarness(t: Parameters<typeof startS4D3Application>[0]): Prom
     stateOf(session: unknown, key: 'plan' | 'userQuestions'): unknown
   }
   const events = (): readonly DurableEvent[] => agent.session.snapshotEvents() as never
+  const planOf = (): PlanProjection => projections.stateOf(agent.session, 'plan') as PlanProjection
+  // THE OFFICIAL ANSWER OBSERVER. The real Host `userQuestions` service of this
+  // composition is patched on its own INSTANCE: the unbound original is saved
+  // and called with `apply(this, args)`, so the production path is unchanged and
+  // only the settlement it produces is recorded. A duplicate answer or a second
+  // ask therefore shows up here even when it produces no second tool result.
+  const asks: AskSettlement[] = []
+  const questionService = app.host.ctx.get('userQuestions') as {
+    ask(this: unknown, ...args: unknown[]): Promise<{ answers: readonly { id: string; selected: readonly string[]; custom?: string }[] }>
+  }
+  const originalAsk = questionService.ask
+  questionService.ask = function observedAsk(this: unknown, ...args: unknown[]): Promise<{ answers: readonly { id: string; selected: readonly string[]; custom?: string }[] }> {
+    const settlement = originalAsk.apply(this, args)
+    return settlement.then(
+      answer => { asks.push({ answer }); return answer },
+      (error: unknown) => {
+        asks.push({ rejectionCode: String((error as { code?: unknown }).code ?? '') })
+        throw error
+      },
+    )
+  }
+  // The plan projection AT each durable boundary: the authority is the
+  // projection the runner reads, never the event's own `active` bit.
+  const boundaries: Boundary[] = []
+  app.host.ctx.on('session/event', ((session: { readonly id?: unknown }, event: { readonly type?: string }) => {
+    if (String(session?.id) !== String(agent.session.id)) return
+    const type = String(event.type)
+    if (type !== 'step/start' && type !== 'step/end' && type !== 'tool/result' && type !== 'plan/mode') return
+    boundaries.push({ type, active: planOf().active })
+  }) as never)
   const callIdOf = (data: unknown): string | undefined => {
     const record = data as {
       readonly callId?: unknown
@@ -168,8 +203,9 @@ async function startHarness(t: Parameters<typeof startS4D3Application>[0]): Prom
     agent,
     adapter,
     events,
-    plan: () => projections.stateOf(agent.session, 'plan') as PlanProjection,
-    questions: () => projections.stateOf(agent.session, 'userQuestions') as QuestionProjection,
+    plan: planOf,
+    asks: () => [...asks],
+    boundaries: () => [...boundaries],
     toolOutcome(callId): ToolOutcome | undefined {
       for (const event of events()) {
         if (event.type !== 'tool/result' || callIdOf(event.data) !== callId) continue
@@ -289,11 +325,17 @@ test('the official exit_plan_mode review approves through the mounted Question s
   const outcome = requireOutcome(harness, 'fr8-plan-approve')
   assert.equal(outcome.isError, false, 'an approved review is not a tool error')
   assert.equal(outcome.content, APPROVED_RESULT, 'the official approve result is committed verbatim')
+
+  // THE OFFICIAL ANSWER: the resolution the real `userQuestions.ask` produced —
+  // the official Approve label, no custom text, and exactly ONE ask settlement.
+  assert.deepEqual(harness.asks(), [{ answer: { answers: [{ id: 'plan-review', selected: ['Approve'] }] } }],
+    'the official ask resolved with the single official Approve answer')
   assert.equal(harness.events().filter(event => event.type === 'tool/result').length, 1,
     'the reviewed call settles exactly once (no duplicate official result)')
 
-  // The approval is NOT itself the plan exit: the durable `plan/mode=false`
-  // lands inside the NEXT accepted pre-step, after this step ended.
+  // The approval is NOT itself the plan exit. At the boundary that ENDS the
+  // reviewing step the official projection is STILL ACTIVE; the exit is
+  // committed after that step ended and before the next step starts.
   await app.waitFor(
     () => harness.events().some(event => event.type === 'plan/mode' && (event.data as { readonly active: boolean }).active === false),
     'the next accepted pre-step commits plan mode off',
@@ -303,11 +345,22 @@ test('the official exit_plan_mode review approves through the mounted Question s
   const off = planModeAfter(harness, resultIndex)
   assert.ok(off !== undefined, 'a plan/mode write follows the approve result')
   assert.equal(off.active, false, 'the FIRST plan/mode after the approve result is the exit')
-  const events = harness.events()
-  assert.ok(events.slice(resultIndex, off.at).some(event => event.type === 'step/end'),
-    'the exiting mode write follows the step that ended')
-  const stepAfter = events.slice(off.at).findIndex(event => event.type === 'step/start')
-  assert.ok(stepAfter >= 0, 'a following accepted step owns the mode write')
+
+  // The boundary trace proves the exact ordering AND the projection value at
+  // each boundary: active through the tool result and through the reviewing
+  // step's own end, false from the exiting mode write through the next step.
+  const trace = harness.boundaries()
+  const endOfReviewStep = trace.findIndex((entry, index) =>
+    index > 0 && entry.type === 'step/end' && trace.slice(0, index).some(prior => prior.type === 'tool/result'))
+  assert.ok(endOfReviewStep > 0, 'the reviewing step ended after its tool result')
+  assert.equal(trace[endOfReviewStep]?.active, true,
+    'the official plan projection is STILL ACTIVE at the end of the reviewing step')
+  const exitBoundary = trace.findIndex(entry => entry.type === 'plan/mode' && entry.active === false)
+  assert.ok(exitBoundary > endOfReviewStep, 'the exiting mode write follows the reviewing step end')
+  const nextStep = trace.findIndex((entry, index) => index > exitBoundary && entry.type === 'step/start')
+  assert.ok(nextStep > exitBoundary, 'a following accepted step starts after the exit write')
+  assert.equal(trace[nextStep]?.active, false,
+    'the following accepted step runs with the official projection already inactive')
 
   // The user-visible terminal state agrees: the badge and the composer hint are
   // gone, and the review stayed on the SAME live Session.
@@ -363,6 +416,11 @@ test('a Keep planning answer keeps plan mode active and returns the feedback tex
     'no plan/mode exit was ever committed',
   )
   assert.equal(harness.events().filter(event => event.type === 'tool/result').length, 1, 'the call settles exactly once')
+  // The OFFICIAL answer keeps the official Keep label and the authored text —
+  // never a generic custom-only answer.
+  assert.deepEqual(harness.asks(), [{
+    answer: { answers: [{ id: 'plan-review', selected: ['Keep planning'], custom: feedback }] },
+  }], 'the official ask resolved with the official Keep label and the authored feedback')
 })
 
 test('a dismissed review concludes the turn with approved:false and never writes a plan exit', async t => {
@@ -388,6 +446,10 @@ test('a dismissed review concludes the turn with approved:false and never writes
   const outcome = requireOutcome(harness, 'fr8-plan-dismiss')
   assert.equal(outcome.isError, false, 'a dismiss is a normal tool result, not a tool failure')
   assert.equal(outcome.content, DISMISSED_RESULT, 'the official dismiss result is committed verbatim')
+  // The dismissal is the official `ASK_CANCELLED` rejection of the ask — not an
+  // answer. Exactly one settlement, and it is a rejection.
+  assert.deepEqual(harness.asks(), [{ rejectionCode: 'ASK_CANCELLED' }],
+    'the official ask rejected with ASK_CANCELLED and produced no answer')
   assert.equal(harness.events().filter(event => event.type === 'tool/result').length, 1,
     'the dismissed call settles exactly once (no second result, no approve)')
   assert.equal(harness.plan().active, true, 'plan mode remains active after a dismiss')
@@ -442,11 +504,17 @@ test('an ordinary ask_user_question keeps the generic Question/Review flow and a
   assert.equal(outcome.isError, false, 'the generic answer is a normal tool result')
   assert.match(outcome.content, /Proceed/u, 'the official answer content reaches the tool result')
 
-  // A repeated Enter after the settlement must not write a second answer or
-  // produce a second official tool result.
+  // The official ask resolved exactly ONCE with the chosen option; a repeated
+  // Enter must not write a second official answer.
+  assert.deepEqual(harness.asks(), [{ answer: { answers: [{ id: 'fr8-generic', selected: ['Proceed'] }] } }],
+    'the official ask resolved with the chosen option')
+
+  // A repeated Enter after the settlement must not write a second answer, ask a
+  // second question, or produce a second official tool result.
   app.vt.sendInput('\r')
 
   await app.settle(80) // bounded observation window for a negative fact
+  assert.equal(harness.asks().length, 1, 'a repeated Enter writes no second official ask settlement')
   assert.equal(harness.events().filter(event => event.type === 'tool/result').length, 1,
     'the settled call produces exactly one tool result')
   assert.equal(harness.events().filter(event => event.type === 'tool/call').length, 1,

@@ -2,8 +2,8 @@
  * FR8 `interaction.plan-review`: the OFFICIAL `exit_plan_mode` review in a real
  * Split Host/Client pair.
  *
- * ONE real installed candidate Host (the C1 qualification fixture row) and ONE
- * real authenticated PTY Client prove, on the SAME Host instance:
+ * ONE real installed candidate Host (the C1 qualification fixture row) and TWO
+ * real authenticated PTY Clients prove, on the SAME Host instance:
  *
  *   1. the Client creates its own Root Session from an ordinary prompt;
  *   2. the Client enters plan mode through the REAL `/plan` input, and the Host
@@ -16,10 +16,15 @@
  *   4. the Host records the EXACT `tool/call` / `tool/result` (`approved:true`)
  *      and the durable `plan/mode=false` lands only AFTER that result, inside
  *      the next accepted pre-step;
- *   5. a SECOND, independent Session proves the negative: a Keep-planning
- *      review leaves plan mode ACTIVE and settles through the official tool
- *      error, and a dismissed review ends the turn with `approved:false` and no
- *      plan exit.
+ *   5. a SECOND, independent Client starts its OWN Session and proves the
+ *      negative: a Keep-planning review leaves plan mode ACTIVE, returns the
+ *      authored feedback through the official tool error, and writes no plan
+ *      exit, while the following prompt runs as an ordinary turn.
+ *
+ * This case deliberately does NOT run the dismiss path: the plan allows the
+ * Split negative to be Keep OR cancel, and the Direct mounted case already owns
+ * the official `ASK_CANCELLED` dismiss proof. The fixture still supports a
+ * `FR8_PLAN_DISMISS` marker, but no Split case consumes it.
  *
  * The fixture never writes a Session event by hand, never injects a synthetic
  * Question DTO and never creates a second Question/Plan authority.
@@ -42,7 +47,6 @@ function assert(condition, message) {
 
 const MARK_APPROVE = 'FR8_PLAN_APPROVE'
 const MARK_KEEP = 'FR8_PLAN_KEEP'
-const MARK_DISMISS = 'FR8_PLAN_DISMISS'
 const MARK_NEXT_STEP = 'FR8_PLAN_NEXT_STEP'
 const PLAN_TAIL = 'FR8_PLAN_TAIL_END'
 

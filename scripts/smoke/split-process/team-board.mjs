@@ -27,6 +27,7 @@
  */
 
 import { SplitSmokeAssertionError } from '../../lib/split-smoke-diagnostics.mjs'
+import { readC1WorkEvents, waitForC1WorkEvent } from '../../lib/split-smoke-fixtures.mjs'
 import { waitForSurfaceStatus } from '../../lib/split-smoke-processes.mjs'
 import {
   hostSessionEvents,
@@ -106,7 +107,7 @@ export async function runTeamBoard(context) {
   const { dshHome, trace } = context
   const scene = createC1Scene(context)
   try {
-    const { host, ready: hostReady } = await scene.startC1Host('team-board', 'FR8 team-board Host')
+    const { host, ready: hostReady, workRoot } = await scene.startC1Host('team-board', 'FR8 team-board Host')
     const hostFacts = await scene.hostIdentityFacts(host)
     assert(hostFacts.hostPid === hostReady.pid, 'FR8 the Host ready record does not own the Host identity')
 
@@ -171,19 +172,47 @@ export async function runTeamBoard(context) {
     assert(updated.owner === 'lead', 'FR8 the task names its owner by agent name')
 
     // ── The CURRENT Team page renders the official projection. ───────────
+    // The OFFICIAL projection of this exact Session is the board authority; the
+    // fixture observed it through the real `sessionProjections` registry after
+    // every durable `team/task` write.
+    const projected = await waitForC1WorkEvent(workRoot,
+      event => event.kind === 'team-projection' && event.sessionId === session
+        && event.tasks?.some(task => task.id === updated.id && task.revision === updated.revision),
+      'FR8 official agentTeam projection carries the updated task')
+    const projectedTask = projected.tasks.find(task => task.id === updated.id)
+    assert(projectedTask.subject === SUBJECT, `FR8 the projection subject: ${JSON.stringify(projectedTask)}`)
+    assert(projectedTask.status === 'in_progress', 'FR8 the projection status is in progress')
+    assert(projectedTask.ownerName === 'lead', 'FR8 the projection owner is the Lead by name')
+
     await submitLine(client, '/tasks', 'FR8-team-tasks')
     await waitForScreen(client, 'Tasks · [Work]', 'FR8 the Tasks panel opens on Work')
     client.send('\t')
     await waitForScreen(client, 'Tasks · Work  [Team]', 'FR8 the Team page opens')
     await waitForScreen(client, 'Agent Team: On (read-only)', 'FR8 the read-only Team status')
-    await waitForScreen(client, SUBJECT, 'FR8 the shared task row')
-    await waitForScreen(client, 'in_progress', 'FR8 the official status word')
-    await waitForScreen(client, '· lead', 'FR8 the official owner name')
+
+    // The page sink is proven on the SAME PAINTED ROW: the status word, the
+    // subject and the owner must belong to ONE Task-panel row, so a transcript
+    // tool card carrying the same strings can never satisfy it.
+    const taskRowOf = async () => {
+      const frame = await frameOf(client)
+      return frame.split('\n').find(row => row.includes('│')
+        && row.includes('in_progress') && row.includes(SUBJECT) && row.includes('· lead'))
+    }
+    const deadline = Date.now() + 60_000
+    let taskRow
+    while (Date.now() < deadline && taskRow === undefined) {
+      taskRow = await taskRowOf()
+      if (taskRow === undefined) await new Promise(resolve => setTimeout(resolve, 100))
+    }
+    assert(taskRow !== undefined,
+      `FR8 one Team panel row carries the official status, subject and owner: ${JSON.stringify((await frameOf(client)).split('\n').slice(-24))}`)
 
     const page = await frameOf(client)
     const panelRows = page.split('\n').filter(row => row.includes('│')).join('\n')
     assert(!/\brev\b/u.test(panelRows), 'FR8 the page never invents an internal revision column')
     assert(!/\b(claim|assign|complete)\b/iu.test(panelRows), 'FR8 the read-only page offers no write verb')
+    // The page is the CURRENT Root Team page of this Session, not a stale frame.
+    assert(page.includes('Agent Team: On (read-only)'), 'FR8 the painted page carries the current ON status')
     trace('team-board.rendered', { sessionId: session, taskId: created.id, revision: updated.revision })
 
     // The two pages keep their OWN selection state across a round trip.
@@ -208,9 +237,17 @@ export async function runTeamBoard(context) {
     await submitLine(client, '/tasks', 'FR8-team-tasks-second')
     await waitForScreen(client, 'Tasks · [Work]', 'FR8 the second Session opens the Tasks panel')
     client.send('\t')
-    await new Promise(resolve => setTimeout(resolve, 500))
+    // The second Session's OWN painted Team page is the authoritative readback:
+    // wait for it, then assert the first Session's task is absent from it.
+    await waitForScreen(client, 'Tasks · Work  [Team]', 'FR8 the second Session Team page paints')
+    await waitForScreen(client, 'Team is Off · Enable it from /model', 'FR8 the second Session reports its own OFF board')
     const secondPage = await frameOf(client)
     assert(!secondPage.includes(SUBJECT), 'FR8 the first Session\'s shared task never leaks into another Session')
+    assert(!secondPage.includes('in_progress'), 'FR8 the second Session paints no shared task status row')
+    const secondProjection = readC1WorkEvents(workRoot)
+      .filter(event => event.kind === 'team-projection' && event.sessionId === second).at(-1)
+    assert(secondProjection === undefined || secondProjection.tasks.length === 0,
+      `FR8 the second Session owns no shared task: ${JSON.stringify(secondProjection)}`)
     const secondEvents = hostSessionEvents(dshHome, second)
     assert(hostUserTexts(secondEvents).some(text => text.includes('fr8-team-board-second')),
       'FR8 the second Session owns its own durable prompt')
