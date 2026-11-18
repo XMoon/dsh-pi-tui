@@ -2421,6 +2421,9 @@ export function applyRunnerWithRuntime(
       // M5-W PR-C: the mounted native `/web` presenter (absent on PiTui and on
       // a TSP pane that did not negotiate its kinds).
       webPresentation: () => surface.webPresentation,
+      // PO-5E: the mounted native `/acp` presenter, read through the SAME live
+      // surface getter.
+      acpPresentation: () => surface.acpPresentation,
               sessionBrowserPresentation: () => surface.sessionBrowserPresentation,
       presetPresentation: () => surface.presetPresentation,
       // PR3-A: registration/refresh failures are background-reachable under a

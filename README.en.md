@@ -168,6 +168,8 @@ ACP v1 is an optional **Host-owned Unix socket** endpoint for local clients runn
 
 **Enable in TUI Settings.** Open `/settings → General → Start ACP automatically` and save the enabled preference to start ACP automatically on the **next Host cold boot**. To enable the ACP listener on the **currently running Host**, open `/settings → Tools → ACP Server` and switch it on. These controls are independent: saving the startup preference does not toggle the running listener, and a runtime toggle does not change the next-start preference. ACP is off by default.
 
+In a Split Client you can also type `/acp` to see the live listener state and enable or disable it immediately: it needs no existing Session and creates none, never changes the next-start preference and opens no browser. The Direct backend has no such runtime control (it answers an explicit refusal); headless endpoint discovery uses `daemon status` below.
+
 **Headless (no TUI required).** In the installed `pi-tui` Profile's **user** `cordis.patch.yml` (normally `<DSH_HOME>/profiles/pi-tui/cordis.patch.yml`), add this row or update the existing row with the same `id`. Keep other entries intact and do not edit the patch bundled inside the npm package:
 
 ```yaml

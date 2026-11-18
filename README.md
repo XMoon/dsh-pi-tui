@@ -165,6 +165,8 @@ ACP v1 是可选的 **Host-owned Unix socket** 入口，仅供同一操作系统
 
 **在 TUI 设置中开启。** 打开 `/settings → General → Start ACP automatically`，开启并保存后，ACP 将在**下一次 Host 冷启动**时自动启用；需要立即启用当前 Host 的 ACP Listener，则进入 `/settings → Tools → ACP Server` 开启。两项设置相互独立：保存自动启动偏好不会立即改变运行时状态，运行时开启也不会更改下次启动的偏好。ACP 默认关闭。
 
+在 Split Client 中也可以直接输入 `/acp` 查看当前 Listener 的实时状态并立即启用/停用：它不需要已有 Session，也不会创建 Session、修改下次启动偏好或打开浏览器。Direct 后端没有该运行时控制（会明确拒绝）；Headless 端点发现使用下文的 `daemon status`。
+
 **Headless（无需 TUI）。** 在已安装 `pi-tui` Profile 的**用户** `cordis.patch.yml`（通常为 `<DSH_HOME>/profiles/pi-tui/cordis.patch.yml`）中添加以下条目，若已存在相同 `id` 则只修改其值。保留文件的其他内容，不要修改包内 patch：
 
 ```yaml

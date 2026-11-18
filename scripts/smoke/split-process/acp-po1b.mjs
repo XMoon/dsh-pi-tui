@@ -479,6 +479,35 @@ export async function runAcpPo1bOptInControl(context) {
     const tui2Ready = await tui2.waitFor(record => record.m4a0 === 'ready', 'acp-po1b re-enable TUI ready', 180_000)
     assert(tui2Ready.surfaceMounted === true && tui2Ready.transport === 'connected',
       'b: after re-enabling ACP the original Split TUI must still mount its surface')
+    // PO-5E: the public `/acp` quick control on this REAL Split Client. ONE
+    // explicit menu action must reach the SAME Host controller, then the menu
+    // presents the authoritative re-read. Closing the menu afterwards retires
+    // the presentation only: the accepted Host mutation is never undone.
+    tui2.send('/acp\r')
+    await tui2.waitForScreen('Status: enabled', 'acp command: enabled menu', 60_000)
+    await tui2.waitForScreen('Disable ACP', 'acp command: disable action', 60_000)
+    tui2.send('\x1b[B') // the status fact row -> the ONE admitted action
+    await tui2.waitForScreen("Stop this Host's local ACP v1 listener", 'acp command: disable action selected', 30_000)
+    tui2.send('\r')
+    await tui2.waitForScreen('Status: disabled', 'acp command: authoritative re-read', 60_000)
+    await waitUntil(() => !exists(socketPath), 'b: the /acp disable retires acp.sock')
+    const afterAcpMenu = await hostStatus(host1)
+    assert(afterAcpMenu.pid === hostPidBefore && afterAcpMenu.localHost.instanceId === instanceBefore,
+      'b: the /acp menu must control the SAME Host')
+    tui2.send('\x1b') // close only: never undo the accepted disable
+    await sleep(300)
+    assert(!exists(socketPath), 'b: closing the /acp menu must never undo the accepted Host write')
+    trace('acp-po1b/slash-command', {
+      enabledMenu: true,
+      disabledViaMenu: true,
+      authoritativeReread: true,
+      sameHost: true,
+      closeDoesNotUndo: true,
+    })
+    // Leave the listener ENABLED for the preference scenario (it was enabled
+    // when this block started).
+    assertAccess(await acpAccess(peer, 'b restore enable after /acp', true), 'enabled', 'b restore enable')
+    await rawInitialize(scopeId, 3)
     tui2.send('/exit\r')
     try { await tui2.waitForExit(60_000) } catch { await tui2.dispose() }
     trace('acp-po1b/runtime-toggle', {
@@ -766,6 +795,7 @@ export async function runAcpPo1bOptInControl(context) {
       autoStartFalseNoSocket: true,
       recomposeKeepsSameHost,
       originalSplitClientIntact: true,
+      slashAcpControl: true,
     }
   } catch (error) {
     originalError = error

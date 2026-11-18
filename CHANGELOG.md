@@ -9,6 +9,8 @@
 
 ### 新增
 
+- **新增 `/acp` 快捷开关，可直接在 Split TUI 中查看并切换当前 Host 的本地 ACP Listener。** 输入 `/acp` 打开一个短菜单：无需已有 Session，也不会创建 Session/Agent、提交模型输入、打开浏览器或改变默认后端。菜单显示 Host 的实时状态，仅在 `disabled`/`enabled` 时提供一次显式的 Enable/Disable，随后按 Host 的权威回读重绘；`changing`、`unavailable` 或连接不可读时不提供写入，旧菜单无法写入新 Host。Direct 后端明确拒绝（仅 Split Client 可用）；持久 `Start ACP automatically` 仍只属于 `/settings → General`，只在下次 Host 启动生效，Headless 场景继续用 `daemon status` 查看 `acp` 与 `acp-socket`。
+
 - **SVG 支持静态描边样式与 `currentColor`。** SVG admission 白名单新增四个有确定渲染意义的静态属性:`stroke-dasharray`(1–32 个无单位非负数或 `none`)、`stroke-dashoffset`(单个有符号无单位数)、`stroke-miterlimit`(1–1000)与 `color`(固定色值);`fill`/`stroke`/`stop-color` 的**整值** `currentColor` 现在按文档内静态继承的 `color` 求值。相对单位、`<style>`/`<filter>`、外部引用、DOCTYPE、混合 token(如 `url(#g) currentColor`)与既有像素/字节预算全部维持原拒绝,原始 SVG 字节不重写。
 
 - **SVG Preview 可恢复失败支持一次显式 Retry。** 子进程超时、无法启动与非正常退出现在按类型分类;Preview 失败态在可恢复类别下显示 `r retry` 操作段,按 `r` 或点击画出的 Retry 段会精确重建当前 `(digest, 宽度)` 变体(单次按键恰好一个新请求,加载中按键被忽略,永不自动重试);超预算、无效输出、被拒绝与已淘汰变体保持不可重试。`Esc close` 行新增完整的鼠标点击 Close 段(仅此查看器)。

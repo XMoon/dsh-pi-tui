@@ -43,6 +43,8 @@ export interface RendererSelectionDeps {
     readonly presetPresentation?: import('../command/preset-presentation.ts').PresetPresentation | undefined
     /** M5-W PR-C: the native `/web` presenter. */
     readonly webPresentation?: import('../command/web-access-presentation.ts').WebAccessPresentation | undefined
+    /** PO-5E: the native `/acp` presenter. */
+    readonly acpPresentation?: import('../command/acp-access-presentation.ts').AcpAccessPresentation | undefined
     readonly sessionBrowserPresentation?: import('../command/session-browser-presentation.ts').SessionBrowserPresentation | undefined
     /** PR-Q: the native Queue manager presentation (undefined when the pane
      *  did not negotiate the kinds the sheet needs). */
@@ -188,6 +190,7 @@ export async function selectRendererMount(deps: RendererSelectionDeps): Promise<
         modelPresentation: tsp.modelPresentation,
         presetPresentation: tsp.presetPresentation,
         webPresentation: tsp.webPresentation,
+        acpPresentation: tsp.acpPresentation,
         sessionBrowserPresentation: tsp.sessionBrowserPresentation,
         queuePresentation: tsp.queuePresentation,
         interaction: tsp.interaction,
@@ -256,6 +259,8 @@ export function productionTspConnector(
   readonly presetPresentation?: import('../command/preset-presentation.ts').PresetPresentation | undefined
   /** M5-W PR-C: the native `/web` presenter. */
   readonly webPresentation?: import('../command/web-access-presentation.ts').WebAccessPresentation | undefined
+  /** PO-5E: the native `/acp` presenter. */
+  readonly acpPresentation?: import('../command/acp-access-presentation.ts').AcpAccessPresentation | undefined
   readonly sessionBrowserPresentation?: import('../command/session-browser-presentation.ts').SessionBrowserPresentation | undefined
   readonly interaction: import('../surface/interaction-presenter.ts').SurfaceInteractionPresenter
   readonly bindInput: (handlers: import('../surface/runtime.ts').SurfaceInputBinding) => void
