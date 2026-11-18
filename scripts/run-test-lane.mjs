@@ -21,8 +21,8 @@
  *     lane that leaves a live process in its owned group is not a pass;
  *   - an EMPTY lane fails closed — a lane that discovers nothing must never
  *     report green;
- *   - the file list is sorted, so the execution order does not depend on the
- *     filesystem;
+ *   - discovery is sorted; only sharded product tests use deterministic
+ *     historical-cost ordering before Node's native partition;
  *   - SIGNALS: on POSIX the child leads its OWN process group, so a forwarded
  *     SIGINT/SIGTERM/SIGHUP reaches the workers and commands it started, and
  *     the temp root is removed only once the whole group is provably gone — a
@@ -160,15 +160,120 @@ export function parseConcurrency(args) {
   return `--test-concurrency=${concurrency}`
 }
 
+
+/**
+ * Experimental scheduling HINTS from one successful Node 24 CI run
+ * (44336051574). They are not test ownership or discovery authority.
+ * Unprofiled and newly added files use a 1-second scheduling estimate;
+ * removed paths are ignored. Keep this small and remove it if CI does not
+ * show a durable wall-clock improvement.
+ */
+const PRODUCT_FILE_COST_SECONDS = new Map([
+  ['app/settings-workspace-visual.test.ts', 140.0],
+  ['integration/kitty-zellij-screen.test.ts', 51.3],
+  ['integration/cli-session-launcher.test.ts', 50.3],
+  ['integration/tern-tsp-headless-commands.test.ts', 40.3],
+  ['app/mcp-settings-mounted.test.ts', 40.2],
+  ['client/transcript-image-viewer-tui.test.ts', 35.9],
+  ['app/settings-web-provider.test.ts', 35.3],
+  ['client/client-file-completion.test.ts', 30.8],
+  ['client/tui-app.test.ts', 30.8],
+  ['integration/tern-tsp-input-completion-direct.test.ts', 29.7],
+  ['app/tern-tsp-live-mount.test.ts', 29.5],
+  ['app/tern-tsp-input-completion-composition.test.ts', 26.3],
+  ['client/visual-presentation-tui.test.ts', 25.1],
+  ['app/settings-web-visual.test.ts', 24.7],
+  ['runtime/direct/tern-tsp-session-browser-commands.test.ts', 24.0],
+  ['integration/sixel-direct-screen.test.ts', 23.4],
+  ['tui/session-workspace-panel.test.ts', 22.4],
+  ['app/plugin-manager-embedded.test.ts', 21.4],
+  ['app/runner-remote-task-center.test.ts', 21.4],
+  ['tui/tern-tsp-input-completion.test.ts', 19.6],
+  ['app/tern-tsp-model-picker.test.ts', 16.4],
+  ['runtime/remote/runner-remote-job-viewer.test.ts', 15.8],
+  ['integration/kitty-native-screen.test.ts', 15.3],
+  ['domain/rendering.test.ts', 15.3],
+  ['client/image-collapse.test.ts', 14.6],
+  ['integration/kitty-tmux-screen.test.ts', 14.0],
+  ['tui/tern-tsp-editor-input.test.ts', 13.5],
+  ['tui/tern-tsp-history-search.test.ts', 13.3],
+  ['client/herdr-reporter.test.ts', 12.7],
+  ['domain/footer-command-runner.test.ts', 12.5],
+  ['app/focus-ui.test.ts', 12.4],
+  ['integration/runner-remote-model-preset.test.ts', 12.3],
+  ['integration/tern-tsp-remote-image-result.test.ts', 12.2],
+  ['app/settings-auth-end-to-end.test.ts', 12.0],
+  ['app/runner-remote-presentation.test.ts', 11.9],
+  ['domain/footer-configurator-ui.test.ts', 11.9],
+  ['app/plugin-manager-catalog-rc2.test.ts', 11.4],
+  ['tui/transcript-search-navigation.test.ts', 11.3],
+  ['app/plugin-manager-workspace-navigation.test.ts', 11.1],
+  ['tui/transcript-search-interaction.test.ts', 11.1],
+  ['integration/kitty-tmux-product.test.ts', 11.1],
+  ['tui/model-picker.test.ts', 10.7],
+  ['app/session-picker-content-search.test.ts', 10.4],
+  ['extension/advanced-interactive.test.ts', 10.4],
+  ['app/task-quick-interaction.test.ts', 10.3],
+  ['tui/transcript-search-runner.test.ts', 10.3],
+  ['integration/tern-tsp-remote-visual-result.test.ts', 10.3],
+  ['app/tern-tsp-preset-picker.test.ts', 10.1],
+  ['domain/footer-command-item-runtime.test.ts', 10.1],
+  ['client/sixel-image.test.ts', 9.5],
+])
+
+/**
+ * Reorder the discovered product files before handing them to Node's NATIVE
+ * index-modulo sharding. The lane's membership and the runner's shard option
+ * are unchanged; this only balances historical scheduling hints.
+ *
+ * Native shards pick indices i % total, so bin capacities MUST match the
+ * number of positions for each index. Without this cap, unequal bin lengths
+ * would shift later files into the wrong shard during interleaving.
+ *
+ * @param {string[]} files - sorted, POSIX test-root-relative paths.
+ * @param {number} total - native shard count.
+ * @returns {string[]} complete deterministic permutation of the same files.
+ */
+export function orderWeightedProductFiles(files, total) {
+  if (total === 1) return files
+  const weight = (file) => PRODUCT_FILE_COST_SECONDS.get(file) ?? 1
+  const ranked = [...files].sort((a, b) =>
+    weight(b) - weight(a) || (a < b ? -1 : a > b ? 1 : 0))
+  const bins = Array.from({ length: total }, () => [])
+  const capacities = bins.map((_, index) => Math.ceil((files.length - index) / total))
+  const loads = bins.map(() => 0)
+
+  for (const file of ranked) {
+    let target = -1
+    for (let index = 0; index < total; index += 1) {
+      if (bins[index].length >= capacities[index]) continue
+      if (target === -1 || loads[index] < loads[target]) target = index
+    }
+    bins[target].push(file)
+    loads[target] += weight(file)
+  }
+
+  const ordered = []
+  for (let offset = 0; ordered.length < files.length; offset += 1) {
+    for (const bin of bins) {
+      if (offset < bin.length) ordered.push(bin[offset])
+    }
+  }
+  return ordered
+}
+
 /**
  * The spawned lane leader: the complete file list stays in this process, never
  * on a Windows CreateProcessW command line. Node still owns native sharding.
  */
 async function runLaneChild(laneName, args) {
   const lane = LANES[laneName]
-  const relativeFiles = resolveLane(TEST_ROOT, lane.patterns, lane.suffixes, lane.exclude ?? [])
-    .map(rel => join('test', rel))
+  const discovered = resolveLane(TEST_ROOT, lane.patterns, lane.suffixes, lane.exclude ?? [])
   const shard = parseShard(args)
+  const ordered = laneName === 'product' && shard !== undefined
+    ? orderWeightedProductFiles(discovered, Number(shard.split('/')[1]))
+    : discovered
+  const relativeFiles = ordered.map(rel => join('test', rel))
   const concurrency = parseConcurrency(args)
   const options = {
     files: relativeFiles,
