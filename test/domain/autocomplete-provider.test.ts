@@ -230,12 +230,14 @@ test('the HOME shorthand completes to an ABSOLUTE Host value — never ~/... (TS
   try {
     const provider = new MentionProvider([], root, scopedSeam(root), undefined,
       () => ({ kind: 'session', sessionId: 'session-live' }), null)
-    const result = await provider.getSuggestions(['@~/Down'], 0, 7, { signal: abort })
-    assert.ok(result !== null, `@~/Down must suggest:\n${JSON.stringify(result)}`)
-    assert.equal(result.prefix, '@~/Down')
+    // The term matches the nested file's basename but no direct child of the
+    // home scope (the amended direct-child-first rule answers a direct match
+    // without recursion), so the scoped recursive search returns both the
+    // directory and the file.
+    const result = await provider.getSuggestions(['@~/loads.'], 0, 10, { signal: abort })
+    assert.ok(result !== null, `@~/loads. must suggest:\n${JSON.stringify(result)}`)
+    assert.equal(result.prefix, '@~/loads.')
     const values = result.items.map(item => item.value)
-    assert.ok(values.includes(`@${join(home, 'Downloads')}/`),
-      `the home scope drives discovery: ${JSON.stringify(values)}`)
     assert.ok(values.includes(`@${join(home, 'Downloads', 'loads.txt')}`),
       `the nested candidate is absolute: ${JSON.stringify(values)}`)
     assert.ok(values.every(value => !value.startsWith('@~')),

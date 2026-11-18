@@ -99,7 +99,10 @@ test('the private wire routes bare, scoped and home Session @ queries without Cl
 
     // 2. EXPLICIT: the Host scanner answers inside the typed scope. The
     //    private wire carries the official query form (no `@`, no quotes).
-    const scoped = await port.listReferences({ kind: 'session', sessionId }, 'src/dee')
+    //    The term matches only a NESTED entry (no direct child of `src/`
+    //    matches `uti`), so the amended direct-child-first rule does not
+    //    preempt the scoped discovery.
+    const scoped = await port.listReferences({ kind: 'session', sessionId }, 'src/uti')
     assert.ok(scoped.kind === 'ok' && scoped.items.some(item => item.path === 'src/deep/utility.ts'),
       `the Host scanner answers an explicit scope: ${JSON.stringify(scoped)}`)
     assert.ok(hostCalls.some(entry => entry.startsWith('list:') || entry.startsWith('find:')),
@@ -161,7 +164,7 @@ test('the private wire routes bare, scoped and home Session @ queries without Cl
     const directBare = await directPort.listReferences(scope, 'notes')
     assert.ok(directBare.kind === 'ok' && directBare.items.some(item => item.path === 'notes.md'),
       `the Direct port answers the bare query too: ${JSON.stringify(directBare)}`)
-    for (const query of ['notes', 'src/dee', 'dist/zzz', '~/']) {
+    for (const query of ['notes', 'src/uti', 'dist/zzz', '~/']) {
       assert.deepEqual(await port.listReferences(scope, query), await directPort.listReferences(scope, query),
         `Direct/Remote parity for query ${JSON.stringify(query)}`)
     }
