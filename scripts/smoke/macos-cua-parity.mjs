@@ -371,6 +371,25 @@ async function waitComposer(session, label) {
   return await waitFrameText(session, 'type a message', `${label} composer ready`, TIMEOUTS.mount)
 }
 
+/** Wait for a bounded conjunction of painted facts, not one racing capture. */
+async function waitFrameMatching(session, predicate, label, timeoutMs = TIMEOUTS.mount) {
+  let lastFrame = ''
+  try {
+    return await waitFor(() => {
+      if (!tmuxSessionExists(session)) {
+        throw new SplitSmokeAssertionError(`${label}: the tmux session exited while waiting for the painted facts`)
+      }
+      lastFrame = tmuxCapture(session, `${label} capture`)
+      return predicate(lastFrame) ? lastFrame : undefined
+    }, label, timeoutMs)
+  } catch (error) {
+    if (error instanceof SplitSmokeAssertionError) {
+      throw new SplitSmokeAssertionError(`${error.message}; frame sha256=${sha16(lastFrame)}`)
+    }
+    throw error
+  }
+}
+
 async function waitSessionExit(session, label) {
   await waitFor(() => (!tmuxSessionExists(session) ? true : undefined), label, TIMEOUTS.exit)
 }
@@ -1048,17 +1067,14 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
     `${CUA_BUNDLE}, press Enter, select the Computer use card and press Enter`,
     'to open its Details panel. Return here when the Details facts are painted.',
   ])
-  frame = tmuxCapture(tui, 'MAC09-01 explicit search result')
-  assert(frame.includes('Computer use'),
-    `MAC09-01: the explicit search did not paint the official Computer use card (frame sha256=${sha16(frame)})`)
-  assert(/\[experimental\]/u.test(frame), 'MAC09-01: the CUA card does not paint its official experimental identity')
+  frame = await waitFrameMatching(tui, painted => painted.includes('Computer use')
+    && /\[experimental\]/u.test(painted)
+    && /Default listing\s+(Host default|Hidden)/u.test(painted)
+    && /Selected in profile\s+No/u.test(painted)
+    && painted.includes('Not live'), 'MAC09-01 CUA Details facts')
   const listedByDefaultObserved = /Default listing\s+(Host default|Hidden)/u.exec(frame)?.[1]
   assert(listedByDefaultObserved !== undefined,
     'MAC09-01: the CUA Details did not paint the Host default-listing fact')
-  assert(/Selected in profile\s+No/u.test(frame),
-    'MAC09-01: the CUA bundle appears selected in the profile although it was never enabled')
-  assert(frame.includes('Not live'),
-    'MAC09-01: the disabled CUA bundle painted a live provider row')
   pushRow(report, 'MAC09-01', 'PASS', {
     defaultListDigest,
     searchedDigest: sha16(frame),
