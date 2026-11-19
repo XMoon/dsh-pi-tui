@@ -1632,38 +1632,55 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
       'MAC09-08 typeText result', TIMEOUTS.turn)
     assert(inputResult.result.isError !== true,
       `MAC09-08: the controlled typeText failed: ${dispatchErrorCode(inputResult.result) ?? 'unknown error'} :: ${dispatchContentText(inputResult.result).slice(0, 400)}`)
-    // typeText settles BEFORE the sequential getState dispatch is durable: wait
-    // for the getState dispatch on the live event stream. The state read follows
-    // the settled typeText in the SAME program, so it is due in seconds.
+    // The model may run SEVERAL attempts inside one program, and the program is
+    // only finished when the turn is: wait for the turn to settle BEFORE reading
+    // the trace, otherwise a later segment can still appear and never be audited.
     try {
-      stateDispatch = await waitFor(() => cuaDispatches(eventsOf(dshHome, input.sessionId), input.afterIndex)
-        .filter(dispatch => dispatch.rootCallId === input.dispatch.rootCallId)
-        .find(dispatch => dispatchMethod(dispatch) === 'getState'),
-      'MAC09-08 official getState dispatch', 60_000)
-      break
+      await waitTurnEnd(dshHome, input.sessionId, input.afterIndex, 'MAC09-08 controlled turn completed')
     } catch (error) {
       if (attempts === 1) throw error
+      continue
     }
+    // The trace is now STABLE: require at least one getState in it, otherwise the
+    // model ended the program without reading the tree and the scene retries.
+    const settledTrace = cuaDispatches(eventsOf(dshHome, input.sessionId), input.afterIndex)
+      .filter(dispatch => dispatch.rootCallId === input.dispatch.rootCallId)
+    if (settledTrace.some(dispatch => dispatchMethod(dispatch) === 'getState')) break
+    if (attempts === 1) throw new Error('MAC09-08: the controlled program never read the accessibility tree')
   }
   // Bind the WHOLE controlled chain, not just the requested prompt text: the
   // official getApp must select this run's exact PID, the show/typeText/getState
   // window ids must agree, and the typed marker must be the exact argument.
   const liveInputDispatches = () => cuaDispatches(eventsOf(dshHome, input.sessionId), input.afterIndex)
     .filter(dispatch => dispatch.rootCallId === input.dispatch.rootCallId)
-  const allMethods = () => liveInputDispatches().map(dispatchMethod)
-  const inputSequence = allMethods()
-  // The model may run several attempts INSIDE the one program (a model that
-  // re-reads the tree before typing is still one bounded input). The controlled
-  // attempt is the FINAL segment: it starts at the LAST getApp and ends at the
-  // LAST getState, which is the observation bound below.
-  const lastGetAppIndex = inputSequence.lastIndexOf('getApp')
-  const attemptDispatches = liveInputDispatches().slice(lastGetAppIndex)
+  // ONE stable trace of the settled controlled call, split into attempt
+  // segments at every getApp. EVERY node of the controlled chain is taken from
+  // the FINAL segment — including listWindows, whose handle must belong to THAT
+  // segment's getApp (a retry may obtain a NEW handle, so a whole-root search
+  // would silently bind the first attempt's handle).
+  const trace = liveInputDispatches()
+  const inputSequence = trace.map(dispatchMethod)
+  const segmentStarts = inputSequence.flatMap((method, index) => method === 'getApp' ? [index] : [])
+  const attemptDispatches = segmentStarts.length === 0 ? [] : trace.slice(segmentStarts.at(-1))
   const attemptMethods = attemptDispatches.map(dispatchMethod)
-  const getAppDispatch = attemptDispatches.find(dispatch => dispatchMethod(dispatch) === 'getApp')
-  const showDispatch = attemptDispatches.find(dispatch => dispatchMethod(dispatch) === 'show')
-  const activateDispatch = attemptDispatches.find(dispatch => dispatchMethod(dispatch) === 'activate')
-  const typeDispatch = attemptDispatches.find(dispatch => dispatchMethod(dispatch) === 'typeText')
-  const attemptStateDispatch = attemptDispatches.find(dispatch => dispatchMethod(dispatch) === 'getState')
+  const firstOf = method => attemptDispatches.find(dispatch => dispatchMethod(dispatch) === method)
+  const getAppDispatch = firstOf('getApp')
+  const listWindowsDispatch = firstOf('listWindows')
+  const showDispatch = firstOf('show')
+  const activateDispatch = firstOf('activate')
+  const typeDispatch = firstOf('typeText')
+  const attemptStateDispatch = firstOf('getState')
+  // NO earlier segment is exempt from the audit: every getApp in the root must
+  // select this run's exact PID, and every typeText must type this run's marker.
+  // A retry that used another target or another text would otherwise hide here.
+  for (const dispatch of trace.filter(item => dispatchMethod(item) === 'getApp')) {
+    assert(dispatchParams(dispatch)?.selector === String(textEditPid),
+      `MAC09-08: an earlier attempt's getApp did not select this run's exact TextEdit PID: ${JSON.stringify(dispatchParams(dispatch)?.selector)}`)
+  }
+  for (const dispatch of trace.filter(item => dispatchMethod(item) === 'typeText')) {
+    assert(dispatchParams(dispatch)?.text === marker,
+      'MAC09-08: an earlier attempt typed text other than this run\'s marker')
+  }
   // The CLAIM is one bounded input observed by the same call: getApp ->
   // listWindows -> typeText -> getState on ONE root call. The window pre-steps
   // (`show` / `activate`) are OPTIONAL: the provider's declared keyboard scope
@@ -1687,7 +1704,6 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
   const controlledHandle = dispatchJsonContent(getAppResult)?.appHandle
   assert(typeof controlledHandle === 'string' && controlledHandle !== '',
     'MAC09-08: the official getApp result carried no app handle')
-  const listWindowsDispatch = liveInputDispatches().find(dispatch => dispatchMethod(dispatch) === 'listWindows')
   const listWindowsResult = cuaResults(inputEventsNow, 0)
     .find(result => result.subCallId === listWindowsDispatch?.subCallId)
   const controlledWindows = dispatchJsonContent(listWindowsResult)
@@ -1728,7 +1744,9 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
     sessionId: sha16(input.sessionId),
     rootCallId: sha16(input.dispatch.rootCallId),
     method: 'typeText',
-    sequence: inputSequence,
+    sequence: attemptMethods,
+    rootSequence: inputSequence,
+    attemptSegments: segmentStarts.length,
     windowPreSteps: showDispatch !== undefined || activateDispatch !== undefined,
     markerDigest: sha16(marker),
     attempts: attempts + 1,
