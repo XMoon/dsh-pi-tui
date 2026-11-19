@@ -11,11 +11,13 @@
  * - presence/activity come from the ONE `SessionScopeAuthority` capture, the
  *   official Remote `SessionSnapshot.running` (or the Direct Agent status),
  *   and the existing application admissions (a held submission, a running user
- *   shell). A pending navigation transition is NEVER idle.
+ *   shell). A pending navigation is not substituted for the current Session's
+ *   observed activity: the transition/retirement contracts own the
+ *   exit-versus-navigation ordering.
  * - a Sessionless scope is still an identity: `capture()` (not only
  *   `captureLive()`) is stored, so the first Session publication invalidates it.
  * - the Remote transport token is captured beside the scope on EVERY Remote
- *   capture — including the admission/transition shortcuts — because the
+ *   capture — including the admission/shell shortcuts — because the
  *   confirm fence compares BOTH the ownership generation and the exact
  *   Connection/binding identity. A sessionless Client fences the Connection
  *   generation with the empty-session sentinel.
