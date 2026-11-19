@@ -1745,6 +1745,29 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
       assert(dispatchParams(dispatch)?.appHandle === handle,
         `MAC09-08: a controlled ${method} did not use its own segment's getApp handle`)
     }
+    // ORDER is part of the proof: the owned window must be selected AFTER this
+    // segment's listWindows and BEFORE any side effect. Without this, a trace
+    // like getApp,listWindows,typeText,show(owned),getState would type into
+    // whatever window was focused and only THEN select the owned one.
+    const listWindowsIndex = methods.indexOf('listWindows')
+    const showIndexes = methods.flatMap((method, position) => method === 'show' ? [position] : [])
+    const activateIndexes = methods.flatMap((method, position) => method === 'activate' ? [position] : [])
+    const typeIndexes = methods.flatMap((method, position) => method === 'typeText' ? [position] : [])
+    for (const showIndex of showIndexes) {
+      assert(showIndex > listWindowsIndex,
+        `MAC09-08: a controlled segment selected the owned window BEFORE its listWindows: ${JSON.stringify(methods)}`)
+    }
+    for (const activateIndex of activateIndexes) {
+      assert(activateIndex > listWindowsIndex && (typeIndexes.length === 0 || activateIndex < typeIndexes[0]),
+        `MAC09-08: a controlled activate was not between listWindows and the input: ${JSON.stringify(methods)}`)
+    }
+    for (const typeIndex of typeIndexes) {
+      const lastShowBefore = showIndexes.filter(position => position < typeIndex).at(-1)
+      assert(lastShowBefore !== undefined,
+        `MAC09-08: a controlled segment typed BEFORE selecting the owned cua-blank window: ${JSON.stringify(methods)}`)
+      assert(!activateIndexes.some(position => position > typeIndex && position < typeIndexes.at(-1)),
+        'MAC09-08: a controlled segment activated the app after typing')
+    }
     const segmentTypeTexts = segment.filter(dispatch => dispatchMethod(dispatch) === 'typeText')
     for (const typeText of segmentTypeTexts) {
       assert(dispatchParams(typeText)?.text === marker,
@@ -1786,18 +1809,16 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
   const activateParams = dispatchParams(activateDispatch)
   assert(typeDispatch !== undefined && typeParams?.text === marker,
     'MAC09-08: the official typeText argument is not the exact random marker')
-  // The provider's declared keyboard scope is app-level (rc.3 capabilities:
-  // keyboard: ["app"]) — typeText routes through the FOCUSED recipient of the
-  // approved appHandle; the windowId params the protocol schema marks optional
-  // are rejected with INVALID_ARGUMENT. The chain stays: show/activate bind
-  // the controlled window, typeText/getState use the app object returned by
-  // the approved getApp.
+  // The provider's declared keyboard scope is app-level (capabilities:
+  // keyboard: ["app"]) — typeText routes through the app's FOCUSED recipient,
+  // so `show` of the OWNED window before the input is REQUIRED (the audit above
+  // enforces the order); a windowId passed to typeText itself is rejected with
+  // INVALID_ARGUMENT. `activate` is optional but must stay before the input.
   const handleBound = (params) => params?.appHandle === controlledHandle
   assert(typeof typeParams?.appHandle === 'string' && handleBound(typeParams)
     && handleBound(stateParams)
     && handleBound(dispatchParams(listWindowsDispatch))
-    // The optional pre-steps, when dispatched, must use the SAME approved handle.
-    && (showParams === undefined || handleBound(showParams))
+    && handleBound(showParams)
     && (activateParams === undefined || handleBound(activateParams)),
     'MAC09-08: listWindows/typeText/getState (or a dispatched pre-step) do not use the exact approved getApp handle')
   assert(showParams !== undefined && showParams.appHandle === controlledHandle,
