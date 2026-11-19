@@ -605,9 +605,15 @@ function helperFromPackage(packageJsonPath, arch) {
   }
 }
 
-function verifyHelperReceipt(helper, targetDshVersion) {
-  assert(helper.receipt.version === targetDshVersion,
-    `the CUA helper receipt version ${JSON.stringify(helper.receipt.version)} != the pinned DSH ${targetDshVersion}`)
+function verifyHelperReceipt(helper, providerVersion) {
+  // The provider PACKAGE is what the candidate pins; the helper RECEIPT is an
+  // independent upstream fact (rc.5 still ships a receipt that says rc.3). Both
+  // are recorded, and the receipt must be a real DSH-family version — it is not
+  // asserted equal to the pinned DSH, which the upstream package does not keep.
+  assert(/^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/u.test(String(helper.receipt.version ?? '')),
+    `the CUA helper receipt carries no DSH-family version: ${JSON.stringify(helper.receipt.version)}`)
+  assert(typeof providerVersion === 'string' && providerVersion !== '',
+    'the CUA provider package version is unreadable')
   assert(helper.expected !== undefined, `the CUA helper receipt has no ${process.arch} application`)
   assert(helper.current.bundle === helper.expected.bundle,
     'the CUA helper current.json does not select the package receipt bundle')
@@ -640,8 +646,13 @@ function verifyDistribution(installation, targetDshVersion) {
   const macosPackage = resolvePackageJson(bundlePackage, CUA_MACOS_PACKAGE)
   assert(macosPackage !== undefined, 'the pinned DSH distribution is missing the macOS CUA provider')
   const helper = helperFromPackage(macosPackage, process.arch)
-  const receipt = verifyHelperReceipt(helper, targetDshVersion)
-  return { dshPackage, bundlePackage, macosPackage, helperAppPath: helper.appPath, receipt }
+  // The pinned pairing is enforced on the PACKAGE the distribution resolves, and
+  // the receipt stays an observed upstream fact.
+  const providerVersion = JSON.parse(readFileSync(macosPackage, 'utf8')).version
+  assert(providerVersion === targetDshVersion,
+    `the CUA provider package ${JSON.stringify(providerVersion)} != the pinned DSH ${targetDshVersion}`)
+  const receipt = verifyHelperReceipt(helper, providerVersion)
+  return { dshPackage, bundlePackage, macosPackage, helperAppPath: helper.appPath, receipt, providerVersion }
 }
 
 function profileCuaHelper(profileDir) {
@@ -1163,6 +1174,9 @@ function makeReport({ candidate, preflight, installation, model, helper }) {
       profileDir: installation.profileDir,
       dshVersion: candidate.targetDshVersion,
       helper: helper.receipt,
+      // The resolved provider PACKAGE is the pinned pairing fact; the receipt's
+      // own version is the upstream helper fact recorded above.
+      providerVersion: helper.providerVersion,
       helperAppPath: helper.helperAppPath,
     },
     model,
