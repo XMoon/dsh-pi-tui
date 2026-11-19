@@ -1647,11 +1647,20 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
   // window ids must agree, and the typed marker must be the exact argument.
   const liveInputDispatches = () => cuaDispatches(eventsOf(dshHome, input.sessionId), input.afterIndex)
     .filter(dispatch => dispatch.rootCallId === input.dispatch.rootCallId)
-  const getAppDispatch = liveInputDispatches().find(dispatch => dispatchMethod(dispatch) === 'getApp')
-  const showDispatch = liveInputDispatches().find(dispatch => dispatchMethod(dispatch) === 'show')
-  const activateDispatch = liveInputDispatches().find(dispatch => dispatchMethod(dispatch) === 'activate')
-  const typeDispatch = liveInputDispatches().find(dispatch => dispatchMethod(dispatch) === 'typeText')
-  const inputSequence = liveInputDispatches().map(dispatchMethod)
+  const allMethods = () => liveInputDispatches().map(dispatchMethod)
+  const inputSequence = allMethods()
+  // The model may run several attempts INSIDE the one program (a model that
+  // re-reads the tree before typing is still one bounded input). The controlled
+  // attempt is the FINAL segment: it starts at the LAST getApp and ends at the
+  // LAST getState, which is the observation bound below.
+  const lastGetAppIndex = inputSequence.lastIndexOf('getApp')
+  const attemptDispatches = liveInputDispatches().slice(lastGetAppIndex)
+  const attemptMethods = attemptDispatches.map(dispatchMethod)
+  const getAppDispatch = attemptDispatches.find(dispatch => dispatchMethod(dispatch) === 'getApp')
+  const showDispatch = attemptDispatches.find(dispatch => dispatchMethod(dispatch) === 'show')
+  const activateDispatch = attemptDispatches.find(dispatch => dispatchMethod(dispatch) === 'activate')
+  const typeDispatch = attemptDispatches.find(dispatch => dispatchMethod(dispatch) === 'typeText')
+  const attemptStateDispatch = attemptDispatches.find(dispatch => dispatchMethod(dispatch) === 'getState')
   // The CLAIM is one bounded input observed by the same call: getApp ->
   // listWindows -> typeText -> getState on ONE root call. The window pre-steps
   // (`show` / `activate`) are OPTIONAL: the provider's declared keyboard scope
@@ -1660,14 +1669,14 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
   // the claim. If they ARE dispatched they must be validated (below).
   const INPUT_SEQUENCE = ['getApp', 'listWindows', 'typeText', 'getState']
   const INPUT_OPTIONAL = ['show', 'activate']
-  const sequenceShaped = inputSequence[0] === INPUT_SEQUENCE[0]
-    && inputSequence[1] === INPUT_SEQUENCE[1]
-    && inputSequence.at(-1) === 'getState'
-    && inputSequence.indexOf('typeText') > 1
-    && inputSequence.every(method => INPUT_SEQUENCE.includes(method) || INPUT_OPTIONAL.includes(method))
-    && new Set(inputSequence).size === inputSequence.length
+  const sequenceShaped = attemptMethods[0] === 'getApp'
+    && attemptMethods[1] === 'listWindows'
+    && attemptMethods.at(-1) === 'getState'
+    && attemptMethods.lastIndexOf('typeText') === attemptMethods.length - 2
+    && attemptMethods.every(method => INPUT_SEQUENCE.includes(method) || INPUT_OPTIONAL.includes(method))
+    && new Set(attemptMethods).size === attemptMethods.length
   assert(sequenceShaped,
-    `MAC09-08: the controlled root dispatched an unexpected cua method sequence: ${JSON.stringify(inputSequence)}`)
+    `MAC09-08: the controlled root dispatched an unexpected cua method sequence: ${JSON.stringify(inputSequence)} (attempt ${JSON.stringify(attemptMethods)})`)
   assert(getAppDispatch !== undefined && dispatchParams(getAppDispatch)?.selector === String(textEditPid),
     'MAC09-08: the official getApp did not select this run\'s exact TextEdit PID')
   const inputEventsNow = eventsOf(dshHome, input.sessionId)
@@ -1680,7 +1689,7 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
     .find(result => result.subCallId === listWindowsDispatch?.subCallId)
   const controlledWindows = dispatchJsonContent(listWindowsResult)
   const typeParams = dispatchParams(typeDispatch)
-  const stateParams = dispatchParams(stateDispatch)
+  const stateParams = dispatchParams(attemptStateDispatch)
   const showParams = dispatchParams(showDispatch)
   const activateParams = dispatchParams(activateDispatch)
   assert(typeDispatch !== undefined && typeParams?.text === marker,
@@ -1708,7 +1717,7 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
       'MAC09-08: show windowId is not this run\'s controlled cua-blank listWindows result')
   }
   const markerResult = await waitFor(() => cuaResults(eventsOf(dshHome, input.sessionId), 0)
-    .find(result => result.rootCallId === input.dispatch.rootCallId
+    .find(result => result.subCallId === attemptStateDispatch.subCallId
       && dispatchMethod(result) === 'getState'
       && dispatchContentText(result).includes(marker)),
   'MAC09-08 the same cua call observes the typed marker in its accessibility tree', TIMEOUTS.turn)
