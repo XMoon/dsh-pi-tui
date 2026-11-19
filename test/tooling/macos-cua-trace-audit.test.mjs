@@ -45,7 +45,7 @@ function dispatch(method, params, options = {}) {
   const subCallId = options.subCallId ?? `${method}-${String(options.index ?? 0)}`
   // The production event shape: the method/params live in `arguments`, which is
   // what dispatchArguments()/dispatchMethod() read on the real stream.
-  return { arguments: { method, params }, subCallId, result: options.result }
+  return { arguments: { method, params }, subCallId, result: options.result, rootCallId: options.rootCallId ?? 'root-1' }
 }
 
 function getApp(subCallId, selector = PID, appHandle = 'app-1') {
@@ -70,7 +70,13 @@ function typeText(subCallId, appHandle, text) {
 
 function getState(subCallId, appHandle, options = {}) {
   return dispatch('getState', options.windowId === undefined ? { appHandle } : { appHandle, windowId: options.windowId },
-    { subCallId, result: { windowId: options.windowId ?? null, focusedWindowId: options.focusedWindowId ?? null } })
+    { subCallId, result: {
+      windowId: options.windowId ?? null,
+      focusedWindowId: options.focusedWindowId ?? null,
+      // A window-scoped read of the owned window is where the marker is expected;
+      // every other read must NOT be mistaken for that observation.
+      tree: options.tree ?? (options.windowId === OWNED_WINDOW ? `text: ${MARKER}` : 'other document'),
+    } })
 }
 
 /** The owned window plus, optionally, a foreign document of the same app. */
@@ -83,9 +89,14 @@ function ownedWindows(extra = []) {
 }
 
 /** Run the real audit with injected async facts. */
-function audit(trace, { typeTextError } = {}) {
+function audit(trace, options = {}) {
+  // The audit judges the WHOLE user turn: by default the trace IS that turn's
+  // dispatches, and the root id is the first dispatch's.
+  const { typeTextError, turnDispatches = trace } = options
   return auditControlledTrace({
     trace,
+    turnDispatches,
+    rootCallId: options.rootCallId ?? trace[0]?.rootCallId,
     textEditPid: PID,
     runToken: RUN_TOKEN,
     marker: MARKER,
@@ -173,6 +184,21 @@ test('a show that NEVER moved focus is refused before the input (rc.5 provider p
   ], /was not the app's focused window before the input/u)
 })
 
+test('a focus read that precedes a later show/activate is NOT a fresh proof', async () => {
+  // The owned window WAS focused when read, but the segment then showed and
+  // activated again; without a fresh read after that, the input target is
+  // unproven. This is the "较早的 true 借给较晚的状态" shape.
+  await rejection([
+    getApp('g1', PID, 'app-1'),
+    listWindows('w1', 'app-1', ownedWindows()),
+    getState('f1', 'app-1', { focusedWindowId: OWNED_WINDOW }),
+    show('s1', 'app-1', OWNED_WINDOW),
+    activate('a1', 'app-1'),
+    typeText('t1', 'app-1', MARKER),
+    getState('e1', 'app-1', { windowId: OWNED_WINDOW, focusedWindowId: OWNED_WINDOW }),
+  ], /focus proof precedes the last show\/activate/u)
+})
+
 test('an APP-scoped observation after the input is refused', async () => {
   // The marker must be read from a window-scoped getState of the owned window;
   // an app-scoped tree can contain the marker in a DIFFERENT document.
@@ -191,18 +217,19 @@ test('an APP-scoped observation after the input is refused', async () => {
 // ── negative shapes that MUST be refused ───────────────────────────────────
 
 test('a typeText in a NON-final segment is refused', async () => {
+  // Exactly ONE typeText in the turn (so the turn-level count cannot be what
+  // fires) but it sits in an EARLIER segment, not the final one.
   await rejection([
     getApp('g1', PID, 'app-1'),
     listWindows('w1', 'app-1', ownedWindows()),
     show('s1', 'app-1', OWNED_WINDOW),
     typeText('t1', 'app-1', MARKER),
-    getState('e1', 'app-1'),
+    getState('e1', 'app-1', { windowId: OWNED_WINDOW, focusedWindowId: OWNED_WINDOW }),
     getApp('g2', PID, 'app-2'),
     listWindows('w2', 'app-2', ownedWindows()),
     show('s2', 'app-2', OWNED_WINDOW),
-    typeText('t2', 'app-2', MARKER),
-    getState('e2', 'app-2'),
-  ], /typed 2 times; the scene claims ONE bounded input/u)
+    getState('f2', 'app-2', { focusedWindowId: OWNED_WINDOW }),
+  ], /a NON-final segment dispatched typeText/u)
 })
 
 test('a show of a window that is NOT the owned one is refused', async () => {
@@ -250,7 +277,7 @@ test('two typeTexts are refused as more than ONE bounded input', async () => {
     show('s2', 'app-2', OWNED_WINDOW),
     typeText('t2', 'app-2', MARKER),
     getState('e2', 'app-2'),
-  ], /typed 2 times; the scene claims ONE bounded input/u)
+  ], /user turn triggered 2 cua typeText calls; the scene claims ONE bounded input/u)
 })
 
 test('a dispatch before the first getApp is refused', async () => {
@@ -273,6 +300,50 @@ test('a method the scene does not audit is refused', async () => {
     typeText('t1', 'app-1', MARKER),
     getState('e1', 'app-1'),
   ], /dispatched a method the scene does not audit: click/u)
+})
+
+test('an owned-window observation WITHOUT the marker in its tree is refused', async () => {
+  await rejection([
+    getApp('g1', PID, 'app-1'),
+    listWindows('w1', 'app-1', ownedWindows()),
+    show('s1', 'app-1', OWNED_WINDOW),
+    getState('f1', 'app-1', { focusedWindowId: OWNED_WINDOW }),
+    typeText('t1', 'app-1', MARKER),
+    getState('e1', 'app-1', { windowId: OWNED_WINDOW, focusedWindowId: OWNED_WINDOW, tree: 'an empty document' }),
+  ], /observation tree does not contain the typed marker/u)
+})
+
+test('a FOREIGN root with a side effect in the same turn is refused', async () => {
+  const own = [
+    getApp('g1', PID, 'app-1'),
+    listWindows('w1', 'app-1', ownedWindows()),
+    show('s1', 'app-1', OWNED_WINDOW),
+    getState('f1', 'app-1', { focusedWindowId: OWNED_WINDOW }),
+    typeText('t1', 'app-1', MARKER),
+    getState('e1', 'app-1', { windowId: OWNED_WINDOW, focusedWindowId: OWNED_WINDOW }),
+  ]
+  // A second CUA root in the SAME user turn typed as well: the selected root
+  // still looks controlled, but the turn did not make ONE bounded input.
+  const foreign = [{ ...typeText('t2', 'app-1', MARKER), rootCallId: 'root-2' }]
+  await rejection(own, /another cua root in the same user turn dispatched side effects/u,
+    { turnDispatches: [...own, ...foreign] })
+})
+
+test('a FOREIGN read-only root in the same turn is admitted', async () => {
+  const own = [
+    getApp('g1', PID, 'app-1'),
+    listWindows('w1', 'app-1', ownedWindows()),
+    show('s1', 'app-1', OWNED_WINDOW),
+    getState('f1', 'app-1', { focusedWindowId: OWNED_WINDOW }),
+    typeText('t1', 'app-1', MARKER),
+    getState('e1', 'app-1', { windowId: OWNED_WINDOW, focusedWindowId: OWNED_WINDOW }),
+  ]
+  const foreign = [
+    { ...getApp('g9', PID, 'app-9'), rootCallId: 'root-2' },
+    { ...getState('r9', 'app-9', { focusedWindowId: OWNED_WINDOW }), rootCallId: 'root-2' },
+  ]
+  const admitted = await audit(own, { turnDispatches: [...own, ...foreign] })
+  assert.equal(admitted.typeTextSettled.result.isError, false)
 })
 
 // ── MAC09-10 disconnect-terminal classification ───────────────────────────

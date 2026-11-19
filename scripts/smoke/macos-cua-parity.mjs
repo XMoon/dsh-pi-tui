@@ -1265,7 +1265,7 @@ function fillUnreachedCases(report) {
 // document of the app, so a segment that never selected the owned window is
 // indistinguishable from a write into a user document, and a second typeText
 // is a second input (MAC09-08 claims ONE bounded input).
-export async function auditControlledTrace({ trace, textEditPid, runToken, marker, resolveJson, resolveTypeTextResult }) {
+export async function auditControlledTrace({ trace, turnDispatches, rootCallId, textEditPid, runToken, marker, resolveJson, resolveTypeTextResult }) {
   const inputSequence = trace.map(dispatchMethod)
   // The controlled trace must OPEN with getApp: a leading dispatch would sit
   // before every segment and therefore outside the per-segment audit below, so
@@ -1291,9 +1291,22 @@ export async function auditControlledTrace({ trace, textEditPid, runToken, marke
     assert(TRACE_METHODS.has(dispatchMethod(dispatch)),
       `MAC09-08: the controlled call dispatched a method the scene does not audit: ${dispatchMethod(dispatch)}`)
   }
+  // ONE bounded input is a WHOLE-TURN claim: a second CUA root in the same user
+  // turn could type without the selected root showing it, so both the turn and
+  // the selected root must carry exactly one typeText.
+  // A foreign root is judged FIRST so its side effect is reported as such
+  // instead of being folded into the turn-wide input count.
+  const foreignRoots = turnDispatches.filter(item => item.rootCallId !== rootCallId)
+  const FOREIGN_READ_ONLY = new Set(['getApp', 'listWindows', 'getState'])
+  const foreignSideEffects = foreignRoots.filter(item => !FOREIGN_READ_ONLY.has(dispatchMethod(item)))
+  assert(foreignSideEffects.length === 0,
+    `MAC09-08: another cua root in the same user turn dispatched side effects: ${JSON.stringify([...new Set(foreignSideEffects.map(dispatchMethod))])}`)
+  const turnTypeTexts = turnDispatches.filter(item => dispatchMethod(item) === 'typeText')
+  assert(turnTypeTexts.length === 1,
+    `MAC09-08: the user turn triggered ${String(turnTypeTexts.length)} cua typeText calls; the scene claims ONE bounded input`)
   const typeTextDispatches = trace.filter(item => dispatchMethod(item) === 'typeText')
   assert(typeTextDispatches.length === 1,
-    `MAC09-08: the controlled call typed ${String(typeTextDispatches.length)} times; the scene claims ONE bounded input`)
+    `MAC09-08: the controlled root typed ${String(typeTextDispatches.length)} times; the scene claims ONE bounded input`)
   // The qualifying RESULT belongs to the FINAL segment's own typeText: an
   // earlier attempt's success may never stand in for it, and an earlier
   // attempt's failure may not disqualify a recovered program.
@@ -1303,6 +1316,7 @@ export async function auditControlledTrace({ trace, textEditPid, runToken, marke
   const segmentRanges = segmentStarts.map((start, index) =>
     trace.slice(start, segmentStarts[index + 1] ?? trace.length))
   const segmentFacts = []
+  let observationJson
   for (const [index, segment] of segmentRanges.entries()) {
     const methods = segment.map(dispatchMethod)
     const final = index === segmentRanges.length - 1
@@ -1377,14 +1391,24 @@ export async function auditControlledTrace({ trace, textEditPid, runToken, marke
       // window therefore proves NOTHING about where the input lands: the app
       // must actually FOCUS the owned window before the input, and the trace
       // must carry that read.
-      const beforeInput = segment.slice(0, typeIndexes[0])
-        .filter(dispatch => dispatchMethod(dispatch) === 'getState')
-      const focusedRead = beforeInput.find(dispatch => {
-        const focused = resolveJson(dispatch)?.focusedWindowId
-        return focused !== undefined && focused !== null && String(focused) === String(ownedWindowId)
-      })
-      assert(focusedRead !== undefined,
-        `MAC09-08: the owned window was not the app's focused window before the input (read focusedWindowId ${JSON.stringify(beforeInput.map(d => resolveJson(d)?.focusedWindowId))}, owned ${JSON.stringify(ownedWindowId)})`)
+      const prefix = segment.slice(0, typeIndexes[0])
+      const beforeInput = prefix
+        .flatMap((dispatch, position) => dispatchMethod(dispatch) === 'getState' ? [{ dispatch, position }] : [])
+      // The FOCUS proof must be the LAST read before the input and must follow
+      // the segment's last show/activate: an earlier `true` cannot carry over a
+      // later change of focus, and a read that precedes a show/activate says
+      // nothing about where the app is focused when the input runs.
+      const lastRead = beforeInput.at(-1)
+      assert(lastRead !== undefined,
+        'MAC09-08: the controlled attempt never read focusedWindowId before the input')
+      const lastFocusChange = prefix
+        .flatMap((dispatch, position) => ['show', 'activate'].includes(dispatchMethod(dispatch)) ? [position] : [])
+        .at(-1)
+      assert(lastFocusChange === undefined || lastRead.position > lastFocusChange,
+        `MAC09-08: the focus proof precedes the last show/activate, so no fresh read proves the input target: ${JSON.stringify(methods)}`)
+      const lastFocused = resolveJson(lastRead.dispatch)?.focusedWindowId
+      assert(lastFocused !== undefined && lastFocused !== null && String(lastFocused) === String(ownedWindowId),
+        `MAC09-08: the owned window was not the app's focused window before the input (last read focusedWindowId ${JSON.stringify(lastFocused)}, owned ${JSON.stringify(ownedWindowId)})`)
       // TARGET PROOF 2 (after the input): the observation must be a
       // WINDOW-SCOPED read of the owned window, and the provider must report
       // that same windowId. An app-scoped tree can contain the marker in a
@@ -1395,6 +1419,12 @@ export async function auditControlledTrace({ trace, textEditPid, runToken, marke
       'MAC09-08: the observation is not a window-scoped read of the owned window')
       assert(String(resolveJson(observation)?.windowId) === String(ownedWindowId),
         `MAC09-08: the window-scoped observation reported another window: ${JSON.stringify(resolveJson(observation)?.windowId)}`)
+      // The marker must be read from THIS owned-window observation's tree: an
+      // app-scoped tree (or another window's) can contain the marker elsewhere.
+      const observationTree = resolveJson(observation)?.tree
+      assert(typeof observationTree === 'string' && observationTree.includes(marker),
+        'MAC09-08: the owned-window observation tree does not contain the typed marker')
+      observationJson = resolveJson(observation)
     }
     segmentFacts.push({ methods, handle, ownedWindowId, typeTexts: segmentTypeTexts.length })
   }
@@ -1419,7 +1449,7 @@ export async function auditControlledTrace({ trace, textEditPid, runToken, marke
   return {
     inputSequence, segmentStarts, attemptMethods, attemptDispatches, getAppDispatch,
     listWindowsDispatch, showDispatch, activateDispatch, typeDispatch, attemptStateDispatch,
-    previews, controlledHandle, controlledWindows, segmentFacts, typeTextSettled,
+    previews, controlledHandle, controlledWindows, segmentFacts, typeTextSettled, observationJson,
   }
 }
 
@@ -1840,60 +1870,42 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
   // window BEFORE typing, (2) type, and (3) read the observation WINDOW-SCOPED,
   // so the marker is proven to be in the owned window and not in another
   // restored document of the same app.
-  const controlledProgram = marker => `Run exactly this in run_code and DO NOT stop early — every call below must run in this one program: const app = await tools.cua({ method: 'getApp', params: { selector: '${String(textEditPid)}' } }); const windows = await tools.cua({ method: 'listWindows', params: { appHandle: app.appHandle } }); const window = windows.find(item => String(item.title ?? '').includes('${runToken}')); if (!window) throw new Error('the controlled TextEdit window was not found'); await tools.cua({ method: 'show', params: { appHandle: app.appHandle, windowId: window.windowId } }); await tools.cua({ method: 'activate', params: { appHandle: app.appHandle } }); const before = await tools.cua({ method: 'getState', params: { appHandle: app.appHandle } }); if (String(before.focusedWindowId) !== String(window.windowId)) throw new Error('the owned TextEdit window is not the focused window'); await tools.cua({ method: 'typeText', params: { appHandle: app.appHandle, text: '${marker}' } }); const after = await tools.cua({ method: 'getState', params: { appHandle: app.appHandle, windowId: window.windowId } }); return JSON.stringify(after.tree).includes('${marker}') ? 'MARKER_PRESENT' : 'MARKER_MISSING'`
-  let input
-  let marker
-  let attempts = 0
-  for (; attempts < 2; attempts += 1) {
-    marker = `CUA-MARKER-${randomUUID().slice(0, 8).toUpperCase()}`
-    input = await promptAndWaitCua({
-      tui,
-      dshHome,
-      sessionId: consent.sessionId,
-      prompt: controlledProgram(marker),
-      label: `MAC09-08 controlled input${attempts === 0 ? '' : ' (retry)'}`,
-      method: 'typeText',
-      timeoutMs: TIMEOUTS.turn,
-    })
-    // The FIRST typeText the turn dispatches is NOT the qualifying input: a
-    // program may fail an early attempt and recover in a later segment, so the
-    // result is bound below to the FINAL segment's own typeText subCallId.
-    // The model may run SEVERAL attempts inside one program, and the program is
-    // only finished when the turn is: wait for the turn to settle BEFORE reading
-    // the trace, otherwise a later segment can still appear and never be audited.
-    try {
-      await waitTurnEnd(dshHome, input.sessionId, input.afterIndex, 'MAC09-08 controlled turn completed')
-    } catch (error) {
-      if (attempts === 1) throw error
-      continue
-    }
-    // The trace is now STABLE: require at least one getState in it, otherwise the
-    // model ended the program without reading the tree and the scene retries.
-    const settledTrace = cuaDispatches(eventsOf(dshHome, input.sessionId), input.afterIndex)
-      .filter(dispatch => dispatch.rootCallId === input.dispatch.rootCallId)
-    if (settledTrace.some(dispatch => dispatchMethod(dispatch) === 'getState')) break
-    if (attempts === 1) throw new Error('MAC09-08: the controlled program never read the accessibility tree')
-  }
-  // Bind the WHOLE controlled chain, not just the requested prompt text: the
-  // official getApp must select this run's exact PID, the show/typeText/getState
-  // window ids must agree, and the typed marker must be the exact argument.
-  const liveInputDispatches = () => cuaDispatches(eventsOf(dshHome, input.sessionId), input.afterIndex)
-    .filter(dispatch => dispatch.rootCallId === input.dispatch.rootCallId)
-  // ONE stable trace of the settled controlled call, split into attempt
-  // segments at every getApp. EVERY node of the controlled chain is taken from
-  // the FINAL segment — including listWindows, whose handle must belong to THAT
-  // segment's getApp (a retry may obtain a NEW handle, so a whole-root search
-  // would silently bind the first attempt's handle).
-  const trace = liveInputDispatches()
+  const controlledProgram = marker => `Run exactly this in run_code and DO NOT stop early — every call below must run in this one program: const app = await tools.cua({ method: 'getApp', params: { selector: '${String(textEditPid)}' } }); const windows = await tools.cua({ method: 'listWindows', params: { appHandle: app.appHandle } }); const window = windows.find(item => String(item.title ?? '').includes('${runToken}')); if (!window) throw new Error('the controlled TextEdit window was not found'); await tools.cua({ method: 'show', params: { appHandle: app.appHandle, windowId: window.windowId } }); await tools.cua({ method: 'activate', params: { appHandle: app.appHandle } }); const before = await tools.cua({ method: 'getState', params: { appHandle: app.appHandle } }); if (String(before.focusedWindowId) !== String(window.windowId)) throw new Error('the owned TextEdit window is not the focused window'); const typed = await tools.cua({ method: 'typeText', params: { appHandle: app.appHandle, text: '${marker}' } }); const after = await tools.cua({ method: 'getState', params: { appHandle: app.appHandle, windowId: window.windowId } }); return JSON.stringify(after.tree).includes('${marker}') ? 'MARKER_PRESENT' : 'MARKER_MISSING'`
+  // ONE prompt and ONE bounded input: a scene that observes nothing after the
+  // input must NOT re-prompt, because the first prompt may already have typed —
+  // a second successful turn would erase the first, already-dispatched input and
+  // make "ONE bounded input" unprovable. The observation failure is reported as
+  // the case's failure instead.
+  const marker = `CUA-MARKER-${randomUUID().slice(0, 8).toUpperCase()}`
+  const input = await promptAndWaitCua({
+    tui,
+    dshHome,
+    sessionId: consent.sessionId,
+    prompt: controlledProgram(marker),
+    label: 'MAC09-08 controlled input',
+    method: 'typeText',
+    timeoutMs: TIMEOUTS.turn,
+  })
+  // The program is only finished when the turn is: settle BEFORE reading the
+  // trace, otherwise a later segment can still appear and never be audited.
+  await waitTurnEnd(dshHome, input.sessionId, input.afterIndex, 'MAC09-08 controlled turn completed')
+  // The audit judges the WHOLE user turn: every CUA dispatch of this turn, not
+  // only the selected root call. A second root that typed would otherwise be
+  // invisible while the selected root still looked controlled.
+  const eventLog = eventsOf(dshHome, input.sessionId)
+  const turnDispatches = cuaDispatches(eventLog, input.afterIndex)
+  const trace = turnDispatches.filter(dispatch => dispatch.rootCallId === input.dispatch.rootCallId)
   // The WHOLE structural audit is one pure function (see auditControlledTrace)
   // so its real judging code is replayable; only the two async facts are
   // injected from this live scene.
-  const eventLog = eventsOf(dshHome, input.sessionId)
   const {
     inputSequence, segmentStarts, attemptMethods, attemptDispatches, getAppDispatch,
     listWindowsDispatch, showDispatch, activateDispatch, typeDispatch, attemptStateDispatch, previews,
+    observationJson,
   } = await auditControlledTrace({
     trace,
+    turnDispatches,
+    rootCallId: input.dispatch.rootCallId,
     textEditPid,
     runToken,
     marker,
@@ -1902,14 +1914,10 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
     resolveTypeTextResult: async dispatch => waitCuaResult(dshHome, input.sessionId, dispatch.subCallId,
       'MAC09-08 final typeText result', TIMEOUTS.turn),
   })
-  // The audit above already bound the handle, the owned window, the order and
-  // the result identity; the scene only needs the params it reports.
+  // The audit above already bound the handle, the owned window, the order, the
+  // result identity and the marker inside the OWNED-WINDOW observation tree; the
+  // scene only needs the params it reports.
   const typeParams = dispatchParams(typeDispatch)
-  const markerResult = await waitFor(() => cuaResults(eventsOf(dshHome, input.sessionId), 0)
-    .find(result => result.subCallId === attemptStateDispatch.subCallId
-      && dispatchMethod(result) === 'getState'
-      && dispatchContentText(result).includes(marker)),
-  'MAC09-08 the same cua call observes the typed marker in its accessibility tree', TIMEOUTS.turn)
   pushRow(report, 'MAC09-08', 'PASS', {
     sessionId: sha16(input.sessionId),
     rootCallId: sha16(input.dispatch.rootCallId),
@@ -1921,12 +1929,14 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
     typeSubCallId: sha16(typeDispatch.subCallId),
     windowPreSteps: true,
     markerDigest: sha16(marker),
-    attempts: attempts + 1,
+    attempts: 1,
     windowId: typeParams.windowId,
     appBound: true,
-    observedInAccessibilityTree: dispatchContentText(markerResult).includes(marker),
+    observedInAccessibilityTree: String(observationJson?.tree ?? '').includes(marker),
+    turnTypeTexts: 1,
+    foreignRootSideEffects: 0,
+    focusedWindowId: observationJson?.focusedWindowId,
   })
-  await waitTurnEnd(dshHome, input.sessionId, input.afterIndex, 'MAC09-08 input turn completed')
 
   // MAC09-06/09: another Session must ask its own consent. The operator DENIES
   // it; the tool fails closed with the official code and dispatches no input.
