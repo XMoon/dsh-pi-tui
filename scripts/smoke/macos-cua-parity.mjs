@@ -1740,7 +1740,8 @@ async function sceneSplit({ installation, workRoot, report, textEditPid }) {
   const staleResults = cuaResults(eventsOf(dshHome, reconnect.sessionId), 0)
     .filter(item => item.subCallId === reconnect.dispatch.subCallId)
   assert(staleResults.length === 0,
-    'MAC09-10: the pending dispatch settled after the Client exited without an answer')
+    `MAC09-10: the pending dispatch settled after the Client exited without an answer: ${
+      staleResults.map(item => JSON.stringify({ code: dispatchErrorCode(item.result), text: dispatchContentText(item.result).slice(0, 240) })).join('; ')}`)
   pushRow(report, 'MAC09-10', 'PASS', {
     sessionId: sha16(reconnect.sessionId),
     subCallId: sha16(reconnect.dispatch.subCallId),
