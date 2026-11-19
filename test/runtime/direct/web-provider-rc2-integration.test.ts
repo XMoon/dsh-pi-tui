@@ -718,8 +718,8 @@ test('an EXTERNAL custom provider installed after the page read is never overwri
   await openWebPageInApp(app)
   app.vt.sendInput(KEY.enter) // the search-provider row Detail
   await app.settle()
-  assert.match(app.view(), /Current: DeepSeek Search API/u,
-    'the page snapshot is the rc.2 shipped default (the billed Search API)')
+  assert.match(app.view(), /Current: Automatic/u,
+    'the page snapshot is the shipped base: no explicit search provider (Automatic routing)')
 
   // Another HOST settings writer installs a CUSTOM provider id while the page
   // still holds its older snapshot.
@@ -728,11 +728,12 @@ test('an EXTERNAL custom provider installed after the page read is never overwri
   }).mutate('web', [{ op: 'set', path: ['searchProvider'], value: 'acme-search' }])
   assert.equal((await config.read())?.searchProvider, 'acme-search', 'the external writer really landed')
 
-  // Confirm the stale candidate: the queue head re-reads the Host, sees the
+  // Confirm a stale candidate: the queue head re-reads the Host, sees the
   // custom route and refuses with ZERO writes instead of overwriting it.
-  // (The Detail opens on the shipped default candidate; Down is a no-op at the
-  // last candidate, and Enter submits that painted candidate into the guard.)
-  app.vt.sendInput(KEY.down) // stays on the last candidate (DeepSeek Search API)
+  // (The Detail opened on the Automatic state, whose highlight starts at the
+  // first candidate; Down moves it to DeepSeek Search API, and Enter submits
+  // that painted candidate into the guard.)
+  app.vt.sendInput(KEY.down) // first candidate (server-side) -> DeepSeek Search API
   app.vt.sendInput(KEY.enter)
   await app.settle()
   await app.waitFor(() => app.view().includes('Not saved') && app.view().includes('custom route'),
