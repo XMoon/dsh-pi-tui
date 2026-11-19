@@ -3718,10 +3718,17 @@ test('a pointer click on the Computer Use row opens the page on the single-pane 
   // rail walk selects Tools, and Enter opens that category's content.
   h.panel.handleInput('\x1b')
   walkTo(h, 'tools')
-  h.panel.handleInput('\r')
+  // POINTER-ONLY: the painted `Enter open` hint is a real target that replays
+  // the Enter ladder, so no keyboard step is needed to reach the Tools rows.
+  const barRow = plain(h, 44).split('\n').findIndex(line => line.includes('Enter open'))
+  assert.ok(barRow >= 0, `the open hint is painted:\n${plain(h, 44)}`)
+  const openCol = (plain(h, 44).split('\n')[barRow] ?? '').indexOf('Enter open')
+  h.panel.onCellPress(openCol + 1, barRow)
+  h.panel.onCellClick(openCol + 1, barRow)
+  const openedRows = plain(h, 44)
+  assert.match(openedRows, /Computer Use/u, `the painted open hint must open the Tools rows:\n${openedRows}`)
   const view = plain(h, 44)
   const rowIndex = view.split('\n').findIndex(line => line.includes('Computer Use'))
-  if (rowIndex < 0) { console.log('DBG2', view) }
   assert.ok(rowIndex >= 0, `the Computer Use row is painted:\n${view}`)
   // The narrow frame is the legacy single-column projection: the rows pane
   // publishes ITS OWN box, not the wide layout's content box.

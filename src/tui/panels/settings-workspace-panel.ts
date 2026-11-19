@@ -711,7 +711,7 @@ interface PaneLayout {
 }
 
 interface HitTarget {
-  readonly kind: 'category' | 'row' | 'pane' | 'change' | 'retry' | 'manage' | 'option' | 'confirm' | 'cancel' | 'about-action' | 'bar-escape' | 'bar-span'
+  readonly kind: 'category' | 'row' | 'pane' | 'change' | 'retry' | 'manage' | 'option' | 'confirm' | 'cancel' | 'about-action' | 'bar-escape' | 'bar-open' | 'bar-span'
   /** The stable identity: a category id, a row id, the pane name, a candidate
    *  value or the button verb. */
   readonly id: string
@@ -727,11 +727,18 @@ interface HitTarget {
 interface PaintedBarLine {
   readonly line: string
   readonly span?: { readonly startCol: number; readonly endCol: number }
+  /** The painted OPEN hint's cell span (rail state): the pointer analogue of
+   *  Enter/Right. Present only when every hint of that verb painted in full. */
+  readonly openSpan?: { readonly startCol: number; readonly endCol: number }
 }
 
 /** The id every painted Esc affordance carries: it names the ONE semantic this
  *  root accepts (replay the current Esc ladder). */
 const BAR_ESCAPE_ID = 'escape'
+/** The id the painted rail OPEN hint carries: it replays the Enter ladder. */
+const BAR_OPEN_ID = 'open'
+/** The painted hint labels that mean "open/focus the selected rail entry". */
+const BAR_OPEN_HINTS: readonly string[] = ['Right open', 'Enter open', 'Enter/Right focus']
 
 /** One painted Detail action. A button publishes a hit target ONLY when the
  *  frame really painted it inside the pane width. */
@@ -1826,6 +1833,12 @@ export class SettingsWorkspacePanel implements Component {
       const bar = this.renderActionBar(plan)
       lines.push(bar.line)
       if (bar.span !== undefined) targets.push(this.barEscapeTarget(lines.length - 1, bar.span))
+      // The PAINTED open hint is a real pointer route on the single-pane frames:
+      // it replays the Enter ladder, so a pointer-only journey can leave the
+      // category rail without a keyboard step.
+      if (bar.openSpan !== undefined) {
+        targets.push({ kind: 'bar-open', id: BAR_OPEN_ID, row: lines.length - 1, startCol: bar.openSpan.startCol, endCol: bar.openSpan.endCol })
+      }
     }
     this.paintedTargets = targets
     this.paintedPanes = panes
@@ -1949,6 +1962,10 @@ export class SettingsWorkspacePanel implements Component {
       // chose its segments against the content width, but the root paints the
       // row from column 0), so the page-local span is already in panel columns.
       targets.push(this.barEscapeTarget(lines.length - 1, barSpan))
+    }
+    const openSpan = navigation?.openSpan
+    if (openSpan !== undefined) {
+      targets.push({ kind: 'bar-open', id: BAR_OPEN_ID, row: lines.length - 1, startCol: openSpan.startCol, endCol: openSpan.endCol })
     }
     this.paintedContentBox = { x: contentX, top: contentTop, width: contentWidth, rows: contentRows }
     const categories = this.currentCategoryOrder()
@@ -2462,7 +2479,7 @@ export class SettingsWorkspacePanel implements Component {
    */
   private renderNavigationActionBar(width: number): PaintedBarLine {
     if (this.bodyFloor() < 1) return this.paintBar([{ text: 'Close [Esc]', priority: 8 }], width)
-    return this.paintBar(this.navigationActionBarSegments(), width)
+    return this.paintBar(this.navigationActionBarSegments(), width, true)
   }
 
   /** Paint the shared Settings row: the LAST (Esc) segment carries the scoped
@@ -2470,22 +2487,37 @@ export class SettingsWorkspacePanel implements Component {
    *  `textMuted` (design language §7.1). The unpainted complete span of the Esc
    *  segment is the ONE pointer geometry this frame may publish; a truncated or
    *  dropped segment publishes none. */
-  private paintBar(segments: readonly ActionBarSegment[], width: number): PaintedBarLine {
+  private paintBar(segments: readonly ActionBarSegment[], width: number, openHint: boolean = false): PaintedBarLine {
     const layout = layoutActionBarRow(segments, width)
     if (layout.truncated || layout.spans.length === 0) return { line: color.textMuted(layout.text) }
     const escapeIndex = segments.length - 1
     let span: { startCol: number; endCol: number } | undefined
+    // A pointer OPEN affordance exists only while EVERY open hint painted in
+    // full: a truncated or dropped hint publishes no geometry, exactly like the
+    // Esc affordance.
+    let openSpan: { startCol: number; endCol: number } | undefined
+    const openSpans: Array<{ startCol: number, endCol: number }> = []
     const painted = layout.spans.map(candidate => {
+      if (openHint && BAR_OPEN_HINTS.includes(candidate.text)) {
+        openSpans.push({ startCol: candidate.startCol, endCol: candidate.endCol })
+      }
       if (candidate.inputIndex !== escapeIndex) return color.textMuted(candidate.text)
       span = { startCol: candidate.startCol, endCol: candidate.endCol }
       return paintActionSpan(candidate.text, 'secondary')
     })
+    if (openSpans.length > 0) {
+      openSpan = {
+        startCol: Math.min(...openSpans.map(part => part.startCol)),
+        endCol: Math.max(...openSpans.map(part => part.endCol)),
+      }
+    }
     const segmentWidth = layout.spans.reduce((sum, candidate) => sum + visibleWidth(candidate.text), 0)
       + Math.max(0, layout.spans.length - 1) * visibleWidth(ACTION_BAR_SEPARATOR)
     const padding = Math.max(0, visibleWidth(layout.text) - segmentWidth)
     return {
       line: painted.join(color.textMuted(ACTION_BAR_SEPARATOR)) + ' '.repeat(padding),
       span,
+      ...(openSpan === undefined ? {} : { openSpan }),
     }
   }
 
@@ -3553,7 +3585,9 @@ export class SettingsWorkspacePanel implements Component {
     // Role 13: hints are the WEAKEST readable ink (`textMuted`), one step below
     // the diagnostic line, so the bar never competes with content. The shared
     // row layout already padded/truncated to the pane width.
-    const rendered = this.paintBar(segments, plan.width)
+    // The open hints (`Right open` / `Enter open`) are REAL pointer targets in
+    // every state that paints them, not keyboard-only text.
+    const rendered = this.paintBar(segments, plan.width, true)
     const choosing = this.choiceField() !== undefined
     this.paintedChoiceNavigation = choosing && rendered.line.includes('Up/Down')
     this.paintedChoiceFactScroll = choosing && choiceFactScrollAvailable
@@ -5832,6 +5866,13 @@ export class SettingsWorkspacePanel implements Component {
         this.handleInput('\x1b')
         return
       }
+      case 'bar-open': {
+        // The painted OPEN hint is the pointer analogue of Enter/Right on the
+        // rail: it replays the SAME keyboard ladder, so the rail's selection,
+        // focus transfer and page mounting stay single-owner.
+        this.handleInput('\r')
+        return
+      }
       case 'bar-span': {
         // A DELEGATED last-row intent: the child's own Action Bar painted this
         // span and owns the semantics; the root only owns the physical row.
@@ -6001,7 +6042,7 @@ export class SettingsWorkspacePanel implements Component {
    *  DELEGATED Action-Bar span (both live on the Root's physical row). */
   private barTargetAt(x: number, y: number): HitTarget | undefined {
     return this.paintedTargets.find(target =>
-      (target.kind === 'bar-escape' || target.kind === 'bar-span')
+      (target.kind === 'bar-escape' || target.kind === 'bar-open' || target.kind === 'bar-span')
       && target.row === y && x >= target.startCol && x < target.endCol)
   }
 
