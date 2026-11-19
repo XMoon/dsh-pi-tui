@@ -1992,11 +1992,15 @@ async function main() {
     })
     await waitPainted(archiveTui, 'MAC09-11 archived Session')
     await waitComposer(archiveTui, 'MAC09-11 archived Session')
+    // The archived Session is the DIRECT one: its nested `cua · screenshot`
+    // card is the SAME TSP projection, so the same expansion + frozen
+    // '[IMAGE] … W×H' row proves the attachment is still viewable while the
+    // bundle is disabled (the attachment/transcript outlive the tool).
     let archiveFrame = ''
     let archiveVisible = false
-    for (let page = 0; page < 10 && !archiveVisible; page += 1) {
+    for (let page = 0; page < 12 && !archiveVisible; page += 1) {
       archiveFrame = tmuxCapture(archiveTui, 'MAC09-11 archived Session frame')
-      archiveVisible = archiveFrame.includes('🖼️')
+      archiveVisible = archiveFrame.includes('[IMAGE]')
         && archiveFrame.includes(`${String(directScene.archive.width)}×${String(directScene.archive.height)}`)
       if (!archiveVisible) {
         sendNamedKey(archiveTui, 'PageUp', 'MAC09-11 archive page')
