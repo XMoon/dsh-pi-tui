@@ -1737,19 +1737,28 @@ async function sceneSplit({ installation, workRoot, report, textEditPid }) {
   assert(!staleFrame.includes('Allow computer use'),
     'MAC09-10: the resumed Client repainted a stale consent Question from the dead Client')
   await sleep(2_000)
+  // The official remote classifies a Client disconnect by ABORTING the turn's
+  // foreground ask (ASK_ABORTED, recorded with the real run evidence). That is
+  // the fail-closed disconnect outcome, NOT a late answer: the claim under test
+  // is that the dead Client's dispatch is never settled by an ANSWER, and that
+  // the resumed Client neither repaints the Question nor answers it.
   const staleResults = cuaResults(eventsOf(dshHome, reconnect.sessionId), 0)
     .filter(item => item.subCallId === reconnect.dispatch.subCallId)
-  assert(staleResults.length === 0,
-    `MAC09-10: the pending dispatch settled after the Client exited without an answer: ${
-      JSON.stringify(staleResults.map(item => ({
+  const disconnectSettles = staleResults.filter(item => item.isError === true
+    && dispatchErrorCode(item) === 'ASK_ABORTED')
+  const lateAnswers = staleResults.filter(item => !(item.isError === true
+    && dispatchErrorCode(item) === 'ASK_ABORTED'))
+  assert(lateAnswers.length === 0,
+    `MAC09-10: the dead Client's dispatch settled by something other than the official disconnect abort: ${
+      JSON.stringify(lateAnswers.map(item => ({
         isError: item.isError,
-        hasError: item.error !== undefined,
         error: item.error === undefined ? undefined : String(JSON.stringify(item.error)).slice(0, 240),
-        content: Array.isArray(item.content) ? item.content.map(block => block?.type ?? typeof block) : item.content,
         text: dispatchContentText({ content: item.content }).slice(0, 240),
       })))}`)
   pushRow(report, 'MAC09-10', 'PASS', {
     sessionId: sha16(reconnect.sessionId),
+    disconnectAbort: disconnectSettles.length > 0,
+    lateAnswerSettles: lateAnswers.length,
     subCallId: sha16(reconnect.dispatch.subCallId),
     oldClientPid: clientPid,
     oldHostPid: registry.record.hostPid,
