@@ -2,15 +2,16 @@
 
 This document owns the long-lived Host/Client boundary: locality, the semantic
 port contract, Direct/Remote equivalence, currentness/identity rules and the
-qualification tiers. Direct remains the production backend. Remote is the
-internal, local split-process backend: the Host/Client link is supported on
+qualification tiers. Direct is the default public backend; `daemon` is the
+opt-in local split-process backend: the Host/Client link is supported on
 Linux and macOS, and one Host process plus zero or more Client processes
 (`dist/local-host.mjs` / `dist/local-client.mjs`; the Host lifetime is
 independent of Client attachment) over an authenticated loopback HTTP/WebSocket
 carrier, entered through ONE lazy Client edge
 (`app/remote-process/local-client-entry.ts -> app/bootstrap.ts`) after
-the official PluginPackages resolution. It is not a package export, bin, backend
-selector or Session surface. The former in-process composition is retired from
+the official PluginPackages resolution. The split transport is not a separate `remote` public backend, package export,
+bin or Session surface: `daemon` is selected through the official startup
+configuration and preserves the same semantic Host/Client contract. The former in-process composition is retired from
 `src/**` into a test-only carrier and composes no production graph.
 
 The current Host-coupling allowlist is

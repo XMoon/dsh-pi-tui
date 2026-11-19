@@ -134,3 +134,22 @@ Record a decision and its rationale in the owning document at the same time as
 the behavior change. Write the rule and the *why*, not a walkthrough of the
 implementation. Keep a new fact in exactly one place: link, don't copy. English
 only, unless the user explicitly asks otherwise.
+
+For a documentation-only change or a new product behavior:
+
+1. Read the root `AGENTS.md`, this map and the owning architecture contract.
+   Verify the claim against current source/tests or the reusable procedure;
+   a PR plan or a historical screenshot does not establish current behavior.
+2. Choose the smallest owning document. Separate user-facing steps from the
+   developer contract; do not create a second copy of an authoritative rule.
+   A large file is split only at a real independently owned responsibility,
+   retaining the shared lifecycle/authority contract in its canonical owner.
+3. When moving a section, preserve its semantics and add an entry link from
+   the old top-level section. Update this canonical index and all references
+   to moved nested anchors; check any source/test comments that point at it.
+4. Run the repository documentation gate with `node scripts/docs-gate.mjs`
+   (also part of `pnpm check:gates`), and review links, source-path claims and
+   formatting. A green path/index check cannot prove the written semantics.
+5. Keep implementation plans, decisions requiring approval, run evidence and
+   historical comparison snapshots in the owning PR/Issue or external plan,
+   not in this long-lived documentation tree.

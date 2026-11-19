@@ -457,5 +457,5 @@ enough. `PROJECTION_ONLY` is not navigable state.
   contract; only a specific real-pane run may claim them. The client's own
   light/dark appearance is headless-controllable (`appearance`) and is covered
   by the real-pane harness, not by this list.
-- No Remote TSP renderer is claimed; a Remote TSP projection observer over the
-  real wire remains a follow-up (see the repository handoff issue).
+- No Remote TSP renderer is claimed. Remote TSP projection observation over
+  the real wire has not been qualified.
