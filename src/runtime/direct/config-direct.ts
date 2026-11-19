@@ -2169,7 +2169,16 @@ export class DirectWebProviderConfig implements WebProviderConfig {
    *  (there is nothing to remove); an unreadable `base`/`user` layer is an
    *  error, never an assumed "no override". This deliberately does NOT consult
    *  the effective value: a custom route is a reason to refuse an explicit SET,
-   *  never a reason to hide an official reset of the USER layer. */
+   *  never a reason to hide an official reset of the USER layer.
+   *
+   *  The synchronous descriptor read below is the CAS source on purpose: it runs
+   *  in the same Promise-continuation chain as the command owner's fresh read
+   *  (after that read's final synchronous projection there is no macrotask
+   *  boundary before this method), so the revision submitted as
+   *  `expectedRevision` belongs to the state the user's reset intent was just
+   *  validated against. A Host writer's SettingsForms/ConfigEditor commit is
+   *  file-I/O based and cannot interleave there; any writer that commits after
+   *  this read makes the CAS fail rather than silently overwriting. */
   private async restoreProvider(field: 'searchProvider' | 'fetchProvider'): Promise<void> {
     const settings = this.settings()
     if (settings === undefined) throw new Error('settings service unavailable')
