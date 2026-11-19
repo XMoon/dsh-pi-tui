@@ -490,3 +490,41 @@ test('a stale-basis confirmation never revokes the replaced provider\'s applicat
     'no revoke may reach the replaced provider from a pre-refresh confirmation')
   mounted.page.dispose()
 })
+
+test('the compact grant spends its rows on the FIRST missing permission', async () => {
+  // 44x8: the page owns 8 rows (identity, scope, rule, 4 content, bar), so the
+  // compact first screen must never spend content rows on a GRANTED permission
+  // while the other one is still missing.
+  const asymmetric = (accessibility: boolean, screenRecording: boolean) => mount({
+    cua: {
+      readSystemStatus: async () => ({ ...STATUS, accessibility, screenRecording }),
+    },
+  })
+  const screenMissing = asymmetric(true, false)
+  screenMissing.page.setMaxRows(8)
+  await settle(screenMissing, 'Screen Recording: Not allowed')
+  const screenText = screenMissing.render(44).join('\n').replace(/\s+/gu, ' ')
+  assert.match(screenText, /Screen Recording: Not allowed/u,
+    'the missing Screen Recording permission must be on the first screen')
+  assert.match(screenText, /\[Request permission\]/u, 'its action must be reachable')
+  assert.doesNotMatch(screenText, /Accessibility: Allowed/u,
+    'the compact grant must not spend its pair on the granted permission')
+  screenMissing.page.dispose()
+
+  const accessibilityMissing = asymmetric(false, true)
+  accessibilityMissing.page.setMaxRows(8)
+  await settle(accessibilityMissing, 'Accessibility: Not allowed')
+  const accessText = accessibilityMissing.render(44).join('\n').replace(/\s+/gu, ' ')
+  assert.match(accessText, /Accessibility: Not allowed/u, 'the missing Accessibility permission leads')
+  assert.match(accessText, /\[Request permission\]/u)
+  assert.doesNotMatch(accessText, /Screen Recording: Allowed/u)
+  accessibilityMissing.page.dispose()
+
+  const bothGranted = asymmetric(true, true)
+  bothGranted.page.setMaxRows(8)
+  await settle(bothGranted, 'Accessibility: Allowed')
+  const grantedText = bothGranted.render(44).join('\n').replace(/\s+/gu, ' ')
+  assert.match(grantedText, /Accessibility: Allowed/u, 'with both granted the primary permission still shows')
+  assert.match(grantedText, /\[Refresh permission\]/u)
+  bothGranted.page.dispose()
+})

@@ -645,6 +645,8 @@ interface Harness {
   readonly specialistBuilds: () => number
   /** How many times the row-level authority re-read was requested. */
   readonly specialistRefreshes: () => number
+  readonly computerUsePages: FakeSpecialistPage[]
+  readonly computerUseBuilds: () => number
 }
 
 function setup(options: {
@@ -752,6 +754,13 @@ function setup(options: {
       return page
     },
     ...options.specialistPage === true ? {
+      createComputerUsePage: (done: () => void) => {
+        computerUseBuilds += 1
+        const page = new FakeSpecialistPage()
+        ;(page as unknown as { done: () => void }).done = done
+        computerUsePages.push(page)
+        return page
+      },
       createSubagentSettingsPage: (done: () => void, onAuthoritativeChange: () => void) => {
         specialistBuilds += 1
         const page = new FakeSpecialistPage()
@@ -766,6 +775,8 @@ function setup(options: {
       },
     } : {},
   }
+  const computerUsePages: FakeSpecialistPage[] = []
+  let computerUseBuilds = 0
   const readSnapshot = options.snapshot ?? ((): SettingsWorkspaceSnapshot => SNAPSHOT)
   const panel = new SettingsWorkspacePanel(
     options.directory === undefined
@@ -792,6 +803,8 @@ function setup(options: {
     webBuilds: () => webBuilds,
     modelsInitials,
     specialistBuilds: () => specialistBuilds,
+    computerUsePages,
+    computerUseBuilds: () => computerUseBuilds,
     specialistRefreshes: () => specialistRefreshes,
   }
 }
@@ -3679,4 +3692,46 @@ test('the confirmation warning is scrollable in L2 and must be read before Confi
     plain(short)
   }
   assert.equal(short.commits(), 1, 'a scrolled/read warning admits the keyboard Confirm')
+})
+
+test('a pointer click on the Computer Use row opens the page on the single-pane frame', () => {
+  // RFL-009 (v2 scope): on the narrow/medium single-pane frame there is no
+  // Detail pane, so the Detail's Manage affordance does not exist. The row
+  // itself must be a real pointer route to the embedded Computer Use page.
+  // The page's own row is added ONLY here: the shared fixture is the other
+  // tests' navigation baseline.
+  const withComputerUse = (): SettingsWorkspaceSnapshot => ({
+    ...SNAPSHOT,
+    rows: [...SNAPSHOT.rows, {
+      id: 'computer-use',
+      category: 'tools' as const,
+      label: 'Computer Use',
+      summary: 'Permissions · applications · PTC',
+      scope: 'DSH Host · official Computer Use provider',
+      freshness: 'runtime' as const,
+      description: 'the official Computer Use provider page',
+      specialist: 'computer-use' as const,
+    }],
+  })
+  const h = setup({ columns: 44, rows: 24, specialistPage: true, snapshot: withComputerUse })
+  // The narrow first frame is the About CONTENT: Esc returns to the list, the
+  // rail walk selects Tools, and Enter opens that category's content.
+  h.panel.handleInput('\x1b')
+  walkTo(h, 'tools')
+  h.panel.handleInput('\r')
+  const view = plain(h, 44)
+  const rowIndex = view.split('\n').findIndex(line => line.includes('Computer Use'))
+  if (rowIndex < 0) { console.log('DBG2', view) }
+  assert.ok(rowIndex >= 0, `the Computer Use row is painted:\n${view}`)
+  // The narrow frame is the legacy single-column projection: the rows pane
+  // publishes ITS OWN box, not the wide layout's content box.
+  const rowsPane = (h.panel as unknown as { paintedPanes?: { rows?: { x: number, contentTop: number } } }).paintedPanes?.rows
+  assert.ok(rowsPane !== undefined, 'the narrow rows pane is recorded by the frame')
+  const y = rowIndex
+  const x = Math.max(rowsPane.x, (view.split('\n')[rowIndex] ?? '').indexOf('Computer Use'))
+  h.panel.onCellPress(x, y)
+  h.panel.onCellClick(x, y)
+  assert.equal(h.computerUseBuilds(), 1,
+    'the click on the Computer Use row must open the embedded page, not only select the row')
+  h.panel.handleInput('\x1b')
 })

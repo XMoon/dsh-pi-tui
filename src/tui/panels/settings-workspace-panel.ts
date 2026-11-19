@@ -5851,11 +5851,17 @@ export class SettingsWorkspacePanel implements Component {
         // (Enter/Right then decide between the Detail, the choice and the
         // row's specialist page).
         this.selectRow(target.id, 'rows')
-        if (target.id === 'subagent-settings' || target.id === 'agent-loop' || target.id === 'shell-execution') {
+        // Pages whose row IS the whole gesture open on the click, exactly like
+        // Enter/Right. The Computer Use row belongs here: on the single-pane
+        // (narrow/medium) frame there is no Detail pane, so the Detail's Manage
+        // affordance does not exist and this click is the ONLY pointer route to
+        // the embedded page.
+        if (target.id === 'subagent-settings' || target.id === 'agent-loop' || target.id === 'shell-execution' || target.id === 'computer-use') {
           const row = this.selectedRow()
           const specialist = row?.specialist
           if (row !== undefined
-            && (specialist === 'subagent-settings' || specialist === 'agent-loop-settings' || specialist === 'shell-execution-settings')) this.openSpecialist(row)
+            && (specialist === 'subagent-settings' || specialist === 'agent-loop-settings'
+              || specialist === 'shell-execution-settings' || specialist === 'computer-use')) this.openSpecialist(row)
         }
         return
       }

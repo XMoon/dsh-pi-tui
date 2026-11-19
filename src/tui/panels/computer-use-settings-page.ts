@@ -540,14 +540,22 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
       }
       const system = systemOf(snapshot)
       if (system?.platform === 'darwin') {
-        push(`Accessibility: ${permissionText(system.accessibility)}`)
-        pushAction(`  ${system.accessibility ? '[Refresh permission]' : '[Request permission]'}`, system.accessibility
+        // The compact grant fits ONE permission pair, so it must spend those rows
+        // on the FIRST MISSING one: a granted permission with a `[Refresh
+        // permission]` action would hide the permission that is still missing.
+        const firstMissing = !system.accessibility
+          ? 'accessibility' as const
+          : !system.screenRecording
+            ? 'screenRecording' as const
+            : undefined
+        const painted = firstMissing ?? 'accessibility'
+        const allowed = painted === 'accessibility' ? system.accessibility : system.screenRecording
+        push(`${painted === 'accessibility' ? 'Accessibility' : 'Screen Recording'}: ${permissionText(allowed)}`)
+        pushAction(`  ${allowed ? '[Refresh permission]' : '[Request permission]'}`, allowed
           ? { id: 'refresh-permission', kind: 'refresh', label: 'Refresh permission', enabled: !busy }
-          : { id: 'request-accessibility', kind: 'request-accessibility', label: 'Request Accessibility permission', enabled: !busy, permission: 'accessibility' })
-        push(`Screen Recording: ${permissionText(system.screenRecording)}`)
-        pushAction(`  ${system.screenRecording ? '[Refresh permission]' : '[Request permission]'}`, system.screenRecording
-          ? { id: 'refresh-permission', kind: 'refresh', label: 'Refresh permission', enabled: !busy }
-          : { id: 'request-screen-recording', kind: 'request-screen-recording', label: 'Request Screen Recording permission', enabled: !busy, permission: 'screenRecording' })
+          : painted === 'accessibility'
+            ? { id: 'request-accessibility', kind: 'request-accessibility', label: 'Request Accessibility permission', enabled: !busy, permission: 'accessibility' }
+            : { id: 'request-screen-recording', kind: 'request-screen-recording', label: 'Request Screen Recording permission', enabled: !busy, permission: 'screenRecording' })
       } else if (system?.platform === 'win32') {
         pushText('Host platform: Windows (unsupported by the macOS provider)')
         pushAction('  [Open Settings → Plugins]', { id: 'plugins', kind: 'plugins', label: 'Open Settings Plugins', enabled: !busy })
