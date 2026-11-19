@@ -1995,18 +1995,21 @@ async function main() {
     })
     await waitPainted(archiveTui, 'MAC09-11 archived Session')
     await waitComposer(archiveTui, 'MAC09-11 archived Session')
-    // The legacy surface keeps the child's result body behind the common
-    // tool-detail master (Ctrl+O); expand it once, then page to the card.
-    sendNamedKey(archiveTui, 'C-o', 'MAC09-11 archive expand')
-    await sleep(500)
     // The archived Session is the DIRECT one: its nested `cua · screenshot`
-    // card is the SAME TSP projection, so the same expansion + frozen
-    // '[IMAGE] … W×H' row proves the attachment is still viewable while the
-    // bundle is disabled (the attachment/transcript outlive the tool).
+    // card is the SAME TSP projection whose per-card disclosure is the mouse
+    // click. Page the transcript until that card is painted, expand it, then
+    // require the frozen '[IMAGE] … W×H' row — the attachment and its row must
+    // stay viewable while the bundle itself is disabled.
     let archiveFrame = ''
     let archiveVisible = false
-    for (let page = 0; page < 12 && !archiveVisible; page += 1) {
+    let archiveExpanded = false
+    for (let page = 0; page < 24 && !archiveVisible; page += 1) {
       archiveFrame = tmuxCapture(archiveTui, 'MAC09-11 archived Session frame')
+      if (!archiveExpanded && archiveFrame.includes('cua · screenshot')) {
+        await expandNestedToolCard(archiveTui, 'cua · screenshot', 'MAC09-11 archived screenshot card')
+        archiveExpanded = true
+        archiveFrame = tmuxCapture(archiveTui, 'MAC09-11 archived Session frame')
+      }
       archiveVisible = archiveFrame.includes('[IMAGE]')
         && archiveFrame.includes(`${String(directScene.archive.width)}×${String(directScene.archive.height)}`)
       if (!archiveVisible) {
