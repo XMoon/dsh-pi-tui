@@ -19,7 +19,7 @@
 import { chmodSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 
-import { SplitSmokeAssertionError } from '../../lib/split-smoke-diagnostics.mjs'
+import { SplitSmokeAssertionError, SplitSmokeWaitError } from '../../lib/split-smoke-diagnostics.mjs'
 import { writeC1WorkFixture } from '../../lib/split-smoke-fixtures.mjs'
 import {
   assertIdentityFields,
@@ -213,6 +213,20 @@ export function createC1Scene(context, options = {}) {
   const sceneScopeSuffix = () => sceneScopeId().slice(0, 40)
   /** Release proof for this scene's own Host seat after its Host was stopped. */
   const awaitSceneSeatFree = async (timeoutMs = 15_000) => {
+    if (process.platform === 'darwin') {
+      // The Darwin Host seat is the account-home `O_EXLOCK` file, not a Linux
+      // abstract socket: proving the SAME kernel claim is free again means
+      // taking its file lock. A seat that stays held is a real leftover.
+      const free = await context.darwinSurface.hostSeatFileFree(sceneScopeId(), { timeoutMs })
+      if (!free) {
+        throw new SplitSmokeWaitError('WAIT_TIMEOUT', {
+          code: 'SEAT_RELEASE_TIMEOUT',
+          waitLabel: 'Darwin Host seat file release',
+          elapsedMs: timeoutMs,
+        })
+      }
+      return
+    }
     await seatFree(`\0dsh-pi-tui-h-${sceneScopeSuffix()}`, timeoutMs)
   }
   /** Release exactly the Clients and Hosts this scene created. */

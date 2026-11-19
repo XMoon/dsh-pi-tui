@@ -120,6 +120,14 @@ export function waitForPidRecords(file: string, count: number, deadlineMs: numbe
     // Close the registration window: a record written after the first read but
     // before the watcher was armed produced no event this wait can see.
     checkRecords()
+    // macOS FSEvents can silently drop the write event that lands in the SAME
+    // tick the FIRST watcher of a heavily-churning process is armed (the
+    // Darwin split lanes run exactly that shape). The drop is of the EVENT,
+    // never of the CONTENT: one content re-read on the next macrotask and one
+    // short-later re-read close that window by re-reading the CURRENT file.
+    // Both are content facts, not clock waits.
+    setImmediate(checkRecords)
+    setTimeout(checkRecords, 50)
   })
 }
 

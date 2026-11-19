@@ -309,6 +309,15 @@ the kernel seat where one is required.
   instance's own `(device, inode)` for one bounded absolute directory path. None
   carries a Session, Workspace registration, file content, write, shutdown,
   approval or version-switch operation.
+- **One operator Peer per connection generation.** The Gateway admits the
+  Client's signed Cookie as an API operator, and a forwarded
+  `user-questions/request`/`approval/request` answer is accepted only from the
+  very Peer that owns the open forwarded-event stream (`$events/result`:
+  "Remote event result belongs to another Peer" otherwise). The Client's
+  borrowed authenticated fetch therefore speaks with the live connection's
+  Cookie instead of exchanging a new one per call; the only Cookie rotation
+  point is the connection's own re-admit before a socket RE-open, which
+  re-publishes both sides on the new operator.
 - **Secret boundary.** The launch token lives only in the Host process and its
   `launch.json` (a new file is written 0600 with an atomic same-directory
   rename); the Client keeps its own Cookie in memory only. Neither token,

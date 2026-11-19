@@ -31,10 +31,12 @@ import { createSmokeDiagnostics, failureCategoryOf, redactErrorForStep, SplitSmo
 import { throwSceneFailure, sceneWorkspace } from '../../scripts/smoke/split-process/acp-sdk-content-interoperability.mjs'
 import { statusMatches } from '../../scripts/lib/split-smoke-processes.mjs'
 import {
+  casePlatformsOf,
   listDefaultLaneCases,
   listSelectableCases,
   parseSelectionArgs,
   resolveSelection,
+  selectedNotVerifiedLine,
   selectedPassLine,
 } from '../../scripts/lib/split-smoke-selection.mjs'
 import { HOST_ONLY_PATCH } from '../../src/app/remote-process/local-host-entry.ts'
@@ -77,7 +79,7 @@ test('the split-process smoke runs on tag pushes or an explicit branch dispatch'
   assert.ok(splitRun, 'the split-process job must execute the real lane against the downloaded candidate')
   const smokeSource = readFileSync(SCRIPT, 'utf8')
   const failureMirrors = smokeSource.match(/evidencePath: process\.env\.SPLIT_PROCESS_FAILURE_EVIDENCE/gu) ?? []
-  assert.equal(failureMirrors.length, 5, 'every full/selected/input failure boundary mirrors the safe CI report')
+  assert.equal(failureMirrors.length, 6, 'every full/selected/input failure boundary mirrors the safe CI report')
   const evidenceSetupIndex = job.steps.findIndex(step => step.name === 'Prepare private Split failure evidence directory')
   const runIndex = job.steps.indexOf(splitRun)
   assert.ok(evidenceSetupIndex >= 0 && evidenceSetupIndex < runIndex,
@@ -414,7 +416,7 @@ test('listing selectable split cases does not install a profile or claim complet
   // expectation is derived from the live registry so no second roster exists.
   assert.deepEqual(result.stdout.trimEnd().split('\n'), [
     'SPLIT_PROCESS_SELECTABLE_CASES scope=SELECTABLE_ONLY',
-    ...listSelectableCases().map(entry => `suite=${entry.suite} case=${entry.id} title=${entry.title}`),
+    ...listSelectableCases().map(entry => `suite=${entry.suite} case=${entry.id} title=${entry.title} platforms=${casePlatformsOf(entry)}`),
   ], 'the listing must follow the registry execution order')
   // A listing never becomes a full PASS and never creates a scene.
   for (const forbidden of ['SPLIT_PROCESS_SMOKE_PASS', 'T60 PASS', 'PASS_REAL_SPLIT_PROCESS',
@@ -424,6 +426,87 @@ test('listing selectable split cases does not install a profile or claim complet
   }
   assert.deepEqual(workRootsIn(dir), [], 'a listing must not create a work root')
   assert.deepEqual(readdirSync(dir), [], 'a listing must not install or write a report')
+})
+
+test('every registry entry declares a conservative platform list and the nine shared cases are dual-platform', () => {
+  const shared = [
+    'surface.sessionless-host-file-f5b',
+    'surface.generic-file-upload-f4',
+    'skills.sessionless-hot',
+    'skills.live-hot',
+    'skills.recovery',
+    'mcp.servers-fr3',
+    'mcp.servers-fr4',
+    'multi-client.shared-session-interactions',
+    // The product Browser×TUI matrix reads its process facts through the
+    // platform seam (Linux /proc, Darwin lsof+ps) and drives the Browser from
+    // the pinned Playwright install, so it is qualified on both platforms.
+    'web.product-browser-tui',
+  ]
+  const cases = listSelectableCases()
+  for (const entry of cases) {
+    const platforms = entry.platforms ?? ['linux']
+    assert.ok(Array.isArray(platforms) && platforms.length > 0 && platforms.every(p => p === 'linux' || p === 'darwin'),
+      `${entry.id} must declare a real platform list, got ${JSON.stringify(platforms)}`)
+    assert.ok(!platforms.includes('win32'), `${entry.id} must never claim Windows`)
+  }
+  for (const id of shared) {
+    const entry = cases.find(candidate => candidate.id === id)
+    assert.ok(entry, `${id} must stay registered`)
+    assert.deepEqual(entry.platforms, ['linux', 'darwin'], `${id} must be the dual-platform shared case`)
+  }
+  // The invariant is a CEILING, not a frozen count: a case may claim Darwin
+  // support only after it is listed in this audited matrix. A future native
+  // evidence PR adds its id here deliberately; an accidental platform flag on
+  // any other registry entry fails this guard.
+  const dual = cases.filter(entry => (entry.platforms ?? ['linux']).includes('darwin'))
+  const unaudited = dual.filter(entry => !shared.includes(entry.id)).map(entry => entry.id)
+  assert.deepEqual(unaudited, [], 'only the audited shared cases may claim Darwin support')
+})
+
+test('platform-unsupported selections are refused before any candidate inspection', () => {
+  const unsupportedPlatform = 'sunos'
+  assert.throws(
+    () => resolveSelection({ mode: 'case', id: 'managed-host.m6-2b-systemd' }, unsupportedPlatform),
+    error => error.code === 'INPUT_PLATFORM_CASE_UNSUPPORTED'
+      && /INPUT_PLATFORM_CASE_UNSUPPORTED/u.test(error.message)
+      && /managed-host\.m6-2b-systemd/u.test(error.message),
+    'a Linux-only case must be refused off its platform',
+  )
+  // A suite is refused as a WHOLE (never silently filtered) and names its members.
+  assert.throws(
+    () => resolveSelection({ mode: 'suite', suite: 'managed-host' }, unsupportedPlatform),
+    error => error.code === 'INPUT_PLATFORM_CASE_UNSUPPORTED'
+      && /managed-host\.m6-2b-systemd/u.test(error.message),
+  )
+  // A dual-platform case resolves on BOTH platforms; a Linux-only case stays valid on Linux.
+  const f4 = resolveSelection({ mode: 'case', id: 'surface.generic-file-upload-f4' }, 'darwin')
+  assert.equal(f4.cases.length, 1)
+  assert.equal(resolveSelection({ mode: 'case', id: 'managed-host.m6-2b-systemd' }, 'linux').cases.length, 1)
+  assert.equal(resolveSelection({ mode: 'suite', suite: 'managed-host' }, 'linux').cases.length,
+    listSelectableCases().filter(entry => entry.suite === 'managed-host').length)
+})
+
+test('the no-selector full lane is refused off Linux before the candidate is read', (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('split-full-platform-')
+  // A missing candidate file would fail INPUT anyway; the platform refusal is
+  // observable through the ordering: run the real CLI on a nonexistent tarball
+  // on a non-Linux host and require the PLATFORM code, not a tarball error.
+  if (process.platform === 'linux') {
+    // On Linux the full lane proceeds to the ordinary candidate preflight; a
+    // missing tarball must NOT be misreported as a platform refusal.
+    const result = runCli(['definitely-missing.tgz'], dir)
+    assert.notEqual(result.status, 0)
+    assert.doesNotMatch(result.stderr, /INPUT_PLATFORM_FULL_UNSUPPORTED/u)
+    return
+  }
+  const result = runCli(['definitely-missing.tgz'], dir)
+  assert.notEqual(result.status, 0)
+  assert.match(result.stderr, /INPUT_PLATFORM_FULL_UNSUPPORTED/u,
+    'the full lane must be refused by platform before the tarball is inspected')
+  assert.match(result.stderr, /INPUT_UNQUALIFIED/u)
+  assert.deepEqual(workRootsIn(dir), [], 'the refused full lane must not create a work root')
 })
 
 test('unknown and conflicting selectors are rejected before a work root exists', (t) => {
@@ -453,17 +536,34 @@ test('unknown and conflicting selectors are rejected before a work root exists',
 test('a required Browser qualification cannot be satisfied by a selected non-Browser case', (t) => {
   const life = testLifecycle(t)
   const dir = life.tempDir('split-selectable-browser-')
+  if (process.platform === 'linux') {
+    // On Linux the required-Browser refusal is the FIRST selector input check.
+    for (const env of [{ SPLIT_PROCESS_REQUIRE_WEB_BROWSER: '1' }, { SPLIT_PROCESS_REQUIRE_WEB_PRODUCT: '1' }]) {
+      const result = runCli(['--case', 'bootstrap.host-runtime-disabled'], dir, env)
+      assert.notEqual(result.status, 0)
+      assert.match(result.stderr, /INPUT_UNQUALIFIED/u)
+      assert.match(result.stderr, /INPUT_SMOKE_SELECTION_INVALID/u)
+      assert.deepEqual(workRootsIn(dir), [], 'a required Browser run must not start a work root')
+    }
+    // The full-only mutation control is refused the same way, before any scene.
+    const mutated = runCli(['--suite', 'bootstrap'], dir, { SPLIT_PROCESS_SMOKE_MUTATION: 'tui-enabled' })
+    assert.notEqual(mutated.status, 0)
+    assert.match(mutated.stderr, /INPUT_SMOKE_SELECTION_INVALID/u)
+    assert.deepEqual(workRootsIn(dir), [], 'the full-only mutation control must not start a work root')
+    return
+  }
+  // Off Linux the SAME selections are refused by the platform pre-check first
+  // (both refusals are pre-install input boundaries; either code is honest).
   for (const env of [{ SPLIT_PROCESS_REQUIRE_WEB_BROWSER: '1' }, { SPLIT_PROCESS_REQUIRE_WEB_PRODUCT: '1' }]) {
     const result = runCli(['--case', 'bootstrap.host-runtime-disabled'], dir, env)
     assert.notEqual(result.status, 0)
     assert.match(result.stderr, /INPUT_UNQUALIFIED/u)
-    assert.match(result.stderr, /INPUT_SMOKE_SELECTION_INVALID/u)
+    assert.match(result.stderr, /INPUT_PLATFORM_CASE_UNSUPPORTED/u)
     assert.deepEqual(workRootsIn(dir), [], 'a required Browser run must not start a work root')
   }
-  // The full-only mutation control is refused the same way, before any scene.
   const mutated = runCli(['--suite', 'bootstrap'], dir, { SPLIT_PROCESS_SMOKE_MUTATION: 'tui-enabled' })
   assert.notEqual(mutated.status, 0)
-  assert.match(mutated.stderr, /INPUT_SMOKE_SELECTION_INVALID/u)
+  assert.match(mutated.stderr, /INPUT_PLATFORM_CASE_UNSUPPORTED/u)
   assert.deepEqual(workRootsIn(dir), [], 'the full-only mutation control must not start a work root')
 })
 
@@ -485,17 +585,18 @@ test('the selectable registry is the single source for listing, resolution and t
   assert.ok(Object.isFrozen(cases) && cases.every(entry => Object.isFrozen(entry)), 'the registry must stay frozen')
 
   // Every case resolves to itself, and every live suite resolves to exactly the
-  // registry entries that declare it, in registry order.
+  // registry entries that declare it, in registry order. The platform argument
+  // pins the audited Linux support the default lane documents.
   for (const entry of cases) {
-    assert.deepEqual(resolveSelection({ mode: 'case', id: entry.id }).cases, [entry])
+    assert.deepEqual(resolveSelection({ mode: 'case', id: entry.id }, 'linux').cases, [entry])
   }
   for (const suite of new Set(cases.map(entry => entry.suite))) {
-    assert.deepEqual(resolveSelection({ mode: 'suite', suite }).cases,
+    assert.deepEqual(resolveSelection({ mode: 'suite', suite }, 'linux').cases,
       cases.filter(entry => entry.suite === suite))
   }
-  assert.throws(() => resolveSelection({ mode: 'case', id: 'does-not-exist' }),
+  assert.throws(() => resolveSelection({ mode: 'case', id: 'does-not-exist' }, 'linux'),
     error => error.code === 'INPUT_SMOKE_SELECTION_INVALID')
-  assert.throws(() => resolveSelection({ mode: 'suite', suite: 'does-not-exist' }),
+  assert.throws(() => resolveSelection({ mode: 'suite', suite: 'does-not-exist' }, 'linux'),
     error => error.code === 'INPUT_SMOKE_SELECTION_INVALID')
 
   const first = cases[0]
@@ -691,7 +792,7 @@ test('environment-gated native cases are selectable-only, never in the default f
   assert.deepEqual(listDefaultLaneCases().filter(entry => entry.suite === 'managed-host'), [])
   assert.deepEqual(listDefaultLaneCases().map(entry => entry.id), all.filter(entry => entry.defaultLane !== false).map(entry => entry.id))
   // A selector still resolves them all (the opt-in route).
-  assert.deepEqual(resolveSelection({ mode: 'suite', suite: 'managed-host' }).cases, managed)
+  assert.deepEqual(resolveSelection({ mode: 'suite', suite: 'managed-host' }, 'linux').cases, managed)
   for (const id of [
     'managed-host.m6-2b-systemd',
     'managed-host.m6-2b-concurrent-cold-start',
@@ -721,7 +822,7 @@ test('the required daemon-control native cases are selectable-only and resolve t
   }
   assert.ok(controls.every(entry => entry.defaultLane === false))
   assert.deepEqual(listDefaultLaneCases().filter(entry => entry.suite === 'daemon-control'), [])
-  assert.deepEqual(resolveSelection({ mode: 'suite', suite: 'daemon-control' }).cases, controls)
+  assert.deepEqual(resolveSelection({ mode: 'suite', suite: 'daemon-control' }, 'linux').cases, controls)
 })
 
 test('a cleanup that did not remove this run\u2019s unit fails the scenario verdict', () => {
@@ -1356,15 +1457,21 @@ test('the independent ACP SDK case is registered once as selectable-only and sta
   assert.equal(listDefaultLaneCases().some(item => item.id === SDK_INTEROP_CASE_ID), false,
     'the default lane must not run the independent SDK case')
   assert.deepEqual(listDefaultLaneCases(), listSelectableCases().filter(item => item.defaultLane !== false))
-  assert.deepEqual(resolveSelection({ mode: 'case', id: SDK_INTEROP_CASE_ID }).cases, [entry])
-  assert.ok(resolveSelection({ mode: 'suite', suite: 'acp' }).cases.includes(entry))
+  assert.deepEqual(resolveSelection({ mode: 'case', id: SDK_INTEROP_CASE_ID }, 'linux').cases, [entry])
+  assert.ok(resolveSelection({ mode: 'suite', suite: 'acp' }, 'linux').cases.includes(entry))
 })
 
-test('a selected result names only the selectable scope', () => {
+test('a selected result names the selectable scope AND the platform it qualified', () => {
   const first = listSelectableCases()[0]
   assert.ok(first, 'the registry must expose a case')
-  assert.equal(selectedPassLine(first.id),
-    `SPLIT_PROCESS_SELECTED_PASS id=${first.id} scope=SELECTABLE_ONLY`)
+  // The historical prefix/id/scope stay byte-identical for existing consumers;
+  // the platform fact is what says which executable support range was proved.
+  assert.equal(selectedPassLine(first.id, 'linux'),
+    `SPLIT_PROCESS_SELECTED_PASS id=${first.id} scope=SELECTABLE_ONLY platform=linux`)
+  assert.equal(selectedPassLine(first.id, 'darwin'),
+    `SPLIT_PROCESS_SELECTED_PASS id=${first.id} scope=SELECTABLE_ONLY platform=darwin`)
+  assert.equal(selectedNotVerifiedLine(first.id, 'darwin', 'BROWSER_MISSING'),
+    `SPLIT_PROCESS_SELECTED_NOT_VERIFIED id=${first.id} scope=SELECTABLE_ONLY platform=darwin reason=BROWSER_MISSING`)
 })
 
 test('an SDK scene failure keeps its real assertion class, message, stack and cleanup facts', () => {

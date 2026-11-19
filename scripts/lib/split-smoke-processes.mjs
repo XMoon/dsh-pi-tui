@@ -16,7 +16,7 @@
  */
 
 import { spawn, spawnSync } from 'node:child_process'
-import { chmodSync, existsSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, readFileSync, readlinkSync, readdirSync, realpathSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:net'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -24,6 +24,7 @@ import xterm from '@xterm/headless'
 
 import { SplitSmokeAssertionError, SplitSmokeWaitError } from './split-smoke-diagnostics.mjs'
 import { currentPtyScriptArgv } from './pty-script.mjs'
+import { createDarwinSurfacePtyScope, darwinKeyTokensOf, darwinHostSeatFileFree } from './split-smoke-darwin-pty.mjs'
 
 function assert(condition, message) {
   if (!condition) throw new SplitSmokeAssertionError(message)
@@ -72,6 +73,94 @@ export function alive(pid) {
 }
 
 /**
+ * The REAL cwd and environment of one live process, read from the OS rather
+ * than from the directory a test only created.
+ *
+ * Linux reads `/proc/<pid>/cwd` and `/proc/<pid>/environ`; Darwin has neither,
+ * so it asks the same questions through `lsof` (the cwd file descriptor) and
+ * `ps -Eww` (the environment `ps` appends after the command line). Both
+ * platforms report the same two facts, so a locality assertion can require the
+ * SAME evidence wherever the lane runs instead of skipping the check.
+ */
+export function readProcessFacts(pid, platform = process.platform) {
+  if (!Number.isInteger(pid) || pid <= 0) throw new SplitSmokeAssertionError(`invalid process id for process facts: ${String(pid)}`)
+  if (platform === 'linux') {
+    const cwd = realpathSync(readlinkSync(`/proc/${String(pid)}/cwd`))
+    const env = Object.fromEntries(readFileSync(`/proc/${String(pid)}/environ`).toString('utf8')
+      .split('\0').filter(Boolean).map(entry => {
+        const equals = entry.indexOf('=')
+        return [entry.slice(0, equals), entry.slice(equals + 1)]
+      }))
+    return { cwd, env }
+  }
+  if (platform === 'darwin') {
+    const cwdLines = spawnSync('lsof', ['-a', '-p', String(pid), '-d', 'cwd', '-Fn'], { encoding: 'utf8' })
+    if (cwdLines.status !== 0) {
+      throw new SplitSmokeAssertionError(`cannot read the cwd of process ${String(pid)}: ${cwdLines.stderr ?? cwdLines.error?.message ?? 'lsof failed'}`)
+    }
+    const cwdPath = (cwdLines.stdout ?? '').split('\n').find(line => line.startsWith('n'))
+    if (cwdPath === undefined) throw new SplitSmokeAssertionError(`process ${String(pid)} reports no cwd file descriptor`)
+    const psLines = spawnSync('ps', ['-Eww', '-p', String(pid)], { encoding: 'utf8' })
+    if (psLines.status !== 0) {
+      throw new SplitSmokeAssertionError(`cannot read the environment of process ${String(pid)}: ${psLines.stderr ?? psLines.error?.message ?? 'ps failed'}`)
+    }
+    // `ps -Eww` prints `  PID TTY TIME CMD <argv…> <KEY=VALUE>…`: the environment
+    // is appended after the command line, so the LAST occurrence of a key wins.
+    // Values may contain spaces, so slice between assignment starts instead of
+    // splitting on whitespace.
+    const command = (psLines.stdout ?? '').split('\n')[1] ?? ''
+    const assignments = [...command.matchAll(/(?:^|\s)([A-Za-z_][A-Za-z0-9_]*)=/gu)]
+      .map(match => ({ key: match[1], start: match.index + match[0].length - match[1].length - 1, valueAt: match.index + match[0].length }))
+    const env = {}
+    for (const [index, assignment] of assignments.entries()) {
+      const next = assignments[index + 1]
+      const valueEnd = next === undefined ? command.length : next.start - 1
+      env[assignment.key] = command.slice(assignment.valueAt, valueEnd)
+    }
+    return { cwd: realpathSync(cwdPath.slice(1)), env }
+  }
+  throw new SplitSmokeAssertionError(`process facts are not supported on ${platform}`)
+}
+
+/**
+ * The identity facts one entry published ABOUT ITSELF, read from its own JSONL
+ * records: a Host's `ready` record carries the local Host identity, a surface
+ * Client's `surface-status` record carries its own pid and the Host identity it
+ * authenticated against. The selected runner reports these after the process
+ * objects are gone, so the PASS line can name the real Host/Client instances
+ * instead of only the candidate hash. Nothing is inferred when a record is
+ * absent: the field is simply not reported.
+ */
+function publishedIdentityFacts(process) {
+  const pid = process.child?.pid
+  if (process.role === 'host') {
+    const ready = process.records.find(record => record.m4a0 === 'ready')
+    const localHost = ready?.localHost
+    return {
+      role: 'host',
+      pid: typeof localHost?.hostPid === 'number' ? localHost.hostPid : pid,
+      ...(typeof localHost?.instanceId === 'string' ? { instanceId: localHost.instanceId } : {}),
+      ...(typeof localHost?.scopeId === 'string' ? { scopeId: localHost.scopeId } : {}),
+      ...(localHost?.hostKernelIdentity?.uniqueId === undefined
+        ? {}
+        : { kernelUniqueId: String(localHost.hostKernelIdentity.uniqueId) }),
+    }
+  }
+  const statuses = process.records.filter(record => record.m4b2s === 'surface-status')
+  const status = [...statuses].reverse().find(record => record.host !== undefined)
+  const sessionIds = [...new Set(statuses
+    .map(record => record.openSessionId)
+    .filter(sessionId => typeof sessionId === 'string' && sessionId !== ''))]
+  return {
+    role: process.role,
+    pid: typeof status?.pid === 'number' ? status.pid : pid,
+    ...(typeof status?.host?.hostPid === 'number' ? { hostPid: status.host.hostPid } : {}),
+    ...(typeof status?.host?.instanceId === 'string' ? { instanceId: status.host.instanceId } : {}),
+    ...(sessionIds.length === 0 ? {} : { sessionIds }),
+  }
+}
+
+/**
  * One lane's process ownership: the entry constructors bound to THIS scope's
  * active set and path sequence. A second lane creates its own scope, so its
  * cleanup can never kill or report this lane's children.
@@ -79,6 +168,19 @@ export function alive(pid) {
 export function createSplitProcessScope() {
   let sequence = 0
   const activeProcesses = new Set()
+  /**
+   * Every process this scope ever created, in creation order. Entries are
+   * never removed: the selected runner takes a slice per case so the verdict
+   * can name the REAL Host/Client identities that case created, after the
+   * processes themselves are gone.
+   */
+  const createdProcesses = []
+  /**
+   * The Darwin surface PTY scope: the ONE private tmux server this lane run
+   * owns. It is created lazily (no tmux server exists until the first Darwin
+   * surface pane) and `stopDarwinSurfaceServer()` is the scoped teardown.
+   */
+  const darwinScope = createDarwinSurfacePtyScope()
 
   /** One OS entry process with parsed JSON records. Bound to this scope's active set and path sequence. */
   class EntryProcess {
@@ -102,6 +204,7 @@ export function createSplitProcessScope() {
         detached: true,
       })
       activeProcesses.add(this)
+      createdProcesses.push(this)
       this.child.stdout.setEncoding('utf8')
       this.child.stderr.setEncoding('utf8')
       let buffer = ''
@@ -125,6 +228,11 @@ export function createSplitProcessScope() {
           resolveExit(this.exitResult)
         })
       })
+    }
+
+    /** @see publishedIdentityFacts */
+    identityFacts() {
+      return publishedIdentityFacts(this)
     }
 
     waitFor(predicate, label, timeoutMs = 120_000) {
@@ -202,14 +310,18 @@ export function createSplitProcessScope() {
   }
 
   /**
-   * One REAL PiTui surface Client driven through the system `script(1)` pseudo-TTY.
+   * One REAL PiTui surface Client.
    *
-   * Structured telemetry reads the private `0600` JSONL file the entry owns (never
-   * the terminal); the terminal bytes stay on the pty and are parsed with the
-   * repository's headless xterm parser, so "the frame shows …" is an escape-aware
-   * fact rather than a substring of raw ANSI. The process tree is `script ->
-   * node dist/local-client.mjs`; the business PID is the one in the `ready`
-   * record, and signals for the surface Client are sent to THAT pid.
+   * Linux drives the system `script(1)` pseudo-TTY (unchanged); Darwin drives
+   * ONE real private-tmux pane (`split-smoke-darwin-pty.mjs`) because BSD
+   * `script(1)` cannot take a live keystroke stream from a Node pipe parent.
+   * Both drivers expose the SAME surface: structured telemetry reads the
+   * private `0600` JSONL record file the entry owns (never the terminal);
+   * "the frame shows …" is an escape-aware fact from the REAL painted terminal
+   * (the headless xterm parser on Linux, the pane capture on Darwin); the
+   * process tree on Linux is `script -> node dist/local-client.mjs` and on
+   * Darwin the pane's process tree; the business PID is the one in the `ready`
+   * record, and signals for the surface Client go to THAT pid.
    */
   class SurfaceEntryProcess {
     constructor(entry, options) {
@@ -221,6 +333,71 @@ export function createSplitProcessScope() {
       this.exitResult = undefined
       this.recordError = undefined
       this.recordPath = join(options.workDir, `surface-client-${String(++sequence)}.jsonl`)
+      this.platform = process.platform
+      if (this.platform === 'darwin') {
+        // The scope owns the ONE private tmux server: its panes are created
+        // through the scope binding, never a per-call option (every direct
+        // constructor caller gets the same driver for free).
+        const exitPath = join(options.workDir, `surface-client-exit-${String(sequence)}.txt`)
+        this.darwin = darwinScope.createPane({
+          entry,
+          cwd: options.cwd,
+          env: {
+            ...options.env,
+            SPLIT_PROCESS_DSH_ANCHOR: options.anchor,
+            SPLIT_PROCESS_PROFILE: options.profile,
+            SPLIT_PROCESS_SCRATCH: options.effectiveScratch ?? join(options.scratch, `surface-${String(sequence)}`),
+            SPLIT_PROCESS_CLIENT_MODE: 'surface',
+            SPLIT_PROCESS_CLIENT_RECORD_FILE: this.recordPath,
+            COLUMNS: String(options.columns ?? 100),
+            LINES: String(options.rows ?? 30),
+          },
+          columns: options.columns ?? 100,
+          rows: options.rows ?? 30,
+          recordPath: this.recordPath,
+          exitPath,
+          role: `surface-${String(sequence)}`,
+        })
+        // The REAL wrapper pid of the pane: a process distinct from the
+        // business Client, tracked for identity/wrapper assertions only. The
+        // Darwin teardown never signals through it (the pane owns the tree).
+        this.child = { pid: this.darwin.panePid }
+        this.term = undefined
+        this.columns = options.columns ?? 100
+        this.rows = options.rows ?? 30
+        this.exit = new Promise(resolveExit => { this.resolveExit = resolveExit })
+        this.recordTimer = setInterval(() => {
+          try {
+            this.readRecords()
+          } catch (error) {
+            this.recordError = error
+          }
+        }, 25)
+        this.panePollTimer = setInterval(() => {
+          if (this.exited) return
+          const facts = this.darwin.deadFacts()
+          if (!facts.dead) return
+          this.exited = true
+          activeProcesses.delete(this)
+          clearInterval(this.recordTimer)
+          clearInterval(this.panePollTimer)
+          if (facts.status === null) {
+            // The pane/session disappeared WITHOUT the wrapper recording a
+            // status. That is a scoped teardown (kill-session), never a Client
+            // exit: report the fact instead of inventing a code, and let any
+            // exit assertion fail on it.
+            this.exitResult = { code: null, signal: null, unrecorded: true }
+            this.resolveExit(this.exitResult)
+            return
+          }
+          // The REAL business Client exited; capture its shell-reported status.
+          this.exitResult = { code: facts.status, signal: null }
+          this.resolveExit(this.exitResult)
+        }, 50)
+        activeProcesses.add(this)
+        createdProcesses.push(this)
+        return
+      }
       this.term = new xterm.Terminal({
         cols: options.columns ?? 100,
         rows: options.rows ?? 30,
@@ -244,6 +421,7 @@ export function createSplitProcessScope() {
         detached: true,
       })
       activeProcesses.add(this)
+      createdProcesses.push(this)
       this.child.stdout.setEncoding('utf8')
       this.child.stderr.setEncoding('utf8')
       this.child.stdout.on('data', chunk => {
@@ -289,6 +467,11 @@ export function createSplitProcessScope() {
           throw new Error(`${this.role}: malformed record line ${String(index)}: ${line.slice(0, 200)} (${String(error)})`)
         }
       })
+    }
+
+    /** @see publishedIdentityFacts */
+    identityFacts() {
+      return publishedIdentityFacts(this)
     }
 
     waitFor(predicate, label, timeoutMs = 120_000) {
@@ -344,8 +527,29 @@ export function createSplitProcessScope() {
       })
     }
 
+    /**
+     * The text a Client-local copy actually handed to the terminal/tmux
+     * clipboard sink, when the driver can observe it.
+     *
+     * Linux owns the Client's byte stream, so the OSC 52 sequence is read from
+     * `raw`. A Darwin pane is a REAL terminal: it consumes the escape and the
+     * product's tmux leg (`load-buffer -w -`, socket from `$TMUX`) leaves the
+     * text in this pane's private tmux buffer. Both are the same product fact —
+     * the confirmed copy reached its sink — read through the platform's own
+     * observable.
+     */
+    async clipboardText() {
+      if (this.platform !== 'darwin') return undefined
+      return this.darwin.bufferText()
+    }
+
     /** Flush the headless terminal and return its visible viewport. */
     async viewport() {
+      if (this.platform === 'darwin') {
+        // The tmux pane capture IS the painted frame; pad/clip to the pane
+        // size so the viewport height matches the Linux xterm viewport.
+        return this.darwin.captureLines()
+      }
       await new Promise(resolveFlush => this.term.write('', resolveFlush))
       const lines = []
       const buffer = this.term.buffer.active
@@ -534,14 +738,27 @@ export function createSplitProcessScope() {
 
     /** Send terminal input to the Client through the pty master. */
     send(data) {
+      if (this.platform === 'darwin') {
+        // REAL keystrokes: named tmux keys for the control/CSI classes, literal
+        // text otherwise. An unmapped byte throws; nothing is dropped.
+        this.darwin.sendTokens(darwinKeyTokensOf(data))
+        return
+      }
       this.child.stdin.write(data)
     }
 
-    /** Signal the business Client process (never the `script` wrapper). */
+    /** Signal the business Client process (never the `script` wrapper / tmux). */
     signalBusiness(signal) {
       const pid = this.records.find(record => record.m4a0 === 'ready')?.pid
         ?? this.records.find(record => record.m4a0 === 'client-started')?.pid
       assert(Number.isInteger(pid), `${this.role}: no business PID is known yet`)
+      if (this.platform === 'darwin') {
+        // A bare POSIX signal to the exact published business pid, never a
+        // process-group or /proc-based guess: the pane wrapper (tmux server)
+        // is never addressed.
+        process.kill(pid, signal)
+        return
+      }
       process.kill(pid, signal)
     }
 
@@ -559,16 +776,58 @@ export function createSplitProcessScope() {
           }))
         }, timeoutMs)
       })
-      return Promise.race([this.exit, deadline]).finally(() => clearTimeout(timer))
+      return Promise.race([this.exit, deadline])
+        .then(result => {
+          if (result?.unrecorded === true) {
+            throw new SplitSmokeAssertionError(
+              `NOT_QUIESCED: the ${this.role} Darwin pane disappeared without a recorded exit status; `
+                + 'a scoped teardown is not a business Client exit',
+            )
+          }
+          return result
+        })
+        .finally(() => clearTimeout(timer))
     }
 
     async dispose() {
       clearInterval(this.recordTimer)
+      if (this.platform === 'darwin') {
+        // The pane poller is the ONLY resolver of `this.exit`: never clear it
+        // before the business Client's end was observed. A Client still alive
+        // gets its own pane torn down first; the poller then records what the
+        // wrapper actually reported (a real status or the explicit unrecorded
+        // teardown fact).
+        if (!this.exited) {
+          await this.darwin.dispose()
+          const settled = await Promise.race([
+            this.exit.then(() => true, () => true),
+            new Promise(resolveWait => setTimeout(() => resolveWait(false), 5_000)),
+          ])
+          clearInterval(this.panePollTimer)
+          activeProcesses.delete(this)
+          if (!settled) {
+            throw new SplitSmokeAssertionError(
+              `NOT_QUIESCED: the ${this.role} Darwin pane did not die after its session was killed`,
+            )
+          }
+          return
+        }
+        clearInterval(this.panePollTimer)
+        activeProcesses.delete(this)
+        return
+      }
       try { process.kill(-this.child.pid, 'SIGKILL') } catch { /* already gone */ }
       try { await this.waitForExit(15_000) } catch { /* best effort */ }
     }
   }
-  return { EntryProcess, SurfaceEntryProcess, activeProcesses }
+  return {
+    EntryProcess,
+    SurfaceEntryProcess,
+    activeProcesses,
+    createdProcesses,
+    darwinScope,
+    darwinHostSeatFileFree,
+  }
 }
 
 /** The last `surface-status` record of a surface Client (no stdin channel). */
@@ -638,7 +897,29 @@ export async function waitForAnyReady(processes, label, timeoutMs) {
   })
 }
 
-export async function seatFree(name, timeoutMs = 5_000) {
+/**
+ * Wait until one seat is released.
+ *
+ * The seat is a platform fact, not a lane choice: Linux abstracts it as a
+ * `\0`-prefixed abstract socket that can be re-bound, while Darwin holds an
+ * `O_EXLOCK` file under the account home (there is no abstract-socket
+ * namespace to re-bind). `options.scopeId` is the FULL scope id the Darwin
+ * seat file is keyed by; the Linux name carries only its 40-char prefix, so a
+ * Darwin caller must pass the untruncated id.
+ */
+export async function seatFree(name, timeoutMs = 5_000, options = {}) {
+  const platform = options.platform ?? process.platform
+  if (platform === 'darwin') {
+    const scopeId = options.scopeId
+    assert(typeof scopeId === 'string' && scopeId !== '',
+      `the Darwin seat probe needs the full scope id, not the truncated name ${JSON.stringify(name)}`)
+    if (await darwinHostSeatFileFree(scopeId, { timeoutMs })) return
+    throw new SplitSmokeWaitError('WAIT_TIMEOUT', {
+      code: 'SEAT_RELEASE_TIMEOUT',
+      waitLabel: 'abstract seat release',
+      elapsedMs: timeoutMs,
+    })
+  }
   const started = Date.now()
   const deadline = started + timeoutMs
   while (Date.now() < deadline) {

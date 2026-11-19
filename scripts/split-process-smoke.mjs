@@ -96,6 +96,7 @@ import {
   inspectSplitCandidate,
 } from './lib/split-smoke-profile.mjs'
 import {
+  alive,
   createSplitProcessScope,
   findIsolatedProcesses,
   killIsolatedProcesses,
@@ -104,16 +105,26 @@ import {
   waitForCondition,
 } from './lib/split-smoke-processes.mjs'
 import {
+  casePlatformsOf,
   listDefaultLaneCases,
   listSelectableCases,
   parseSelectionArgs,
   resolveSelection,
+  selectedNotVerifiedLine,
   selectedPassLine,
 } from './lib/split-smoke-selection.mjs'
 import { ENTRY_ADMISSION_MUTATIONS } from './smoke/split-process/entry-admission.mjs'
 
 // Re-exported for the tooling guards that drive the bounded condition wait.
 export { waitForCondition }
+
+// The ONE selected-runner surface the macOS CLI dispatch reuses in-process:
+// the same registry listing and the same selected execution. Nothing here
+// copies the selector grammar.
+export {
+  printSelectableCases,
+  runSelectedCases,
+}
 
 
 const TRACE_PATH = process.env.SPLIT_PROCESS_TRACE
@@ -142,7 +153,7 @@ let diagnostics
 // The lane's ONE process scope: module-level qualification helpers and the
 // full/selected dispatchers resolve the same constructors. A CLI run takes
 // exactly one of those paths, so this active set never spans two runs.
-const { EntryProcess, SurfaceEntryProcess, activeProcesses } = createSplitProcessScope()
+const { EntryProcess, SurfaceEntryProcess, activeProcesses, createdProcesses, darwinScope, darwinHostSeatFileFree } = createSplitProcessScope()
 /** Detached processes this round owns: PID -> its kernel starttime (if known). */
 const trackedProcesses = new Map()
 
@@ -183,6 +194,32 @@ export async function runSelectedCase(diagnostics, selectedCase, context) {
 
 function sleep(ms) {
   return new Promise(resolveSleep => setTimeout(resolveSleep, ms))
+}
+
+/**
+ * The scoped Darwin surface teardown: the private tmux server of THIS run is
+ * stopped only after every pane it created is dead. On Linux this is a no-op
+ * (no pane was ever created; the scope never started a tmux server).
+ */
+async function stopDarwinSurfaceServer() {
+  if (process.platform !== 'darwin') return
+  await darwinScope.stopServer()
+}
+
+/**
+ * Install the Darwin surface driver into the platform seam the
+ * `SurfaceEntryProcess` constructor reads. The Linux constructor path reads
+ * `currentPtyScriptArgv` directly, so the seam only matters on Darwin; a
+ * Linux caller of the shared runner must NOT start a tmux server.
+ */
+function installDarwinSurfaceDriver() {
+  if (process.platform !== 'darwin') {
+    throw new SplitSmokeInputError(
+      'INPUT_PLATFORM_FULL_UNSUPPORTED',
+      `INPUT_UNQUALIFIED: INPUT_PLATFORM_FULL_UNSUPPORTED (invalid smoke selection, not a product regression): `
+        + `the Darwin surface driver cannot be installed on platform=${process.platform}`,
+    )
+  }
 }
 
 function failpoint(name) {
@@ -265,6 +302,9 @@ async function main(explicitPath) {
       installation,
       EntryProcess,
       SurfaceEntryProcess,
+      darwinSurface: {
+        hostSeatFileFree: darwinHostSeatFileFree,
+      },
       entries,
       base,
       workDir,
@@ -281,6 +321,10 @@ async function main(explicitPath) {
       runStep: (name, operation) => diagnostics.runStep(name, operation),
       // Backstop only: the case kills its own detached processes first.
       trackDetachedPid: (pid, starttime) => trackedProcesses.set(pid, starttime),
+      // The case id a boundary report names (the full lane sets it per scene).
+      currentCaseId: undefined,
+      /** @see emitBoundaryNotVerified */
+      reportBoundary: ({ boundary, reason }) => emitBoundaryNotVerified(context.currentCaseId, { boundary, reason }),
     }
     /**
      * The Full lane IS the default-lane registry: every default-lane case runs
@@ -291,6 +335,7 @@ async function main(explicitPath) {
      */
     const actualCaseResults = []
     for (const registeredCase of listDefaultLaneCases()) {
+      context.currentCaseId = registeredCase.id
       const result = await diagnostics.runStep(
         `case/${registeredCase.id}`,
         () => registeredCase.run(context),
@@ -407,8 +452,11 @@ async function main(explicitPath) {
     throw error
   } finally {
     // A failed assertion must not leave a live Host/Client probe behind; each
-    // entry is its own process group leader (`detached: true`).
+    // entry is its own process group leader (`detached: true`). A Darwin
+    // surface has NO child process group: its pane is torn down by its own
+    // `dispose`, so only Linux entries enter this kill channel.
     for (const run of [...activeProcesses]) {
+      if (run.platform === 'darwin') continue
       try { process.kill(-run.child.pid, 'SIGKILL') } catch { /* already gone */ }
     }
     for (const [pid, starttime] of trackedProcesses) killTracked(pid, starttime, 'SIGKILL')
@@ -422,6 +470,7 @@ async function main(explicitPath) {
       closeSync(traceFd)
       traceFd = undefined
     }
+    await stopDarwinSurfaceServer()
     if (workDir === undefined) {
       // Nothing was created: setup failed before the work root existed.
     } else if (!KEEP) rmSync(workDir, { recursive: true, force: true })
@@ -478,12 +527,13 @@ async function proveFailpointCleanup(dshHome) {
  *
  * The registry order IS the execution order a suite or the full lane follows,
  * so the listing prints it verbatim: sorting here would show a bootstrap order
- * that no real run performs.
+ * that no real run performs. Each row ends with the registry-derived platform
+ * support of that case: the fact a selector pre-check refuses on.
  */
 function printSelectableCases() {
   process.stdout.write('SPLIT_PROCESS_SELECTABLE_CASES scope=SELECTABLE_ONLY\n')
   for (const entry of listSelectableCases()) {
-    process.stdout.write(`suite=${entry.suite} case=${entry.id} title=${entry.title}\n`)
+    process.stdout.write(`suite=${entry.suite} case=${entry.id} title=${entry.title} platforms=${casePlatformsOf(entry)}\n`)
   }
 }
 
@@ -905,12 +955,25 @@ async function runSelectedCases(selection) {
 
   let workDir
   let dshHome
+  /** Collected verdicts, printed ONLY after the scoped cleanup finished. */
+  let verdictReport
   try {
     workDir = mkdtempSync(join(tmpdir(), 'dsh-split-process-'))
     // The cleanup scans this exact DSH_HOME even when the profile installation
     // fails before returning: assign it before the install, not after.
     dshHome = join(workDir, 'dsh-home')
     const installation = createSplitSmokeProfile({ tarball, targetDshVersion, workDir })
+    // Qualification-only: the isolated Client environment is curated, so a
+    // selected run's operator-expiry fault switch must be forwarded explicitly
+    // (production never sets it; the case files pass their own probes the same
+    // way). Without this the switch would silently never reach the Client.
+    const operatorExpirySwitch = process.env.SPLIT_PROCESS_CLIENT_EXPIRE_OPERATOR_ONCE
+    if (operatorExpirySwitch !== undefined) {
+      installation.base.env.SPLIT_PROCESS_CLIENT_EXPIRE_OPERATOR_ONCE = operatorExpirySwitch
+      if (process.env.SPLIT_PROCESS_CLIENT_EXPIRE_OPERATOR_AFTER_MS !== undefined) {
+        installation.base.env.SPLIT_PROCESS_CLIENT_EXPIRE_OPERATOR_AFTER_MS = process.env.SPLIT_PROCESS_CLIENT_EXPIRE_OPERATOR_AFTER_MS
+      }
+    }
     diagnostics.checkpoint('setup/profile-install')
     // The SAME context shape the full lane passes to a migrated case; a selected
     // case gets the ONE installation of this run and never expands its own set.
@@ -918,6 +981,9 @@ async function runSelectedCases(selection) {
       installation,
       EntryProcess,
       SurfaceEntryProcess,
+      darwinSurface: {
+        hostSeatFileFree: darwinHostSeatFileFree,
+      },
       entries: installation.entries,
       base: installation.base,
       workDir,
@@ -933,29 +999,32 @@ async function runSelectedCases(selection) {
       runStep: (name, operation) => diagnostics.runStep(name, operation),
       // Backstop only: the case kills its own detached processes first.
       trackDetachedPid: (pid, starttime) => trackedProcesses.set(pid, starttime),
+      // The current selected case id + the shared boundary reporter: a selected
+      // case must be able to publish the same NOT_VERIFIED line as a full-lane
+      // scene, and the line has to name the case it belongs to.
+      currentCaseId: undefined,
+      /** @see emitBoundaryNotVerified */
+      reportBoundary: ({ boundary, reason }) => emitBoundaryNotVerified(context.currentCaseId, { boundary, reason }),
     }
+    // The per-case verdict and identity facts are COLLECTED here and printed
+    // only after the cleanup below: a verdict announced before the scoped
+    // servers/work root/processes are quiesced would claim a run the lane has
+    // not finished (a cleanup failure must never leave a PASS behind).
     const selected = []
     for (const selectedCase of selection.cases) {
+      const createdMark = createdProcesses.length
+      context.currentCaseId = selectedCase.id
       const result = await runSelectedCase(diagnostics, selectedCase, context)
       selected.push({
         id: selectedCase.id,
         status: typeof result?.status === 'string' ? result.status : 'PASS',
         reason: typeof result?.reason === 'string' ? result.reason : undefined,
+        identities: createdProcesses.slice(createdMark).map(process => process.identityFacts()),
       })
     }
     assert(createHash('sha256').update(readFileSync(tarball)).digest('hex') === candidateSha256,
       'the candidate artifact changed during the selected qualification')
-    for (const entry of selected) {
-      // Only a real PASS may print SELECTED_PASS. An environment-gated
-      // NOT_VERIFIED is reported as its own distinct line and is non-zero, so a
-      // caller can never mistake it for a qualified pass.
-      if (entry.status === 'PASS') {
-        process.stdout.write(`${selectedPassLine(entry.id)}\n`)
-      } else {
-        process.stdout.write(`SPLIT_PROCESS_SELECTED_NOT_VERIFIED id=${entry.id} scope=SELECTABLE_ONLY reason=${entry.reason ?? entry.status}\n`)
-        process.exitCode = 1
-      }
-    }
+    verdictReport = selected
   } catch (error) {
     // Report BEFORE the cleanup below: the failure projection must read the
     // still-live process handles, and the work root must still exist while the
@@ -967,6 +1036,7 @@ async function runSelectedCases(selection) {
     throw error
   } finally {
     for (const run of [...activeProcesses]) {
+      if (run.platform === 'darwin') continue
       try { process.kill(-run.child.pid, 'SIGKILL') } catch { /* already gone */ }
     }
     // The backstop for detached processes a case created and registered: the
@@ -978,18 +1048,115 @@ async function runSelectedCases(selection) {
       // setup failure before the root existed) there is nothing to prove.
       await proveFailpointCleanup(dshHome)
     }
+    await stopDarwinSurfaceServer()
+    // Quiescence is decided BEFORE the private work root is removed: a
+    // NOT_QUIESCED run must keep its scene for diagnosis, and no verdict may be
+    // printed for a run that still owns a live process.
+    if (verdictReport !== undefined) await assertSelectedQuiesced(verdictReport)
     if (workDir === undefined) {
       // Nothing was created: setup failed before the work root existed.
     } else if (!KEEP) rmSync(workDir, { recursive: true, force: true })
     else console.error(`preserved split-process environment: ${workDir}`)
   }
+  // The scoped cleanup finished: only now may the lane name what it proved.
+  // A surviving entry process means the run is NOT quiesced, so it cannot
+  // print a PASS at all.
+  await announceSelectedVerdicts(verdictReport, { candidateSha256, targetDshVersion })
+}
+
+/**
+ * Decide quiescence for EVERY selected case before any verdict is printed. A
+ * survivor means the run cannot claim a PASS for ANY case (its scene stays for
+ * diagnosis because the work root is removed only after this check).
+ */
+async function assertSelectedQuiesced(selected) {
+  const leaked = []
+  for (const entry of selected) {
+    const pids = entry.identities.filter(identity => typeof identity.pid === 'number')
+    // A just-killed child is still observable until the OS reaps it: give the
+    // scoped cleanup a bounded window before declaring the run non-quiesced.
+    const reapDeadline = Date.now() + 5_000
+    let survivors = pids.filter(identity => alive(identity.pid))
+    while (survivors.length > 0 && Date.now() < reapDeadline) {
+      await new Promise(resolveSleep => setTimeout(resolveSleep, 50))
+      survivors = pids.filter(identity => alive(identity.pid))
+    }
+    for (const identity of survivors) leaked.push(`${entry.id}:${identity.role}:${String(identity.pid)}`)
+  }
+  if (leaked.length > 0) {
+    throw new SplitSmokeAssertionError(
+      `NOT_QUIESCED: ${String(leaked.length)} selected-run process(es) are still alive after cleanup: `
+        + `${leaked.join(', ')} (the private scene is preserved)`,
+    )
+  }
+}
+
+/**
+ * Print the collected selected verdicts and their real identity facts AFTER the
+ * scoped cleanup. Only a PASS prints `SPLIT_PROCESS_SELECTED_PASS`; an
+ * environment-gated NOT_VERIFIED prints its own non-zero line, and a
+ * non-quiesced run fails instead of claiming either.
+ */
+async function announceSelectedVerdicts(selected, candidateFacts) {
+  if (selected === undefined) return
+  for (const entry of selected) {
+    if (entry.status === 'PASS') {
+      process.stdout.write(`${selectedPassLine(entry.id, LANE_PLATFORM)}\n`)
+    } else {
+      process.stdout.write(`${selectedNotVerifiedLine(entry.id, LANE_PLATFORM, entry.reason ?? entry.status)}\n`)
+      process.exitCode = 1
+    }
+    const hosts = entry.identities.filter(identity => identity.role === 'host')
+    const clients = entry.identities.filter(identity => identity.role !== 'host')
+    // <pid>:<instanceId>:<kernel uniqueId — the macOS process identity fact the
+    // plan requires, never a Linux /proc value.
+    const hostFacts = hosts
+      .map(identity => [
+        String(identity.pid),
+        identity.instanceId ?? '',
+        identity.kernelUniqueId ?? '',
+      ].join(':'))
+      .join(',')
+    const clientFacts = clients.map(identity => String(identity.pid)).join(',')
+    const sessionIds = [...new Set(clients.flatMap(identity => identity.sessionIds ?? []))]
+    process.stdout.write(
+      `SPLIT_PROCESS_SELECTED_FACTS id=${entry.id} platform=${LANE_PLATFORM}`
+        + ` candidate=${candidateFacts.candidateSha256} pin=${candidateFacts.targetDshVersion}`
+        + ` hosts=${hostFacts === '' ? 'none' : hostFacts} clients=${clientFacts === '' ? 'none' : clientFacts}`
+        + ` sessions=${sessionIds.length === 0 ? 'none' : sessionIds.join(',')}`
+        + ` quiesced=true\n`,
+    )
+  }
+}
+
+/**
+ * The effective platform this lane dispatches on. Production reads the real
+ * `process.platform`; the diagnostics input-boundary tests pin `linux` through
+ * this one documented override so they can drive the full lane's CANDIDATE
+ * preflight from a non-Linux host. Nothing else reads it.
+ */
+const LANE_PLATFORM = process.env.SPLIT_PROCESS_TEST_PLATFORM === 'linux' ? 'linux' : process.platform
+
+/**
+ * The ONE machine-visible NOT_VERIFIED boundary line. A case that deliberately
+ * did not execute one qualified scene reports it here, so the evidence carries
+ * the fact (never a checkpoint name alone) and a reader can never mistake the
+ * boundary for a pass.
+ */
+function emitBoundaryNotVerified(caseId, { boundary, reason }) {
+  assert(typeof boundary === 'string' && boundary !== '', 'a boundary report needs a name')
+  assert(typeof reason === 'string' && reason !== '', 'a boundary report needs its blocker')
+  process.stdout.write(
+    `SPLIT_PROCESS_BOUNDARY_NOT_VERIFIED id=${String(caseId)}`
+      + ` platform=${LANE_PLATFORM} boundary=${boundary} reason=${reason}\n`,
+  )
 }
 
 /** Strict CLI dispatch: `--list`, the old full run, or one selected case set. */
 async function runLane() {
   let selection
   try {
-    selection = resolveSelection(parseSelectionArgs(process.argv.slice(2)))
+    selection = resolveSelection(parseSelectionArgs(process.argv.slice(2)), LANE_PLATFORM)
   } catch (error) {
     // A selector error exists before any reporter: it leaves the ONE fixed
     // input projection and never a work root, an install or a process.
@@ -1006,6 +1173,24 @@ async function runLane() {
     return
   }
   if (selection.mode === 'full') {
+    // The no-selector whole lane is the Linux full qualification: its
+    // `/proc` helpers and `script(1)` PTYs have no Darwin driver in scope, so
+    // a Mac caller is refused before the candidate is even inspected instead
+    // of pretending the Linux lane was ported.
+    if (LANE_PLATFORM !== 'linux') {
+      const refusal = new SplitSmokeInputError(
+        'INPUT_PLATFORM_FULL_UNSUPPORTED',
+        `INPUT_UNQUALIFIED: INPUT_PLATFORM_FULL_UNSUPPORTED (invalid smoke selection, not a product regression): `
+          + `the no-selector full lane is Linux-only; platform=${LANE_PLATFORM} runs only --list, --case or --suite`,
+      )
+      emitInputFailure({
+        lane: 'split-process',
+        heading: 'SPLIT_PROCESS_SMOKE',
+        error: refusal,
+        evidencePath: process.env.SPLIT_PROCESS_FAILURE_EVIDENCE,
+      })
+      throw refusal
+    }
     await main(selection.candidate)
     return
   }

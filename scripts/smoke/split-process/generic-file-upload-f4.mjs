@@ -14,6 +14,7 @@
 import { createHash } from 'node:crypto'
 import { chmodSync, mkdirSync, realpathSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import zlib from 'node:zlib'
 
 import { SplitSmokeAssertionError } from '../../lib/split-smoke-diagnostics.mjs'
 import { waitForC1WorkEvent } from '../../lib/split-smoke-fixtures.mjs'
@@ -84,6 +85,49 @@ function deterministicBytes(seed, length = 8 * 1024 * 1024) {
   const bytes = Buffer.alloc(length)
   for (let index = 0; index < length; index += 1) bytes[index] = (index * 31 + seed) % 251
   return bytes
+}
+
+/**
+ * One deterministic valid PNG: fixed 8-byte signature, one IHDR (the seeded
+ * 1×1 8-bit RGB pixel data follows the exact canonical layout) and the CRCs
+ * the real intake requires. The magic-byte sniffing intake accepts it, and
+ * the Host Store verifies the stored bytes against its own durable reference.
+ */
+function deterministicPng(seed) {
+  const width = 1
+  const height = 1
+  const chunk = (type, data) => {
+    const head = Buffer.alloc(4)
+    head.writeUInt32BE(data.length, 0)
+    const body = Buffer.concat([Buffer.from(type, 'ascii'), data])
+    const crc = Buffer.alloc(4)
+    crc.writeUInt32BE(crc32(body) >>> 0, 0)
+    return Buffer.concat([head, body, crc])
+  }
+  const ihdr = Buffer.alloc(13)
+  ihdr.writeUInt32BE(width, 0)
+  ihdr.writeUInt32BE(height, 4)
+  ihdr[8] = 8 // bit depth
+  ihdr[9] = 2 // color type: truecolor RGB
+  const raw = Buffer.from([0, (seed >>> 0) & 0xff, (seed >>> 8) & 0xff, (seed >>> 16) & 0xff])
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    chunk('IHDR', ihdr),
+    chunk('IDAT', zlib.deflateSync(raw)),
+    chunk('IEND', Buffer.alloc(0)),
+  ])
+}
+
+/** The PNG CRC-32 (the standard zlib polynomial, no reflection on the table). */
+function crc32(buffer) {
+  let crc = 0xffffffff
+  for (const byte of buffer) {
+    crc ^= byte
+    for (let bit = 0; bit < 8; bit += 1) {
+      crc = (crc >>> 1) ^ (0xedb88320 & -(crc & 1))
+    }
+  }
+  return ~crc
 }
 
 /** Write the test-only Host probe request; the fixture resolves the exact Agent. */
@@ -260,6 +304,68 @@ export async function runGenericFileUploadF4(context) {
       attachmentId: durableSkill.file.attachment.attachmentId,
       bytes: probeSkill.bytes,
       sha256: probeSkill.sha256,
+    })
+
+    // ── P: ONE deterministic PNG through the SAME official image admission:
+    // `/image` (the image-only compatibility route of the SAME intake) stages
+    // the picture into the SAME composer, the submission carries it as an
+    // official image part of the SAME Session, and the Host's OWN
+    // `ctx.attachments.readImage` authority reads the stored bytes back. The
+    // digest/signature/pixel facts come from the Host readback, never from
+    // the local file.
+    const imageMarker = 'F4_CLIENT_A_PNG_20261119'
+    const pngBytes = deterministicPng(0x46_34_50_4e)
+    const pngPath = join(clientDir, 'client-only-shot.png')
+    writeFileSync(pngPath, pngBytes, { mode: 0o600 })
+    await waitForComposer(clientA, '❯', 'F4 image prompt composer')
+    clientA.send(`/image ${pngPath}`)
+    clientA.send('\r')
+    await waitForComposer(clientA, '[image #', 'F4 image attachment placeholder')
+    clientA.send(` ${imageMarker}`)
+    await waitForComposer(clientA, imageMarker, 'F4 image draft marker')
+    clientA.send('\r')
+    // The durable row is the prompt's own commit proof and the probe's input
+    // must exist BEFORE the Host-side read is requested: the fixture resolves
+    // the exact Agent and durable image block, then reads the stored bytes
+    // through the official `ctx.attachments.readImage` authority. The durable
+    // log flush trails the commit, so poll until the exact row is readable.
+    const durableImageRowDeadline = Date.now() + 120_000
+    let imageEvents = []
+    while (Date.now() < durableImageRowDeadline) {
+      imageEvents = (hostSessionEvents(dshHome, sessionId) ?? []).filter(event => event.type === 'user/message'
+        && JSON.stringify(event.data?.content ?? []).includes(imageMarker))
+      if (imageEvents.length === 1) break
+      await sleep(100)
+    }
+    assert(imageEvents.length === 1, `F4 the image prompt must land exactly one durable row (got ${String(imageEvents.length)})`)
+    requestHostProbe(join(workRoot, 'probe'), sessionId, imageMarker)
+    const durableImage = await waitForC1WorkEvent(
+      workRoot,
+      event => event.kind === 'f4-file-probe' && event.marker === imageMarker && event.error === undefined,
+      'F4 image Host readback',
+      120_000,
+    )
+    const imageBlock = imageEvents[0].data?.content?.find(block => block?.type === 'image' && block.attachment?.attachmentId !== undefined)
+    assert(imageBlock !== undefined, 'F4 the image prompt carried no durable image part')
+    assert(imageBlock.attachment.attachmentId === `sha256:${durableImage.sha256}`,
+      `F4 the Host stored reference is not content-addressed to the readback digest (${imageBlock.attachment.attachmentId})`)
+    assert(durableImage.mediaType === 'image/png' && durableImage.pngSignature === true,
+      `F4 the Host-stored image is not a verified PNG: ${JSON.stringify({ mediaType: durableImage.mediaType, pngSignature: durableImage.pngSignature })}`)
+    assert(durableImage.bytes === durableImage.refBytes && durableImage.bytes > 0,
+      `F4 the Host readback byte count disagrees with its durable reference: ${JSON.stringify({ bytes: durableImage.bytes, refBytes: durableImage.refBytes })}`)
+    assert(durableImage.sha256 === createHash('sha256').update(pngBytes).digest('hex'),
+      'F4 the Host stored bytes are not the Client source PNG')
+    assert(durableImage.width > 0 && durableImage.height > 0,
+      `F4 the Host-stored image carries no pixel facts: ${JSON.stringify({ width: durableImage.width, height: durableImage.height })}`)
+    await clientA.waitForScreen('🖼️', 'F4 Client A paints the accepted image row', 60_000)
+    trace('f4-image-png', {
+      sessionId,
+      attachmentId: durableImage.attachmentId,
+      bytes: durableImage.bytes,
+      width: durableImage.width,
+      height: durableImage.height,
+      sha256: durableImage.sha256,
+      hostReadbackVerified: true,
     })
 
     // ── Negative: the source changes after /attach → visible refusal, no file row

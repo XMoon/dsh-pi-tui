@@ -41,6 +41,27 @@ function assert(condition, message) {
   if (!condition) throw new SplitSmokeAssertionError(message)
 }
 
+/**
+ * The ONE Host process-identity fact this case pins across the sessionless
+ * discovery, expressed with the platform registry schema the Host really
+ * publishes: Linux carries `hostStarttime` (schema 1), Darwin carries the
+ * kernel identity (`hostKernelIdentity.uniqueId`, schema 2). No platform
+ * fakes the other's field.
+ */
+function publishedProcessIdentity(localHost, label) {
+  if (process.platform === 'darwin') {
+    const identity = localHost?.hostKernelIdentity
+    assert(typeof identity?.uniqueId === 'string' && identity.uniqueId !== '',
+      `${label}: the Darwin Host Ready record carries no kernel identity: ${JSON.stringify(localHost)}`)
+    assert(identity.pid === localHost.hostPid,
+      `${label}: the Darwin kernel identity does not name the published Host pid`)
+    return identity.uniqueId
+  }
+  assert(typeof localHost?.hostStarttime === 'string' && localHost.hostStarttime !== '',
+    `${label}: the Host Ready record carries no authenticated process identity: ${JSON.stringify(localHost)}`)
+  return localHost.hostStarttime
+}
+
 /** Wait for the Welcome's CONFIRMED Host directory across a wrapped row. */
 async function waitForConfirmedDirectory(client, canonicalPath, label, timeoutMs = 120_000) {
   const started = Date.now()
@@ -127,8 +148,9 @@ export async function runSessionlessHostFileF5B(context) {
 
   try {
     const { host, ready } = await startC1Host('unowned-job', 'F5B')
-    assert(ready.localHost?.hostPid > 0 && typeof ready.localHost?.hostStarttime === 'string',
-      `F5B the Host Ready record carries no authenticated process identity: ${JSON.stringify(ready.localHost)}`)
+    const hostProcessIdentity = publishedProcessIdentity(ready.localHost, 'F5B')
+    assert(ready.localHost?.hostPid > 0,
+      `F5B the Host Ready record carries no Host pid: ${JSON.stringify(ready.localHost)}`)
 
     // ── F5B-A: the automatic same-object adoption + first Session ───────────
     const { client: alpha, ready: alphaReady } = await startC1Client('F5B alpha client', {
@@ -245,6 +267,10 @@ export async function runSessionlessHostFileF5B(context) {
       unitContract: 'test/app/remote-process-local-workspace-equivalence.test.ts',
       requirement: 'WS-L2 remains open until a same-uid mount-namespace capable Linux host runs it',
     })
+    context.reportBoundary?.({
+      boundary: 'same-path-different-mount-view',
+      reason: 'an-unprivileged-user-namespace-maps-uid-0-and-a-same-uid-mount-namespace-needs-CAP_SYS_ADMIN',
+    })
 
     // ── F5B-D: a refused MANUAL Host path creates nothing and adopts nothing ─
     // The manual Host-path proposal outranks any auto candidate; the Host
@@ -281,10 +307,10 @@ export async function runSessionlessHostFileF5B(context) {
     await manual.waitForScreen(betaMarker, 'F5B manual @ candidate', 120_000)
 
     const hostAfter = await hostStatus(host)
-    assert(hostAfter.pid === ready.pid && hostAfter.localHost?.hostStarttime === ready.localHost?.hostStarttime,
+    assert(hostAfter.pid === ready.pid && publishedProcessIdentity(hostAfter.localHost, 'F5B') === hostProcessIdentity,
       `F5B the Host identity changed during the sessionless discovery: ${JSON.stringify({
-        before: { pid: ready.pid, starttime: ready.localHost?.hostStarttime },
-        after: { pid: hostAfter.pid, starttime: hostAfter.localHost?.hostStarttime },
+        before: { pid: ready.pid, identity: hostProcessIdentity },
+        after: { pid: hostAfter.pid, identity: publishedProcessIdentity(hostAfter.localHost, 'F5B after') },
       })}`)
 
     await exitC1Client(alpha, 'F5B alpha client')
@@ -298,7 +324,7 @@ export async function runSessionlessHostFileF5B(context) {
     context.trace?.('f5b-sessionless-host-file', {
       candidate: context.candidateSha256,
       hostPid: ready.localHost?.hostPid,
-      hostStarttime: ready.localHost?.hostStarttime,
+      hostProcessIdentity,
       instanceId: ready.localHost?.instanceId,
       autoSameObject: true,
       alphaDurableCwd: alphaHeader.cwd,

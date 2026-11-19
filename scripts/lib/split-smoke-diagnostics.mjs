@@ -124,6 +124,12 @@ export const LANE_ERROR_CODES = Object.freeze([
   // The selectable-entry boundary: an unknown/ambiguous selector, a selector
   // combined with --list, or a full-only control used with --case/--suite.
   'INPUT_SMOKE_SELECTION_INVALID',
+  // The platform-eligibility boundary: a case/suite whose registry entry does
+  // not support the current OS, refused before any candidate inspection.
+  'INPUT_PLATFORM_CASE_UNSUPPORTED',
+  // The no-selector whole lane on a non-Linux OS: the Linux full qualification
+  // has no Darwin driver in scope, so the whole form is refused up front.
+  'INPUT_PLATFORM_FULL_UNSUPPORTED',
   'RECORD_READ_FAILED',
   'RECORD_WAIT_TIMEOUT',
   'PROCESS_EXITED_BEFORE_RECORD',
