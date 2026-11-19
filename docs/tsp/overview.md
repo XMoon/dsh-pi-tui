@@ -434,8 +434,10 @@ enough. `PROJECTION_ONLY` is not navigable state.
 
 ## Verification entry points
 
-- Headless/semantic suites: `test/tern-tsp-*.test.ts` (transcript mapper,
-  renderer selection, interaction, projection) — the routine gate.
+- Headless/semantic suites: TSP headless/semantic tests are owned by their respective directories under
+  `test/` (including `test/app/` and `test/integration/`); discover the current
+  suite with `rg --files test | rg 'tern-tsp-'` instead of relying on a
+  root-level filename glob.
 - Real-pane operations: [../guides/tern-pane-testing.md](../guides/tern-pane-testing.md)
   (`scripts/tern-pane-drive.mjs`, `scripts/tern-pane-smoke.mjs`, geometry and
   instrumentation helpers).
