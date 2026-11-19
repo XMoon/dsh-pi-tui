@@ -3398,9 +3398,11 @@ export function applyRunnerWithRuntime(
       get supportsTuiBuiltinUi() { return !tspRendererActive },
       supportsModelPickerUi: () => surface.modelPresentation !== undefined,
       supportsPresetPickerUi: () => surface.presetPresentation !== undefined,
-      // PO-5E: the native `/acp` presenter (Split Client only). A Direct mount
-      // never installs it, so `/acp` keeps its own explicit Direct refusal from
-      // the handler; an unnegotiated TSP pane refuses before the handler.
+      // PO-5E: the native `/acp` presenter, present only where the mounted TUI
+      // renderer negotiated its kinds (a PiTui Direct mount has no TSP overlay,
+      // so it never reports it). On the Direct backend the registered handler
+      // still refuses the Split-only operation explicitly; an unnegotiated TSP
+      // pane refuses before the handler.
       supportsAcpPickerUi: () => surface.acpPresentation !== undefined,
        supportsSessionBrowserUi: () => surface.sessionBrowserPresentation !== undefined,
       // B3-A3: the ONE Task Center capability of the CURRENTLY mounted display
