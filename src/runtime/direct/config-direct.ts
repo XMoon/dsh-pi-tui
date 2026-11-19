@@ -2060,6 +2060,16 @@ export class DirectWebProviderConfig implements WebProviderConfig {
   async read(): Promise<WebProviderSettings | undefined> {
     const settings = this.settings()
     if (settings === undefined) return undefined
+    // Availability is the cheap synchronous pre-check: a half-mounted
+    // configuration is UNAVAILABLE before the credential store is consulted.
+    if (readSettingsDescriptor(settings, WEB_PROVIDER_NS) === undefined
+      || readSettingsDescriptor(settings, WEB_SEARCH_API_NS) === undefined) return undefined
+    // The credential presence is the read's ONLY await. Every descriptor fact
+    // is projected AFTER it, so the returned value/base/user facts are the
+    // Host state at this SYNCHRONOUS return. That is what lets the command
+    // queue's reset decision and the adapter's revision-checked dispatch act on
+    // the same state instead of a snapshot the credential read outlived.
+    const credential = await this.credentialFact()
     // Both official descriptors must be readable form projections: a missing
     // or malformed one is UNAVAILABLE, never a defaulted value. The `web`
     // descriptor is read ONCE: its `value`, `base` and `user` are the same
@@ -2091,7 +2101,7 @@ export class DirectWebProviderConfig implements WebProviderConfig {
       providerSelection,
       api: { searchBilling, fetchBilling, count, sendOriginalQuestion },
       advanced: webApiAdvancedFactsOf(api),
-      credential: await this.credentialFact(),
+      credential,
     }
   }
 

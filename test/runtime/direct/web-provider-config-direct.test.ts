@@ -490,3 +490,30 @@ test('an unreadable USER/base layer refuses the reset instead of assuming no ove
     assert.deepEqual(h.settings.recorded, [], 'an unreadable layer is never a write authorization')
   }
 })
+
+test('read() returns the provider layers observed at its synchronous return, not before the credential await', async () => {
+  const h = host()
+  let releaseCredential: () => void = () => {}
+  let credentialStarted = false
+  const gate = new Promise<void>(resolve => { releaseCredential = resolve })
+  h.credentials.describe = async () => {
+    credentialStarted = true
+    await gate
+    return { configured: false }
+  }
+  const pending = new DirectWebProviderConfig(h.ctx).read()
+  while (!credentialStarted) await new Promise(resolve => setImmediate(resolve))
+  // Another writer moves the provider while the credential read is pending.
+  const descriptor = h.settings.descriptors.get('web')!
+  descriptor.user = { searchProvider: 'deepseek-search-api' }
+  descriptor.value = { searchProvider: 'deepseek-search-api', fetchProvider: 'http' }
+  descriptor.revision = (descriptor.revision ?? 0) + 1
+  releaseCredential()
+  const read = await pending
+  assert.deepEqual(read?.providerSelection.search, {
+    baseId: undefined,
+    userSet: true,
+    userId: 'deepseek-search-api',
+  }, 'the returned layer facts are the state at the synchronous return, not a snapshot the credential read outlived')
+  assert.equal(read?.searchProvider, 'deepseek-search-api')
+})

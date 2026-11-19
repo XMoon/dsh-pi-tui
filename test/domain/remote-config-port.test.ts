@@ -2201,7 +2201,65 @@ test('a stale mirrored USER layer never authorizes a reset after the Host moved'
   web.value = { fetchProvider: 'http' }
   web.revision += 1
   emit('settings/document-updated')
-  await port.web.restoreSearchProvider()
-  assert.deepEqual(state.mutateCalls, [], 'the refreshed layer has no own-field, so the reset is a no-op')
+  // The captured layer no longer matches the refreshed descriptor: the reset is
+  // REFUSED at the dispatch fence with zero Host mutations (never re-targeted).
+  await assert.rejects(port.web.restoreSearchProvider(), /USER\/base selection changed before the reset was dispatched/u)
+  assert.deepEqual(state.mutateCalls, [], 'the refreshed layer no longer matches the captured facts')
   assert.equal((await port.web.read())?.providerSelection.search.userSet, false)
+})
+
+test('a queued Remote reset is refused when another writer moved the USER value before dispatch', async () => {
+  // RFL-001: the reset captures the committed mirror facts synchronously and
+  // re-proves them against the descriptor that supplies the CAS revision. A
+  // writer that changes the same USER field while the reset waits in the
+  // serialized write queue must NOT be cleared by that older gesture.
+  const { port, state, emit } = createBackend(current => { seedWebNamespaces(current) })
+  await port.describe()
+  let releaseMutate: () => void = () => {}
+  state.mutateGate = () => new Promise<void>(resolve => { releaseMutate = resolve })
+  // Block the ONE shared mirror write queue with an unrelated API-section write.
+  const held = port.web.setSendOriginalQuestion(false)
+  for (let attempt = 0; attempt < 100 && state.mutateCalls.length === 0; attempt += 1) await tick()
+  assert.equal(state.mutateCalls.length, 1, 'the unrelated write reached the Host and is held')
+  // The reset observes the CURRENT USER value and queues behind the held write.
+  const reset = port.web.restoreSearchProvider()
+  // Let the adapter pass its pre-queue readiness check and join the queue.
+  await tick()
+  // Another writer moves the SAME field while the reset is queued.
+  const web = state.namespaces.get(WEB_NS)!
+  web.value = { searchProvider: 'deepseek-search-api', fetchProvider: 'http' }
+  web.user = { searchProvider: 'deepseek-search-api' }
+  web.revision += 1
+  emit('settings/document-updated')
+  releaseMutate()
+  await held
+  await assert.rejects(reset, /USER\/base selection changed before the reset was dispatched/u)
+  assert.equal(state.mutateCalls.filter(call => call.ns === WEB_NS).length, 0,
+    'the stale reset never reached the official Host mutate')
+  const read = await port.web.read()
+  assert.equal(read?.searchProvider, 'deepseek-search-api', 'the other writer\'s value is preserved')
+  assert.deepEqual(read?.providerSelection.search, { baseId: undefined, userSet: true, userId: 'deepseek-search-api' })
+})
+
+test('a queued Remote reset is refused when the deployment default moved before dispatch', async () => {
+  const { port, state, emit } = createBackend(current => { seedWebNamespaces(current) })
+  await port.describe()
+  let releaseMutate: () => void = () => {}
+  state.mutateGate = () => new Promise<void>(resolve => { releaseMutate = resolve })
+  const held = port.web.setSendOriginalQuestion(false)
+  for (let attempt = 0; attempt < 100 && state.mutateCalls.length === 0; attempt += 1) await tick()
+  assert.equal(state.mutateCalls.length, 1)
+  const reset = port.web.restoreSearchProvider()
+  await tick()
+  const web = state.namespaces.get(WEB_NS)!
+  // Same USER value, different deployment default: the gesture's meaning (the
+  // deployment default it was confirmed against) no longer holds.
+  web.base = { searchProvider: 'deepseek-official', fetchProvider: 'http' }
+  web.revision += 1
+  emit('settings/document-updated')
+  releaseMutate()
+  await held
+  await assert.rejects(reset, /USER\/base selection changed before the reset was dispatched/u)
+  assert.equal(state.mutateCalls.filter(call => call.ns === WEB_NS).length, 0)
+  assert.equal(state.namespaces.get(WEB_NS)?.base?.searchProvider, 'deepseek-official')
 })

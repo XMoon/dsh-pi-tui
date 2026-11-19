@@ -2513,30 +2513,33 @@ class RemoteWebProviderConfig implements WebProviderConfig {
    *  `unset` path op on the mirror's existing write queue. Both layers must be
    *  readable; an already-absent USER own-field is a real no-op (sending
    *  `unset` would let the official base substitution PIN it again when a
-   *  sibling USER field exists, so it must never be dispatched blindly). The
-   *  synchronous `beforeDispatch` re-proves the same facts against the exact
-   *  descriptor revision that is about to be sent as the CAS token. */
+   *  sibling USER field exists, so it must never be dispatched blindly).
+   *
+   *  STALE-INTENT FENCE: the facts are captured SYNCHRONOUSLY from the same
+   *  committed mirror view the caller's read used, BEFORE this write joins the
+   *  serialized queue. While it waits, another writer may refresh the mirror to
+   *  a different USER value or deployment default; the synchronous
+   *  `beforeDispatch` then compares the descriptor that supplies the CAS
+   *  revision with those captured facts and REFUSES the reset (zero Host
+   *  mutation) instead of clearing the other writer's newer value. */
   private async restoreProvider(field: 'searchProvider' | 'fetchProvider'): Promise<void> {
-    await this.mirror.ensureCurrent()
     const web = this.mirror.namespace(WEB_PROVIDER_NS)
     if (web === undefined) throw new Error('the official Host Web settings section is unavailable')
-    const user = plainRecord(web.user)
-    const base = plainRecord(web.base)
-    if (user === undefined || base === undefined) {
+    const observed = webProviderSelectionFactsOf(web.base, web.user, field)
+    if (observed === undefined) {
       throw new Error('the official Host Web settings section does not report its USER/base layers')
     }
-    if (!Object.hasOwn(user, field)) return
+    if (!observed.userSet) return
     await this.dispatch(
       WEB_PROVIDER_NS,
       [{ op: 'unset', path: [field] }],
       descriptor => {
-        const liveUser = plainRecord(descriptor.user)
-        const liveBase = plainRecord(descriptor.base)
-        if (liveUser === undefined || liveBase === undefined) {
+        const live = webProviderSelectionFactsOf(descriptor.base, descriptor.user, field)
+        if (live === undefined) {
           throw new Error('the official Host Web settings section does not report its USER/base layers')
         }
-        if (!Object.hasOwn(liveUser, field)) {
-          throw new Error(`the ${field} USER override was already removed by another writer; no reset was dispatched`)
+        if (live.baseId !== observed.baseId || live.userSet !== observed.userSet || live.userId !== observed.userId) {
+          throw new Error('the Host Web USER/base selection changed before the reset was dispatched; no reset was dispatched')
         }
       },
     )
