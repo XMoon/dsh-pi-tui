@@ -731,6 +731,51 @@ function verifyBundleComposition(installation) {
 }
 
 /**
+ * Wait until the durable CUA permission store is QUIESCENT, then return its
+ * immutable decision snapshot.
+ *
+ * The store legitimately changes while a consent decision is being written: the
+ * resumed Split Client can raise a NEW model-initiated ask after the disconnect
+ * case, and answering it writes a decision. A "before" snapshot taken during
+ * that write would then differ from the post-disable read for a reason that has
+ * nothing to do with disabling the bundle. A painted consent Question that no
+ * case owns is denied here (a local refusal, recorded in the report) so the
+ * store settles; the snapshot is accepted only when two consecutive reads agree.
+ */
+async function quiesceConsentDecisions(installation, tui, label) {
+  const deadline = Date.now() + TIMEOUTS.consent
+  let deniedAsks = 0
+  let snapshot = permissionStoreSnapshot(installation.dshHome)
+  while (Date.now() < deadline) {
+    const frame = tmuxCapture(tui, `${label} consent state`)
+    if (frame.includes('Allow computer use')) {
+      // Deny through the PAINTED option rows only (never a blind key).
+      const optionRow = frame.split('\n').find(line => line.includes('[2] Deny'))
+      assert(optionRow !== undefined, `${label}: the painted Question has no Deny option row`)
+      sendNamedKey(tui, '2', `${label} deny option`)
+      await sleep(500)
+      sendNamedKey(tui, 'Enter', `${label} deny review`)
+      await sleep(500)
+      if (tmuxCapture(tui, `${label} review state`).includes('Submit [Enter]')) {
+        sendNamedKey(tui, 'Enter', `${label} deny submit`)
+      }
+      deniedAsks += 1
+      for (let wait = 0; wait < 20; wait += 1) {
+        if (!tmuxCapture(tui, `${label} after deny`).includes('Allow computer use')) break
+        await sleep(500)
+      }
+    }
+    const next = permissionStoreSnapshot(installation.dshHome)
+    if (JSON.stringify(next) === JSON.stringify(snapshot)) {
+      return { snapshot: next, deniedAsks }
+    }
+    snapshot = next
+    await sleep(400)
+  }
+  throw new Error(`${label}: the durable CUA consent store never settled`)
+}
+
+/**
  * THE IMMUTABLE DECISION SNAPSHOT of the durable CUA permission store.
  *
  * The official provider rewrites its own state file (including on shutdown), so
@@ -2077,7 +2122,9 @@ async function main() {
     // Captured IMMUTABLY before the operator disables the bundle: the provider
     // rewrites its own state file during shutdown, so a late re-read of the same
     // path would silently compare the new file with itself.
-    const storageBefore = permissionStoreSnapshot(installation.dshHome)
+    const quiesced = await quiesceConsentDecisions(installation, splitTui, 'MAC09-11')
+    const storageBefore = quiesced.snapshot
+    report.macos11Quiesce = { deniedAsks: quiesced.deniedAsks }
     assert(storageBefore.some(entry => Object.keys(entry.applications).length > 0),
       'MAC09-11: the durable CUA consent store carries no application decision to protect (positive control)')
     await operatorGate(operator, splitTui, 'MAC09-11 disable Computer use', 'continue mac09-11-disable', [

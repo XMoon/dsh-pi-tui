@@ -366,6 +366,43 @@ test('a provider basis rollover refreshes the page and DISCARDS the pre-refresh 
   mounted.page.dispose()
 })
 
+test('a rejected write from the replaced provider is unknown, not failed', async () => {
+  let basis = 1
+  let rejectRun!: (error: Error) => void
+  const held = new Promise<void>((_, reject) => { rejectRun = reject })
+  const mounted = mount({
+    cua: {
+      observation: { readSnapshot: () => basis, subscribe: () => () => {} },
+      // The OLD provider accepts the revoke, then the provider is replaced and
+      // the old write rejects with an ordinary business error.
+      revoke: async (id) => {
+        mounted.calls.push(`revoke:${id}`)
+        await held
+      },
+    },
+  })
+  mounted.page.setMaxRows(80)
+  const frame = await settle(mounted, 'TextEdit')
+  const revokeRow = frame.findIndex(line => line.includes('[Revoke access…]'))
+  const event = { type: 'press', x: frame[revokeRow]!.indexOf('['), y: revokeRow, width: 96, height: 79 } as TuiMouseEvent
+  mounted.page.handleMouse(event)
+  mounted.page.handleMouse({ ...event, type: 'click' } as TuiMouseEvent)
+  assert.match(mounted.render().join('\n'), /\[y Revoke\]/u, 'the revoke confirmation is armed')
+  mounted.page.handleInput('y')
+  await new Promise(resolve => setTimeout(resolve, 10))
+  assert.deepEqual(mounted.calls.filter(call => call.startsWith('revoke:')), ['revoke:app-1'])
+  // The provider is replaced while the accepted write is still held.
+  basis = 2
+  rejectRun(new Error('old provider unavailable after request'))
+  await new Promise(resolve => setTimeout(resolve, 20))
+  const painted = mounted.render().join('\n').replace(/\s+/gu, ' ')
+  assert.match(painted, /unconfirmed/u,
+    'a rejection raised after the provider was replaced may not be presented as this provider\'s failure')
+  assert.doesNotMatch(painted, /old provider unavailable after request/u,
+    'the replaced provider\'s error text must not be attributed to the current provider')
+  mounted.page.dispose()
+})
+
 test('a read that CROSSES a provider replacement is never adopted as the new basis', async () => {
   let basis = 1
   let releaseRead!: () => void

@@ -470,6 +470,14 @@ export class CuaAccessSettingsController {
     // queued dispatch is invisible to `epoch`: the identity must be re-read at
     // the dispatch boundary and again at settlement.
     const admittedBasis = basis
+    // The ONE currentness judgment for a dispatched write. Direct's observation
+    // subscription is a no-op, so a provider replacement during the write is
+    // invisible to `epoch`: the identity must be re-read here, and BOTH the
+    // success and the error settlement must use this same judgment — an error
+    // raised by a replaced provider is not a property of the current one.
+    const stillCurrent = (): boolean => !this.closed
+      && epoch === this.epoch
+      && Object.is(this.deps.cuaAccess.observation.readSnapshot(), admittedBasis)
     const task = this.tail.then(async () => {
       if (this.closed || epoch !== this.epoch) return
       this.patch({ busy: true })
@@ -490,12 +498,7 @@ export class CuaAccessSettingsController {
       }
       try {
         await run()
-        if (this.closed) return
-        if (epoch !== this.epoch) {
-          this.publishUnknown(receipt, kind)
-          return
-        }
-        if (!Object.is(this.deps.cuaAccess.observation.readSnapshot(), admittedBasis)) {
+        if (!stillCurrent()) {
           // The write may have reached the OLD provider while its result is no
           // longer attributable: never paint it as a success.
           this.publishUnknown(receipt, kind)
@@ -504,8 +507,10 @@ export class CuaAccessSettingsController {
         this.patch({ action: { ...receipt, kind, state: 'ok', at: Date.now() } })
         await this.refresh()
       } catch (error) {
-        if (this.closed) return
-        if (epoch !== this.epoch) {
+        if (!stillCurrent()) {
+          // The rejection belongs to the replaced provider: the CURRENT one has
+          // no attributable outcome, so the truthful state is unknown, not the
+          // old provider's failure.
           this.publishUnknown(receipt, kind)
           return
         }
