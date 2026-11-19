@@ -1268,10 +1268,18 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
     prompt: 'Without using any tools, answer in one short sentence: which tool would you use for macOS computer control?',
     label: 'MAC09-02 enabled non-PTC negative',
   })
+  // The profile composes EVERY shipped agent preset, so the PTC row's own
+  // presence proves nothing about the STANDARD preset: read the standard
+  // preset's OWN plugin list and require it to carry no PTC executor (the only
+  // path by which a Session reaches the cua tool).
   const standardPresetAfter = dumpProfile(installation, 'MAC09-02 after the standard Session')
-  const standardEntries = standardPresetAfter.flatMap(entry => Array.isArray(entry?.config?.plugins) ? entry.config.plugins : [])
-  assert(standardEntries.every(plugin => plugin?.name !== '@deepseek-ai/dsh-tool-executor-ptc'),
+  const presetRows = standardPresetAfter.filter(entry => entry?.name === '@deepseek-ai/dsh-agent-preset')
+  const standardRow = presetRows.find(entry => entry?.config?.id === 'standard')
+  assert(standardRow !== undefined, 'MAC09-02: the profile declares no standard agent preset')
+  const standardPlugins = Array.isArray(standardRow?.config?.plugins) ? standardRow.config.plugins : []
+  assert(standardPlugins.every(plugin => plugin?.name !== '@deepseek-ai/dsh-tool-executor-ptc'),
     'MAC09-02: the standard preset composed the PTC executor, so a non-PTC Session could reach cua')
+
   // The rest of the lane runs PTC Sessions: restore the shipped default so the
   // negative above cannot change later cases' admission.
   await sendKeys(tui, '/preset default ptc', 'MAC09-02 restore PTC default')
