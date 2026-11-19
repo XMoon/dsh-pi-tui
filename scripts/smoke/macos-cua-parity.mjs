@@ -1507,20 +1507,46 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
   // MAC09-08: one safe, bounded TextEdit input, verified through the same
   // official CUA observation (the window's accessibility tree).
   setCase(report, 'MAC09-08')
-  const marker = `CUA-MARKER-${randomUUID().slice(0, 8).toUpperCase()}`
-  const input = await promptAndWaitCua({
-    tui,
-    dshHome,
-    sessionId: consent.sessionId,
-    prompt: `Run exactly this in run_code: const app = await tools.cua({ method: 'getApp', params: { selector: '${String(textEditPid)}' } }); const windows = await tools.cua({ method: 'listWindows', params: { appHandle: app.appHandle } }); const window = windows.find(item => String(item.title ?? '').includes('cua-blank')); if (!window) throw new Error('the controlled TextEdit window was not found'); await tools.cua({ method: 'show', params: { appHandle: app.appHandle, windowId: window.windowId } }); await tools.cua({ method: 'activate', params: { appHandle: app.appHandle } }); await app.typeText('${marker}'); const tree = await app.getAccessibilityTree(); return JSON.stringify(tree).includes('${marker}') ? 'MARKER_PRESENT' : 'MARKER_MISSING'`,
-    label: 'MAC09-08 controlled input',
-    method: 'typeText',
-    timeoutMs: TIMEOUTS.turn,
-  })
-  const inputResult = await waitCuaResult(dshHome, input.sessionId, input.dispatch.subCallId,
-    'MAC09-08 typeText result', TIMEOUTS.turn)
-  assert(inputResult.result.isError !== true,
-    `MAC09-08: the controlled typeText failed: ${dispatchErrorCode(inputResult.result) ?? 'unknown error'} :: ${dispatchContentText(inputResult.result).slice(0, 400)}`)
+  // The scene's fact is the HOST tool behaviour (one bounded input, observed by
+  // the same official call), not model obedience. A model that stops after
+  // typeText without reading the tree leaves the observation unproven, so the
+  // scene re-runs the SAME bounded program once with an explicit instruction and
+  // records the retry. Every attempt keeps its own random marker, so the
+  // identity checks below always bind the attempt that actually ran.
+  const controlledProgram = marker => `Run exactly this in run_code and DO NOT stop early — every call below must run in this one program: const app = await tools.cua({ method: 'getApp', params: { selector: '${String(textEditPid)}' } }); const windows = await tools.cua({ method: 'listWindows', params: { appHandle: app.appHandle } }); const window = windows.find(item => String(item.title ?? '').includes('cua-blank')); if (!window) throw new Error('the controlled TextEdit window was not found'); await tools.cua({ method: 'show', params: { appHandle: app.appHandle, windowId: window.windowId } }); await tools.cua({ method: 'activate', params: { appHandle: app.appHandle } }); await app.typeText('${marker}'); const tree = await app.getAccessibilityTree(); return JSON.stringify(tree).includes('${marker}') ? 'MARKER_PRESENT' : 'MARKER_MISSING'`
+  let input
+  let inputResult
+  let marker
+  let stateDispatch
+  let attempts = 0
+  for (; attempts < 2; attempts += 1) {
+    marker = `CUA-MARKER-${randomUUID().slice(0, 8).toUpperCase()}`
+    input = await promptAndWaitCua({
+      tui,
+      dshHome,
+      sessionId: consent.sessionId,
+      prompt: controlledProgram(marker),
+      label: `MAC09-08 controlled input${attempts === 0 ? '' : ' (retry)'}`,
+      method: 'typeText',
+      timeoutMs: TIMEOUTS.turn,
+    })
+    inputResult = await waitCuaResult(dshHome, input.sessionId, input.dispatch.subCallId,
+      'MAC09-08 typeText result', TIMEOUTS.turn)
+    assert(inputResult.result.isError !== true,
+      `MAC09-08: the controlled typeText failed: ${dispatchErrorCode(inputResult.result) ?? 'unknown error'} :: ${dispatchContentText(inputResult.result).slice(0, 400)}`)
+    // typeText settles BEFORE the sequential getState dispatch is durable: wait
+    // for the getState dispatch on the live event stream. The state read follows
+    // the settled typeText in the SAME program, so it is due in seconds.
+    try {
+      stateDispatch = await waitFor(() => cuaDispatches(eventsOf(dshHome, input.sessionId), input.afterIndex)
+        .filter(dispatch => dispatch.rootCallId === input.dispatch.rootCallId)
+        .find(dispatch => dispatchMethod(dispatch) === 'getState'),
+      'MAC09-08 official getState dispatch', 60_000)
+      break
+    } catch (error) {
+      if (attempts === 1) throw error
+    }
+  }
   // Bind the WHOLE controlled chain, not just the requested prompt text: the
   // official getApp must select this run's exact PID, the show/typeText/getState
   // window ids must agree, and the typed marker must be the exact argument.
@@ -1530,15 +1556,6 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
   const showDispatch = liveInputDispatches().find(dispatch => dispatchMethod(dispatch) === 'show')
   const activateDispatch = liveInputDispatches().find(dispatch => dispatchMethod(dispatch) === 'activate')
   const typeDispatch = liveInputDispatches().find(dispatch => dispatchMethod(dispatch) === 'typeText')
-  // typeText settles BEFORE the sequential getState dispatch is durable: wait
-  // for the getState dispatch on the live event stream instead of freezing the
-  // list at the typeText result instant.
-  // The state read follows the settled typeText in the SAME run_code program,
-  // so it is due in seconds; a model that ends the program without it must
-  // fail this bounded wait instead of consuming the whole turn budget.
-  const stateDispatch = await waitFor(() => liveInputDispatches()
-    .find(dispatch => dispatchMethod(dispatch) === 'getState'),
-  'MAC09-08 official getState dispatch', 120_000)
   assert(JSON.stringify(liveInputDispatches().map(dispatchMethod))
     === JSON.stringify(['getApp', 'listWindows', 'show', 'activate', 'typeText', 'getState']),
   'MAC09-08: the controlled root dispatched an unexpected cua method sequence')
@@ -1587,6 +1604,7 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
     rootCallId: sha16(input.dispatch.rootCallId),
     method: 'typeText',
     markerDigest: sha16(marker),
+    attempts: attempts + 1,
     windowId: typeParams.windowId,
     appBound: true,
     observedInAccessibilityTree: dispatchContentText(markerResult).includes(marker),
