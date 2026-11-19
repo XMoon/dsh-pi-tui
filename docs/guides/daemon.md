@@ -13,7 +13,7 @@ Direct is the default. To try daemon mode for a single interactive launch:
 DSH_PI_TUI_BACKEND=daemon dsh --profile pi-tui
 ~~~
 
-Alternatively, set **Settings → General → Startup backend** to `daemon`
+Alternatively, set **/settings → General → Backend** to `daemon`
 and start a new TUI. This stored setting applies on the next launch only;
 it does not change the backend of a Client already running. A one-launch
 `DSH_PI_TUI_BACKEND` override has precedence over the Profile setting and
@@ -67,11 +67,15 @@ Host work. Check `daemon status` and the running sessions first.
 
 ## Optional local ACP listener
 
-The Host-owned ACP v1 listener is independent of the daemon backend choice
-and is default-off. Its Profile auto-start preference and the **current**
+The split Host can expose an optional Host-owned ACP v1 listener, which is
+default-off. It is not a Direct-backend listener or a second Host authority. Its Profile auto-start preference and the **current**
 running listener state are separate controls. `daemon status` shows a
 socket address only for a listener that has been positively verified as
 enabled; never guess a socket from the home/profile path.
+
+From an attached Split Client, `/acp` can inspect or change the current
+listener state without creating a Session or updating the next-launch
+preference. The Direct backend refuses that runtime control.
 
 For contributor-level process, authentication, ACP admission and Client
 detach guarantees, see [Host/Client](../architecture/host-client.md),
