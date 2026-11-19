@@ -730,17 +730,17 @@ function verifyBundleComposition(installation) {
   return { providerRow: provider.name, agentPreset: provider.config.agentPreset }
 }
 
-/** The DECISION content of the durable CUA permission store (never secrets). */
-function permissionStoreDecisions(dshHome, entries) {
-  const directory = join(dshHome, 'storages')
-  return entries.map(entry => {
-    const parsed = JSON.parse(readFileSync(join(directory, entry.name), 'utf8'))
-    const decisions = parsed?.state?.applications ?? parsed?.state ?? parsed?.applications ?? parsed
-    return decisions
-  })
-}
-
-function permissionStoreFingerprint(dshHome) {
+/**
+ * THE IMMUTABLE DECISION SNAPSHOT of the durable CUA permission store.
+ *
+ * The official provider rewrites its own state file (including on shutdown), so
+ * a fingerprint taken BEFORE an operation cannot be re-read afterwards: the
+ * file content at that path is already the new one. This reads the decision
+ * content ONCE, at the moment the caller asks for it, and returns plain data —
+ * the only form in which a "before" value can still be compared after the
+ * operation ran. Never secrets: application ids, names, decisions, revisions.
+ */
+function permissionStoreSnapshot(dshHome) {
   const directory = join(dshHome, 'storages')
   if (!existsSync(directory)) return []
   return readdirSync(directory)
@@ -748,7 +748,15 @@ function permissionStoreFingerprint(dshHome) {
     .sort()
     .map(name => {
       const path = join(directory, name)
-      return { name, sha256: sha256File(path), bytes: statSync(path).size }
+      const parsed = JSON.parse(readFileSync(path, 'utf8'))
+      const state = parsed?.state ?? parsed
+      const applications = state?.applications ?? state?.global?.applications ?? {}
+      return {
+        name,
+        sha256: sha256File(path),
+        bytes: statSync(path).size,
+        applications,
+      }
     })
 }
 
@@ -2048,7 +2056,12 @@ async function main() {
     // Manager; the tool is withdrawn, but the OS TCC entry and the durable
     // consent storage remain untouched.
     setCase(report, 'MAC09-11')
-    const storageBefore = permissionStoreFingerprint(installation.dshHome)
+    // Captured IMMUTABLY before the operator disables the bundle: the provider
+    // rewrites its own state file during shutdown, so a late re-read of the same
+    // path would silently compare the new file with itself.
+    const storageBefore = permissionStoreSnapshot(installation.dshHome)
+    assert(storageBefore.some(entry => Object.keys(entry.applications).length > 0),
+      'MAC09-11: the durable CUA consent store carries no application decision to protect (positive control)')
     await operatorGate(operator, splitTui, 'MAC09-11 disable Computer use', 'continue mac09-11-disable', [
       'Open /plugins, search the Computer use card, open its Details and choose',
       'Disable. Wait until the card reports disabled. Then start a NEW session',
@@ -2067,32 +2080,31 @@ async function main() {
       prompt: 'Without using any tools, answer in one short sentence: can you control macOS applications right now?',
       label: 'MAC09-11 disabled cua negative',
     })
-    const storageAfter = permissionStoreFingerprint(installation.dshHome)
+    const storageAfter = permissionStoreSnapshot(installation.dshHome)
     // The contract is that the durable DECISIONS survive disabling the bundle,
-    // not that the provider's state file keeps byte-identical formatting: the
-    // official provider may rewrite its own store as it shuts down. Compare the
-    // stored decision content and keep both raw fingerprints for the evidence.
-    const decisionsBefore = permissionStoreDecisions(installation.dshHome, storageBefore)
-    const decisionsAfter = permissionStoreDecisions(installation.dshHome, storageAfter)
+    // not that the provider's own state file keeps byte-identical formatting
+    // (it rewrites it on shutdown). `storageBefore` is the immutable snapshot
+    // taken BEFORE the disable, so this comparison is real; the raw digests and
+    // the exact drift stay in the report for review.
+    const decisionsOf = entries => entries.map(entry => ({ name: entry.name, applications: entry.applications }))
     report.permissionStorage = {
-      before: storageBefore,
-      after: storageAfter,
+      before: storageBefore.map(({ name, sha256, bytes }) => ({ name, sha256, bytes })),
+      after: storageAfter.map(({ name, sha256, bytes }) => ({ name, sha256, bytes })),
       byteDrift: storageBefore.map(entry => entry.sha256).join(',') !== storageAfter.map(entry => entry.sha256).join(',')
         ? storageBefore.map((entry, index) => ({ name: entry.name, before: entry.sha256, after: storageAfter[index]?.sha256 }))
         : false,
-      decisionsBefore,
-      decisionsAfter,
-      decisionsEqual: JSON.stringify(decisionsBefore) === JSON.stringify(decisionsAfter),
+      decisionsBefore: decisionsOf(storageBefore),
+      decisionsAfter: decisionsOf(storageAfter),
     }
+    report.permissionStorage.decisionsEqual = JSON.stringify(report.permissionStorage.decisionsBefore)
+      === JSON.stringify(report.permissionStorage.decisionsAfter)
     assert(JSON.stringify(storageBefore.map(entry => entry.name))
       === JSON.stringify(storageAfter.map(entry => entry.name)),
     'MAC09-11: disabling the bundle changed the durable CUA consent storage files')
-    // The durable DECISIONS are the contract (the official provider may rewrite
-    // its own state file as it shuts down; report.permissionStorage records the
-    // exact byte drift for review instead of hiding it).
     assert(report.permissionStorage.decisionsEqual,
       `MAC09-11: disabling the bundle changed the durable CUA consent decisions: ${
-        JSON.stringify({ before: decisionsBefore, after: decisionsAfter }).slice(0, 600)}`)
+        JSON.stringify(report.permissionStorage.decisionsBefore).slice(0, 600)} -> ${
+        JSON.stringify(report.permissionStorage.decisionsAfter).slice(0, 600)}`)
     const profileHelper = profileCuaHelper(installation.profileDir)
     assert(profileHelper !== undefined && existsSync(profileHelper.appPath),
       'MAC09-11: disabling the bundle removed the official helper application')
