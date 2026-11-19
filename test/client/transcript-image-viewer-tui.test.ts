@@ -112,26 +112,42 @@ async function clickControl(vt: VirtualTerminal, needle: string, nth = 0): Promi
   assert.ok(row !== -1, `missing ${needle} #${nth + 1}:\n${view}`)
   const line = view.split('\n')[row - 1]!
   const cell = controlCell(line)
-  vt.sendInput(`\x1b[<0;${cell};${row}M`)
-  vt.sendInput(`\x1b[<0;${cell};${row}m`)
-  await settleClick(vt)
+  await clickCell(vt, cell, row)
   return row
 }
 
+/**
+ * Only two gestures on the same painted row can select the same word within
+ * the fork's 500ms multi-click window; different rows cannot. Keep a
+ * per-terminal, test-only timestamp so unrelated clicks need only wait for
+ * the real rendered frame, not an unconditional 600ms timer.
+ *
+ * Guard the WHOLE ROW, rather than only the exact x cell: the fork's text
+ * selection double-click groups cells by word, while the component path
+ * additionally keys by target component + exact x/y.
+ */
+const lastPointerRow = new WeakMap<VirtualTerminal, { row: number; at: number }>()
+
 async function clickCell(vt: VirtualTerminal, x: number, row: number): Promise<void> {
+  const last = lastPointerRow.get(vt)
+  if (last !== undefined && last.row === row) {
+    const remainingMs = Math.max(0, 550 - (Date.now() - last.at))
+    if (remainingMs > 0) {
+      // reason: the same-row fork DOUBLE_CLICK_INTERVAL_MS=500 contract
+      await new Promise<void>(resolve => setTimeout(resolve, remainingMs))
+    }
+  }
   vt.sendInput(`\x1b[<0;${x};${row}M`)
   vt.sendInput(`\x1b[<0;${x};${row}m`)
-  await settleClick(vt)
+  lastPointerRow.set(vt, { row, at: Date.now() })
+  await vt.waitForRender()
 }
 
 /**
- * Wait out the alt screen's DOUBLE_CLICK window before the next pointer cell.
- *
- * The fork treats a fast repeat at the same cell as a double click (word
- * selection), so two consecutive disclosure clicks on one cell need the window
- * to elapse first; this is the contract under test, not a blind sleep. The
- * bound is the fork's own `DOUBLE_CLICK_INTERVAL_MS` (500) with one frame of
- * slack.
+ * Preserve the complete fork multi-click observation window for MANUALLY
+ * delivered pointer gestures that test a negative or stale-click outcome.
+ * Ordinary helper-driven clicks use the same-row guard in clickCell() above
+ * and await the terminal's real rendered frame instead.
  */
 async function settleClick(vt: VirtualTerminal): Promise<void> {
   // The bounded window IS the contract (fork DOUBLE_CLICK_INTERVAL_MS = 500).
