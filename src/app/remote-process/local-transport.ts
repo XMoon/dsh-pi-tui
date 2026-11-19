@@ -829,6 +829,17 @@ export async function installLocalTransport(
     includeCookie,
     options.qualificationPromptAckDropped,
   )
+  // The official unary carrier is ONE installation-lifetime object, exactly
+  // like `fetchAuthenticated`: its once-only qualification injections (the
+  // prompt/model ACK drops and the forged operator Cookie) are factory-local
+  // state. Constructing it per request would reset those flags and the
+  // AFTER_MS timer on every RPC.
+  const fetchOfficial = cookieFetch(
+    origin,
+    () => cookie,
+    includeCookie,
+    options.qualificationPromptAckDropped,
+  )
   /** Borrowed-route send; re-assigned below once the Connection exists. */
   let sendAuthenticated: (input: string | URL, init?: RequestInit) => Promise<Response> = fetchAuthenticated
 
@@ -909,11 +920,7 @@ export async function installLocalTransport(
         interactions: 'answer',
         transport: {
           fetch: (input, init) => sendWithOperatorRecovery(
-            {
-              send: cookieFetch(origin, () => cookie, includeCookie, options.qualificationPromptAckDropped),
-              recoverOperator,
-              origin,
-            },
+            { send: fetchOfficial, recoverOperator, origin },
             input,
             init,
           ),
