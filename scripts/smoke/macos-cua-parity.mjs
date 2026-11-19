@@ -1628,10 +1628,9 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
       method: 'typeText',
       timeoutMs: TIMEOUTS.turn,
     })
-    inputResult = await waitCuaResult(dshHome, input.sessionId, input.dispatch.subCallId,
-      'MAC09-08 typeText result', TIMEOUTS.turn)
-    assert(inputResult.result.isError !== true,
-      `MAC09-08: the controlled typeText failed: ${dispatchErrorCode(inputResult.result) ?? 'unknown error'} :: ${dispatchContentText(inputResult.result).slice(0, 400)}`)
+    // The FIRST typeText the turn dispatches is NOT the qualifying input: a
+    // program may fail an early attempt and recover in a later segment, so the
+    // result is bound below to the FINAL segment's own typeText subCallId.
     // The model may run SEVERAL attempts inside one program, and the program is
     // only finished when the turn is: wait for the turn to settle BEFORE reading
     // the trace, otherwise a later segment can still appear and never be audited.
@@ -1669,7 +1668,9 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
   const showDispatch = firstOf('show')
   const activateDispatch = firstOf('activate')
   const typeDispatch = firstOf('typeText')
-  const attemptStateDispatch = firstOf('getState')
+  // The observation is the LAST dispatch of the segment (the post-typing read);
+  // an earlier getState is a bounded read-only preview and never qualifies.
+  const attemptStateDispatch = attemptDispatches.at(-1)
   // NO earlier segment is exempt: the WHOLE settled trace must satisfy the same
   // safety constraints, otherwise a retry could hide another target, another
   // text or an un-audited side effect (click/pressKey/scroll/...) behind the
@@ -1715,16 +1716,22 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
   // `show` (the OWNED window) is REQUIRED, not optional: getState carries no
   // window identity, so the explicit owned-window selection is the only proof
   // that the app-scoped typeText targeted the controlled `cua-blank` window.
-  // `activate` is optional. The final segment carries no repeats.
+  // `activate` is optional. A bounded READ-ONLY preview getState before the
+  // input is legitimate (a real rc.5 trace is getApp,listWindows,getState,show,
+  // activate,typeText,getState); exactly ONE typeText may appear, and the LAST
+  // dispatch must be the observation getState.
+  const typeIndexes = attemptMethods.flatMap((method, index) => method === 'typeText' ? [index] : [])
   const sequenceShaped = attemptMethods[0] === 'getApp'
     && attemptMethods[1] === 'listWindows'
-    && attemptMethods[2] === 'show'
+    && typeIndexes.length === 1
     && attemptMethods.at(-1) === 'getState'
-    && attemptMethods.lastIndexOf('typeText') === attemptMethods.length - 2
+    && attemptMethods.slice(0, typeIndexes[0]).includes('show')
     && attemptMethods.every(method => INPUT_SEQUENCE.includes(method) || INPUT_OPTIONAL.includes(method))
-    && new Set(attemptMethods).size === attemptMethods.length
-  assert(sequenceShaped,
-    `MAC09-08: the controlled root dispatched an unexpected cua method sequence: ${JSON.stringify(inputSequence)} (attempt ${JSON.stringify(attemptMethods)})`)
+  const previews = typeIndexes.length === 1
+    ? attemptMethods.slice(0, typeIndexes[0]).filter(method => method === 'getState').length
+    : -1
+  assert(sequenceShaped && previews <= 2,
+    `MAC09-08: the controlled root dispatched an unexpected cua method sequence: ${JSON.stringify(inputSequence)} (attempt ${JSON.stringify(attemptMethods)}, previews ${String(previews)})`)
   assert(getAppDispatch !== undefined && dispatchParams(getAppDispatch)?.selector === String(textEditPid),
     'MAC09-08: the official getApp did not select this run\'s exact TextEdit PID')
   const inputEventsNow = eventsOf(dshHome, input.sessionId)
@@ -1735,6 +1742,12 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
   const listWindowsResult = cuaResults(inputEventsNow, 0)
     .find(result => result.subCallId === listWindowsDispatch?.subCallId)
   const controlledWindows = dispatchJsonContent(listWindowsResult)
+  // The qualifying RESULT is bound to the FINAL segment's own typeText: an
+  // earlier attempt's success (or failure) may never stand in for it.
+  inputResult = await waitCuaResult(dshHome, input.sessionId, typeDispatch.subCallId,
+    'MAC09-08 final typeText result', TIMEOUTS.turn)
+  assert(inputResult !== undefined && inputResult.result.isError !== true,
+    `MAC09-08: the controlled typeText failed: ${dispatchErrorCode(inputResult?.result) ?? 'unknown error'} :: ${dispatchContentText(inputResult?.result ?? {}).slice(0, 400)}`)
   const typeParams = dispatchParams(typeDispatch)
   const stateParams = dispatchParams(attemptStateDispatch)
   const showParams = dispatchParams(showDispatch)
@@ -1775,6 +1788,8 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
     sequence: attemptMethods,
     rootSequence: inputSequence,
     attemptSegments: segmentStarts.length,
+    previewReads: previews,
+    typeSubCallId: sha16(typeDispatch.subCallId),
     windowPreSteps: true,
     markerDigest: sha16(marker),
     attempts: attempts + 1,
