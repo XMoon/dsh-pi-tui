@@ -486,7 +486,7 @@ function waitForReplacementGeneration(
  * request is cancelled. The shared operation itself keeps running for the other
  * waiters; only this caller's await is released.
  */
-function settleWithOwnSignal(operation: Promise<void>, signal: AbortSignal | undefined): Promise<void> {
+export function settleWithOwnSignal(operation: Promise<void>, signal: AbortSignal | undefined): Promise<void> {
   if (signal === undefined) return operation
   return new Promise<void>((resolveWait, rejectWait) => {
     if (signal.aborted) {
@@ -525,6 +525,13 @@ export function operatorRecoveryMayRetry(
   return operatorRecoveryDecision(input, init, origin).retry
 }
 
+/** The truthful cancellation reason of one request signal. */
+export function abortReasonOf(signal: AbortSignal, fallback: unknown): Error {
+  if (signal.reason instanceof Error) return signal.reason
+  if (fallback instanceof Error) return fallback
+  return new Error('local transport: request aborted')
+}
+
 /** The two independent decisions one 401 requires. */
 export interface OperatorRecoveryDecision {
   /** Rebuild the connection and its operator? (A dead operator affects every route.) */
@@ -547,8 +554,10 @@ export function operatorRecoveryDecision(
 ): OperatorRecoveryDecision {
   const route = new URL(typeof input === 'string' ? input : input.href, `${origin}/`)
   if (route.pathname.includes('$events/result')) return { rebuild: false, retry: false }
-  const retry = init?.signal?.aborted !== true
-    && (init?.body === undefined || typeof init.body === 'string')
+  // A caller that already cancelled needs no connection rebuilt on ITS behalf;
+  // any other 401 waiter drives the shared re-admit.
+  if (init?.signal?.aborted === true) return { rebuild: false, retry: false }
+  const retry = init?.body === undefined || typeof init.body === 'string'
   return { rebuild: true, retry }
 }
 
@@ -830,13 +839,17 @@ export async function installLocalTransport(
         if (!decision.rebuild) return response
         try {
           await settleWithOwnSignal(recoverOperator(init?.signal ?? undefined), init?.signal ?? undefined)
-        } catch {
+        } catch (error) {
+          // A CALLER cancellation is reported as cancellation, never as an HTTP
+          // auth failure (the official rpc caller throws on !ok before it
+          // re-checks the signal, so a fabricated 401 would surface as auth).
+          if (init?.signal?.aborted === true) throw abortReasonOf(init.signal, error)
           // A recovery that cannot re-admit leaves the original 401 with the
           // caller: the authentication failure is never hidden.
           return response
         }
         // A request cancelled while the re-admit was running is not re-sent.
-        if (init?.signal?.aborted === true) return response
+        if (init?.signal?.aborted === true) throw abortReasonOf(init.signal, undefined)
         if (!decision.retry) return response
         return await send(input, init)
       }
