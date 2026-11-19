@@ -88,6 +88,7 @@ import {
 import { homedir, tmpdir } from 'node:os'
 import { createRequire } from 'node:module'
 import { dirname, join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { createInterface } from 'node:readline'
 
 import { parse as parseYaml } from 'yaml'
@@ -1242,6 +1243,159 @@ function fillUnreachedCases(report) {
   for (const id of REQUIRED_CASES) caseNotVerified(report, id, 'not reached because an earlier case stopped the scene')
 }
 
+// ── MAC09-08 controlled-trace audit ───────────────────────────────────────
+//
+// The WHOLE structural audit of one settled controlled program, as a pure
+// function of its trace so the real judging code can be replayed against
+// synthetic traces (test/tooling/macos-cua-trace-audit.test.mjs) instead of
+// only being exercised by whatever a model happened to emit. Two async facts
+// are injected because they come from the live event stream: the JSON payload
+// of a dispatch result, and the settlement of the FINAL segment's own typeText.
+//
+// NO earlier segment is exempt and NO earlier segment may WRITE. The only legal
+// shape of a controlled program is:
+//   for EVERY segment (split at each getApp):
+//     getApp(this run's exact PID) -> listWindows(that handle)
+//     -> show(that handle, a window whose title carries THIS run's token)
+//     -> optional activate(that handle) / read-only getState(that handle)
+//   and exactly ONE typeText in the WHOLE trace, in the FINAL segment, typed
+//   with that segment's handle and this run's marker, observed by the final
+//   getState of that same segment.
+// Anything else fails closed: an app-scoped typeText can write into ANY open
+// document of the app, so a segment that never selected the owned window is
+// indistinguishable from a write into a user document, and a second typeText
+// is a second input (MAC09-08 claims ONE bounded input).
+export async function auditControlledTrace({ trace, textEditPid, runToken, marker, resolveJson, resolveTypeTextResult }) {
+  const inputSequence = trace.map(dispatchMethod)
+  // The controlled trace must OPEN with getApp: a leading dispatch would sit
+  // before every segment and therefore outside the per-segment audit below, so
+  // an unowned `show`/`activate` (which can still raise an already-authorized
+  // foreign app and move focus) would have no this-run handle or owned target
+  // behind it. Fail closed instead of auditing such a prefix.
+  assert(inputSequence[0] === 'getApp',
+    `MAC09-08: the controlled call dispatched before obtaining an app handle: ${JSON.stringify(inputSequence)}`)
+  const segmentStarts = inputSequence.flatMap((method, index) => method === 'getApp' ? [index] : [])
+  const attemptDispatches = segmentStarts.length === 0 ? [] : trace.slice(segmentStarts.at(-1))
+  const attemptMethods = attemptDispatches.map(dispatchMethod)
+  const firstOf = method => attemptDispatches.find(dispatch => dispatchMethod(dispatch) === method)
+  const getAppDispatch = firstOf('getApp')
+  const listWindowsDispatch = firstOf('listWindows')
+  const showDispatch = firstOf('show')
+  const activateDispatch = firstOf('activate')
+  const typeDispatch = firstOf('typeText')
+  // The observation is the LAST dispatch of the segment (the post-typing read);
+  // an earlier getState is a bounded read-only preview and never qualifies.
+  const attemptStateDispatch = attemptDispatches.at(-1)
+  const TRACE_METHODS = new Set(['getApp', 'listWindows', 'show', 'activate', 'typeText', 'getState'])
+  for (const dispatch of trace) {
+    assert(TRACE_METHODS.has(dispatchMethod(dispatch)),
+      `MAC09-08: the controlled call dispatched a method the scene does not audit: ${dispatchMethod(dispatch)}`)
+  }
+  const typeTextDispatches = trace.filter(item => dispatchMethod(item) === 'typeText')
+  assert(typeTextDispatches.length === 1,
+    `MAC09-08: the controlled call typed ${String(typeTextDispatches.length)} times; the scene claims ONE bounded input`)
+  // The qualifying RESULT belongs to the FINAL segment's own typeText: an
+  // earlier attempt's success may never stand in for it, and an earlier
+  // attempt's failure may not disqualify a recovered program.
+  const typeTextSettled = await resolveTypeTextResult(typeDispatch)
+  assert(typeTextSettled !== undefined && typeTextSettled.result?.isError !== true,
+    `MAC09-08: the controlled typeText failed: ${dispatchErrorCode(typeTextSettled?.result) ?? 'unknown error'} :: ${dispatchContentText(typeTextSettled?.result ?? {}).slice(0, 400)}`)
+  const segmentRanges = segmentStarts.map((start, index) =>
+    trace.slice(start, segmentStarts[index + 1] ?? trace.length))
+  const segmentFacts = []
+  for (const [index, segment] of segmentRanges.entries()) {
+    const methods = segment.map(dispatchMethod)
+    const final = index === segmentRanges.length - 1
+    assert(methods[0] === 'getApp' && methods[1] === 'listWindows',
+      `MAC09-08: a controlled segment did not open with getApp -> listWindows: ${JSON.stringify(methods)}`)
+    assert(methods.every(method => TRACE_METHODS.has(method) && method !== 'typeText' || final),
+      `MAC09-08: a NON-final segment dispatched typeText: ${JSON.stringify(methods)}`)
+    const appDispatch = segment[0]
+    assert(dispatchParams(appDispatch)?.selector === String(textEditPid),
+      `MAC09-08: a controlled getApp selected a target other than this run's exact TextEdit PID: ${JSON.stringify(dispatchParams(appDispatch)?.selector)}`)
+    const handle = resolveJson(appDispatch)?.appHandle
+    assert(typeof handle === 'string' && handle !== '',
+      'MAC09-08: a controlled getApp result carried no app handle')
+    const windowDispatch = segment[1]
+    assert(dispatchParams(windowDispatch)?.appHandle === handle,
+      'MAC09-08: a controlled listWindows did not use its own getApp handle')
+    const windows = resolveJson(windowDispatch)
+    const ownedWindowIds = (Array.isArray(windows) ? windows : [])
+      .filter(window => String(window?.title ?? '').includes(runToken))
+      .map(window => window?.windowId)
+    assert(ownedWindowIds.length === 1,
+      `MAC09-08: the controlled app did not expose exactly one owned cua-blank window in a segment: ${JSON.stringify(ownedWindowIds)}`)
+    const ownedWindowId = ownedWindowIds[0]
+    const shows = segment.filter(dispatch => dispatchMethod(dispatch) === 'show')
+    assert(shows.length >= 1,
+      'MAC09-08: a controlled segment never selected the owned cua-blank window (show)')
+    for (const show of shows) {
+      assert(dispatchParams(show)?.appHandle === handle,
+        'MAC09-08: a controlled show did not use its own getApp handle')
+      assert(dispatchParams(show)?.windowId === ownedWindowId,
+        `MAC09-08: a controlled show selected a window that is not this run's owned cua-blank window: ${JSON.stringify(dispatchParams(show)?.windowId)}`)
+    }
+    for (const dispatch of segment) {
+      const method = dispatchMethod(dispatch)
+      if (method === 'getApp' || method === 'show') continue
+      assert(dispatchParams(dispatch)?.appHandle === handle,
+        `MAC09-08: a controlled ${method} did not use its own segment's getApp handle`)
+    }
+    // ORDER is part of the proof: the owned window must be selected AFTER this
+    // segment's listWindows and BEFORE any side effect. Without this, a trace
+    // like getApp,listWindows,typeText,show(owned),getState would type into
+    // whatever window was focused and only THEN select the owned one.
+    const listWindowsIndex = methods.indexOf('listWindows')
+    const showIndexes = methods.flatMap((method, position) => method === 'show' ? [position] : [])
+    const activateIndexes = methods.flatMap((method, position) => method === 'activate' ? [position] : [])
+    const typeIndexes = methods.flatMap((method, position) => method === 'typeText' ? [position] : [])
+    for (const showIndex of showIndexes) {
+      assert(showIndex > listWindowsIndex,
+        `MAC09-08: a controlled segment selected the owned window BEFORE its listWindows: ${JSON.stringify(methods)}`)
+    }
+    for (const activateIndex of activateIndexes) {
+      assert(activateIndex > listWindowsIndex && (typeIndexes.length === 0 || activateIndex < typeIndexes[0]),
+        `MAC09-08: a controlled activate was not between listWindows and the input: ${JSON.stringify(methods)}`)
+    }
+    for (const typeIndex of typeIndexes) {
+      const lastShowBefore = showIndexes.filter(position => position < typeIndex).at(-1)
+      assert(lastShowBefore !== undefined,
+        `MAC09-08: a controlled segment typed BEFORE selecting the owned cua-blank window: ${JSON.stringify(methods)}`)
+      assert(!activateIndexes.some(position => position > typeIndex && position < typeIndexes.at(-1)),
+        'MAC09-08: a controlled segment activated the app after typing')
+    }
+    const segmentTypeTexts = segment.filter(dispatch => dispatchMethod(dispatch) === 'typeText')
+    for (const typeText of segmentTypeTexts) {
+      assert(dispatchParams(typeText)?.text === marker,
+        'MAC09-08: the controlled call typed text other than this run\'s marker')
+    }
+    segmentFacts.push({ methods, handle, ownedWindowId, typeTexts: segmentTypeTexts.length })
+  }
+  assert(segmentFacts.at(-1).typeTexts === 1,
+    'MAC09-08: the final segment did not carry the ONE controlled typeText')
+  // The CLAIM is one bounded input observed by the same call. `show` of the
+  // OWNED window is REQUIRED in every segment (getState carries no window
+  // identity, so the explicit selection is the only target proof). A bounded
+  // READ-ONLY preview getState before the input is legitimate; the LAST dispatch
+  // of the final segment must be the observation getState.
+  const previews = attemptMethods.slice(0, attemptMethods.indexOf('typeText'))
+    .filter(method => method === 'getState').length
+  const sequenceShaped = attemptMethods.at(-1) === 'getState' && previews <= 2
+  assert(sequenceShaped,
+    `MAC09-08: the controlled root dispatched an unexpected cua method sequence: ${JSON.stringify(inputSequence)} (attempt ${JSON.stringify(attemptMethods)}, previews ${String(previews)})`)
+  assert(getAppDispatch !== undefined && dispatchParams(getAppDispatch)?.selector === String(textEditPid),
+    'MAC09-08: the official getApp did not select this run\'s exact TextEdit PID')
+  const controlledHandle = resolveJson(getAppDispatch)?.appHandle
+  assert(typeof controlledHandle === 'string' && controlledHandle !== '',
+    'MAC09-08: the official getApp result carried no app handle')
+  const controlledWindows = resolveJson(listWindowsDispatch)
+  return {
+    inputSequence, segmentStarts, attemptMethods, attemptDispatches, getAppDispatch,
+    listWindowsDispatch, showDispatch, activateDispatch, typeDispatch, attemptStateDispatch,
+    previews, controlledHandle, controlledWindows, segmentFacts, typeTextSettled,
+  }
+}
+
 // ── Direct scene ──────────────────────────────────────────────────────────
 
 async function sceneDirect({ installation, workRoot, report, operator, helperAppPath, textEditPid, runToken }) {
@@ -1630,9 +1784,7 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
   // identity checks below always bind the attempt that actually ran.
   const controlledProgram = marker => `Run exactly this in run_code and DO NOT stop early — every call below must run in this one program: const app = await tools.cua({ method: 'getApp', params: { selector: '${String(textEditPid)}' } }); const windows = await tools.cua({ method: 'listWindows', params: { appHandle: app.appHandle } }); const window = windows.find(item => String(item.title ?? '').includes('${runToken}')); if (!window) throw new Error('the controlled TextEdit window was not found'); await tools.cua({ method: 'show', params: { appHandle: app.appHandle, windowId: window.windowId } }); await tools.cua({ method: 'activate', params: { appHandle: app.appHandle } }); await app.typeText('${marker}'); const tree = await app.getAccessibilityTree(); return JSON.stringify(tree).includes('${marker}') ? 'MARKER_PRESENT' : 'MARKER_MISSING'`
   let input
-  let inputResult
   let marker
-  let stateDispatch
   let attempts = 0
   for (; attempts < 2; attempts += 1) {
     marker = `CUA-MARKER-${randomUUID().slice(0, 8).toUpperCase()}`
@@ -1675,174 +1827,26 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
   // segment's getApp (a retry may obtain a NEW handle, so a whole-root search
   // would silently bind the first attempt's handle).
   const trace = liveInputDispatches()
-  const inputSequence = trace.map(dispatchMethod)
-  // The controlled trace must OPEN with getApp: a leading dispatch would sit
-  // before every segment and therefore outside the per-segment audit below, so
-  // an unowned `show`/`activate` (which can still raise an already-authorized
-  // foreign app and move focus) would have no this-run handle or owned target
-  // behind it. Fail closed instead of auditing such a prefix.
-  assert(inputSequence[0] === 'getApp',
-    `MAC09-08: the controlled call dispatched before obtaining an app handle: ${JSON.stringify(inputSequence)}`)
-  const segmentStarts = inputSequence.flatMap((method, index) => method === 'getApp' ? [index] : [])
-  const attemptDispatches = segmentStarts.length === 0 ? [] : trace.slice(segmentStarts.at(-1))
-  const attemptMethods = attemptDispatches.map(dispatchMethod)
-  const firstOf = method => attemptDispatches.find(dispatch => dispatchMethod(dispatch) === method)
-  const getAppDispatch = firstOf('getApp')
-  const listWindowsDispatch = firstOf('listWindows')
-  const showDispatch = firstOf('show')
-  const activateDispatch = firstOf('activate')
-  const typeDispatch = firstOf('typeText')
-  // The observation is the LAST dispatch of the segment (the post-typing read);
-  // an earlier getState is a bounded read-only preview and never qualifies.
-  const attemptStateDispatch = attemptDispatches.at(-1)
-  // NO earlier segment is exempt and NO earlier segment may WRITE. The only
-  // legal shape of a controlled program is:
-  //   for EVERY segment (split at each getApp):
-  //     getApp(this run's exact PID) -> listWindows(that handle)
-  //     -> show(that handle, a window whose title carries THIS run's token)
-  //     -> optional activate(that handle) / read-only getState(that handle)
-  //   and exactly ONE typeText in the WHOLE trace, in the FINAL segment, typed
-  //   with that segment's handle and this run's marker, observed by the final
-  //   getState of that same segment.
-  // Anything else fails closed: an app-scoped typeText can write into ANY open
-  // document of the app, so a segment that never selected the owned window is
-  // indistinguishable from a write into a user document, and a second typeText
-  // is a second input (MAC09-08 claims ONE bounded input).
-  const TRACE_METHODS = new Set(['getApp', 'listWindows', 'show', 'activate', 'typeText', 'getState'])
-  for (const dispatch of trace) {
-    assert(TRACE_METHODS.has(dispatchMethod(dispatch)),
-      `MAC09-08: the controlled call dispatched a method the scene does not audit: ${dispatchMethod(dispatch)}`)
-  }
+  // The WHOLE structural audit is one pure function (see auditControlledTrace)
+  // so its real judging code is replayable; only the two async facts are
+  // injected from this live scene.
   const eventLog = eventsOf(dshHome, input.sessionId)
-  const resultOf = dispatch => cuaResults(eventLog, 0).find(item => item.subCallId === dispatch.subCallId)
-  const typeTextDispatches = trace.filter(item => dispatchMethod(item) === 'typeText')
-  assert(typeTextDispatches.length === 1,
-    `MAC09-08: the controlled call typed ${String(typeTextDispatches.length)} times; the scene claims ONE bounded input`)
-  const segmentRanges = segmentStarts.map((start, index) =>
-    trace.slice(start, segmentStarts[index + 1] ?? trace.length))
-  const segmentFacts = []
-  for (const [index, segment] of segmentRanges.entries()) {
-    const methods = segment.map(dispatchMethod)
-    const final = index === segmentRanges.length - 1
-    assert(methods[0] === 'getApp' && methods[1] === 'listWindows',
-      `MAC09-08: a controlled segment did not open with getApp -> listWindows: ${JSON.stringify(methods)}`)
-    assert(methods.every(method => TRACE_METHODS.has(method) && method !== 'typeText' || final),
-      `MAC09-08: a NON-final segment dispatched typeText: ${JSON.stringify(methods)}`)
-    const appDispatch = segment[0]
-    assert(dispatchParams(appDispatch)?.selector === String(textEditPid),
-      `MAC09-08: a controlled getApp selected a target other than this run's exact TextEdit PID: ${JSON.stringify(dispatchParams(appDispatch)?.selector)}`)
-    const handle = dispatchJsonContent(resultOf(appDispatch))?.appHandle
-    assert(typeof handle === 'string' && handle !== '',
-      'MAC09-08: a controlled getApp result carried no app handle')
-    const windowDispatch = segment[1]
-    assert(dispatchParams(windowDispatch)?.appHandle === handle,
-      'MAC09-08: a controlled listWindows did not use its own getApp handle')
-    const windows = dispatchJsonContent(resultOf(windowDispatch))
-    const ownedWindowIds = (Array.isArray(windows) ? windows : [])
-      .filter(window => String(window?.title ?? '').includes(runToken))
-      .map(window => window?.windowId)
-    assert(ownedWindowIds.length === 1,
-      `MAC09-08: the controlled app did not expose exactly one owned cua-blank window in a segment: ${JSON.stringify(ownedWindowIds)}`)
-    const ownedWindowId = ownedWindowIds[0]
-    const shows = segment.filter(dispatch => dispatchMethod(dispatch) === 'show')
-    assert(shows.length >= 1,
-      'MAC09-08: a controlled segment never selected the owned cua-blank window (show)')
-    for (const show of shows) {
-      assert(dispatchParams(show)?.appHandle === handle,
-        'MAC09-08: a controlled show did not use its own getApp handle')
-      assert(dispatchParams(show)?.windowId === ownedWindowId,
-        `MAC09-08: a controlled show selected a window that is not this run's owned cua-blank window: ${JSON.stringify(dispatchParams(show)?.windowId)}`)
-    }
-    for (const dispatch of segment) {
-      const method = dispatchMethod(dispatch)
-      if (method === 'getApp' || method === 'show') continue
-      assert(dispatchParams(dispatch)?.appHandle === handle,
-        `MAC09-08: a controlled ${method} did not use its own segment's getApp handle`)
-    }
-    // ORDER is part of the proof: the owned window must be selected AFTER this
-    // segment's listWindows and BEFORE any side effect. Without this, a trace
-    // like getApp,listWindows,typeText,show(owned),getState would type into
-    // whatever window was focused and only THEN select the owned one.
-    const listWindowsIndex = methods.indexOf('listWindows')
-    const showIndexes = methods.flatMap((method, position) => method === 'show' ? [position] : [])
-    const activateIndexes = methods.flatMap((method, position) => method === 'activate' ? [position] : [])
-    const typeIndexes = methods.flatMap((method, position) => method === 'typeText' ? [position] : [])
-    for (const showIndex of showIndexes) {
-      assert(showIndex > listWindowsIndex,
-        `MAC09-08: a controlled segment selected the owned window BEFORE its listWindows: ${JSON.stringify(methods)}`)
-    }
-    for (const activateIndex of activateIndexes) {
-      assert(activateIndex > listWindowsIndex && (typeIndexes.length === 0 || activateIndex < typeIndexes[0]),
-        `MAC09-08: a controlled activate was not between listWindows and the input: ${JSON.stringify(methods)}`)
-    }
-    for (const typeIndex of typeIndexes) {
-      const lastShowBefore = showIndexes.filter(position => position < typeIndex).at(-1)
-      assert(lastShowBefore !== undefined,
-        `MAC09-08: a controlled segment typed BEFORE selecting the owned cua-blank window: ${JSON.stringify(methods)}`)
-      assert(!activateIndexes.some(position => position > typeIndex && position < typeIndexes.at(-1)),
-        'MAC09-08: a controlled segment activated the app after typing')
-    }
-    const segmentTypeTexts = segment.filter(dispatch => dispatchMethod(dispatch) === 'typeText')
-    for (const typeText of segmentTypeTexts) {
-      assert(dispatchParams(typeText)?.text === marker,
-        'MAC09-08: the controlled call typed text other than this run\'s marker')
-    }
-    segmentFacts.push({ methods, handle, ownedWindowId, typeTexts: segmentTypeTexts.length })
-  }
-  assert(segmentFacts.at(-1).typeTexts === 1,
-    'MAC09-08: the final segment did not carry the ONE controlled typeText')
-  // The CLAIM is one bounded input observed by the same call. `show` of the
-  // OWNED window is REQUIRED in every segment (getState carries no window
-  // identity, so the explicit selection is the only target proof). A bounded
-  // READ-ONLY preview getState before the input is legitimate; the LAST dispatch
-  // of the final segment must be the observation getState.
-  const previews = attemptMethods.slice(0, attemptMethods.indexOf('typeText'))
-    .filter(method => method === 'getState').length
-  const sequenceShaped = attemptMethods.at(-1) === 'getState' && previews <= 2
-  assert(sequenceShaped,
-    `MAC09-08: the controlled root dispatched an unexpected cua method sequence: ${JSON.stringify(inputSequence)} (attempt ${JSON.stringify(attemptMethods)}, previews ${String(previews)})`)
-  assert(getAppDispatch !== undefined && dispatchParams(getAppDispatch)?.selector === String(textEditPid),
-    'MAC09-08: the official getApp did not select this run\'s exact TextEdit PID')
-  const inputEventsNow = eventsOf(dshHome, input.sessionId)
-  const getAppResult = cuaResults(inputEventsNow, 0).find(result => result.subCallId === getAppDispatch?.subCallId)
-  const controlledHandle = dispatchJsonContent(getAppResult)?.appHandle
-  assert(typeof controlledHandle === 'string' && controlledHandle !== '',
-    'MAC09-08: the official getApp result carried no app handle')
-  const listWindowsResult = cuaResults(inputEventsNow, 0)
-    .find(result => result.subCallId === listWindowsDispatch?.subCallId)
-  const controlledWindows = dispatchJsonContent(listWindowsResult)
-  // The qualifying RESULT is bound to the FINAL segment's own typeText: an
-  // earlier attempt's success (or failure) may never stand in for it.
-  inputResult = await waitCuaResult(dshHome, input.sessionId, typeDispatch.subCallId,
-    'MAC09-08 final typeText result', TIMEOUTS.turn)
-  assert(inputResult !== undefined && inputResult.result.isError !== true,
-    `MAC09-08: the controlled typeText failed: ${dispatchErrorCode(inputResult?.result) ?? 'unknown error'} :: ${dispatchContentText(inputResult?.result ?? {}).slice(0, 400)}`)
+  const {
+    inputSequence, segmentStarts, attemptMethods, attemptDispatches, getAppDispatch,
+    listWindowsDispatch, showDispatch, activateDispatch, typeDispatch, attemptStateDispatch, previews,
+  } = await auditControlledTrace({
+    trace,
+    textEditPid,
+    runToken,
+    marker,
+    resolveJson: dispatch => dispatchJsonContent(
+      cuaResults(eventLog, 0).find(item => item.subCallId === dispatch.subCallId)),
+    resolveTypeTextResult: async dispatch => waitCuaResult(dshHome, input.sessionId, dispatch.subCallId,
+      'MAC09-08 final typeText result', TIMEOUTS.turn),
+  })
+  // The audit above already bound the handle, the owned window, the order and
+  // the result identity; the scene only needs the params it reports.
   const typeParams = dispatchParams(typeDispatch)
-  const stateParams = dispatchParams(attemptStateDispatch)
-  const showParams = dispatchParams(showDispatch)
-  const activateParams = dispatchParams(activateDispatch)
-  assert(typeDispatch !== undefined && typeParams?.text === marker,
-    'MAC09-08: the official typeText argument is not the exact random marker')
-  // The provider's declared keyboard scope is app-level (capabilities:
-  // keyboard: ["app"]) — typeText routes through the app's FOCUSED recipient,
-  // so `show` of the OWNED window before the input is REQUIRED (the audit above
-  // enforces the order); a windowId passed to typeText itself is rejected with
-  // INVALID_ARGUMENT. `activate` is optional but must stay before the input.
-  const handleBound = (params) => params?.appHandle === controlledHandle
-  assert(typeof typeParams?.appHandle === 'string' && handleBound(typeParams)
-    && handleBound(stateParams)
-    && handleBound(dispatchParams(listWindowsDispatch))
-    && handleBound(showParams)
-    && (activateParams === undefined || handleBound(activateParams)),
-    'MAC09-08: listWindows/typeText/getState (or a dispatched pre-step) do not use the exact approved getApp handle')
-  assert(showParams !== undefined && showParams.appHandle === controlledHandle,
-    'MAC09-08: the controlled attempt did not show a window of the approved app handle')
-  const controlledInputWindow = Array.isArray(controlledWindows)
-    ? controlledWindows.find(window => window?.windowId === showParams?.windowId
-      && String(window?.title ?? '').includes(runToken))
-    : undefined
-  assert(controlledInputWindow !== undefined,
-    'MAC09-08: show windowId is not this run\'s controlled cua-blank listWindows result')
   const markerResult = await waitFor(() => cuaResults(eventsOf(dshHome, input.sessionId), 0)
     .find(result => result.subCallId === attemptStateDispatch.subCallId
       && dispatchMethod(result) === 'getState'
@@ -2447,7 +2451,11 @@ async function main() {
 }
 
 try {
-  await main()
+  // Importing this module must not start a qualification: the trace audit is
+  // replayed directly by test/tooling/macos-cua-trace-audit.test.mjs.
+  if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+    await main()
+  }
 } catch (error) {
   const kind = error instanceof CuaInputError
     ? 'INPUT_UNQUALIFIED'
