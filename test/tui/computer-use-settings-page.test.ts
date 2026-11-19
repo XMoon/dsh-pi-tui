@@ -509,6 +509,16 @@ test('the compact grant spends its rows on the FIRST missing permission', async 
   assert.match(screenText, /\[Request permission\]/u, 'its action must be reachable')
   assert.doesNotMatch(screenText, /Accessibility: Allowed/u,
     'the compact grant must not spend its pair on the granted permission')
+  // The painted action must SINK to the permission it names.
+  for (let cursor = 0; cursor < 20; cursor += 1) {
+    if (/>.*\[Request permission\]/u.test(screenMissing.render(44).join('\n'))) break
+    screenMissing.page.handleInput('\x1b[B')
+  }
+  screenMissing.page.handleInput('\r')
+  await new Promise(resolve => setTimeout(resolve, 10))
+  assert.deepEqual(screenMissing.calls.filter(call => call.startsWith('request:')),
+    ['request:screenRecording:zh'],
+    'the compact [Request permission] must request the MISSING permission, not Accessibility')
   screenMissing.page.dispose()
 
   const accessibilityMissing = asymmetric(false, true)
