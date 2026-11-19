@@ -630,6 +630,9 @@ function verifyHelperReceipt(helper, providerVersion) {
     `the official CUA helper team id does not match the package receipt ${helper.receipt.teamId}`)
   return {
     bundle: helper.current.bundle,
+    // The upstream receipt's own declared version: an observed fact, NOT the
+    // pinned pairing (the rc.5 package still ships an rc.3 receipt).
+    receiptVersion: helper.receipt.version,
     teamId: helper.receipt.teamId,
     architectures: helper.receipt.applications?.map(application => application.architecture) ?? [],
     arch: `darwin-${process.arch}`,
