@@ -41,7 +41,6 @@ import { ACTION_BAR_SEPARATOR } from '../presentation/action-bar.ts'
 import { paintActionSpan } from '../presentation/action-ink.ts'
 import type { ModelsInitialView } from './models-workspace-page.ts'
 import type { EmbeddedSpecialistPage } from './settings-workspace-panel.ts'
-import type { WebPanelTaskRunner } from './web-provider-panels.ts'
 
 /** The exact credential reference the official DeepSeek Search / Fetch API
  *  providers resolve (`apiKeyEnv`'s shipped default). Its VALUE never reaches
@@ -230,7 +229,7 @@ export interface WebSettingsPageIntents {
   readonly navigateToModels: (initial: ModelsInitialView) => void
   readonly requestRender: () => void
   /** The caller's owned task entry (never a bare promise). */
-  readonly run: WebPanelTaskRunner
+  readonly run: (label: string, task: () => Promise<void>) => void
   /** The page's own close (Esc at the list root). Returns to the Tools row. */
   readonly done: () => void
 }
