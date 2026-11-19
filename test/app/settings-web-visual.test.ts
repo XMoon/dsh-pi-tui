@@ -666,14 +666,16 @@ test('the AUTOMATIC page offers a complete pointer-only route: click the row, th
   clickWord(h, 'Confirm [Enter]')
   await waitForPainted(h, 'the verified explicit write', frame => frame.includes('Verified'))
   assert.equal(h.store.web.searchProvider, 'deepseek-search-api', 'the ONE real Host write landed')
-  // Exit the Detail with the official Esc key. The painted Back [Esc] span is
-  // the SAME Esc semantic through the Root's bar-escape delegate; on this page
-  // the headless pointer route was observed NOT to complete the Back span while
-  // a Verified verdict is painted (an existing Root/phase interaction this PR
-  // does not change), so the exit step here is honestly keyboard — the write
-  // journey above stays pointer-only.
-  await key(h, ESC)
-  await waitForPainted(h, 'the Esc Back to return to the list', frame =>
+  // The painted Back span (the page's own last-row Esc affordance) exits the
+  // Detail to the list — pointer-only, no keyboard Esc. The Root requests a
+  // render after admitting a body press, so the release resolves against the
+  // child's next painted frame; the settled Verified verdict legitimately stays
+  // painted on the list, so the exit is proven by the list's own bar.
+  const back = paintedWordPoint(h, 'Back [Esc]')
+  press(h, back.row, back.column)
+  await h.vt.waitForRender()
+  release(h, back.row, back.column)
+  await waitForPainted(h, 'the pointer Back to return to the list', frame =>
     frame.includes('Enter open') && !frame.includes('Confirm [Enter]'))
 })
 
