@@ -1539,3 +1539,63 @@ test('exit intent: a presenter failure is recorded and never becomes an unhandle
     process.off('unhandledRejection', listener)
   }
 })
+
+test('exit intent: an old confirmation cannot commit after a newer choice opened AND withdrew', () => {
+  // RFL-007 (reopened): `open === undefined` is not proof that no newer
+  // operation happened; the operation epoch is.
+  const h = exitIntentHarness({ backend: 'daemon', activity: 'working' })
+  h.coordinator.request('slash')
+  h.state.onClose = () => {
+    h.state.onClose = undefined
+    h.coordinator.request('keyboard') // a newer choice opens
+    h.current()!.dismiss() // ... and is withdrawn by a Host modal
+  }
+  h.current()!.select('keep-and-disconnect')
+  assert.deepEqual(h.commits, [], 'the old confirmation loses to the newer operation')
+  assert.equal(h.current(), undefined)
+})
+
+test('exit intent: a dispose from a close-time callback blocks the old commit', () => {
+  const h = exitIntentHarness({ backend: 'daemon', activity: 'working' })
+  h.coordinator.request('slash')
+  h.state.onClose = () => {
+    h.state.onClose = undefined
+    h.coordinator.dispose()
+  }
+  h.current()!.select('keep-and-disconnect')
+  assert.deepEqual(h.commits, [])
+})
+
+test('exit intent: a late Stop failure never rewrites a newer choice', async () => {
+  // RFL-011: the error settlement is bound to the OWN stop controller.
+  const stop = deferred<StopCurrentWorkOutcome>()
+  const h = exitIntentHarness({ backend: 'daemon', activity: 'working', stop: () => stop.promise })
+  h.coordinator.request('slash')
+  h.current()!.select('stop-and-disconnect')
+  h.current()!.dismiss()
+  h.state.activity = 'working'
+  h.coordinator.request('slash')
+  const newer = h.current()!
+  stop.reject(new Error('old-stop-late-failure'))
+  await new Promise<void>(resolve => setImmediate(resolve))
+  await new Promise<void>(resolve => setImmediate(resolve))
+  assert.equal(h.current(), newer, 'the newer choice is not replaced by the retired task')
+  assert.equal(h.current()!.phase, 'choose')
+  assert.deepEqual(h.commits, [], 'a retired Stop can never commit an exit')
+})
+
+test('exit intent: a cancellation-shaped Stop failure still settles the seat', async () => {
+  // RFL-012: only the task's own AbortSignal/typed outcome is a cancellation;
+  // a thrown cancellation-shaped error is an unexpected failure.
+  const h = exitIntentHarness({
+    backend: 'daemon',
+    activity: 'working',
+    stop: async () => { throw cancellationError('stop aborted') },
+  })
+  h.coordinator.request('slash')
+  h.current()!.select('stop-and-disconnect')
+  await new Promise<void>(resolve => setImmediate(resolve))
+  await new Promise<void>(resolve => setImmediate(resolve))
+  assert.equal(h.current()?.phase, 'unconfirmed', 'the seat leaves the Stopping state')
+  assert.deepEqual(h.commits, [])
+})

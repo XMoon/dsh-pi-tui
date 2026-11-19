@@ -232,3 +232,16 @@ test('a phase update drops a focus the new options no longer offer', () => {
   const focused = lines.find(line => line.startsWith('❯ '))
   assert.ok(focused?.includes('Disconnect without stopping'), 'the new phase owns its safe default')
 })
+
+test('a long status is budgeted by its real rows and never hides the actions', () => {
+  // RFL-009: a long Host error must not be assumed to be two rows; the compact
+  // plan drops the detail rather than pushing the actions out of the box.
+  const seat = mountRecorder(select => exitChoiceUnconfirmed('detail '.repeat(80), select, () => {}))
+  seat.component.setMaxRows(8)
+  const text = seat.component.render(60).map(stripAnsi).join('\n')
+  assert.match(text, /Stop could not be confirmed\./u)
+  assert.match(text, /Disconnect without stopping/u)
+  assert.match(text, /Stay in the TUI/u)
+  seat.component.handleInput('\r')
+  assert.deepEqual(seat.selections, ['disconnect-without-stop'])
+})

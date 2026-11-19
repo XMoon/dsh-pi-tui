@@ -5021,7 +5021,13 @@ export class TuiApp {
           return (onInput: (data: string) => void, onResize: () => void): void => {
             target.start(onInput, () => {
               // The app may be disposed before the terminal stops.
-              if (!this.disposed) this.syncSurfaceGeometry()
+              if (!this.disposed) {
+                // The grant changed: the Exit Choice's last-painted action set
+                // no longer describes the viewport. No option may be confirmed
+                // until the next paint recomputes the real operability.
+                this.clientExitChoiceOverlay?.component.invalidateActions()
+                this.syncSurfaceGeometry()
+              }
               onResize()
             })
           }

@@ -26,7 +26,7 @@ import type { JsonValue } from '../../src/domain/transcript/types.ts'
 import type { AssistantLiveChunk, AssistantLiveInput } from '../../src/runtime/assistant-stream-port.ts'
 import { TuiApp, ThinkingCompactComponent, TODO_COMPACT_LIMIT, TODO_SHORT_COMPACT_LIMIT, TODO_SHORT_SCREEN_MAX_ROWS, todoCompactLimit, type OwnedRunner } from '../../src/tui-app.ts'
 import type { ExitSessionActivity as ExitActivity } from '../../src/domain/command/policy.ts'
-import { exitChoiceAsking, type ExitChoiceOption } from '../../src/app/surface/exit-choice.ts'
+import { exitChoiceAsking, exitChoiceUnconfirmed, type ExitChoiceOption } from '../../src/app/surface/exit-choice.ts'
 import { createExitIntentFacts } from '../../src/app/bootstrap/exit-facts.ts'
 import { createExitIntentCoordinator } from '../../src/app/bootstrap/exit-intent.ts'
 import { pituiExitChoiceSeam } from '../../src/app/surface/exit-choice-pitui.ts'
@@ -6524,23 +6524,23 @@ test('a 20-column terminal makes only Stay actable (no clipped Stop)', async () 
   assert.deepEqual(selections, ['stay'], 'the only actable option is Stay')
 })
 
-test('a six-row terminal fits a short title plus all three real actions', async () => {
-  // Four content rows are the title + the three actions: every painted action
-  // is actable, and nothing is clipped.
+test('a six-row terminal keeps the risk line and only the safe Stay action', async () => {
+  // Four content rows cannot host the risk line plus all three actions; the
+  // destructive Stop is refused and the truthful safe path remains.
   const surface = startSizedApp(80, 6)
   await surface.vt.waitForRender()
   const selections: ExitChoiceOption[] = []
   surface.app.openExitChoice(exitChoiceAsking('daemon-busy', option => { selections.push(option) }, () => {}))
   await surface.vt.waitForRender()
   const view = surface.vt.getViewport().join('\n')
-  assert.match(view, /Keep working and disconnect/u)
-  assert.match(view, /Stop current work and disconnect/u)
+  assert.match(view, /Session is working\./u, 'the risk line survives')
   assert.match(view, /Stay in the TUI/u)
+  assert.ok(!view.includes('Stop current work'), `no unhostable destructive action is painted:\n${view}`)
   surface.vt.sendInput('\x1b[B')
   await surface.vt.waitForRender()
   surface.vt.sendInput('\r')
   await surface.vt.waitForRender()
-  assert.deepEqual(selections, ['stop-and-disconnect'], 'a truly painted action remains actable')
+  assert.deepEqual(selections, ['stay'], 'the only actable option is Stay')
 })
 
 test('an eight-row terminal keeps the short risk line with all three actions', async () => {
@@ -6646,4 +6646,40 @@ test('the live facts -> coordinator -> real PiTui seat -> ONE commit chain', asy
   coordinator.request('slash')
   await surface.vt.waitForRender()
   assert.match(surface.vt.getViewport().join('\n'), /Disconnect without stopping/)
+})
+
+test('a resize before the next paint refuses an old dangerous confirmation', async () => {
+  // RFL-009: the keyboard uses the last painted action set; a geometry change
+  // invalidates it immediately, before the repaint recomputes operability.
+  const surface = startSizedApp(80, 24)
+  await surface.vt.waitForRender()
+  const selections: ExitChoiceOption[] = []
+  surface.app.openExitChoice(exitChoiceAsking('daemon-busy', option => { selections.push(option) }, () => {}))
+  await surface.vt.waitForRender()
+  surface.vt.sendInput('\x1b[B') // focus Stop in the 80-column frame
+  await surface.vt.waitForRender()
+  surface.vt.resize(20, 24) // invalidate before any repaint
+  surface.vt.sendInput('\r')
+  await surface.vt.waitForRender()
+  assert.ok(!selections.includes('stop-and-disconnect'),
+    `a pre-resize dangerous confirmation can never fire: ${JSON.stringify(selections)}`)
+  // After the repaint the 20-column frame makes only Stay actable.
+  surface.vt.sendInput('\r')
+  await surface.vt.waitForRender()
+  assert.deepEqual(selections, ['stay'])
+})
+
+test('a long Host error detail never pushes the actable actions out of the box', async () => {
+  // RFL-009: status rows are the REAL wrapped rows, not a fixed 2-row estimate.
+  const surface = startSizedApp(80, 12)
+  await surface.vt.waitForRender()
+  const selections: ExitChoiceOption[] = []
+  surface.app.openExitChoice(exitChoiceUnconfirmed('host-error: '.repeat(60), option => { selections.push(option) }, () => {}))
+  await surface.vt.waitForRender()
+  const view = surface.vt.getViewport().join('\n')
+  assert.match(view, /Disconnect without stopping/u)
+  assert.match(view, /Stay in the TUI/u)
+  surface.vt.sendInput('\r')
+  await surface.vt.waitForRender()
+  assert.deepEqual(selections, ['disconnect-without-stop'])
 })

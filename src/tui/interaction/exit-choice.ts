@@ -103,6 +103,16 @@ export class ExitChoicePanel implements Component, Focusable {
     this.maxRows = Math.max(1, Math.floor(rows))
   }
 
+  /**
+   * The physical geometry changed (a terminal resize): the last painted
+   * action set no longer describes the viewport. Keyboard confirmation is
+   * refused until the next render recomputes it.
+   */
+  invalidateActions(): void {
+    this.lastOperable = []
+    this.pressed = undefined
+  }
+
   handleInput(data: string): void {
     if (this.disposed) return
     // While the daemon Stop is in flight the choice is LOCKED: no key can
@@ -237,7 +247,11 @@ export class ExitChoicePanel implements Component, Focusable {
     const wrapRows = (text: string): number => Math.max(1, wrapTextWithAnsi(text, inner).length)
     const bodyRows = model.body.reduce((rows, paragraph) => rows + wrapRows(paragraph), 0)
     const shortRows = wrapRows(model.shortBody)
-    const statusRows = model.status === undefined || model.status === '' ? 0 : 2
+    // The status is a blank row plus its REAL wrapped rows: a long Host error
+    // must never be budgeted as two rows and then push the actions off-screen.
+    const statusRows = model.status === undefined || model.status === ''
+      ? 0
+      : 1 + wrapRows(model.status)
     const minimal = (): FramePlan => ({
       minimal: model.phase === 'stopping' ? 'Stopping current work…' : 'Esc Stay',
       title: false,
@@ -265,16 +279,18 @@ export class ExitChoicePanel implements Component, Focusable {
     if (this.maxRows >= fullNeeded) {
       return { minimal: undefined, title: true, body: 'full', status: statusRows > 0, options: widthOptions, hint: true }
     }
+    // The risk sentence is part of the decision contract: a box that cannot
+    // host it WITH every action must not keep the destructive actions actable.
     const compactNeeded = 1 + shortRows + widthOptions.length
     if (this.maxRows >= compactNeeded) {
       return { minimal: undefined, title: true, body: 'short', status: false, options: widthOptions, hint: false }
     }
-    const optionsOnlyNeeded = 1 + widthOptions.length
-    if (this.maxRows >= optionsOnlyNeeded) {
-      return { minimal: undefined, title: true, body: 'none', status: false, options: widthOptions, hint: false }
-    }
-    // The box cannot host every actable option: keep ONLY the safe path.
+    // The box cannot host the risk line plus every actable option: keep ONLY
+    // the safe path, with the risk line when it still fits.
     const stay = widthOptions.find(option => option.id === 'stay')
+    if (stay !== undefined && this.maxRows >= 2 + shortRows) {
+      return { minimal: undefined, title: true, body: 'short', status: false, options: [stay], hint: false }
+    }
     if (stay !== undefined && this.maxRows >= 2) {
       return { minimal: undefined, title: true, body: 'none', status: false, options: [stay], hint: false }
     }

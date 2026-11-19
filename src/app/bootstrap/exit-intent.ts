@@ -144,6 +144,14 @@ export function createExitIntentCoordinator(deps: ExitIntentCoordinatorDeps): Ex
   let captured: CapturedChoice | undefined
   /** The in-flight daemon Stop wait, if any (owned by the open choice). */
   let stopWait: AbortController | undefined
+  /**
+   * Monotonic identity of the LATEST exit operation/decision. Every request,
+   * dismissal, stale retirement and dispose bumps it, so a close-time focus
+   * callback cannot hand the decision away and back again without the old
+   * confirmation observing it: `open === undefined` alone is not proof that no
+   * newer operation happened.
+   */
+  let operationEpoch = 0
   let disposed = false
 
   const safeDiag = (level: 'info' | 'error', message: string, fields?: Record<string, unknown>): void => {
@@ -186,6 +194,7 @@ export function createExitIntentCoordinator(deps: ExitIntentCoordinatorDeps): Ex
 
   /** Renderer-initiated withdrawal with zero business action. */
   const dismiss = (): void => {
+    operationEpoch += 1
     clearChoice()
     // The renderer dropped the seat itself (Host modal preemption / teardown):
     // tell the seam only if it still owns a window; a redundant close is idle.
@@ -204,9 +213,14 @@ export function createExitIntentCoordinator(deps: ExitIntentCoordinatorDeps): Ex
    * Session owner. The newer operation always wins: an old confirmation never
    * exits a surface it no longer owns.
    */
-  const commitAfterClose = (identity: CapturedChoice, workStopped: boolean): void => {
+  const commitAfterClose = (identity: CapturedChoice, workStopped: boolean, epoch: number): void => {
     closeChoice()
-    if (open !== undefined) return
+    // The close may synchronously restore another owner's focus and run
+    // callbacks that start (and even withdraw) a NEWER operation. Only the
+    // SAME operation epoch, still-current identity and a live coordinator may
+    // commit; a newer request/dismiss/retire/dispose always wins.
+    if (disposed) return
+    if (operationEpoch !== epoch) return
     if (!identityCurrent(identity)) return
     deps.commit({ workStopped })
   }
@@ -218,13 +232,15 @@ export function createExitIntentCoordinator(deps: ExitIntentCoordinatorDeps): Ex
     presenter()?.update(open)
   }
 
-  /** The whole Stop task's failure settlement (see `runStop`). */
-  const settleStopFailure = (error: unknown): void => {
+  /** The whole Stop task's failure settlement, bound to its OWN wait. */
+  const settleStopFailure = (controller: AbortController, error: unknown): void => {
     // runOwned has already recorded the task failure; this is the SEAT
-    // settlement. A throwing presentation here is a handler failure and is
+    // settlement. An old/withdrawn task must not rewrite a newer choice nor
+    // clear a newer task's ownership: only the CURRENT wait of the still-open
+    // choice may settle. A throwing presentation here is a handler failure
     // captured by runOwned's handler-failure sink — never an unhandled
     // rejection, never a stopped claim.
-    if (disposed) return
+    if (disposed || stopWait !== controller) return
     stopWait = undefined
     settleUnconfirmed(`The stop request failed: ${safeErrorMessage(error)}`)
   }
@@ -247,6 +263,10 @@ export function createExitIntentCoordinator(deps: ExitIntentCoordinatorDeps): Ex
       closeChoice()
       return
     }
+    // The operation identity of THIS confirmation. Any close-time/newer
+    // operation bumps the coordinator epoch and makes this confirmation
+    // unable to commit afterwards.
+    const epoch = operationEpoch
     const facts = deps.facts.capture()
     const backend = deps.facts.currentBackend()
     // The choice captured an exact identity. A backend flip retires it with no
@@ -264,11 +284,11 @@ export function createExitIntentCoordinator(deps: ExitIntentCoordinatorDeps): Ex
     // `stop-and-exit` runs the EXISTING Direct controller: its owned-session
     // retirement is the only Direct cancel. Nothing is claimed as stopped here.
     if (option === 'stop-and-exit' || option === 'exit-local') {
-      commitAfterClose(identity, false)
+      commitAfterClose(identity, false, epoch)
       return
     }
     if (option === 'keep-and-disconnect' || option === 'disconnect-without-stop') {
-      commitAfterClose(identity, false)
+      commitAfterClose(identity, false, epoch)
       return
     }
     if (option === 'stop-and-disconnect') {
@@ -281,7 +301,7 @@ export function createExitIntentCoordinator(deps: ExitIntentCoordinatorDeps): Ex
       if (facts.activity === 'idle') {
         // The exact owner became idle by itself: the SAME captured identity is
         // already proven current above, so detach without sending a cancel.
-        commitAfterClose(identity, true)
+        commitAfterClose(identity, true, epoch)
         return
       }
       if (facts.activity === 'unknown') {
@@ -293,16 +313,22 @@ export function createExitIntentCoordinator(deps: ExitIntentCoordinatorDeps): Ex
       }
       if (identity.live === undefined) {
         // No live Session remains: nothing to stop; detach without a cancel.
-        commitAfterClose(identity, false)
+        commitAfterClose(identity, false, epoch)
         return
       }
       // The WHOLE async Stop task (both presenter calls and the exact-owner
-      // operation) is one owned task: task failures are recorded and settle
-      // the unconfirmed seat; handler failures reach the handler sink.
-      runOwned('exit intent stop', () => runStop(identity), {
+      // operation) is one owned task. The task's own AbortSignal + typed
+      // outcomes express legitimate cancellation; a THROWN cancellation-shaped
+      // error is not a business cancellation of the decision, so BOTH terminal
+      // routes settle through the same controller fence. An old task can only
+      // record diagnostics, never rewrite a newer choice or clear its wait.
+      const controller = new AbortController()
+      stopWait = controller
+      runOwned('exit intent stop', () => runStop(identity, epoch, controller), {
         diag: deps.diag,
         sessionId: () => identity.live?.sessionId,
-        onError: settleStopFailure,
+        onCancel: (error) => { settleStopFailure(controller, error) },
+        onError: (error) => { settleStopFailure(controller, error) },
       })
       return
     }
@@ -324,6 +350,9 @@ export function createExitIntentCoordinator(deps: ExitIntentCoordinatorDeps): Ex
       safeDiag('error', 'exit intent requires a choice but no surface is mounted')
       return
     }
+    // A new choice is a NEWER operation: any earlier confirmation still
+    // unwinding can no longer commit after it.
+    operationEpoch += 1
     captured = {
       kind,
       backend,
@@ -335,11 +364,13 @@ export function createExitIntentCoordinator(deps: ExitIntentCoordinatorDeps): Ex
     seam.open(open)
   }
 
-  const runStop = async (identity: CapturedChoice): Promise<void> => {
+  const runStop = async (
+    identity: CapturedChoice,
+    epoch: number,
+    controller: AbortController,
+  ): Promise<void> => {
     const live = identity.live
     if (live === undefined) throw new Error('a daemon Stop requires a captured live Session')
-    const controller = new AbortController()
-    stopWait = controller
     open = exitChoiceStopping(select, dismiss)
     presenter()?.update(open)
     const outcome = await deps.stopCurrentWork(live, controller.signal)
@@ -349,12 +380,13 @@ export function createExitIntentCoordinator(deps: ExitIntentCoordinatorDeps): Ex
     stopWait = undefined
     if (outcome.kind === 'stopped') {
       // The idle proof is bound to the exact generation; the commit re-checks
-      // the captured identity after the close-time focus callbacks.
+      // the captured identity and the operation epoch after the close-time
+      // focus callbacks.
       if (!identityCurrent(identity)) {
         settleUnconfirmed('The captured session is no longer current.')
         return
       }
-      commitAfterClose(identity, true)
+      commitAfterClose(identity, true, epoch)
       return
     }
     settleUnconfirmed(outcome.detail)
@@ -399,6 +431,7 @@ export function createExitIntentCoordinator(deps: ExitIntentCoordinatorDeps): Ex
       // The Stop wait (if any) is abandoned too: it can only prove a generation
       // the Client already left, so it can never commit an exit.
       safeDiag('info', 'exit choice retired: the captured identity is no longer current')
+      operationEpoch += 1
       closeChoice()
     }
   }
@@ -410,6 +443,7 @@ export function createExitIntentCoordinator(deps: ExitIntentCoordinatorDeps): Ex
     dispose: () => {
       if (disposed) return
       disposed = true
+      operationEpoch += 1
       clearChoice()
     },
   }
