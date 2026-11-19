@@ -57,7 +57,11 @@ MANDATORY or BLOCKING.
 | `architecture/host-client.md` | contributors | Host-owned vs Client-local locality, the semantic-port boundary, Direct/Remote equivalence, currentness/identity fences, Plugin Manager Host authority, workflow-terminal authority, coupling guard and qualification tiers |
 | `architecture/concurrency.md` | contributors | Session writer authority (`SessionHandle` / `SessionWriteLease`), process-local transition/operation barriers, stale/generation fences |
 | `architecture/failure-model.md` | contributors | `runDetached` / `runOwned` promise ownership, error observation and cancellation taxonomy |
-| `architecture/surface-behavior.md` | contributors | Durable non-transcript workspace behavior: quit/queue, Task Center/Browser, Job Workspace, Settings, Task Quick, Plugin Manager/Detail, input completion and attachment intake |
+| `architecture/surface-behavior.md` | contributors | Shared non-transcript interaction contracts: quit, queue, composer submission, task/job views, Web/ACP quick controls, model picker, schedule, task quick and common docks; entry links to separately owned surfaces |
+| `architecture/surface-session.md` | contributors | Session Workspace browsing, navigation, currentness, switching and guarded resume behavior |
+| `architecture/surface-settings.md` | contributors | Settings Workspace page navigation, edit/write settlement and configuration presentation |
+| `architecture/surface-plugins.md` | contributors | Plugin Manager/Detail surface interactions, inventory display and install/update workflows |
+| `architecture/surface-input.md` | contributors | Attachment intake, input completion, session `@` routing and shell-input surface behavior |
 | `architecture/surface-catalog.md` | contributors | Command/skill catalog ownership, standing scope, Host vs TUI authority and refresh semantics |
 | `architecture/overlay-focus.md` | contributors | Managed-overlay / editor-seat / focus contract, synchronous reentrancy, one-shot closure and physical-screen leases |
 | `architecture/transcript.md` | contributors | One DisplayPreset authority, semantic transcript classification, folding/reveal, Context/Work/Thinking disclosure |

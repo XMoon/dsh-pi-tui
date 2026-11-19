@@ -2045,7 +2045,7 @@ cancelled   = the operation was cancelled before a definitive outcome
 
 The concrete controller/install admission, request-id reconciliation and
 stopped-surface behavior are owned by
-[surface-behavior.md](./surface-behavior.md#plugin-manager-and-plugin-detail);
+[surface-behavior.md](./surface-plugins.md#plugin-manager-and-plugin-detail);
 this section keeps only the transport-neutral ownership taxonomy and the
 pre-dispatch generation rule.
 
@@ -2292,7 +2292,7 @@ Authority: `src/runtime/config-port.ts` (`AccountConfig`),
 `src/app/remote/client-runtime.ts` (generated Client contribution),
 `src/app/command/account-workflow.ts`, and
 `src/tui/panels/account-workspace-page.ts`. Surface navigation is owned by
-[surface-behavior.md](./surface-behavior.md#settings-workspace).
+[surface-behavior.md](./surface-settings.md#settings-workspace).
 
 Must-not: expose a token/grant/PKCE value; start Account sign-in outside the
 official Host Account authority; clear the Account grant through
@@ -2360,7 +2360,7 @@ Bxx presentation exceptions; that identity is still gated on the Host
 The controller, inventory read epoch, install state machine, request-id
 reconciliation, retry/unknown handling, workspace lease and Detail copy/upgrade
 guidance are owned by
-[surface-behavior.md](./surface-behavior.md#plugin-manager-and-plugin-detail).
+[surface-behavior.md](./surface-plugins.md#plugin-manager-and-plugin-detail).
 
 ## Agent composition policy
 

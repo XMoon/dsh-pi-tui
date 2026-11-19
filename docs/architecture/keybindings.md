@@ -346,7 +346,7 @@ keymap or `app.tasks.open`.
     higher-priority Host winner keeps its own route. Two such presses in the
     empty Host main Editor open the EXISTING registered Session Workspace;
     that behavior is owned by
-    [surface-behavior.md](./surface-behavior.md#session-workspace). There is
+    [surface-behavior.md](./surface-session.md#session-workspace). There is
     no bindable action for it, and `app.session.open` remains reserved and
     unbindable.
 
