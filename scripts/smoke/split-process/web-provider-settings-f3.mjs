@@ -936,6 +936,93 @@ export async function runWebProviderSettingsF3(context) {
       advancedOverrides: 'unset',
     })
 
+    // ── 5d. The REAL Host moves the Search provider to AUTOMATIC and to a
+    // CUSTOM id: the scheduled Billing row must stay inert with ZERO Host
+    // mutations in both states (the A5 matrix's remaining real-path cases).
+    const automaticWeb = await requestWebProvider(root, 'automatic', undefined,
+      'UI_L6 automatic search provider')
+    assert(automaticWeb.searchProvider === undefined,
+      `UI_L6 automatic: the official Host still pins a searchProvider: ${JSON.stringify(automaticWeb)}`)
+    assert(!Object.hasOwn(namespaceConfig(documentPath, WEB_NS) ?? {}, 'searchProvider'),
+      'UI_L6 automatic: the official user layer must not carry a searchProvider')
+    await reopenWebPage(clientA, 'UI_L6 automatic A re-read')
+    await waitForScreenText(clientA, 'Current: Automatic', 'UI_L6 automatic page current fact')
+    // The official Settings revision is the authoritative mutation ingress: it
+    // is read before and after the inert Enter, so a page that silently exposed
+    // Confirm (and a command that accepted it) cannot pass on an unchanged
+    // document snapshot alone.
+    const automaticBefore = await requestWebProvider(root, 'observe', undefined,
+      'UI_L6 automatic revision before')
+    await assertInertBilling(clientA, documentPath, ROW.searchBilling, 'Not selected',
+      'Billing is EDITABLE HERE', 'UI_L6 automatic billing route gate')
+    const automaticAfter = await requestWebProvider(root, 'observe', undefined,
+      'UI_L6 automatic revision after')
+    assert(automaticAfter.apiRevision === automaticBefore.apiRevision,
+      `UI_L6 automatic: the inert Billing row mutated the Billing namespace (revision ${String(automaticBefore.apiRevision)} -> ${String(automaticAfter.apiRevision)})`)
+    trace('f3.ui-l6', {
+      verdict: 'UI_L6_PASS',
+      phase: 'automatic-billing-inert',
+      searchProvider: 'Automatic',
+      confirmed: false,
+      billingNamespaceRevision: [automaticBefore.apiRevision, automaticAfter.apiRevision],
+      hostWrites: 0,
+    })
+
+    const customWeb = await requestWebProvider(root, 'custom', CUSTOM_SEARCH_PROVIDER,
+      'UI_L6 custom search provider')
+    assert(customWeb.searchProvider === CUSTOM_SEARCH_PROVIDER,
+      `UI_L6 custom: the official Host must keep the custom id: ${JSON.stringify(customWeb)}`)
+    await reopenWebPage(clientA, 'UI_L6 custom A re-read')
+    await waitForScreenText(clientA, CUSTOM_SEARCH_PROVIDER, 'UI_L6 custom page current fact')
+    const customBefore = await requestWebProvider(root, 'observe', undefined,
+      'UI_L6 custom revision before')
+    await assertInertBilling(clientA, documentPath, ROW.searchBilling, 'Not selected',
+      'Billing is EDITABLE HERE', 'UI_L6 custom billing route gate')
+    const customAfter = await requestWebProvider(root, 'observe', undefined,
+      'UI_L6 custom revision after')
+    assert(customAfter.apiRevision === customBefore.apiRevision,
+      `UI_L6 custom: the inert Billing row mutated the Billing namespace (revision ${String(customBefore.apiRevision)} -> ${String(customAfter.apiRevision)})`)
+    trace('f3.ui-l6', {
+      verdict: 'UI_L6_PASS',
+      phase: 'custom-billing-inert',
+      searchProvider: CUSTOM_SEARCH_PROVIDER,
+      confirmed: false,
+      billingNamespaceRevision: [customBefore.apiRevision, customAfter.apiRevision],
+      hostWrites: 0,
+    })
+
+    // Restore the explicit official provider so the later override/restore
+    // phases keep a writable Billing row.
+    const explicitWeb = await requestWebProvider(root, 'explicit', 'deepseek-search-api',
+      'UI_L6 restore explicit search provider')
+    assert(explicitWeb.searchProvider === 'deepseek-search-api',
+      `UI_L6 restore explicit: the official Host must pin the API again: ${JSON.stringify(explicitWeb)}`)
+
+    // POSITIVE CALIBRATION on the SAME Billing ingress: a real TUI Billing
+    // confirm must bump the observed `web-deepseek-api` revision. Without this
+    // the read-before/read-after equality above could be a dead probe.
+    const billingControlBefore = await requestWebProvider(root, 'observe', undefined,
+      'UI_L6 billing control revision before')
+    await reopenWebPage(clientA, 'UI_L6 billing control A re-read')
+    await openWebRow(clientA, ROW.searchBilling, 'UI_L6 billing control row')
+    await selectCandidate(clientA, 2, 'UI_L6 billing control', BILLING_LABELS['api-key'])
+    await confirmCandidate(clientA, BILLING_LABELS['api-key'], 'UI_L6 billing control write')
+    const billingControlAfter = await requestWebProvider(root, 'observe', undefined,
+      'UI_L6 billing control revision after')
+    assert(billingControlAfter.apiRevision > billingControlBefore.apiRevision,
+      `UI_L6 positive calibration: a real Billing mutation must bump the observed Billing-namespace revision (${String(billingControlBefore.apiRevision)} -> ${String(billingControlAfter.apiRevision)})`)
+    trace('f3.ui-l6', {
+      verdict: 'UI_L6_PASS',
+      phase: 'billing-mutation-calibration',
+      billing: 'api-key',
+      billingNamespaceRevision: [billingControlBefore.apiRevision, billingControlAfter.apiRevision],
+      hostWrites: 1,
+    })
+    // Restore the Billing mode the earlier phase left behind, so the later
+    // override assertions keep their own baseline.
+    await selectCandidate(clientA, 1, 'UI_L6 billing control restore', BILLING_LABELS.account)
+    await confirmCandidate(clientA, BILLING_LABELS.account, 'UI_L6 billing control restore write')
+
     // ── 5. The Host applies the rc.2 YAML-only Search override (outside the
     // TUI): its row must paint the MASKED read-only fact, Search Billing must
     // become inert with ZERO writes while Fetch Billing stays independently
@@ -1112,71 +1199,6 @@ export async function runWebProviderSettingsF3(context) {
       customRouteSeeded,
       customRouteReplaceRefused: negative.customRouteRefusal?.rejected === true,
     })
-
-    // ── 5d. The REAL Host moves the Search provider to AUTOMATIC and to a
-    // CUSTOM id: the scheduled Billing row must stay inert with ZERO Host
-    // mutations in both states (the A5 matrix's remaining real-path cases).
-    const automaticWeb = await requestWebProvider(root, 'automatic', undefined,
-      'UI_L6 automatic search provider')
-    assert(automaticWeb.searchProvider === undefined,
-      `UI_L6 automatic: the official Host still pins a searchProvider: ${JSON.stringify(automaticWeb)}`)
-    assert(!Object.hasOwn(namespaceConfig(documentPath, WEB_NS) ?? {}, 'searchProvider'),
-      'UI_L6 automatic: the official user layer must not carry a searchProvider')
-    await reopenWebPage(clientA, 'UI_L6 automatic A re-read')
-    await waitForScreenText(clientA, 'Current: Automatic', 'UI_L6 automatic page current fact')
-    // The official Settings revision is the authoritative mutation ingress: it
-    // is read before and after the inert Enter, so a page that silently exposed
-    // Confirm (and a command that accepted it) cannot pass on an unchanged
-    // document snapshot alone.
-    const automaticBefore = await requestWebProvider(root, 'observe', undefined,
-      'UI_L6 automatic revision before')
-    await assertInertBilling(clientA, documentPath, ROW.searchBilling, 'Not selected',
-      'Billing is EDITABLE HERE', 'UI_L6 automatic billing route gate')
-    const automaticAfter = await requestWebProvider(root, 'observe', undefined,
-      'UI_L6 automatic revision after')
-    assert(automaticAfter.revision === automaticBefore.revision,
-      `UI_L6 automatic: the inert Billing row mutated the official Settings (revision ${String(automaticBefore.revision)} -> ${String(automaticAfter.revision)})`)
-    trace('f3.ui-l6', {
-      verdict: 'UI_L6_PASS',
-      phase: 'automatic-billing-inert',
-      searchProvider: 'Automatic',
-      confirmed: false,
-      settingsRevision: [automaticBefore.revision, automaticAfter.revision],
-      hostWrites: 0,
-    })
-
-    const customWeb = await requestWebProvider(root, 'custom', CUSTOM_SEARCH_PROVIDER,
-      'UI_L6 custom search provider')
-    assert(customWeb.searchProvider === CUSTOM_SEARCH_PROVIDER,
-      `UI_L6 custom: the official Host must keep the custom id: ${JSON.stringify(customWeb)}`)
-    await reopenWebPage(clientA, 'UI_L6 custom A re-read')
-    await waitForScreenText(clientA, CUSTOM_SEARCH_PROVIDER, 'UI_L6 custom page current fact')
-    const customBefore = await requestWebProvider(root, 'observe', undefined,
-      'UI_L6 custom revision before')
-    await assertInertBilling(clientA, documentPath, ROW.searchBilling, 'Not selected',
-      'Billing is EDITABLE HERE', 'UI_L6 custom billing route gate')
-    const customAfter = await requestWebProvider(root, 'observe', undefined,
-      'UI_L6 custom revision after')
-    assert(customAfter.revision === customBefore.revision,
-      `UI_L6 custom: the inert Billing row mutated the official Settings (revision ${String(customBefore.revision)} -> ${String(customAfter.revision)})`)
-    trace('f3.ui-l6', {
-      verdict: 'UI_L6_PASS',
-      phase: 'custom-billing-inert',
-      searchProvider: CUSTOM_SEARCH_PROVIDER,
-      confirmed: false,
-      settingsRevision: [customBefore.revision, customAfter.revision],
-      hostWrites: 0,
-    })
-
-    // Restore the explicit official provider so the later override/restore
-    // phases keep a writable Billing row. This successful mutation is ALSO the
-    // positive calibration of the observation: it must bump the revision.
-    const explicitWeb = await requestWebProvider(root, 'explicit', 'deepseek-search-api',
-      'UI_L6 restore explicit search provider')
-    assert(explicitWeb.searchProvider === 'deepseek-search-api',
-      `UI_L6 restore explicit: the official Host must pin the API again: ${JSON.stringify(explicitWeb)}`)
-    assert(explicitWeb.revision > customAfter.revision,
-      `UI_L6 positive calibration: a real official mutation must bump the observed Settings revision (${String(customAfter.revision)} -> ${String(explicitWeb.revision)})`)
 
     // ── 6. Both Clients drop and re-establish their Gateway carrier. ────────
     const documentBeforeReconnect = readFileSync(documentPath, 'utf8')

@@ -1431,14 +1431,20 @@ export async function apply(ctx) {
               ? { op: 'unset', path: ['searchProvider'] }
               : { op: 'set', path: ['searchProvider'], value: String(request.value) }])
           }
-          const descriptor = ctx.settings.describe().find(entry => entry.ns === webNamespace)
+          const descriptors = ctx.settings.describe()
+          const descriptor = descriptors.find(entry => entry.ns === webNamespace)
+          const apiDescriptor = descriptors.find(entry => entry.ns === apiNamespace)
           const value = plainValue(descriptor)
           record('f3-web-provider', {
             nonce: request.nonce,
             mode: request.mode,
             searchProvider: value?.searchProvider,
             fetchProvider: value?.fetchProvider,
+            // The Billing setters write `web-deepseek-api.searchBilling`, so the
+            // A5 zero-mutation observation must watch THAT namespace's revision
+            // (the `web` revision only tracks provider changes).
             revision: descriptor?.revision,
+            apiRevision: apiDescriptor?.revision,
           })
         }
         const webRequestTimer = setInterval(() => {
