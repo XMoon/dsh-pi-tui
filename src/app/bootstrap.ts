@@ -2421,6 +2421,9 @@ export function applyRunnerWithRuntime(
       // M5-W PR-C: the mounted native `/web` presenter (absent on PiTui and on
       // a TSP pane that did not negotiate its kinds).
       webPresentation: () => surface.webPresentation,
+      // PO-5E: the mounted native `/acp` presenter, read through the SAME live
+      // surface getter.
+      acpPresentation: () => surface.acpPresentation,
               sessionBrowserPresentation: () => surface.sessionBrowserPresentation,
       presetPresentation: () => surface.presetPresentation,
       // PR3-A: registration/refresh failures are background-reachable under a
@@ -2545,6 +2548,7 @@ export function applyRunnerWithRuntime(
         tspCommandPickerCapabilities: () => ({
           modelPicker: surface.modelPresentation !== undefined,
           presetPicker: surface.presetPresentation !== undefined,
+          acpPicker: surface.acpPresentation !== undefined,
           sessionBrowser: surface.sessionBrowserPresentation !== undefined,
           queueManager: surface.queuePresentationAvailable(),
           taskCenter: surface.display.supportsTaskCenter,
@@ -3394,6 +3398,12 @@ export function applyRunnerWithRuntime(
       get supportsTuiBuiltinUi() { return !tspRendererActive },
       supportsModelPickerUi: () => surface.modelPresentation !== undefined,
       supportsPresetPickerUi: () => surface.presetPresentation !== undefined,
+      // PO-5E: the native `/acp` presenter, present only where the mounted TUI
+      // renderer negotiated its kinds (a PiTui Direct mount has no TSP overlay,
+      // so it never reports it). On the Direct backend the registered handler
+      // still refuses the Split-only operation explicitly; an unnegotiated TSP
+      // pane refuses before the handler.
+      supportsAcpPickerUi: () => surface.acpPresentation !== undefined,
        supportsSessionBrowserUi: () => surface.sessionBrowserPresentation !== undefined,
       // B3-A3: the ONE Task Center capability of the CURRENTLY mounted display
       // seam (PiTui = true, TSP = its negotiated kinds). Read live at the

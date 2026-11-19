@@ -168,6 +168,8 @@ ACP v1 is an optional **Host-owned Unix socket** endpoint for local clients runn
 
 **Enable in TUI Settings.** Open `/settings → General → Start ACP automatically` and save the enabled preference to start ACP automatically on the **next Host cold boot**. To enable the ACP listener on the **currently running Host**, open `/settings → Tools → ACP Server` and switch it on. These controls are independent: saving the startup preference does not toggle the running listener, and a runtime toggle does not change the next-start preference. ACP is off by default.
 
+In a Split Client you can also type `/acp` to see the live listener state and enable or disable it immediately: it needs no existing Session and creates none, never changes the next-start preference and opens no browser. The Direct backend has no such runtime control (it answers an explicit refusal); headless endpoint discovery uses `daemon status` below.
+
 **Headless (no TUI required).** In the installed `pi-tui` Profile's **user** `cordis.patch.yml` (normally `<DSH_HOME>/profiles/pi-tui/cordis.patch.yml`), add this row or update the existing row with the same `id`. Keep other entries intact and do not edit the patch bundled inside the npm package:
 
 ```yaml
@@ -183,7 +185,7 @@ dsh --profile pi-tui daemon start      # if no Host is running
 dsh --profile pi-tui daemon restart    # if the Host runs and the preference changed
 ```
 
-The basic daemon does not need `daemon install`; `restart` interrupts in-flight Turns/Jobs. `host=ready` from `daemon status` **does not prove ACP is listening**. Verify a real socket connection and successful ACP `initialize`; inspect `dsh --profile pi-tui daemon logs --lines 200` on failure.
+The basic daemon does not need `daemon install`; `restart` interrupts in-flight Turns/Jobs. `daemon status` reports the authenticated Host's listener as `acp=enabled|disabled|unavailable`, and prints `acp-socket` only when `acp=enabled`. `host=ready` **does not by itself prove ACP is listening**, and `acp=unavailable` means the state could not be proven (for example, no Host, a transition in flight or a failed read) — never treat it as disabled. Still verify a real socket connection and successful ACP `initialize`; inspect `dsh --profile pi-tui daemon logs --lines 200` on failure.
 
 **Endpoint discovery.** `scopeId` is SHA256 of `dsh-pi-tui/local-scope/1`, decimal UID and Profile `realpath`, separated by NUL bytes. Linux uses `<DSH_HOME>/run/dsh-pi-tui/<scopeId>/acp.sock`; macOS uses `/private/tmp/dpt-<uid>-<first 40 hex characters of scopeId>/acp.sock`. The socket has mode `0600` and newly created private directories are `0700`.
 

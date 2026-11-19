@@ -28,6 +28,7 @@
 import { closeSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs'
 import { connect, createServer } from 'node:net'
 import { join } from 'node:path'
+import { spawnSync } from 'node:child_process'
 
 import { SplitSmokeAssertionError } from '../../lib/split-smoke-diagnostics.mjs'
 import { createSplitSmokeProfile } from '../../lib/split-smoke-profile.mjs'
@@ -161,7 +162,7 @@ function seatName(scopeId) {
  * Every returned boolean is a fact gathered from a REAL process/socket.
  */
 export async function runAcpPo1bOptInControl(context) {
-  const { EntryProcess, SurfaceEntryProcess, entries, base, dshHome, workDir, trace } = context
+  const { EntryProcess, SurfaceEntryProcess, entries, base, dshHome, workDir, trace, installation } = context
   const hosts = []
   const clients = []
   const peers = []
@@ -171,6 +172,30 @@ export async function runAcpPo1bOptInControl(context) {
 
   const scopeDirOf = scopeId => join(dshHome, 'run', 'dsh-pi-tui', scopeId)
   const socketPathFor = scopeId => join(scopeDirOf(scopeId), 'acp.sock')
+  /** One REAL public management command against THIS isolated installation. */
+  const runDsh = args => {
+    const [executable, ...prefix] = installation.dshInvocation
+    const result = spawnSync(executable, [...prefix, '--profile', 'pi-tui', ...args], {
+      cwd: installation.profileDir,
+      env: installation.env,
+      encoding: 'utf8',
+      timeout: 120_000,
+      shell: false,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    return { code: result.status, stdout: result.stdout ?? '', stderr: result.stderr ?? '' }
+  }
+  /** PO-5D: one real `daemon status` observation, folded into its key=value fields. */
+  const daemonStatus = label => {
+    const result = runDsh(['daemon', 'status'])
+    assert(result.code === 0, `${label}: daemon status exited ${result.code}: ${result.stderr.slice(-500)}`)
+    const fields = {}
+    for (const line of result.stdout.split('\n')) {
+      const at = line.indexOf('=')
+      if (at > 0) fields[line.slice(0, at)] = line.slice(at + 1)
+    }
+    return fields
+  }
 
   const startHost = label => {
     const host = new EntryProcess('host', entries.host, { ...base })
@@ -389,6 +414,12 @@ export async function runAcpPo1bOptInControl(context) {
     // ── b) RUNTIME TOGGLE through the private Peer control ───────────────────
     const peer = await startPeer('acp-po1b runtime peer')
     assertAccess(await acpAccess(peer, 'b getStatus', undefined), 'disabled', 'b getStatus')
+    // PO-5D: the REAL public `daemon status` observes the same live controller.
+    const statusDisabledBefore = daemonStatus('b status disabled')
+    assert(statusDisabledBefore.acp === 'disabled',
+      `b: a disabled listener must report acp=disabled: ${JSON.stringify(statusDisabledBefore)}`)
+    assert(statusDisabledBefore['acp-socket'] === undefined,
+      'b: a disabled listener must print no endpoint')
     assertAccess(await acpAccess(peer, 'b enable', true), 'enabled', 'b enable')
     const socketPath = socketPathFor(scopeId)
     assert(exists(socketPath), 'b: enabling the local ACP access must bind acp.sock')
@@ -401,6 +432,20 @@ export async function runAcpPo1bOptInControl(context) {
     const init = await raw.initialize(1)
     assert(init?.result?.protocolVersion === 1, 'b: the runtime-enabled socket must answer a raw ACP initialize')
     assert(init?.result?.agentInfo?.name === 'dsh-pi-tui', 'b: initialize must name dsh-pi-tui')
+    const statusEnabled = daemonStatus('b status enabled')
+    assert(statusEnabled.acp === 'enabled',
+      `b: an enabled, serving listener must report acp=enabled: ${JSON.stringify(statusEnabled)}`)
+    assert(statusEnabled['acp-socket'] === socketPath,
+      `b: daemon status must print the live logical endpoint ${socketPath}: ${JSON.stringify(statusEnabled)}`)
+    // D4: the read-only route sits behind the official Owner admission. An
+    // unauthenticated GET is refused AND carries no ACP state body.
+    const instanceRecord = JSON.parse(readFileSync(join(scopeDirOf(scopeId), 'instance.json'), 'utf8'))
+    const refused = await fetch(`${instanceRecord.origin}/api/pi-tui.acp-status`, { redirect: 'manual' })
+    const refusedBody = await refused.text()
+    assert(refused.status === 401 || refused.status === 403,
+      `b: an unauthenticated ACP status GET must be refused, got HTTP ${String(refused.status)}`)
+    assert(!refusedBody.includes('"state"'),
+      'b: an unauthenticated response must not carry the ACP status body')
 
     const identityBefore = await hostStatus(host1)
     const hostPidBefore = identityBefore.pid
@@ -409,6 +454,13 @@ export async function runAcpPo1bOptInControl(context) {
     assertAccess(await acpAccess(peer, 'b disable', false), 'disabled', 'b disable')
     await raw.closed
     await waitUntil(() => !exists(socketPath), 'b: acp.sock to retire after a runtime disable')
+    const statusDisabledAfter = daemonStatus('b status disabled after toggle')
+    assert(statusDisabledAfter.acp === 'disabled',
+      `b: a disabled listener must report acp=disabled: ${JSON.stringify(statusDisabledAfter)}`)
+    assert(statusDisabledAfter['acp-socket'] === undefined,
+      'b: the retired listener must print no endpoint')
+    assert(statusDisabledAfter.pid === statusEnabled.pid && statusDisabledAfter.instance === statusEnabled.instance,
+      'b: the SAME Host PID/instance served both daemon status reads across the runtime toggle')
     const afterDisable = await hostStatus(host1)
     assert(afterDisable.pid === hostPidBefore && afterDisable.localHost.instanceId === instanceBefore,
       'b: disabling the listener must not replace the Host')
@@ -427,6 +479,35 @@ export async function runAcpPo1bOptInControl(context) {
     const tui2Ready = await tui2.waitFor(record => record.m4a0 === 'ready', 'acp-po1b re-enable TUI ready', 180_000)
     assert(tui2Ready.surfaceMounted === true && tui2Ready.transport === 'connected',
       'b: after re-enabling ACP the original Split TUI must still mount its surface')
+    // PO-5E: the public `/acp` quick control on this REAL Split Client. ONE
+    // explicit menu action must reach the SAME Host controller, then the menu
+    // presents the authoritative re-read. Closing the menu afterwards retires
+    // the presentation only: the accepted Host mutation is never undone.
+    tui2.send('/acp\r')
+    await tui2.waitForScreen('Status: enabled', 'acp command: enabled menu', 60_000)
+    await tui2.waitForScreen('Disable ACP', 'acp command: disable action', 60_000)
+    tui2.send('\x1b[B') // the status fact row -> the ONE admitted action
+    await tui2.waitForScreen("Stop this Host's local ACP v1 listener", 'acp command: disable action selected', 30_000)
+    tui2.send('\r')
+    await tui2.waitForScreen('Status: disabled', 'acp command: authoritative re-read', 60_000)
+    await waitUntil(() => !exists(socketPath), 'b: the /acp disable retires acp.sock')
+    const afterAcpMenu = await hostStatus(host1)
+    assert(afterAcpMenu.pid === hostPidBefore && afterAcpMenu.localHost.instanceId === instanceBefore,
+      'b: the /acp menu must control the SAME Host')
+    tui2.send('\x1b') // close only: never undo the accepted disable
+    await sleep(300)
+    assert(!exists(socketPath), 'b: closing the /acp menu must never undo the accepted Host write')
+    trace('acp-po1b/slash-command', {
+      enabledMenu: true,
+      disabledViaMenu: true,
+      authoritativeReread: true,
+      sameHost: true,
+      closeDoesNotUndo: true,
+    })
+    // Leave the listener ENABLED for the preference scenario (it was enabled
+    // when this block started).
+    assertAccess(await acpAccess(peer, 'b restore enable after /acp', true), 'enabled', 'b restore enable')
+    await rawInitialize(scopeId, 3)
     tui2.send('/exit\r')
     try { await tui2.waitForExit(60_000) } catch { await tui2.dispose() }
     trace('acp-po1b/runtime-toggle', {
@@ -714,6 +795,7 @@ export async function runAcpPo1bOptInControl(context) {
       autoStartFalseNoSocket: true,
       recomposeKeepsSameHost,
       originalSplitClientIntact: true,
+      slashAcpControl: true,
     }
   } catch (error) {
     originalError = error

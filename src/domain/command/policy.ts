@@ -37,6 +37,10 @@ export const SESSIONLESS_COMMANDS = new Set([
   // Host feature, not a conversation), so a first-boot `/web` never creates a
   // Session and never submits a prompt.
   'web',
+  // `/acp` (PO-5E) is the SAME kind of Split-Client quick control for the local
+  // ACP v1 listener: it must answer before any Session exists and never creates
+  // one just to toggle a Host feature.
+  'acp',
   // `/quit` is `/exit`'s canonical command alias (the runner registers
   // /exit → /quit); before a session exists both must exit WITHOUT creating
   // one — the alias must not silently drift out of the sessionless set
@@ -136,6 +140,10 @@ export const LOCAL_COMMANDS = new Set([
   // `/web` (M5-W PR-C) is a Client-local control entry: it is reserved for this
   // surface (no plugin may shadow it) and it is never a Host/model line.
   'web',
+  // `/acp` (PO-5E) is the same Client-local control entry for the local ACP
+  // listener. It performs an explicit Host mutation, so it is NOT in
+  // READ_ONLY_LOCAL_COMMANDS.
+  'acp',
   // Image UX PR2: `/view-image` is a Client-local transcript presentation
   // command (mounted window → PiTui picker/Viewer), never a Host/model line.
   'view-image',

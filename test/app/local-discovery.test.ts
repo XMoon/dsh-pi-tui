@@ -68,6 +68,7 @@ import {
   type LinuxLocalInstanceRecord,
   type LocalInstanceRecord,
 } from '../../src/app/remote-process/local-discovery.ts'
+import { observeAuthenticatedLocalAcpStatus } from '../../src/app/remote-process/local-acp-status.ts'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
 
@@ -1019,6 +1020,83 @@ test('a self-consistent Host build is admitted while a registry/identity build d
       authenticateLocalHost(hostRecord, scope),
       (error: unknown) => error instanceof LocalScopeError && error.code === 'HOST_IDENTITY_MISMATCH',
     )
+  } finally {
+    await new Promise<void>(resolve => server.close(() => resolve()))
+    cleanup(value.root)
+  }
+})
+
+test('the authenticated ACP status observation accepts only this Host instance and fails closed', async t => {
+  const value = fixture(t)
+  const scope = scopeFor(value)
+  const record = linuxRecordFor(scope)
+  let instanceId = record.instanceId
+  let status: unknown = { state: 'enabled' }
+  let reject = false
+  const server = createHttpServer((request, response) => {
+    const url = new URL(request.url ?? '/', 'http://127.0.0.1')
+    if (url.pathname !== '/api/pi-tui.acp-status') {
+      response.writeHead(404)
+      response.end()
+      return
+    }
+    if (reject || request.headers.cookie !== 'dsh_session=fixture-cookie') {
+      response.writeHead(401, { 'cache-control': 'no-store' })
+      response.end('unauthorized')
+      return
+    }
+    response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+    response.end(`${JSON.stringify({ schema: 1, instanceId, status })}\n`)
+  })
+  try {
+    await new Promise<void>((resolve, rejectListen) => {
+      server.once('error', rejectListen)
+      server.listen(0, '127.0.0.1', () => resolve())
+    })
+    const origin = `http://127.0.0.1:${String((server.address() as AddressInfo).port)}`
+    const hostRecord = { ...record, origin }
+    const verified = { record: hostRecord, cookie: 'dsh_session=fixture-cookie', identity: hostRecord }
+    assert.deepEqual(await observeAuthenticatedLocalAcpStatus(verified), { state: 'enabled' },
+      'the same-instance authenticated read is the live listener fact')
+
+    instanceId = randomUUID()
+    assert.equal(await observeAuthenticatedLocalAcpStatus(verified), undefined,
+      'a status from another Host instance is never attributed to this observation')
+
+    instanceId = record.instanceId
+    reject = true
+    assert.equal(await observeAuthenticatedLocalAcpStatus(verified), undefined,
+      'a refused authenticated route is not a guessed disabled state')
+  } finally {
+    await new Promise<void>(resolve => server.close(() => resolve()))
+    cleanup(value.root)
+  }
+})
+
+test('a status body that fails after the headers is an unprovable undefined, never a rejection', async t => {
+  const value = fixture(t)
+  const scope = scopeFor(value)
+  const record = linuxRecordFor(scope)
+  const server = createHttpServer((_request, response) => {
+    // Valid 200 + the exact media/cache headers, then a truncated body and a
+    // destroyed socket: the read fails mid-stream AFTER the headers.
+    response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+    response.write('{"schema":1,"instanceId":"')
+    response.destroy()
+  })
+  try {
+    await new Promise<void>((resolve, rejectListen) => {
+      server.once('error', rejectListen)
+      server.listen(0, '127.0.0.1', () => resolve())
+    })
+    const origin = `http://127.0.0.1:${String((server.address() as AddressInfo).port)}`
+    const hostRecord = { ...record, origin }
+    const verified = { record: hostRecord, cookie: 'dsh_session=fixture-cookie', identity: hostRecord }
+    // The observer MUST resolve `undefined` (the CLI's `acp=unavailable`
+    // classification) instead of rejecting into the management result and
+    // replacing the original status/stderr/exit code.
+    await assert.doesNotReject(observeAuthenticatedLocalAcpStatus(verified))
+    assert.equal(await observeAuthenticatedLocalAcpStatus(verified), undefined)
   } finally {
     await new Promise<void>(resolve => server.close(() => resolve()))
     cleanup(value.root)

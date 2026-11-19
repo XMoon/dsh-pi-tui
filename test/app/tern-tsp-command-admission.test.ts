@@ -14,7 +14,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { classifyCommandLine, type CommandLineClassification } from '../../src/domain/command/policy.ts'
-import { TSP_B2A_RESULT_NOTICE_COMMANDS, TSP_SUPPORTED_TUI_BUILTINS, titleRefusalNoticeOwner, titleSuccessNoticeVisible, tspBuiltinAvailability, type TspBuiltinPickers } from '../../src/app/command/tsp-capability.ts'
+import { TSP_B2A_RESULT_NOTICE_COMMANDS, TSP_SUPPORTED_TUI_BUILTINS, titleRefusalNoticeOwner, titleSuccessNoticeVisible, tspBuiltinAvailability, tspSelectedTuiBuiltinAvailability, type TspBuiltinPickers } from '../../src/app/command/tsp-capability.ts'
 
 /** Classify one line through the REAL classifier with explicit fact wiring. */
 function classify(facts: {
@@ -50,7 +50,7 @@ test('the TSP builtin capability unconditionally admits the exit pair and the B2
       `/${name} is available on the TSP renderer`)
   }
   for (const name of [
-    'settings', 'help', 'status', 'tasks', 'model', 'preset', 'footer', 'focus', 'display',
+    'settings', 'help', 'status', 'tasks', 'model', 'preset', 'acp', 'footer', 'focus', 'display',
     'export', 'transcript', 'rewind', 'plugins', 'keybindings', 'login',
   ]) {
     assert.deepEqual(bare(classify({ tuiCommand: true }), name), { kind: 'unsupported' },
@@ -109,6 +109,35 @@ test('native Session Browser commands require the mounted capability', () => {
     assert.deepEqual(bare(tui, name), { kind: 'unsupported' }, `/${name} is refused without the Browser`)
     assert.deepEqual(bare(tui, name, { sessionBrowser: true }), { kind: 'available' },
       `/${name} is admitted only when the Browser presenter is installed`)
+  }
+})
+
+test('the native ACP quick control requires its mounted native picker', () => {
+  const tui = classify({ tuiCommand: true })
+  assert.deepEqual(bare(tui, 'acp'), { kind: 'unsupported' },
+    '/acp is refused before the handler on a pane without its native presenter')
+  assert.deepEqual(bare(tui, 'acp', { acpPicker: true }), { kind: 'available' },
+    '/acp is admitted only when the native listener picker is mounted')
+  // No sibling presenter is an ACP substitute; the ACP capability admits ONLY
+  // /acp; and the family decision is unchanged.
+  for (const substitute of [
+    { modelPicker: true }, { presetPicker: true }, { sessionBrowser: true }, { taskCenter: true }, { queueManager: true },
+  ]) {
+    assert.deepEqual(bare(tui, 'acp', substitute), { kind: 'unsupported' },
+      'a sibling presenter is never an ACP substitute')
+  }
+  assert.deepEqual(bare(tui, 'model', { acpPicker: true }), { kind: 'unsupported' },
+    'the ACP capability never admits another native picker command')
+  assert.deepEqual(bare(tui, 'preset', { acpPicker: true }), { kind: 'unsupported' })
+  // The SAME decision function screens slash COMPLETION candidates (a candidate
+  // carries no argument, and /acp never depends on one).
+  assert.deepEqual(tspSelectedTuiBuiltinAvailability('acp', { acpPicker: true }, ''), { kind: 'available' })
+  assert.deepEqual(tspSelectedTuiBuiltinAvailability('acp', {}, ''), { kind: 'unsupported' })
+  const hostClaimed = classify({ hostClaim: { claimed: true, attachments: false }, tuiCommand: true })
+  assert.deepEqual(bare(hostClaimed, 'acp', { acpPicker: true }), { kind: 'not-a-tui-builtin' })
+  for (const facts of [{ extensionCommand: true }, { skillInvocation: true }, {}]) {
+    assert.deepEqual(bare(classify(facts), 'acp', { acpPicker: true }), { kind: 'not-a-tui-builtin' },
+      'the capability never captures a non-TUI family')
   }
 })
 
