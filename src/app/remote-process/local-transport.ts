@@ -525,11 +525,79 @@ export function operatorRecoveryMayRetry(
   return operatorRecoveryDecision(input, init, origin).retry
 }
 
+/**
+ * Whether this request signal is aborted right now. A function call keeps the
+ * check honest across an `await`: narrowing a property read would make the
+ * compiler treat a later abort as unreachable.
+ */
+function isSignalAborted(signal: AbortSignal | undefined): boolean {
+  return signal?.aborted === true
+}
+
 /** The truthful cancellation reason of one request signal. */
-export function abortReasonOf(signal: AbortSignal, fallback: unknown): Error {
-  if (signal.reason instanceof Error) return signal.reason
+export function abortReasonOf(signal: AbortSignal | undefined, fallback: unknown): Error {
+  if (signal?.reason instanceof Error) return signal.reason
   if (fallback instanceof Error) return fallback
   return new Error('local transport: request aborted')
+}
+
+/**
+ * The ONE auth-recovery wrapper for the official unary carrier and every
+ * borrowed authenticated route.
+ *
+ * Two DIFFERENT questions are kept apart:
+ *
+ * 1. Must the connection be rebuilt? YES for every 401 except a forwarded event
+ *    RESULT, whose payload belongs to the stream and Peer that received the
+ *    invocation — there the Gateway's own generation abort + Host re-delivery
+ *    is the only correct recovery. A dead operator affects EVERY route, so a
+ *    non-replayable request (a stream/FormData upload) still triggers the
+ *    rebuild even though it cannot be re-sent; otherwise that upload would
+ *    leave every later request on the expired operator.
+ * 2. May THIS payload be re-sent? Only a replayable body, only once, and only
+ *    after the re-admitted generation is ready. A 401 is rejected before Host
+ *    dispatch, so this retry cannot duplicate a write.
+ *
+ * A caller cancellation is ALWAYS reported as cancellation, never as an HTTP
+ * auth failure: the official rpc caller throws on `!response.ok` before it
+ * re-checks the abort signal, so a 401 returned to a cancelled caller would
+ * surface as an authentication error. A genuine re-admit failure still returns
+ * the original 401.
+ */
+export async function sendWithOperatorRecovery(
+  deps: OperatorRecoveryDeps,
+  input: string | URL,
+  init?: RequestInit,
+): Promise<Response> {
+  const signal = init?.signal ?? undefined
+  const response = await deps.send(input, init)
+  if (response.status !== 401) return response
+  // Cancelled while the HTTP answer was settling: the 401 is not this caller's
+  // answer to act on (and it must not be mistaken for auth failure). No
+  // recovery is started on a cancelled caller's behalf either.
+  if (isSignalAborted(signal)) throw abortReasonOf(signal, undefined)
+  // Read the flags before awaiting: they describe THIS 401 and this payload.
+  const { rebuild, retry } = operatorRecoveryDecision(input, init, deps.origin)
+  if (!rebuild) return response
+  try {
+    await settleWithOwnSignal(deps.recoverOperator(signal), signal)
+  } catch (error) {
+    if (isSignalAborted(signal)) throw abortReasonOf(signal, error)
+    // A recovery that cannot re-admit leaves the original 401 with the caller:
+    // the authentication failure is never hidden.
+    return response
+  }
+  // A request cancelled while the re-admit was running is not re-sent.
+  if (isSignalAborted(signal)) throw abortReasonOf(signal, undefined)
+  if (!retry) return response
+  return await deps.send(input, init)
+}
+
+/** What the recovery wrapper needs beyond the request itself. */
+export interface OperatorRecoveryDeps {
+  readonly send: (input: string | URL, init?: RequestInit) => Promise<Response>
+  readonly recoverOperator: (signal: AbortSignal | undefined) => Promise<void>
+  readonly origin: string
 }
 
 /** The two independent decisions one 401 requires. */
@@ -831,34 +899,24 @@ export async function installLocalTransport(
      *    only after the re-admitted generation is ready. A 401 is rejected
      *    before Host dispatch, so this retry cannot duplicate a write.
      */
-    const withOperatorRecovery = (send: (input: string | URL, init?: RequestInit) => Promise<Response>) =>
-      async (input: string | URL, init?: RequestInit): Promise<Response> => {
-        const response = await send(input, init)
-        if (response.status !== 401) return response
-        const decision = operatorRecoveryDecision(input, init, origin)
-        if (!decision.rebuild) return response
-        try {
-          await settleWithOwnSignal(recoverOperator(init?.signal ?? undefined), init?.signal ?? undefined)
-        } catch (error) {
-          // A CALLER cancellation is reported as cancellation, never as an HTTP
-          // auth failure (the official rpc caller throws on !ok before it
-          // re-checks the signal, so a fabricated 401 would surface as auth).
-          if (init?.signal?.aborted === true) throw abortReasonOf(init.signal, error)
-          // A recovery that cannot re-admit leaves the original 401 with the
-          // caller: the authentication failure is never hidden.
-          return response
-        }
-        // A request cancelled while the re-admit was running is not re-sent.
-        if (init?.signal?.aborted === true) throw abortReasonOf(init.signal, undefined)
-        if (!decision.retry) return response
-        return await send(input, init)
-      }
-    sendAuthenticated = withOperatorRecovery(fetchAuthenticated)
+    sendAuthenticated = (input, init) => sendWithOperatorRecovery(
+      { send: fetchAuthenticated, recoverOperator, origin },
+      input,
+      init,
+    )
     connectionFiber = context.plugin(connectionContext => {
       modules.connection.installConnection(connectionContext, {
         interactions: 'answer',
         transport: {
-          fetch: withOperatorRecovery(cookieFetch(origin, () => cookie, includeCookie, options.qualificationPromptAckDropped)),
+          fetch: (input, init) => sendWithOperatorRecovery(
+            {
+              send: cookieFetch(origin, () => cookie, includeCookie, options.qualificationPromptAckDropped),
+              recoverOperator,
+              origin,
+            },
+            input,
+            init,
+          ),
           createWebSocket: url => {
             const socket = createWebSocket(url)
             options.qualificationWebSocketObserver?.(url, socket)

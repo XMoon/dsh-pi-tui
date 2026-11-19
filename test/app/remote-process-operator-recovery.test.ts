@@ -14,6 +14,7 @@ import test from 'node:test'
 import {
   abortReasonOf,
   operatorRecoveryDecision,
+  sendWithOperatorRecovery,
   settleWithOwnSignal,
 } from '../../src/app/remote-process/local-transport.ts'
 
@@ -94,4 +95,96 @@ test('the cancellation reason is the signal reason, with a real fallback', () =>
   // The fallback is for a signal that carries no Error reason at all.
   const fallback = new Error('re-admit failed')
   assert.equal(abortReasonOf({ reason: undefined } as unknown as AbortSignal, fallback), fallback)
+})
+
+/** One fake carrier: answer 401 first, then the scripted follow-up. */
+function fakeCarrier(answers: readonly Response[]): {
+  readonly calls: Array<{ readonly input: string; readonly init: RequestInit | undefined }>
+  readonly send: (input: string | URL, init?: RequestInit) => Promise<Response>
+} {
+  const calls: Array<{ readonly input: string; readonly init: RequestInit | undefined }> = []
+  return {
+    calls,
+    send: async (input, init) => {
+      calls.push({ input: String(input), init })
+      const answer = answers[Math.min(calls.length - 1, answers.length - 1)]
+      return answer
+    },
+  }
+}
+
+const unauthorized = (): Response => new Response('unauthorized', { status: 401 })
+const ok = (): Response => new Response('ok', { status: 200 })
+
+test('a 401 that arrives after the caller cancelled is reported as cancellation', async () => {
+  // The signal aborts while the HTTP promise is settling: the official rpc
+  // caller throws on !ok before it re-checks the signal, so returning the 401
+  // here would surface as an auth failure. No recovery is started either.
+  const controller = new AbortController()
+  const reason = new Error('caller cancelled while the 401 was settling')
+  const recoverCalls: string[] = []
+  const deps = {
+    send: async () => { controller.abort(reason); return unauthorized() },
+    recoverOperator: async () => { recoverCalls.push('recover') },
+    origin: ORIGIN,
+  }
+  await assert.rejects(
+    sendWithOperatorRecovery(deps, `${ORIGIN}/api/session/list`, {
+      method: 'POST',
+      body: '{}',
+      signal: controller.signal,
+    }),
+    error => error === reason,
+  )
+  assert.deepEqual(recoverCalls, [])
+})
+
+test('a genuine re-admit failure still returns the original 401', async () => {
+  const carrier = fakeCarrier([unauthorized()])
+  const response = await sendWithOperatorRecovery({
+    send: carrier.send,
+    recoverOperator: async () => { throw new Error('generation never became ready') },
+    origin: ORIGIN,
+  }, `${ORIGIN}/api/session/list`, { method: 'POST', body: '{}' })
+  assert.equal(response.status, 401)
+  assert.equal(carrier.calls.length, 1)
+})
+
+test('a replayable 401 rebuilds and is re-sent exactly once', async () => {
+  const carrier = fakeCarrier([unauthorized(), ok()])
+  const recoverCalls: string[] = []
+  const response = await sendWithOperatorRecovery({
+    send: carrier.send,
+    recoverOperator: async () => { recoverCalls.push('recover') },
+    origin: ORIGIN,
+  }, `${ORIGIN}/api/session/list`, { method: 'POST', body: '{}' })
+  assert.equal(response.status, 200)
+  assert.equal(carrier.calls.length, 2)
+  assert.deepEqual(recoverCalls, ['recover'])
+})
+
+test('a non-replayable 401 rebuilds the connection but is not re-sent', async () => {
+  const carrier = fakeCarrier([unauthorized()])
+  const recoverCalls: string[] = []
+  const response = await sendWithOperatorRecovery({
+    send: carrier.send,
+    recoverOperator: async () => { recoverCalls.push('recover') },
+    origin: ORIGIN,
+  }, `${ORIGIN}/api/session/uploadFileBinary`, { method: 'POST', body: new FormData() })
+  assert.equal(response.status, 401)
+  assert.equal(carrier.calls.length, 1)
+  assert.deepEqual(recoverCalls, ['recover'])
+})
+
+test('a forwarded event result neither rebuilds nor is re-sent', async () => {
+  const carrier = fakeCarrier([unauthorized()])
+  const recoverCalls: string[] = []
+  const response = await sendWithOperatorRecovery({
+    send: carrier.send,
+    recoverOperator: async () => { recoverCalls.push('recover') },
+    origin: ORIGIN,
+  }, `${ORIGIN}/api/$events/result`, { method: 'POST', body: '{}' })
+  assert.equal(response.status, 401)
+  assert.equal(carrier.calls.length, 1)
+  assert.deepEqual(recoverCalls, [])
 })
