@@ -56,6 +56,7 @@ import {
   waitForHostSessionEventAfter,
   waitForHostSessionHeader,
 } from '../../lib/split-smoke-sessions.mjs'
+import { runOwnedDetachedDriver } from '../../lib/owned-browser-driver.mjs'
 import {
   PR_A_WEB_ROWS,
   browserDriverExitBounded,
@@ -785,25 +786,34 @@ export const runWebProductQualification = async context => {
     const settingsDriverPath = join(SCRIPT_DIR, 'fixtures', 'm6-web-settings-browser.mjs')
     assert(existsSync(settingsDriverPath), 'PR-A the Web settings persistence driver is missing')
     const settingsResultPath = join(browserRoot, `web-settings-${String(++browserRun)}.json`)
-    const settingsChild = spawn(process.execPath, [settingsDriverPath, settingsResultPath], {
-      cwd: workDir,
-      env: {
-        ...driverEnv,
-        M6_DSH_HOME: dshHome,
-        M6_PROFILE_PATCH: join(dshHome, 'profiles', base.profile, 'cordis.patch.yml'),
-        M6_PLAYWRIGHT_ROOT: playwrightRoot,
-      },
-      stdio: ['ignore', 'pipe', 'pipe'],
-      detached: true,
-    })
+    /** Own the detached driver + Chromium group on EVERY exit path. */
     let settingsOut = ''
     let settingsErr = ''
-    settingsChild.stdout.setEncoding('utf8')
-    settingsChild.stdout.on('data', chunk => { settingsOut = `${settingsOut}${chunk}`.slice(-8_192) })
-    settingsChild.stderr.setEncoding('utf8')
-    settingsChild.stderr.on('data', chunk => { settingsErr = `${settingsErr}${chunk}`.slice(-8_192) })
-    const settingsExit = new Promise(resolveExit => settingsChild.on('close', (code, signal) => resolveExit({ code, signal })))
-    const settingsFinished = await browserDriverExitBounded(settingsExit, 300_000, 'PR_A_WEB_SETTINGS_TIMEOUT')
+    const settingsRun = await runOwnedDetachedDriver({
+      command: process.execPath,
+      args: [settingsDriverPath, settingsResultPath],
+      options: {
+        cwd: workDir,
+        env: {
+          ...driverEnv,
+          M6_DSH_HOME: dshHome,
+          M6_PROFILE_PATCH: join(dshHome, 'profiles', base.profile, 'cordis.patch.yml'),
+          M6_PLAYWRIGHT_ROOT: playwrightRoot,
+        },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      },
+      timeoutMs: 300_000,
+      cleanupMs: 15_000,
+      bounded: browserDriverExitBounded,
+      tag: 'PR_A_WEB_SETTINGS',
+      onSpawn(child) {
+        child.stdout.setEncoding('utf8')
+        child.stdout.on('data', chunk => { settingsOut = `${settingsOut}${chunk}`.slice(-8_192) })
+        child.stderr.setEncoding('utf8')
+        child.stderr.on('data', chunk => { settingsErr = `${settingsErr}${chunk}`.slice(-8_192) })
+      },
+    })
+    const settingsFinished = settingsRun.finished
     const settingsResult = existsSync(settingsResultPath) ? readJson(settingsResultPath) : {}
     assert(settingsFinished.code === 0,
       `PR-A the real Browser settings witness failed (exit ${JSON.stringify(settingsFinished.code)}/${String(settingsFinished.signal)}): ${redactWebQualificationText(`${settingsErr}${settingsOut}${String(settingsResult.error ?? '')}`)}`)
