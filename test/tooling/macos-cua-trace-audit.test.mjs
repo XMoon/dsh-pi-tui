@@ -1,0 +1,382 @@
+/**
+ * Discrimination replay for the MAC09-08 controlled-trace audit.
+ *
+ * The native lane can only observe whatever a model happens to emit, and until
+ * rc.5 every real trace was a SINGLE segment — so the cross-segment, ordering
+ * and result-identity rules added for RFL-014 were never exercised by anything
+ * that would fail if they were wrong. This test replays the REAL audit function
+ * (`auditControlledTrace`, imported from the lane itself, not a copy) against
+ * synthetic traces: three positive shapes that must be admitted, and four
+ * negative shapes that must be refused for the exact reason they are unsafe.
+ *
+ * It touches no OS, no Host and no tty: the two async facts the audit needs are
+ * injected as plain functions.
+ *
+ * MUTATION CONTROLS actually run against this file (each rule reverted in turn):
+ *   - drop the show-before-typeText ordering      -> the "typed BEFORE" case fails
+ *   - drop the `trace[0] === 'getApp'` guard      -> the prefix case fails
+ *   - drop the owned-window id check on `show`    -> the foreign-window case fails
+ *   - take the handle from the FIRST getApp       -> the recovered-retry case fails
+ * One rule is NOT independently observable and is therefore not claimed as
+ * discriminating: binding the qualifying result to the final segment's own
+ * typeText. The single-typeText rule already forces the first typeText to BE the
+ * final one, so that binding is defence-in-depth, not the thing that catches a
+ * failure. No test was manufactured to make it look otherwise.
+ *
+ * @module macos-cua-trace-audit.test
+ */
+
+import assert from 'node:assert/strict'
+import test from 'node:test'
+
+import { auditControlledTrace, classifyDisconnectSettlements } from '../../scripts/smoke/macos-cua-parity.mjs'
+
+const PID = 4242
+const RUN_TOKEN = 'cua-blank-abc12345'
+const MARKER = 'CUA-MARKER-TEST'
+const OWNED_WINDOW = 101
+const OTHER_WINDOW = 202
+
+/**
+ * Build one dispatch of a synthetic trace. Results are keyed by subCallId so a
+ * single trace can carry several getApp handles and several windows.
+ */
+function dispatch(method, params, options = {}) {
+  const subCallId = options.subCallId ?? `${method}-${String(options.index ?? 0)}`
+  // The production event shape: the method/params live in `arguments`, which is
+  // what dispatchArguments()/dispatchMethod() read on the real stream.
+  return { arguments: { method, params }, subCallId, result: options.result, rootCallId: options.rootCallId ?? 'root-1' }
+}
+
+function getApp(subCallId, selector = PID, appHandle = 'app-1') {
+  return dispatch('getApp', { selector: String(selector) }, { subCallId, result: { appHandle } })
+}
+
+function listWindows(subCallId, appHandle, windows) {
+  return dispatch('listWindows', { appHandle }, { subCallId, result: windows })
+}
+
+function show(subCallId, appHandle, windowId) {
+  return dispatch('show', { appHandle, windowId }, { subCallId })
+}
+
+function activate(subCallId, appHandle) {
+  return dispatch('activate', { appHandle }, { subCallId })
+}
+
+function typeText(subCallId, appHandle, text) {
+  return dispatch('typeText', { appHandle, text }, { subCallId })
+}
+
+function getState(subCallId, appHandle, options = {}) {
+  return dispatch('getState', options.windowId === undefined ? { appHandle } : { appHandle, windowId: options.windowId },
+    { subCallId, result: {
+      windowId: options.windowId ?? null,
+      focusedWindowId: options.focusedWindowId ?? null,
+      // A window-scoped read of the owned window is where the marker is expected;
+      // every other read must NOT be mistaken for that observation.
+      tree: options.tree ?? (options.windowId === OWNED_WINDOW ? `text: ${MARKER}` : 'other document'),
+    } })
+}
+
+/** The owned window plus, optionally, a foreign document of the same app. */
+function ownedWindows(extra = []) {
+  return [
+    { windowId: OWNED_WINDOW, title: `${RUN_TOKEN}.txt` },
+    { windowId: OTHER_WINDOW, title: 'notes.txt' },
+    ...extra,
+  ]
+}
+
+/** Run the real audit with injected async facts. */
+function audit(trace, options = {}) {
+  // The audit judges the WHOLE user turn: by default the trace IS that turn's
+  // dispatches, and the root id is the first dispatch's.
+  const { typeTextError, turnDispatches = trace } = options
+  return auditControlledTrace({
+    trace,
+    turnDispatches,
+    rootCallId: options.rootCallId ?? trace[0]?.rootCallId,
+    textEditPid: PID,
+    runToken: RUN_TOKEN,
+    marker: MARKER,
+    resolveJson: d => d.result,
+    resolveTypeTextResult: async d => ({ result: { isError: typeTextError !== undefined, content: [] } }),
+  })
+}
+
+async function rejection(trace, pattern, options) {
+  await assert.rejects(() => audit(trace, options), pattern)
+}
+
+// ── positive shapes that MUST be admitted ──────────────────────────────────
+
+test('a single-segment chain is admitted', async () => {
+  const admitted = await audit([
+    getApp('g1'),
+    listWindows('w1', 'app-1', ownedWindows()),
+    show('s1', 'app-1', OWNED_WINDOW),
+    activate('a1', 'app-1'),
+    getState('f1', 'app-1', { focusedWindowId: OWNED_WINDOW }),
+    typeText('t1', 'app-1', MARKER),
+    getState('e1', 'app-1', { windowId: OWNED_WINDOW, focusedWindowId: OWNED_WINDOW }),
+  ])
+  assert.equal(admitted.inputSequence.join(','), 'getApp,listWindows,show,activate,getState,typeText,getState')
+  assert.equal(admitted.segmentStarts.length, 1)
+  assert.equal(admitted.previews, 1)
+  assert.equal(admitted.controlledHandle, 'app-1')
+})
+
+test('a bounded read-only preview before the input is admitted', async () => {
+  const admitted = await audit([
+    getApp('g1'),
+    listWindows('w1', 'app-1', ownedWindows()),
+    getState('p1', 'app-1', { focusedWindowId: OTHER_WINDOW }),
+    show('s1', 'app-1', OWNED_WINDOW),
+    activate('a1', 'app-1'),
+    getState('f1', 'app-1', { focusedWindowId: OWNED_WINDOW }),
+    typeText('t1', 'app-1', MARKER),
+    getState('e1', 'app-1', { windowId: OWNED_WINDOW, focusedWindowId: OWNED_WINDOW }),
+  ])
+  assert.equal(admitted.previews, 2)
+  assert.equal(admitted.attemptStateDispatch.subCallId, 'e1',
+    'the observation is the LAST getState, never the preview')
+})
+
+test('a recovered retry whose final getApp returns a NEW handle is admitted', async () => {
+  const admitted = await audit([
+    // Earlier attempt: read-only, its own handle and its own owned window.
+    getApp('g1', PID, 'app-1'),
+    listWindows('w1', 'app-1', ownedWindows()),
+    show('s1', 'app-1', OWNED_WINDOW),
+    getState('e1', 'app-1'),
+    // Final attempt: a NEW handle, and the whole chain follows it.
+    getApp('g2', PID, 'app-2'),
+    listWindows('w2', 'app-2', ownedWindows()),
+    show('s2', 'app-2', OWNED_WINDOW),
+    activate('a2', 'app-2'),
+    getState('f2', 'app-2', { focusedWindowId: OWNED_WINDOW }),
+    typeText('t2', 'app-2', MARKER),
+    getState('e2', 'app-2', { windowId: OWNED_WINDOW, focusedWindowId: OWNED_WINDOW }),
+  ])
+  assert.equal(admitted.segmentStarts.length, 2)
+  assert.equal(admitted.controlledHandle, 'app-2', 'the final segment owns the qualifying handle')
+  assert.equal(admitted.listWindowsDispatch.subCallId, 'w2',
+    'listWindows must come from the FINAL segment, never an earlier one')
+  assert.equal(admitted.typeDispatch.subCallId, 't2')
+})
+
+test('a show that NEVER moved focus is refused before the input (rc.5 provider proof)', async () => {
+  // The rc.5 provider's show -> restoreWindow only clears AXHidden/AXMinimized;
+  // it does not raise or focus the window (AXAccess.swift, rc.5 tag). An
+  // app-scoped typeText targets AXFocusedWindow, so a trace that shows the
+  // owned window while the app still focuses ANOTHER restored document must be
+  // refused — it would type into that other document.
+  await rejection([
+    getApp('g1', PID, 'app-1'),
+    listWindows('w1', 'app-1', ownedWindows()),
+    show('s1', 'app-1', OWNED_WINDOW),
+    dispatch('getState', { appHandle: 'app-1' },
+      { subCallId: 'f1', result: { windowId: null, focusedWindowId: OTHER_WINDOW } }),
+    typeText('t1', 'app-1', MARKER),
+    dispatch('getState', { appHandle: 'app-1', windowId: OWNED_WINDOW },
+      { subCallId: 'e1', result: { windowId: OWNED_WINDOW, focusedWindowId: OTHER_WINDOW } }),
+  ], /was not the app's focused window before the input/u)
+})
+
+test('a focus read that precedes a later show/activate is NOT a fresh proof', async () => {
+  // The owned window WAS focused when read, but the segment then showed and
+  // activated again; without a fresh read after that, the input target is
+  // unproven. This is the "较早的 true 借给较晚的状态" shape.
+  await rejection([
+    getApp('g1', PID, 'app-1'),
+    listWindows('w1', 'app-1', ownedWindows()),
+    getState('f1', 'app-1', { focusedWindowId: OWNED_WINDOW }),
+    show('s1', 'app-1', OWNED_WINDOW),
+    activate('a1', 'app-1'),
+    typeText('t1', 'app-1', MARKER),
+    getState('e1', 'app-1', { windowId: OWNED_WINDOW, focusedWindowId: OWNED_WINDOW }),
+  ], /focus proof precedes the last show\/activate/u)
+})
+
+test('an APP-scoped observation after the input is refused', async () => {
+  // The marker must be read from a window-scoped getState of the owned window;
+  // an app-scoped tree can contain the marker in a DIFFERENT document.
+  await rejection([
+    getApp('g1', PID, 'app-1'),
+    listWindows('w1', 'app-1', ownedWindows()),
+    show('s1', 'app-1', OWNED_WINDOW),
+    dispatch('getState', { appHandle: 'app-1' },
+      { subCallId: 'f1', result: { windowId: null, focusedWindowId: OWNED_WINDOW } }),
+    typeText('t1', 'app-1', MARKER),
+    dispatch('getState', { appHandle: 'app-1' },
+      { subCallId: 'e1', result: { windowId: null, focusedWindowId: OTHER_WINDOW } }),
+  ], /observation is not a window-scoped read of the owned window/u)
+})
+
+// ── negative shapes that MUST be refused ───────────────────────────────────
+
+test('a typeText in a NON-final segment is refused', async () => {
+  // Exactly ONE typeText in the turn (so the turn-level count cannot be what
+  // fires) but it sits in an EARLIER segment, not the final one.
+  await rejection([
+    getApp('g1', PID, 'app-1'),
+    listWindows('w1', 'app-1', ownedWindows()),
+    show('s1', 'app-1', OWNED_WINDOW),
+    typeText('t1', 'app-1', MARKER),
+    getState('e1', 'app-1', { windowId: OWNED_WINDOW, focusedWindowId: OWNED_WINDOW }),
+    getApp('g2', PID, 'app-2'),
+    listWindows('w2', 'app-2', ownedWindows()),
+    show('s2', 'app-2', OWNED_WINDOW),
+    getState('f2', 'app-2', { focusedWindowId: OWNED_WINDOW }),
+  ], /a NON-final segment dispatched typeText/u)
+})
+
+test('a show of a window that is NOT the owned one is refused', async () => {
+  await rejection([
+    getApp('g1'),
+    listWindows('w1', 'app-1', ownedWindows()),
+    show('s1', 'app-1', OTHER_WINDOW),
+    typeText('t1', 'app-1', MARKER),
+    getState('e1', 'app-1'),
+  ], /selected a window that is not this run's owned cua-blank window/u)
+})
+
+test('typing BEFORE the owned-window show is refused even when the observation finds the marker', async () => {
+  await rejection([
+    getApp('g1'),
+    listWindows('w1', 'app-1', ownedWindows()),
+    typeText('t1', 'app-1', MARKER),
+    show('s1', 'app-1', OWNED_WINDOW),
+    getState('e1', 'app-1'),
+  ], /typed BEFORE selecting the owned cua-blank window/u)
+})
+
+test('a FAILED final typeText is refused even when the trace is otherwise legal', async () => {
+  // Exactly ONE typeText (so the single-input rule cannot be what fires): the
+  // audit must read the FINAL segment's OWN result and reject its failure
+  // instead of treating a dispatched-but-failed input as the claim.
+  await rejection([
+    getApp('g1', PID, 'app-1'),
+    listWindows('w1', 'app-1', ownedWindows()),
+    show('s1', 'app-1', OWNED_WINDOW),
+    typeText('t1', 'app-1', MARKER),
+    getState('e1', 'app-1'),
+  ], /the controlled typeText failed/u, { typeTextError: 'INVALID_ARGUMENT' })
+})
+
+test('two typeTexts are refused as more than ONE bounded input', async () => {
+  await rejection([
+    getApp('g1', PID, 'app-1'),
+    listWindows('w1', 'app-1', ownedWindows()),
+    show('s1', 'app-1', OWNED_WINDOW),
+    typeText('t1', 'app-1', MARKER),
+    getState('e1', 'app-1'),
+    getApp('g2', PID, 'app-2'),
+    listWindows('w2', 'app-2', ownedWindows()),
+    show('s2', 'app-2', OWNED_WINDOW),
+    typeText('t2', 'app-2', MARKER),
+    getState('e2', 'app-2'),
+  ], /user turn triggered 2 cua typeText calls; the scene claims ONE bounded input/u)
+})
+
+test('a dispatch before the first getApp is refused', async () => {
+  await rejection([
+    show('s0', 'app-1', OWNED_WINDOW),
+    getApp('g1'),
+    listWindows('w1', 'app-1', ownedWindows()),
+    show('s1', 'app-1', OWNED_WINDOW),
+    typeText('t1', 'app-1', MARKER),
+    getState('e1', 'app-1'),
+  ], /dispatched before obtaining an app handle/u)
+})
+
+test('a method the scene does not audit is refused', async () => {
+  await rejection([
+    getApp('g1'),
+    listWindows('w1', 'app-1', ownedWindows()),
+    show('s1', 'app-1', OWNED_WINDOW),
+    dispatch('click', { appHandle: 'app-1' }, { subCallId: 'c1' }),
+    typeText('t1', 'app-1', MARKER),
+    getState('e1', 'app-1'),
+  ], /dispatched a method the scene does not audit: click/u)
+})
+
+test('an owned-window observation WITHOUT the marker in its tree is refused', async () => {
+  await rejection([
+    getApp('g1', PID, 'app-1'),
+    listWindows('w1', 'app-1', ownedWindows()),
+    show('s1', 'app-1', OWNED_WINDOW),
+    getState('f1', 'app-1', { focusedWindowId: OWNED_WINDOW }),
+    typeText('t1', 'app-1', MARKER),
+    getState('e1', 'app-1', { windowId: OWNED_WINDOW, focusedWindowId: OWNED_WINDOW, tree: 'an empty document' }),
+  ], /observation tree does not contain the typed marker/u)
+})
+
+test('a FOREIGN root with a side effect in the same turn is refused', async () => {
+  const own = [
+    getApp('g1', PID, 'app-1'),
+    listWindows('w1', 'app-1', ownedWindows()),
+    show('s1', 'app-1', OWNED_WINDOW),
+    getState('f1', 'app-1', { focusedWindowId: OWNED_WINDOW }),
+    typeText('t1', 'app-1', MARKER),
+    getState('e1', 'app-1', { windowId: OWNED_WINDOW, focusedWindowId: OWNED_WINDOW }),
+  ]
+  // A second CUA root in the SAME user turn typed as well: the selected root
+  // still looks controlled, but the turn did not make ONE bounded input.
+  const foreign = [{ ...typeText('t2', 'app-1', MARKER), rootCallId: 'root-2' }]
+  await rejection(own, /another cua root in the same user turn dispatched side effects/u,
+    { turnDispatches: [...own, ...foreign] })
+})
+
+test('a FOREIGN read-only root in the same turn is admitted', async () => {
+  const own = [
+    getApp('g1', PID, 'app-1'),
+    listWindows('w1', 'app-1', ownedWindows()),
+    show('s1', 'app-1', OWNED_WINDOW),
+    getState('f1', 'app-1', { focusedWindowId: OWNED_WINDOW }),
+    typeText('t1', 'app-1', MARKER),
+    getState('e1', 'app-1', { windowId: OWNED_WINDOW, focusedWindowId: OWNED_WINDOW }),
+  ]
+  const foreign = [
+    { ...getApp('g9', PID, 'app-9'), rootCallId: 'root-2' },
+    { ...getState('r9', 'app-9', { focusedWindowId: OWNED_WINDOW }), rootCallId: 'root-2' },
+  ]
+  const admitted = await audit(own, { turnDispatches: [...own, ...foreign] })
+  assert.equal(admitted.typeTextSettled.result.isError, false)
+})
+
+// ── MAC09-10 disconnect-terminal classification ───────────────────────────
+
+test('MAC09-10: ZERO settlements never classify as a disconnect abort', () => {
+  // The external review's counterexample: the dead Client's ask produces no
+  // settlement at all during the post-resume window. "No late answer" must not
+  // be read as "the old ask retired".
+  const classified = classifyDisconnectSettlements([])
+  assert.deepEqual(classified.aborts, [])
+  assert.deepEqual(classified.late, [])
+})
+
+test('MAC09-10: the official ASK_ABORTED terminal is classified as the abort', () => {
+  const classified = classifyDisconnectSettlements([
+    { isError: true, error: { code: 'ASK_ABORTED' }, content: [] },
+  ])
+  assert.equal(classified.aborts.length, 1)
+  assert.deepEqual(classified.late, [])
+})
+
+test('MAC09-10: a late ANSWER is classified as a late settlement, never as the abort', () => {
+  const classified = classifyDisconnectSettlements([
+    { isError: false, content: [{ type: 'text', text: 'allow once' }] },
+  ])
+  assert.deepEqual(classified.aborts, [])
+  assert.equal(classified.late.length, 1)
+})
+
+test('MAC09-10: a DIFFERENT error code is a late settlement, never the abort', () => {
+  const classified = classifyDisconnectSettlements([
+    { isError: true, error: { code: 'CALLER_NOT_LIVE' }, content: [] },
+  ])
+  assert.deepEqual(classified.aborts, [])
+  assert.equal(classified.late.length, 1)
+})

@@ -534,6 +534,29 @@ no `--patch` overlay), an isolated tmux socket, and the DSH process exit
 status. The candidate tarball argument is required (no published-package
 fallback); it is a manual qualification lane, not part of `verify:release`.
 
+`pnpm smoke:macos-cua -- <candidate.tgz>` is an explicitly selected,
+operator-assisted macOS native qualification for the official Computer use
+bundle. It installs the candidate into ONE isolated `pi-tui` profile, starts
+the real TUI in a private tmux server, and drives the MAC-09 matrix: the real
+Plugin Manager selection, the PTC `cua` tool, macOS Accessibility and Screen
+Recording on the official `DSH Computer Use.app`, the application-consent
+Question, the official Host Attachment Store screenshot and Client image row,
+one bounded TextEdit input, per-Session consent, the Split Client
+disconnect/reconnect path and bundle withdrawal. The operator supplies an
+image-capable model route patch and matching credentials through
+`MACOS_CUA_PROFILE_PATCH` and `MACOS_CUA_CREDENTIALS`; the lane copies both
+into the disposable DSH home with `0600`, never prints them and never grants a
+macOS permission itself. The operator grants the TCC permissions to the exact
+helper path the lane prints and answers each consent Question in the real
+TUI. A missing native prerequisite reports `MACOS_CUA: NOT_VERIFIED` and exits
+non-zero; unrun cases stay `NOT_VERIFIED`. The private JSON report (candidate
+and runtime identities, anonymized Session/tool/Question/attachment digests,
+image dimensions and cleanup facts, never screenshot bytes or credentials) is
+written `0600` under `MACOS_CUA_EVIDENCE_DIR` or a fresh private directory.
+The lane is never part of `pnpm test`, `pack:release`, the Split smoke or a
+Linux CI lane. Its L0 input/opt-in guard is
+`test/tooling/macos-cua-parity.test.mjs`.
+
 ### Isolated single-file and probe runs
 
 Prefer a repository-owned lane; it already owns and removes its disposable

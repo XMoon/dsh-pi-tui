@@ -112,6 +112,7 @@ export type SettingsWorkspaceRowId =
   | 'footer-configurator'
   | 'keyboard-shortcuts'
   | 'mcp-servers'
+  | 'computer-use'
   | `ext-setting:${string}`
 
 /** The prefix that separates a dynamic extension-setting row from the static
@@ -235,7 +236,7 @@ export interface SettingsWorkspaceRow {
    *  specialist page. */
   readonly specialist?:
     | 'subagent-settings' | 'web-settings' | 'footer-configurator' | 'keybindings' | 'mcp-servers'
-    | 'agent-loop-settings' | 'shell-execution-settings'
+    | 'computer-use' | 'agent-loop-settings' | 'shell-execution-settings'
   /** Whether the row's specialist page may be opened RIGHT NOW. Absent = yes.
    *  A non-current authority (a stale/unavailable backend) paints the row and
    *  its last-known facts but offers no Manage action, because the page could
@@ -382,7 +383,10 @@ export interface SettingsWorkspacePanelIntents {
    * the intent (Esc/Left/Shift+Tab at its list root) and the root commits the
    * focus change; it never closes the page by itself.
    */
-  readonly onOpenPlugins?: (onYieldNavigation: () => void) => EmbeddedPluginPage | undefined
+  readonly onOpenPlugins?: (
+    onYieldNavigation: () => void,
+    onManageComputerUse: () => string | undefined,
+  ) => EmbeddedPluginPage | undefined
   /** The lazily built Models direct page (the Settings category keeps the
    * same screen lease). `openAccount` switches this workspace to the Account
    * page when the Models list's account entry is activated. */
@@ -443,6 +447,16 @@ export interface SettingsWorkspacePanelIntents {
    * it. There is no writable document field and no second Observation owner.
    */
   readonly createMcpServersPage?: (done: () => void) => EmbeddedSpecialistPage | undefined
+  /**
+   * PR-5 / MAC-09 v2: the ONE per-open Computer Use specialist page. It
+   * forwards only the official CUA access port, the existing Plugin Manager
+   * roster and the existing preset-default writer; `done` returns to the Tools
+   * row that opened it. No second Settings lease or permission store.
+   */
+  readonly createComputerUsePage?: (
+    done: () => void,
+    openPlugins: () => void,
+  ) => EmbeddedSpecialistPage | undefined
   /** The live terminal row budget (the panel never reads the terminal itself). */
   readonly rows: () => number
   /** The live terminal column budget (the projection's width). */
@@ -697,7 +711,7 @@ interface PaneLayout {
 }
 
 interface HitTarget {
-  readonly kind: 'category' | 'row' | 'pane' | 'change' | 'retry' | 'manage' | 'option' | 'confirm' | 'cancel' | 'about-action' | 'bar-escape' | 'bar-span'
+  readonly kind: 'category' | 'row' | 'pane' | 'change' | 'retry' | 'manage' | 'option' | 'confirm' | 'cancel' | 'about-action' | 'bar-escape' | 'bar-open' | 'bar-span'
   /** The stable identity: a category id, a row id, the pane name, a candidate
    *  value or the button verb. */
   readonly id: string
@@ -713,11 +727,24 @@ interface HitTarget {
 interface PaintedBarLine {
   readonly line: string
   readonly span?: { readonly startCol: number; readonly endCol: number }
+  /** The painted OPEN hint's cell span (rail state): the pointer analogue of
+   *  Enter/Right. Present only when every hint of that verb painted in full. */
+  readonly openSpan?: { readonly startCol: number; readonly endCol: number }
 }
 
 /** The id every painted Esc affordance carries: it names the ONE semantic this
  *  root accepts (replay the current Esc ladder). */
 const BAR_ESCAPE_ID = 'escape'
+/** The id the painted rail OPEN hint carries: it replays the Enter ladder. */
+const BAR_OPEN_ID = 'open'
+/** The ActionBar's OWN target kinds. EVERY gate that treats the physical last
+ *  row as one bar gesture must use this predicate: the wheel-cancel rule and
+ *  the root-owned release branch previously listed the kinds by hand, so a new
+ *  bar kind could be half-wired (press armed, wheel cancel and release blind). */
+const isActionBarTargetKind = (kind: HitTarget['kind']): boolean =>
+  kind === 'bar-escape' || kind === 'bar-open' || kind === 'bar-span'
+/** The painted hint labels that mean "open/focus the selected rail entry". */
+const BAR_OPEN_HINTS: readonly string[] = ['Right open', 'Enter open', 'Enter/Right focus']
 
 /** One painted Detail action. A button publishes a hit target ONLY when the
  *  frame really painted it inside the pane width. */
@@ -827,6 +854,7 @@ function isWorkspaceRowId(id: string): id is SettingsWorkspaceRowId {
     || id === 'footer-configurator'
     || id === 'keyboard-shortcuts'
     || id === 'mcp-servers'
+    || id === 'computer-use'
     || id.startsWith(EXTENSION_SETTING_ROW_PREFIX)
 }
 
@@ -1181,6 +1209,19 @@ export class SettingsWorkspacePanel implements Component {
   private pendingInitialSpecialist: {
     readonly rowId: SettingsWorkspaceRowId
     readonly specialist: SettingsWorkspaceSpecialistRoute
+  } | undefined
+  /** PR-5: an in-lease Plugin Manager → Tools · Computer Use navigation,
+   *  consumed at the START of the next frame (before the direct projection is
+   *  chosen) so the retired Plugin page cannot be painted by the old frame. */
+  private pendingComputerUseNavigation: {
+    readonly pluginPage: EmbeddedPluginPage
+    readonly categoryId: SettingsWorkspaceCategoryId
+    readonly view: import('../plugin-manager/workspace.ts').PluginWorkspaceView
+    readonly width: number
+    readonly rows: number
+    readonly notice: string | undefined
+    readonly cardValue: string | undefined
+    readonly focus: SettingsWorkspaceFocus
   } | undefined
   /** The ONE command-facing settlement of the typed deeplink: it resolves on
    *  the frame that really mounts the page (or on a failure/teardown), so the
@@ -1726,6 +1767,10 @@ export class SettingsWorkspacePanel implements Component {
     }
     this.lastRenderWidth = width
     this.lastRenderRows = liveRows
+    // PR-5: a Plugin Manager → Computer Use switch is a same-lease navigation.
+    // It must be committed BEFORE `direct` is chosen: `direct` would otherwise
+    // still describe the retired Plugins category and paint the closed page.
+    this.consumeComputerUseNavigation()
     const choosing = this.choiceField() !== undefined
     const direct = this.paintsDirectPage(width)
     const plan = planSettingsChrome(
@@ -1794,6 +1839,12 @@ export class SettingsWorkspacePanel implements Component {
       const bar = this.renderActionBar(plan)
       lines.push(bar.line)
       if (bar.span !== undefined) targets.push(this.barEscapeTarget(lines.length - 1, bar.span))
+      // The PAINTED open hint is a real pointer route on the single-pane frames:
+      // it replays the Enter ladder, so a pointer-only journey can leave the
+      // category rail without a keyboard step.
+      if (bar.openSpan !== undefined) {
+        targets.push({ kind: 'bar-open', id: BAR_OPEN_ID, row: lines.length - 1, startCol: bar.openSpan.startCol, endCol: bar.openSpan.endCol })
+      }
     }
     this.paintedTargets = targets
     this.paintedPanes = panes
@@ -1917,6 +1968,10 @@ export class SettingsWorkspacePanel implements Component {
       // chose its segments against the content width, but the root paints the
       // row from column 0), so the page-local span is already in panel columns.
       targets.push(this.barEscapeTarget(lines.length - 1, barSpan))
+    }
+    const openSpan = navigation?.openSpan
+    if (openSpan !== undefined) {
+      targets.push({ kind: 'bar-open', id: BAR_OPEN_ID, row: lines.length - 1, startCol: openSpan.startCol, endCol: openSpan.endCol })
     }
     this.paintedContentBox = { x: contentX, top: contentTop, width: contentWidth, rows: contentRows }
     const categories = this.currentCategoryOrder()
@@ -2430,7 +2485,7 @@ export class SettingsWorkspacePanel implements Component {
    */
   private renderNavigationActionBar(width: number): PaintedBarLine {
     if (this.bodyFloor() < 1) return this.paintBar([{ text: 'Close [Esc]', priority: 8 }], width)
-    return this.paintBar(this.navigationActionBarSegments(), width)
+    return this.paintBar(this.navigationActionBarSegments(), width, true)
   }
 
   /** Paint the shared Settings row: the LAST (Esc) segment carries the scoped
@@ -2438,22 +2493,37 @@ export class SettingsWorkspacePanel implements Component {
    *  `textMuted` (design language §7.1). The unpainted complete span of the Esc
    *  segment is the ONE pointer geometry this frame may publish; a truncated or
    *  dropped segment publishes none. */
-  private paintBar(segments: readonly ActionBarSegment[], width: number): PaintedBarLine {
+  private paintBar(segments: readonly ActionBarSegment[], width: number, openHint: boolean = false): PaintedBarLine {
     const layout = layoutActionBarRow(segments, width)
     if (layout.truncated || layout.spans.length === 0) return { line: color.textMuted(layout.text) }
     const escapeIndex = segments.length - 1
     let span: { startCol: number; endCol: number } | undefined
+    // A pointer OPEN affordance exists only while EVERY open hint painted in
+    // full: a truncated or dropped hint publishes no geometry, exactly like the
+    // Esc affordance.
+    let openSpan: { startCol: number; endCol: number } | undefined
+    const openSpans: Array<{ startCol: number, endCol: number }> = []
     const painted = layout.spans.map(candidate => {
+      if (openHint && BAR_OPEN_HINTS.includes(candidate.text)) {
+        openSpans.push({ startCol: candidate.startCol, endCol: candidate.endCol })
+      }
       if (candidate.inputIndex !== escapeIndex) return color.textMuted(candidate.text)
       span = { startCol: candidate.startCol, endCol: candidate.endCol }
       return paintActionSpan(candidate.text, 'secondary')
     })
+    if (openSpans.length > 0) {
+      openSpan = {
+        startCol: Math.min(...openSpans.map(part => part.startCol)),
+        endCol: Math.max(...openSpans.map(part => part.endCol)),
+      }
+    }
     const segmentWidth = layout.spans.reduce((sum, candidate) => sum + visibleWidth(candidate.text), 0)
       + Math.max(0, layout.spans.length - 1) * visibleWidth(ACTION_BAR_SEPARATOR)
     const padding = Math.max(0, visibleWidth(layout.text) - segmentWidth)
     return {
       line: painted.join(color.textMuted(ACTION_BAR_SEPARATOR)) + ' '.repeat(padding),
       span,
+      ...(openSpan === undefined ? {} : { openSpan }),
     }
   }
 
@@ -3283,6 +3353,8 @@ export class SettingsWorkspacePanel implements Component {
         return this.intents.createKeybindingsPage === undefined ? undefined : { label: 'Configure shortcuts…' }
       case 'mcp-servers':
         return this.intents.createMcpServersPage === undefined ? undefined : { label: 'Manage MCP servers…' }
+      case 'computer-use':
+        return this.intents.createComputerUsePage === undefined ? undefined : { label: 'Manage Computer Use…' }
       case 'agent-loop-settings':
         return this.intents.createHostNumericSettingsPage === undefined ? undefined : { label: 'Configure Agent loop…' }
       case 'shell-execution-settings':
@@ -3519,7 +3591,9 @@ export class SettingsWorkspacePanel implements Component {
     // Role 13: hints are the WEAKEST readable ink (`textMuted`), one step below
     // the diagnostic line, so the bar never competes with content. The shared
     // row layout already padded/truncated to the pane width.
-    const rendered = this.paintBar(segments, plan.width)
+    // The open hints (`Right open` / `Enter open`) are REAL pointer targets in
+    // every state that paints them, not keyboard-only text.
+    const rendered = this.paintBar(segments, plan.width, true)
     const choosing = this.choiceField() !== undefined
     this.paintedChoiceNavigation = choosing && rendered.line.includes('Up/Down')
     this.paintedChoiceFactScroll = choosing && choiceFactScrollAvailable
@@ -3777,7 +3851,7 @@ export class SettingsWorkspacePanel implements Component {
       || row.specialist === 'agent-loop-settings'
       || row.specialist === 'shell-execution-settings'
       ? 1
-      : row.specialist === 'web-settings' || row.specialist === 'mcp-servers'
+      : row.specialist === 'web-settings' || row.specialist === 'mcp-servers' || row.specialist === 'computer-use'
         ? 1
         : 0
     if (this.bodyFloor() < floor) return
@@ -3816,6 +3890,9 @@ export class SettingsWorkspacePanel implements Component {
         break
       case 'mcp-servers':
         page = this.intents.createMcpServersPage?.(done)
+        break
+      case 'computer-use':
+        page = this.intents.createComputerUsePage?.(done, () => this.navigateComputerUseToPlugins())
         break
       case 'agent-loop-settings':
         page = this.intents.createHostNumericSettingsPage?.('agent-loop', done, changed)
@@ -4050,7 +4127,10 @@ export class SettingsWorkspacePanel implements Component {
    */
   private ensurePluginPageMounted(): void {
     if (this.pluginPage !== undefined || this.disposed) return
-    const page = this.intents.onOpenPlugins?.(() => this.yieldPluginNavigation())
+    const page = this.intents.onOpenPlugins?.(
+      () => this.yieldPluginNavigation(),
+      () => this.requestComputerUseNavigation(),
+    )
     if (page === undefined) return
     this.pluginPage = page
     this.bumpRevision()
@@ -4106,6 +4186,111 @@ export class SettingsWorkspacePanel implements Component {
     this.syncPluginFrame()
     this.pressedGesture = undefined
     this.contentPressed = undefined
+    this.bumpRevision()
+    this.intents.requestRender()
+  }
+
+  /**
+   * PR-5: the Plugin Manager's explicit `Manage Computer Use…` intent. It
+   * validates the SAME lease destination before anything is retired, so a
+   * missing row/factory returns the exact reason to the plugin page instead of
+   * closing it into a dead end. The actual switch is consumed on the next frame
+   * (a synchronous close inside the plugin's own input/dispatch stack would
+   * dispose the caller under itself).
+   */
+  private requestComputerUseNavigation(): string | undefined {
+    if (this.disposed) return 'The Settings workspace is closing.'
+    if (this.pendingComputerUseNavigation !== undefined) return undefined
+    if (this.categoryId !== 'plugins') return 'The Plugin Manager page is not current.'
+    const pluginPage = this.pluginPage
+    if (pluginPage === undefined) return 'The Plugin Manager page is not open.'
+    if (this.specialistPage !== undefined) return 'Another Settings page is already open.'
+    if (this.pluginPageHasPendingMutation()) return 'The Plugin Manager is still saving a change; wait for it to settle.'
+    if (this.intents.createComputerUsePage === undefined) return 'The Computer Use settings page is not available in this build.'
+    const row = this.snapshot.rows.find(candidate => candidate.id === 'computer-use')
+    if (row === undefined || row.category !== 'tools' || row.specialist !== 'computer-use' || row.specialistAvailable === false) {
+      return 'The Computer Use settings row is not available right now.'
+    }
+    if (this.bodyFloor() < 1) return 'The window is too small to show the Computer Use page.'
+    this.pendingComputerUseNavigation = {
+      pluginPage,
+      categoryId: this.categoryId,
+      view: pluginPage.currentView(),
+      width: this.lastRenderWidth,
+      rows: this.lastRenderRows,
+      notice: this.noticeKey(),
+      cardValue: typeof pluginPage.selectedCardValue === 'function' ? pluginPage.selectedCardValue() : undefined,
+      focus: this.focus,
+    }
+    this.intents.requestRender()
+    return undefined
+  }
+
+  /**
+   * PR-5: consume the one deferred Plugin → Computer Use navigation. Order is
+   * load-bearing: retire the Plugin child and release its Host claim FIRST,
+   * commit the Tools row/focus SECOND, and mount the specialist THIRD.
+   */
+  /** A stable identity for the shared App notice (the object is rebuilt). */
+  private noticeKey(): string | undefined {
+    const notice = this.intents.notice()
+    return notice === undefined ? undefined : `${notice.kind}\u0000${notice.text}`
+  }
+
+  private consumeComputerUseNavigation(): void {
+    const pending = this.pendingComputerUseNavigation
+    if (pending === undefined) return
+    this.pendingComputerUseNavigation = undefined
+    if (this.disposed) return
+    // The SAME child/view/category the user requested from must still be live:
+    // a newer input, a category change, a resize/notice or a replacement page
+    // makes this deferred navigation stale.
+    if (this.categoryId !== pending.categoryId) return
+    if (this.pluginPage !== pending.pluginPage) return
+    if (pending.pluginPage.currentView() !== pending.view) return
+    if (this.lastRenderWidth !== pending.width || this.lastRenderRows !== pending.rows) return
+    if (this.noticeKey() !== pending.notice) return
+    if (this.focus !== pending.focus) return
+    if (typeof pending.pluginPage.selectedCardValue === 'function'
+      && pending.pluginPage.selectedCardValue() !== pending.cardValue) return
+    if (this.pluginPageHasPendingMutation()) return
+    const destination = this.snapshot.rows.find(candidate => candidate.id === 'computer-use')
+    if (destination === undefined || destination.specialist !== 'computer-use'
+      || destination.specialistAvailable === false || this.intents.createComputerUsePage === undefined) return
+    if (this.bodyFloor() < 1) return
+    this.closePluginPage()
+    this.categoryId = 'tools'
+    this.rowId = 'computer-use'
+    this.focus = 'rows'
+    this.rowOffset = 0
+    this.detailOffset = 0
+    this.resetChoice()
+    this.pressedGesture = undefined
+    this.contentPressed = undefined
+    this.specialistPressed = undefined
+    this.bumpRevision()
+    const row = this.snapshot.rows.find(candidate => candidate.id === 'computer-use')
+    if (row !== undefined) this.openSpecialist(row)
+  }
+
+  /**
+   * PR-5: the Computer Use page's explicit `Open Settings → Plugins` navigation.
+   * It retires THIS specialist first and switches the SAME Settings lease to
+   * the Plugins direct page; the lazy Plugin Manager mount then starts its one
+   * inventory read. Never a second settings surface.
+   */
+  private navigateComputerUseToPlugins(): void {
+    if (this.disposed || this.specialistRow !== 'computer-use') return
+    this.closeSpecialist()
+    this.categoryId = 'plugins'
+    this.focus = 'content'
+    this.rowId = undefined
+    this.rowOffset = 0
+    this.detailOffset = 0
+    this.resetChoice()
+    this.pressedGesture = undefined
+    this.contentPressed = undefined
+    this.specialistPressed = undefined
     this.bumpRevision()
     this.intents.requestRender()
   }
@@ -4300,6 +4485,10 @@ export class SettingsWorkspacePanel implements Component {
 
   handleInput(data: string): void {
     if (this.disposed) return
+    // PR-5: a newer keyboard input supersedes a deferred Plugin → Computer Use
+    // navigation. Without this, a buffered Enter+Esc (or a resize/notice before
+    // the next frame) would still teleport after the user backed out.
+    this.pendingComputerUseNavigation = undefined
     // A keyboard interaction SUPERSEDES any in-flight pointer gesture: the
     // press-time painted target may repaint into a different action, and a
     // hosted page may switch its own Question/Picker sub-view, before the
@@ -4329,6 +4518,15 @@ export class SettingsWorkspacePanel implements Component {
     // transition) only the real Esc is admitted — a key must never act on a
     // body the user cannot see.
     if (this.specialistPage !== undefined) {
+      // RFL-016: the root chrome (an App notice/choice) can shrink the hosted
+      // grant without changing the terminal size. The pointer path already
+      // refuses a stale hit map; the keyboard path must revoke the specialist's
+      // old action grant too. Only the real Esc passes.
+      if (this.chromeGeometryStale() && !matchesKey(data, 'escape')) {
+        this.cancelPointerOwners()
+        this.intents.requestRender()
+        return
+      }
       if (!matchesKey(data, 'escape') && this.specialistPage.grantAwaitingPaint?.() === true) return
       this.specialistPage.handleInput(data)
       // The child's own model changed THIS frame's business content; the root
@@ -5186,6 +5384,8 @@ export class SettingsWorkspacePanel implements Component {
    *  through to the alt screen's `onCellPress`/`onCellClick` identity path. */
   handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
     if (this.disposed) return undefined
+    // PR-5: a newer pointer input also supersedes a deferred navigation.
+    this.pendingComputerUseNavigation = undefined
     // PR-D (Owner-approved scope amendment): a pending press recorded on the
     // physical Action Bar is retired by ANY effective wheel. That row is
     // outside the hosted body box, so the child never sees this wheel and could
@@ -5194,7 +5394,7 @@ export class SettingsWorkspacePanel implements Component {
     // complete on release. Rail/content presses keep their own RFL-012 rule
     // (an immaterial wheel does not cancel them).
     if (event.type === 'wheel' && (event.wheelDelta ?? 0) !== 0) {
-      if (this.pressedGesture?.target.kind === 'bar-escape' || this.pressedGesture?.target.kind === 'bar-span') {
+      if (this.pressedGesture !== undefined && isActionBarTargetKind(this.pressedGesture.target.kind)) {
         this.pressedGesture = undefined
       }
       // A hosted page's BODY press is revoked too: the child only receives
@@ -5348,6 +5548,7 @@ export class SettingsWorkspacePanel implements Component {
 
   onCellPress(x: number, y: number): void {
     if (this.disposed) return
+    this.pendingComputerUseNavigation = undefined
     // A directory change invalidates the WHOLE painted hit map, not just the
     // cells that happen to move: the press is refused and the release may never
     // resurrect a target of the previous registry generation.
@@ -5508,6 +5709,7 @@ export class SettingsWorkspacePanel implements Component {
 
   onCellClick(x: number, y: number): void {
     if (this.disposed) return
+    this.pendingComputerUseNavigation = undefined
     // The same directory fence on release: a gesture that began before a
     // registration/unload/dispose can never complete against the new directory.
     this.syncExtensionDirectory()
@@ -5535,8 +5737,7 @@ export class SettingsWorkspacePanel implements Component {
     }
     // A recorded last-row Esc gesture resolves against the ROOT's painted hit
     // map only (the child content owner is never consulted for it).
-    if (this.pressedGesture?.target.kind === 'bar-escape'
-      || this.pressedGesture?.target.kind === 'bar-span') {
+    if (this.pressedGesture !== undefined && isActionBarTargetKind(this.pressedGesture.target.kind)) {
       const target = this.takeGesture(x, y)
       if (target !== undefined) this.activate(target)
       return
@@ -5670,6 +5871,13 @@ export class SettingsWorkspacePanel implements Component {
         this.handleInput('\x1b')
         return
       }
+      case 'bar-open': {
+        // The painted OPEN hint is the pointer analogue of Enter/Right on the
+        // rail: it replays the SAME keyboard ladder, so the rail's selection,
+        // focus transfer and page mounting stay single-owner.
+        this.handleInput('\r')
+        return
+      }
       case 'bar-span': {
         // A DELEGATED last-row intent: the child's own Action Bar painted this
         // span and owns the semantics; the root only owns the physical row.
@@ -5689,11 +5897,17 @@ export class SettingsWorkspacePanel implements Component {
         // (Enter/Right then decide between the Detail, the choice and the
         // row's specialist page).
         this.selectRow(target.id, 'rows')
-        if (target.id === 'subagent-settings' || target.id === 'agent-loop' || target.id === 'shell-execution') {
+        // Pages whose row IS the whole gesture open on the click, exactly like
+        // Enter/Right. The Computer Use row belongs here: on the single-pane
+        // (narrow/medium) frame there is no Detail pane, so the Detail's Manage
+        // affordance does not exist and this click is the ONLY pointer route to
+        // the embedded page.
+        if (target.id === 'subagent-settings' || target.id === 'agent-loop' || target.id === 'shell-execution' || target.id === 'computer-use') {
           const row = this.selectedRow()
           const specialist = row?.specialist
           if (row !== undefined
-            && (specialist === 'subagent-settings' || specialist === 'agent-loop-settings' || specialist === 'shell-execution-settings')) this.openSpecialist(row)
+            && (specialist === 'subagent-settings' || specialist === 'agent-loop-settings'
+              || specialist === 'shell-execution-settings' || specialist === 'computer-use')) this.openSpecialist(row)
         }
         return
       }
@@ -5833,7 +6047,7 @@ export class SettingsWorkspacePanel implements Component {
    *  DELEGATED Action-Bar span (both live on the Root's physical row). */
   private barTargetAt(x: number, y: number): HitTarget | undefined {
     return this.paintedTargets.find(target =>
-      (target.kind === 'bar-escape' || target.kind === 'bar-span')
+      isActionBarTargetKind(target.kind)
       && target.row === y && x >= target.startCol && x < target.endCol)
   }
 

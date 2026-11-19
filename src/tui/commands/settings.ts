@@ -72,6 +72,8 @@ import {
 import { ModelsWorkspacePage, type ModelsInitialView, type ModelsWorkspaceSource } from '../panels/models-workspace-page.ts'
 import { McpServersPage } from '../panels/mcp-servers-page.ts'
 import { McpServersController } from '../../app/command/mcp-servers.ts'
+import { ComputerUseSettingsPage, COMPUTER_USE_PAGE_TITLE } from '../panels/computer-use-settings-page.ts'
+import { CuaAccessSettingsController } from '../../app/command/cua-access-settings.ts'
 import { AccountWorkspacePage, type AccountInitialView } from '../panels/account-workspace-page.ts'
 import { CredentialWorkflow, type AuthDestination } from '../../app/command/credential-workflow.ts'
 import { AccountWorkflow } from '../../app/command/account-workflow.ts'
@@ -110,6 +112,8 @@ type SettingsCommandRunner = Pick<
   | 'clientCommands'
   | 'config'
   | 'createPluginManagerPage'
+  | 'cuaAccess'
+  | 'pluginManager'
   | 'policy'
   | 'sessionPolicyGeneration'
   | 'currentNotificationMethod'
@@ -378,6 +382,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
   const WEB_LAUNCHER_ROW_ID = 'web-settings'
   /** FR3: the Tools navigation row that opens the embedded MCP servers page. */
   const MCP_SERVERS_ROW_LABEL = 'MCP servers'
+  const COMPUTER_USE_ROW_SUMMARY = 'Permissions · applications · PTC'
   const MCP_SERVERS_ROW_SUMMARY = 'Inspect · probe · restart'
   /** The ACP listener runtime row's fixed description (one string so the async
    *  `refreshRow` repaint and the initial paint stay identical). */
@@ -1377,7 +1382,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
         },
       },
       {
-        onOpenPlugins: (onYieldNavigation) => runner.createPluginManagerPage(onYieldNavigation),
+        onOpenPlugins: (onYieldNavigation, onManageComputerUse) => runner.createPluginManagerPage(onYieldNavigation, onManageComputerUse),
         onCommit: async (request) => {
           const result = await commitSettingsWorkspaceField(request, pinnedApprovalScope())
           // Only a session that still belongs to THIS open may update the
@@ -1560,6 +1565,32 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
           activeMcpController = controller
           controller.start()
           return page
+        },
+        // PR-5/MAC-09 v2: the ONE per-open Computer Use page. The controller
+        // reads the official CUA access port and reuses the existing Plugin
+        // Manager roster + preset-default writer; the page is disposed by the
+        // Settings lease and owns no second permission store.
+        createComputerUsePage: (done, openPlugins) => {
+          const cuaAccess = runner.cuaAccess
+          const pluginManager = runner.pluginManager
+          if (cuaAccess === undefined || pluginManager === undefined) return undefined
+          const controller = new CuaAccessSettingsController({
+            cuaAccess,
+            pluginManager,
+            presetDefault: runner.config.presetDefault,
+            diag: runner.diag,
+            locale: () => {
+              const locale = Intl.DateTimeFormat().resolvedOptions().locale
+              return locale === '' ? 'en-US' : locale
+            },
+          })
+          return new ComputerUseSettingsPage({
+            controller,
+            requestRender: () => { if (!app.isDisposed()) app.requestRender() },
+            done,
+            openPlugins,
+            diag: runner.diag,
+          })
         },
         // The About page's two version facts: read ONCE per workspace open on
         // the Client side. `tui` is this bundle's own version and `dsh` the
@@ -3924,6 +3955,23 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     // C2-R5/C2-R6/C2-R7: Footer layout, Keyboard shortcuts and the Extensions
     // rows are same-lease pages and rows of THIS workspace; no row hands the
     // user off to a second settings editor.
+    // PR-5/MAC-09 v2: the ONE Tools navigation row into the Computer Use
+    // specialist. It carries NO `edit`: the page writes only through the
+    // official CUA access port, and the row is omitted when that port is not
+    // part of this composition (never painted as an inert control).
+    const computerUseRow: SettingsWorkspaceRow | undefined = runner.cuaAccess === undefined || runner.pluginManager === undefined
+      ? undefined
+      : {
+        id: 'computer-use',
+        category: 'tools',
+        label: COMPUTER_USE_PAGE_TITLE,
+        summary: COMPUTER_USE_ROW_SUMMARY,
+        scope: 'DSH Host · official Computer Use provider',
+        freshness: 'runtime',
+        description: 'Manage the official Computer Use provider: the bundle selection, the two independent macOS privileges (Accessibility and Screen Recording), the official helper identity, the PTC default/execution facts and the persisted application decisions. '
+          + 'Request/Open only ask the Host provider to show its guidance; only a fresh Host observation paints Allowed. Revoke removes one persisted application decision; disabling the bundle is managed in Plugins.',
+        specialist: 'computer-use',
+      }
     const mcpServersRow: SettingsWorkspaceRow | undefined = runner.mcpServers === undefined ? undefined : {
       // FR3: the ONE read-only/Probe/Restart MCP management row. It carries NO
       // `edit`: this page writes no configuration (server CRUD is a later
@@ -4463,6 +4511,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
           specialist: 'web-settings',
         },
         ...(mcpServersRow === undefined ? [] : [mcpServersRow]),
+        ...(computerUseRow === undefined ? [] : [computerUseRow]),
         // C2-R6: the registry's live directory IS the row list. Every record is
         // projected in the Registry's own global order (order ASC, id ASC); the
         // command layer never groups or re-sorts, because the plugin GROUPS are

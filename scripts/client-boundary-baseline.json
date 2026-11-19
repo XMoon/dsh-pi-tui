@@ -82,6 +82,9 @@
   "runtime/direct/host-command-direct.ts": [
     "commands"
   ],
+  "runtime/direct/cua-access-direct.ts": [
+    "cuaAccess"
+  ],
   "runtime/direct/host-file-direct.ts": [
     "fileReferences"
   ],

@@ -67,6 +67,7 @@ export const HOST_SERVICES = [
   'sandboxPolicy',
   'shell',
   'pluginManager',
+  'cuaAccess',
   'jobController',
   'mcpManager',
 ]

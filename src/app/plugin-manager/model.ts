@@ -291,6 +291,9 @@ export function entryValue(entryId: string): string {
   return `entry:${entryId}`
 }
 
+/** The one official Computer Use bundle whose card owns the Settings deep link. */
+const CUA_BUNDLE_NAME = '@deepseek-ai/dsh-cua-bundle'
+
 /** The action values the workspace maps to controller operations. */
 export const PLUGIN_ACTION = {
   install: 'action:install',
@@ -306,6 +309,7 @@ export const PLUGIN_ACTION = {
   approveBuilds: 'action:approve-builds',
   reconcileInstall: 'action:reconcile-install',
   hideInstall: 'action:hide-install',
+  manageComputerUse: 'action:manage-computer-use',
 } as const
 
 /** The row-level toggle value for one addressable plugin entry id. */
@@ -757,6 +761,26 @@ function cardActions(card: PluginCardView): PluginDetailAction[] {
         reason: card.removeBlockedReason ?? 'This bundle is not removable',
         tone: 'warning',
       })
+  }
+  // PR-5/MAC-09 v2: the official Experimental Computer Use card's ONE bounded
+  // navigation into the same Settings→Tools page. It is a pure navigation
+  // intent: no permission read, no second store, and no action on any other
+  // card. A disabled action carries the Host's exact reason.
+  if (card.target === 'bundle' && card.name === CUA_BUNDLE_NAME) {
+    const reason = card.error !== undefined
+      ? errorText(card.error)
+      : card.availability === 'missing'
+        ? 'The Computer use bundle files are not installed.'
+        : card.enabled
+          ? undefined
+          : 'The Computer use bundle is not enabled in this profile.'
+    actions.push({
+      value: PLUGIN_ACTION.manageComputerUse,
+      label: 'Manage Computer Use…',
+      enabled: reason === undefined,
+      ...(reason === undefined ? {} : { reason }),
+      tone: reason === undefined ? 'normal' : 'warning',
+    })
   }
   for (const row of card.rows) {
     if (!row.canToggle) continue

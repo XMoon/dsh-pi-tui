@@ -171,6 +171,8 @@ export interface PluginContentViewport {
  * application layer keeps seeing a plain `Component`.
  */
 export interface EmbeddedPluginPage extends Component {
+  /** The selected Plugin card value, when the page can name its source. */
+  selectedCardValue?(): string | undefined
   focused: boolean
   /** Release this page and the Host claim it owns, exactly once. */
   dispose(): void
@@ -229,7 +231,7 @@ export interface EmbeddedPluginPage extends Component {
 
 /** One painted hit target of the LAST frame (never a screen-index authority). */
 interface HitTarget {
-  readonly kind: 'card' | 'action' | 'filter' | 'pane' | 'search' | 'diagnostic-fact' | 'diagnostic-action'
+  readonly kind: 'card' | 'action' | 'filter' | 'pane' | 'search' | 'diagnostic-fact' | 'diagnostic-action' | 'notice'
   readonly value: string
   readonly row: number
   readonly startCol: number
@@ -556,6 +558,20 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
 
   handleInput(data: string): void {
     if (this.disposed) return
+    if (this.firstCuaEnableNotice) {
+      if (data === 'o' || data === 'O') {
+        this.firstCuaEnableNotice = false
+        const reason = this.intents.openComputerUseSettings?.()
+        if (reason !== undefined) this.controller.explain(reason)
+        return
+      }
+      if (data === 'l' || data === 'L' || matchesKey(data, 'escape')) {
+        this.firstCuaEnableNotice = false
+        return
+      }
+      // Any other key means "later": dismiss the notice and process the key.
+      this.firstCuaEnableNotice = false
+    }
     this.syncInputFocus()
     if (matchesKey(data, 'escape')) {
       this.handleEscape()
@@ -1828,6 +1844,15 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       case 'action':
         this.dispatchAction(target.value)
         return
+      case 'notice':
+        this.firstCuaEnableNotice = false
+        if (target.value === 'first-cua-open') {
+          const reason = this.intents.openComputerUseSettings?.()
+          if (reason !== undefined) this.controller.explain(reason)
+        }
+        this.bumpRevision()
+        this.intents.requestRender()
+        return
       case 'diagnostic-fact': {
         const fact = this.diagnosticsFacts().find(candidate => candidate.id === target.value)
         if (fact === undefined) return
@@ -1869,11 +1894,30 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
         this.openUpdateFromDetail(card)
         return
       case PLUGIN_ACTION.toggle:
-        if (card !== undefined && this.controller.toggleCard(card.value)) this.openConfirmation()
+        if (card === undefined) return
+        if (this.controller.toggleCard(card.value)) {
+          this.openConfirmation()
+        } else if (card.name === '@deepseek-ai/dsh-cua-bundle' && !card.enabled) {
+          // Remember only the INTENT; the notice is published in render() after
+          // the Host mutation result and a fresh inventory read show enabled.
+          this.pendingCuaFirstEnable = card.value
+        }
         return
       case PLUGIN_ACTION.remove:
         if (card !== undefined && this.controller.requestRemove(card.value)) this.openConfirmation()
         return
+      case PLUGIN_ACTION.manageComputerUse: {
+        if (card === undefined) return
+        const detail = this.detailView(card)
+        const action = detail.actions.find(candidate => candidate.value === PLUGIN_ACTION.manageComputerUse)
+        if (action === undefined || !action.enabled) {
+          this.controller.explain(action?.reason ?? 'The Computer Use settings page is not available.')
+          return
+        }
+        const reason = this.intents.openComputerUseSettings?.()
+        if (reason !== undefined) this.controller.explain(reason)
+        return
+      }
       case PLUGIN_ACTION.officialInstall: {
         if (card === undefined) return
         const detail = this.detailView(card)
@@ -2293,6 +2337,11 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
 
   private installOffset = 0
 
+  /** The CUA bundle value awaiting a settled first enable (never a pre-result). */
+  private pendingCuaFirstEnable: string | undefined
+  /** The one-shot first-enable notice's Open/Later keyboard window. */
+  private firstCuaEnableNotice = false
+
   // ── rendering ────────────────────────────────────────────────────────────
 
   render(width: number): string[] {
@@ -2304,6 +2353,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     }
     this.syncInputFocus()
     this.syncFrameState()
+    this.settleFirstCuaEnableNotice()
     this.ensureSelection()
     this.ensureDetailSelection()
     this.ensureUpdateSelection()
@@ -2316,7 +2366,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     const lines: string[] = []
     const targets: HitTarget[] = []
     if (plan.searchRows === 1) lines.push(this.renderSearchRow(plan, 0, targets))
-    if (plan.noticeRows === 1) lines.push(this.renderNotice(plan))
+    if (plan.noticeRows === 1) lines.push(this.renderNotice(plan, targets))
     const bodyTop = this.bodyTop(plan)
     if (plan.bodyRows > 0) {
       lines.push(...this.renderBody(plan, bodyTop, targets))
@@ -2527,7 +2577,50 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
   /** The page's OWN Host notice row: a settled/refused operation message, a
    *  failed inventory read or a version-exemption warning. The shared App
    *  notice is NOT a second source here — the Settings root paints it once. */
-  private renderNotice(plan: ChromePlan): string {
+  /**
+   * v2 §3.4 first-enable guidance: publish ONLY after the official toggle
+   * result + inventory readback show the bundle enabled and the mutation is no
+   * longer busy. A failed/no-op enable never claims success.
+   */
+  private settleFirstCuaEnableNotice(): void {
+    const pending = this.pendingCuaFirstEnable
+    if (pending === undefined || this.controller.busy() !== undefined) return
+    const card = this.controller.cards().find(candidate => candidate.value === pending)
+    if (card === undefined) {
+      this.pendingCuaFirstEnable = undefined
+      return
+    }
+    if (card.enabled && card.error === undefined) {
+      this.pendingCuaFirstEnable = undefined
+      this.firstCuaEnableNotice = true
+      this.controller.explain('Computer Use is enabled. Press o to open Settings → Tools · Computer Use and authorize Accessibility and Screen Recording on the Host Mac, or l to continue later.')
+    } else if (card.enabled) {
+      // Selection saved but the official provider reports a preparation error:
+      // never overwrite that error with a first-use success claim.
+      this.pendingCuaFirstEnable = undefined
+    } else if (this.controller.notice() !== undefined) {
+      // The settled Host result was a failure/no-op; its generic message owns
+      // the explanation and no first-use claim is made.
+      this.pendingCuaFirstEnable = undefined
+    }
+  }
+
+  private renderNotice(plan: ChromePlan, targets: HitTarget[]): string {
+    if (this.firstCuaEnableNotice) {
+      const narrow = plan.width < 60
+      const label = narrow ? 'Computer Use enabled. ' : 'Computer Use is enabled. '
+      const openLabel = narrow ? '[Open]' : '[Open Computer Use settings]'
+      const laterLabel = '[Later]'
+      const text = `${color.textMuted('ℹ ')}${label}${color.primary(openLabel)} ${color.textDim(laterLabel)}`
+      const row = plan.searchRows
+      const openStart = visibleWidth(`${color.textMuted('ℹ ')}${label}`)
+      const openEnd = openStart + visibleWidth(openLabel)
+      const laterStart = openEnd + 1
+      const laterEnd = laterStart + visibleWidth(laterLabel)
+      if (openEnd <= plan.width) targets.push({ kind: 'notice', value: 'first-cua-open', row, startCol: openStart, endCol: openEnd })
+      if (laterEnd <= plan.width) targets.push({ kind: 'notice', value: 'first-cua-later', row, startCol: laterStart, endCol: laterEnd })
+      return fit(text, plan.width)
+    }
     const model = this.controller.model()
     const exemptionWarning = model.exemptionWarnings.length === 0
       ? undefined
@@ -3982,6 +4075,10 @@ export interface PluginManagerWorkspacePanelIntents {
   /** The Settings root's navigation yield (Esc/Left/Shift+Tab at the list
    * root). The page only reports the intent; the ROOT commits the focus. */
   readonly onYieldNavigation: () => void
+  /** PR-5/MAC-09 v2: request the SAME Settings lease's Tools · Computer Use
+   *  page. Undefined = the switch was scheduled; a string = the exact reason
+   *  it cannot happen right now (the page explains it and stays put). */
+  readonly openComputerUseSettings?: () => string | undefined
 }
 
 /**

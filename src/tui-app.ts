@@ -904,6 +904,40 @@ export const XML_ENVELOPE_RESULT_TOOLS: ReadonlySet<string> = new Set(['read', '
  */
 export const TERMINAL_RESULT_TOOLS: ReadonlySet<string> = new Set(['bash', 'pwsh', 'shell'])
 
+/**
+ * The result lines ONE legacy PTC sub-call body paints, in BLOCK ORDER.
+ *
+ * An image-bearing row renders its structured blocks in order, so a mixed
+ * text+image result keeps its readable text AND gets the TSP's frozen
+ * payload-free identity row (`[IMAGE] name · W×H · bytes`) for each image
+ * block. Image BYTES never render on this surface; the native image node stays
+ * the TSP pane's capability. A row without an image block keeps its exact
+ * previous projection (terminal stdout keeps whitelisted SGR, every other
+ * result is plain text).
+ */
+export function subCallResultLines(child: Extract<TranscriptMessage, { kind: 'tool' }>): string[] {
+  const images = new Map(toolRowImageBlocks(child).map(block => [block.index, block.attachment]))
+  if (images.size === 0) {
+    return TERMINAL_RESULT_TOOLS.has(child.name)
+      ? sanitizeDisplayLog(child.result).split('\n')
+      : sanitizeDisplayText(child.result).split('\n')
+  }
+  const lines: string[] = []
+  ;(child.resultBlocks ?? []).forEach((block, index) => {
+    const attachment = images.get(index)
+    if (attachment !== undefined) {
+      lines.push(imageIdentityText(attachment))
+      return
+    }
+    if (block?.type === 'text' && typeof block.text === 'string') {
+      lines.push(...sanitizeDisplayText(block.text).split('\n'))
+    }
+  })
+  // A row whose blocks carry only images still states WHAT it holds.
+  if (lines.length === 0) for (const attachment of images.values()) lines.push(imageIdentityText(attachment))
+  return lines
+}
+
 /** First lines of a multi-line text, joined for folded previews. */
 function preview(text: string, lines: number): string {
   const parts = text.split('\n')
@@ -1964,6 +1998,7 @@ export interface SettingsWorkspaceOpenOptions {
    */
   readonly onOpenPlugins?: (
     onYieldNavigation: () => void,
+    onManageComputerUse: () => string | undefined,
   ) => import('./tui/plugin-manager/workspace.ts').EmbeddedPluginPage | undefined
   /** Fired once when the workspace is torn down by ANY path, with the reason
    *  the lease really closed. `user-exit` is the panel's own L0 Esc/Close
@@ -2037,6 +2072,11 @@ export interface SettingsWorkspaceOpenOptions {
    */
   readonly createMcpServersPage?: (
     done: () => void,
+  ) => import('./tui/panels/settings-workspace-panel.ts').EmbeddedSpecialistPage | undefined
+  /** PR-5/MAC-09 v2: the ONE same-lease Computer Use page factory. */
+  readonly createComputerUsePage?: (
+    done: () => void,
+    openPlugins: () => void,
   ) => import('./tui/panels/settings-workspace-panel.ts').EmbeddedSpecialistPage | undefined
 }
 
@@ -22392,17 +22432,16 @@ export class TuiApp {
         const rendered = this.renderVisualChildBody(card, child, width, indent, bodyExpanded)
         regions.push({ sourceKey: transcriptSearchSourceKey({ kind: 'subcall-field', subCallIds: path, field: 'result' }), anchorRow: resultStart, rowStart: resultStart, rowEnd: resultStart + rendered, enumerable: false })
         rows += rendered
-      } else if (child.result !== '') {
+      } else if (toolRowProjectsImages(child) || child.result !== '') {
         const resultStart = row + rows
-        // A captured terminal sub-call stdout keeps whitelisted SGR; every
-        // other external result is plain. The projected line count is the
-        // region height as well, so the display and the search geometry agree.
-        const resultLines = TERMINAL_RESULT_TOOLS.has(child.name)
-          ? sanitizeDisplayLog(child.result).split('\n')
-          : sanitizeDisplayText(child.result).split('\n')
+        const resultLines = subCallResultLines(child)
         // Result lines are truncated to the width: a dropped match would shift
         // every later raw ordinal. Anchor the body, never enumerate.
         regions.push({ sourceKey: transcriptSearchSourceKey({ kind: 'subcall-field', subCallIds: path, field: 'result' }), anchorRow: resultStart, rowStart: resultStart, rowEnd: resultStart + resultLines.length, enumerable: false })
+        // The projection already sanitized every line: terminal stdout keeps the
+        // whitelisted SGR (`sanitizeDisplayLog`), plain text and image identity
+        // are escape-free. Re-projecting here with `sanitizedPhysicalLine` would
+        // strip that SGR and change the established terminal-output contract.
         for (const line of resultLines) {
           card.addChild(new Text(truncateToWidth(`${pad}  ${color.textDim(line)}`, width, '…'), 0, 0))
           rows += 1
@@ -27902,6 +27941,9 @@ export class TuiApp {
       ...(options.createMcpServersPage === undefined
         ? {}
         : { createMcpServersPage: options.createMcpServersPage }),
+      ...(options.createComputerUsePage === undefined
+        ? {}
+        : { createComputerUsePage: options.createComputerUsePage }),
       // The clipboard capability stays the SAME Client-local `copySelection` the
       // rest of the surface already uses; the settlement re-proves THIS workspace
       // record before it may notify.
@@ -30418,6 +30460,7 @@ export class TuiApp {
 }
 
 // Style helpers from the terminal theme runtime's token functions.
+import { imageIdentityText, toolRowImageBlocks, toolRowProjectsImages } from './tui/tsp/transcript-view.ts'
 import { color } from './tui/theme/runtime.ts'
 
 /**
