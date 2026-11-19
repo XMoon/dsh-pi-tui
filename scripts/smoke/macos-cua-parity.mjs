@@ -778,12 +778,11 @@ async function quiesceConsentDecisions(installation, tui, label) {
 /**
  * THE IMMUTABLE DECISION SNAPSHOT of the durable CUA permission store.
  *
- * The official provider rewrites its own state file (including on shutdown), so
- * a fingerprint taken BEFORE an operation cannot be re-read afterwards: the
- * file content at that path is already the new one. This reads the decision
- * content ONCE, at the moment the caller asks for it, and returns plain data —
- * the only form in which a "before" value can still be compared after the
- * operation ran. Never secrets: application ids, names, decisions, revisions.
+ * A fingerprint taken BEFORE an operation cannot be re-read afterwards: the
+ * file at that path may already be the new one. This reads the decision content
+ * ONCE, at the moment the caller asks for it, and returns plain data — the only
+ * form in which a "before" value can still be compared after the operation ran.
+ * Never secrets: application ids, names, decisions, revisions.
  */
 function permissionStoreSnapshot(dshHome) {
   const directory = join(dshHome, 'storages')
@@ -2146,11 +2145,10 @@ async function main() {
       label: 'MAC09-11 disabled cua negative',
     })
     const storageAfter = permissionStoreSnapshot(installation.dshHome)
-    // The contract is that the durable DECISIONS survive disabling the bundle,
-    // not that the provider's own state file keeps byte-identical formatting
-    // (it rewrites it on shutdown). `storageBefore` is the immutable snapshot
-    // taken BEFORE the disable, so this comparison is real; the raw digests and
-    // the exact drift stay in the report for review.
+    // The contract is that the durable DECISIONS survive disabling the bundle.
+    // `storageBefore` is the immutable snapshot taken BEFORE the disable, so
+    // this comparison is real; the raw digests stay in the report, and a byte
+    // drift (none measured on a quiescent store) is visible rather than hidden.
     const decisionsOf = entries => entries.map(entry => ({ name: entry.name, applications: entry.applications }))
     report.permissionStorage = {
       before: storageBefore.map(({ name, sha256, bytes }) => ({ name, sha256, bytes })),
