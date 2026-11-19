@@ -38,6 +38,7 @@ test('the daemon Coordinator row injects tuiDaemonStartup and nothing else', () 
   const block = rowBlock('pi-tui-daemon-launcher')
   assert.match(block, /name: '@xmoon76\/dsh-pi-tui\/daemon-launcher'/u)
   assert.match(block, /inject: \[tuiDaemonStartup\]/u)
+  assert.ok(!block.includes('disabled:'), 'the daemon control-plane row must never be disabled')
 })
 
 test('webserver is conditionally disabled under the daemon supervisor', () => {
@@ -76,6 +77,42 @@ test('the web-preferences schema row is NOT disabled (it only projects Config)',
 test('the Direct tui-app row still gates on tuiStartup', () => {
   const block = rowBlock('tui-app')
   assert.match(block, /inject: \[tuiStartup,/u)
+})
+
+/**
+ * The Direct-only TUI/Host rows that gated ONLY on `tuiStartup`. Under the
+ * daemon backend the supervisor never publishes that service, so the old graph
+ * left them pending and printed the misleading `waiting for tuiStartup`
+ * warning. Each row must now carry the SAME daemon disable used by the other
+ * Host-business rows, and keep its original injection for Direct/Host-only.
+ *
+ * The list is the KNOWN bug set, not a permanent roster constraint: a future
+ * row with different semantics must be classified on its own owner, and this
+ * test must not fail merely because another `tuiStartup` row exists.
+ */
+const DIRECT_ONLY_DAEMON_DISABLED: ReadonlyArray<readonly [string, RegExp]> = [
+  ['pi-tui-extension-host', /inject: \[tuiStartup\]/u],
+  ['pi-tui-builtins', /inject: \[tuiStartup, piTuiExtensions\]/u],
+  ['pi-tui-performance-host', /inject: \[tuiStartup, sessionProjections\]/u],
+  ['workspace-files', /inject: \[tuiStartup\]/u],
+  ['tui-app', /inject: \[tuiStartup, /u],
+  ['workspace-controller', /inject: \[tuiStartup\]/u],
+  ['directory-picker', /inject: \[tuiStartup\]/u],
+  ['pi-tui-schedule', /inject: \[tuiStartup, sessionController\]/u],
+  ['pi-tui-direct-connection', /inject: \[tuiStartup, credentials, webServer\]/u],
+  ['pi-tui-direct-file-upload', /inject: \[tuiStartup, agents, attachments, commands, connection\]/u],
+  ['pi-tui-direct-session-controller', /inject: \[tuiStartup, agentDefaultModel,/u],
+]
+
+test('every Direct-only tuiStartup row is conditionally disabled in the daemon supervisor', () => {
+  for (const [id, inject] of DIRECT_ONLY_DAEMON_DISABLED) {
+    const block = rowBlock(id)
+    assert.ok(block.includes(DAEMON_DISABLED),
+      `${id} must be absent from the daemon supervisor instead of pending on tuiStartup`)
+    // The Direct / Host-only graphs must keep the exact original dependency:
+    // the disable condition is an ADDITION, never a replacement.
+    assert.match(block, inject, `${id} must keep its Direct/Host-only injection`)
+  }
 })
 
 test('the daemon supervisor disables every second-Host-business authority row', () => {
