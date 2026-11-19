@@ -33,12 +33,12 @@ dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.5.6
 dsh --profile pi-tui
 ```
 
-### 候选预览（0.5.7 × 0.2.2-rc.3，未发布）
+### 候选预览（0.5.7 × 0.2.2-rc.5，未发布）
 
-本 checkout 携带尚未发布的 `0.5.7` 候选，针对 DSH `0.2.2-rc.3` 精确验证：运行时最低与精确验证目标均为 `>=0.2.2-rc.3`（不兼容 `0.2.2-rc.2` 及更早），并要求 Node.js `>=24.9.0`。`0.5.7` 尚未发布到 npm，暂不提供安装型 `dsh plugin add ...@0.5.7` 命令；请从本 checkout 构建并用 `pnpm compat:dsh:npm` 验证该预览配对。安装或升级 DSH 前先正常结束 Agent 回合、退出旧 TUI/Host；不支持热升级。
+本 checkout 携带尚未发布的 `0.5.7` 候选，针对 DSH `0.2.2-rc.5` 精确验证：运行时最低为 `>=0.2.2-rc.3`，精确验证目标为 `0.2.2-rc.5`（不兼容 `0.2.2-rc.2` 及更早；早于 rc.5 的 Host 上，Web 搜索的自动路由决策可能不同），并要求 Node.js `>=24.9.0`。`0.5.7` 尚未发布到 npm，暂不提供安装型 `dsh plugin add ...@0.5.7` 命令；请从本 checkout 构建并用 `pnpm compat:dsh:npm` 验证该预览配对。安装或升级 DSH 前先正常结束 Agent 回合、退出旧 TUI/Host；不支持热升级。
 
 ```sh
-npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty @deepseek-ai/dsh@0.2.2-rc.3
+npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty @deepseek-ai/dsh@0.2.2-rc.5
 pnpm compat:dsh:npm
 ```
 
@@ -74,7 +74,7 @@ pnpm compat:dsh:npm
 | TUI 包版本 | 对应的官方 DSH tags | 说明 |
 |---|---|---|
 | `0.5.6`（stable / `@latest`） | `dsh-v0.2.2-rc.1` | 已发布稳定版；最低与精确验证目标为 DSH `0.2.2-rc.1`，Node.js `>=24.9.0`；不兼容 `0.2.1-rc.*` |
-| `0.5.7`（候选预览，未发布） | `dsh-v0.2.2-rc.3` | 本 checkout 候选；最低与精确验证目标为 DSH `0.2.2-rc.3`，Node.js `>=24.9.0`；不兼容 `0.2.2-rc.2` 及更早 |
+| `0.5.7`（候选预览，未发布） | `dsh-v0.2.2-rc.5`（`0.2.2-rc.3` 起） | 本 checkout 候选；最低 DSH 为 `0.2.2-rc.3`，精确验证目标为 `0.2.2-rc.5`，Node.js `>=24.9.0`；不兼容 `0.2.2-rc.2` 及更早 |
 | `0.5.5`（stable，历史） | `dsh-v0.2.1-rc.2`、`dsh-v0.2.1-rc.3`、`dsh-v0.2.1-rc.4`、`dsh-v0.2.1-rc.5` | 上一正式版；最低 DSH 版本为 `0.2.1-rc.2` |
 | `0.5.4`（stable，历史） | `dsh-v0.2.1-rc.2`、`dsh-v0.2.1-rc.3`、`dsh-v0.2.1-rc.4` | 上一稳定版；最低 DSH 版本为 0.2.1-rc.2，已在该三个 DSH 版本通过官方 preset assembly |
 | `0.5.3`（stable，历史） | `dsh-v0.2.1-rc.2`、`dsh-v0.2.1-rc.3`、`dsh-v0.2.1-rc.4` | 上一稳定版；最低 DSH 版本为 0.2.1-rc.2，已在该三个 DSH 版本通过官方 preset assembly |
@@ -88,7 +88,7 @@ pnpm compat:dsh:npm
 | `0.4.6`（stable，历史） | `dsh-v0.1.5-rc.1`、`dsh-v0.1.5-rc.2` | 上一稳定版；0.1.5 runtime 的兼容 TUI |
 | `0.4.7-alpha.2`（next，历史） | `dsh-v0.1.6-alpha.2` | 上一条 next 线；0.1.6-alpha.2 runtime 的兼容 TUI |
 
-不要混装稳定线与 `@next` 预发布线。`0.5.6` 是已发布稳定版（`@latest`），要求 DSH `>=0.2.2-rc.1`，且不兼容 `0.2.1-rc.*`；`0.5.7` 是尚未发布的候选，目标 DSH `0.2.2-rc.3`。升级前让回合和后台任务结束，正常退出旧 TUI/Host，并备份 Profile/patch、Session 原始日志、Workspace 及所需 Host 资源与凭据引用；不支持热升级。0.2.2 写入的数据不保证能由 rc5 原地读取，回退时须恢复到独立目录并使用匹配的旧版 DSH/TUI。历史配对见上表；通用匹配和诊断方式见[兼容性指南](docs/guides/dsh-compatibility.md)，`@next` 集成状态见 [next 分支 README](https://github.com/XMoon/dsh-pi-tui/blob/next/README.md)。
+不要混装稳定线与 `@next` 预发布线。`0.5.6` 是已发布稳定版（`@latest`），要求 DSH `>=0.2.2-rc.1`，且不兼容 `0.2.1-rc.*`；`0.5.7` 是尚未发布的候选，最低 DSH `0.2.2-rc.3`，精确验证目标 `0.2.2-rc.5`。升级前让回合和后台任务结束，正常退出旧 TUI/Host，并备份 Profile/patch、Session 原始日志、Workspace 及所需 Host 资源与凭据引用；不支持热升级。0.2.2 写入的数据不保证能由 rc5 原地读取，回退时须恢复到独立目录并使用匹配的旧版 DSH/TUI。历史配对见上表；通用匹配和诊断方式见[兼容性指南](docs/guides/dsh-compatibility.md)，`@next` 集成状态见 [next 分支 README](https://github.com/XMoon/dsh-pi-tui/blob/next/README.md)。
 
 新的 Agent preset 使用当前 roster 中选定的 id。DSH 允许合法的自定义
 `code` preset；只要当前 roster 存在它，显式输入和持久化状态都会保留 `code`。

@@ -37,10 +37,11 @@ export const WEB_TOOL_ROW = 'tool-web'
  *
  * `providers` selects the `web` row's shipped configuration:
  * - `'messages'` (the historical rc.1 stored selection): an explicitly stored
- *   `deepseek-official` keeps applying over rc.2's shipped default (F15).
- * - `'base-defaults'`: exactly the rc.2 `dsh-base` patch — the official
- *   default Search API / HTTP fetch, and NO `web-deepseek-api` config at all
- *   (the pure schema defaults, no legacy key).
+ *   `deepseek-official` keeps applying over the automatic routing (F15).
+ * - `'base-defaults'`: exactly the official `dsh-base` patch — `fetchProvider:
+ *   http` ONLY, no `searchProvider` at all (the Host's Automatic routing
+ *   state), and NO `web-deepseek-api` config (the pure schema defaults, no
+ *   legacy key).
  */
 export async function mountWebProviderPlane(
   ctx: Context,
@@ -67,7 +68,7 @@ export async function mountWebProviderPlane(
     `      name: ${JSON.stringify(require.resolve('@deepseek-ai/dsh-web'))}`,
     '      config:',
     ...(options.providers === 'base-defaults'
-      ? ['        searchProvider: deepseek-search-api', '        fetchProvider: http']
+      ? ['        fetchProvider: http']
       : ['        searchProvider: deepseek-official', '        fetchProvider: http']),
     `    - id: ${WEB_SEARCH_MESSAGES_ROW}`,
     `      name: ${JSON.stringify(require.resolve('@deepseek-ai/dsh-web-search-deepseek'))}`,

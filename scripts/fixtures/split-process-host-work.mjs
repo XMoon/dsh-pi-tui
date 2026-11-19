@@ -1416,6 +1416,76 @@ export async function apply(ctx) {
             .finally(() => { overrideBusy = false })
         }, 40)
         ctx.effect(() => () => clearInterval(overrideTimer))
+        // The A5 negative matrix: the smoke asks the REAL Host to move the
+        // search provider to AUTOMATIC (unset), a CUSTOM id, or an explicit
+        // official id through ONE official Settings mutation, so the inert
+        // Billing row's zero-write evidence runs on the real Host path.
+        // F8: a TEST-ONLY counter at the REAL SettingsForms mutation ingress.
+        // The Settings revision only moves when serialized row state changes,
+        // so a rejected/same-value call is invisible there; counting the
+        // ingress itself is what proves ZERO Billing mutation calls.
+        const mutationCounts = {}
+        const settingsService = ctx.settings
+        const originalMutate = settingsService.mutate
+        settingsService.mutate = async function countedMutate(namespace, ops, expected) {
+          const fields = Array.isArray(ops)
+            ? ops.map(op => Array.isArray(op?.path) ? op.path.join('.') : '').join(',')
+            : ''
+          mutationCounts[namespace] = (mutationCounts[namespace] ?? 0) + 1
+          mutationCounts[`${namespace}:${fields}`] = (mutationCounts[`${namespace}:${fields}`] ?? 0) + 1
+          return originalMutate.call(this, namespace, ops, expected)
+        }
+        const webRequestPath = join(root, 'f3-web-provider-request.json')
+        let webRequestBusy = false
+        const applyWebProvider = async request => {
+          // `observe` is the AUTHORITATIVE zero-mutation probe: it never calls
+          // the official setter, and reports the namespace revision the smoke
+          // compares across an inert Enter.
+          if (request.mode !== 'observe') {
+            await ctx.settings.mutate(webNamespace, [request.mode === 'automatic'
+              ? { op: 'unset', path: ['searchProvider'] }
+              : { op: 'set', path: ['searchProvider'], value: String(request.value) }])
+          }
+          const descriptors = ctx.settings.describe()
+          const descriptor = descriptors.find(entry => entry.ns === webNamespace)
+          const apiDescriptor = descriptors.find(entry => entry.ns === apiNamespace)
+          const value = plainValue(descriptor)
+          record('f3-web-provider', {
+            nonce: request.nonce,
+            mode: request.mode,
+            searchProvider: value?.searchProvider,
+            fetchProvider: value?.fetchProvider,
+            // The Billing setters write `web-deepseek-api.searchBilling`, so the
+            // A5 zero-mutation observation must watch THAT namespace's revision
+            // (the `web` revision only tracks provider changes).
+            revision: descriptor?.revision,
+            apiRevision: apiDescriptor?.revision,
+            mutationCounts: { ...mutationCounts },
+          })
+        }
+        const webRequestTimer = setInterval(() => {
+          if (webRequestBusy || !existsSync(webRequestPath)) return
+          webRequestBusy = true
+          let request
+          try {
+            request = JSON.parse(readFileSync(webRequestPath, 'utf8'))
+          } catch (error) {
+            rmSync(webRequestPath, { force: true })
+            webRequestBusy = false
+            record('f3-web-provider-failed', {
+              message: error instanceof Error ? error.message : String(error),
+            })
+            return
+          }
+          rmSync(webRequestPath, { force: true })
+          void applyWebProvider(request)
+            .catch(error => record('f3-web-provider-failed', {
+              nonce: request?.nonce,
+              message: error instanceof Error ? error.message : String(error),
+            }))
+            .finally(() => { webRequestBusy = false })
+        }, 40)
+        ctx.effect(() => () => clearInterval(webRequestTimer))
         const { credentialRef } = await import('@deepseek-ai/dsh-credentials')
         const ref = credentialRef('DEEPSEEK_API_KEY')
         // The sentinel reference is fixture state on the shared lane's ONE

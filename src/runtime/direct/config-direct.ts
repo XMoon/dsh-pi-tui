@@ -2064,9 +2064,9 @@ export class DirectWebProviderConfig implements WebProviderConfig {
     const provider = formValueOf(readSettingsDescriptor(settings, WEB_PROVIDER_NS))
     const api = formValueOf(readSettingsDescriptor(settings, WEB_SEARCH_API_NS))
     if (provider === undefined || api === undefined) return undefined
-    // rc.2 has NO single `baseURL` requirement: an unset Search/Fetch endpoint
-    // follows the current conversation's DeepSeek route, so the read stays
-    // ready. A missing/foreign billing value, though, is UNAVAILABLE — never a
+    // There is NO single `baseURL` requirement: an unset Search/Fetch endpoint
+    // keeps the read ready (the Host selects the actual provider at request
+    // time). A missing/foreign billing value, though, is UNAVAILABLE — never a
     // silent `auto`.
     const searchBilling = readWebApiBilling(api, 'searchBilling')
     const fetchBilling = readWebApiBilling(api, 'fetchBilling')
