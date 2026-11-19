@@ -38,6 +38,9 @@ export interface PreferencesPlaneOptions {
   /** Mount the canonical row DISABLED (the negative control). */
   readonly disabledRow?: boolean
   readonly rowName?: string
+  /** Also install a minimal `ui-settings-general` Settings entry so the
+   * OFFICIAL settings.yaml importer can commit a real profile transaction. */
+  readonly importableSettings?: boolean
   /** Extra profile USER rows written before mount (for example the retired
    * `tui-app` migration source). */
   readonly userRows?: readonly Record<string, unknown>[]
@@ -86,17 +89,31 @@ export function writePreferencesProfile(root: string, options: PreferencesPlaneO
       version: '0.0.0',
       private: true,
       type: 'module',
-      exports: { './preferences': './preferences.mjs' },
+      exports: {
+        './preferences': './preferences.mjs',
+        ...(options.importableSettings === true
+          ? { './ui-settings-general': './ui-settings-general.mjs' }
+          : {}),
+      },
     }, null, 2))
     writeFileSync(join(installedPackage, 'preferences.mjs'), [
       `export { name, Config, apply } from ${JSON.stringify(pathToFileURL(join(process.cwd(), 'src/app/config/preferences.ts')).href)}`,
       '',
     ].join('\n'))
+    if (options.importableSettings === true) {
+      writeFileSync(join(installedPackage, 'ui-settings-general.mjs'), [
+        `export { name, Config, apply } from ${JSON.stringify(pathToFileURL(join(process.cwd(), 'test/support/preferences-ui-general-row.ts')).href)}`,
+        '',
+      ].join('\n'))
+    }
     writeFileSync(join(bundleDir, 'cordis.patch.yml'), [
       '- insert:',
       `    - id: ${PREFERENCES_ROW_ID}`,
       `      name: ${JSON.stringify(options.rowName ?? '@xmoon76/dsh-pi-tui/preferences')}`,
       ...(options.disabledRow === true ? ['      disabled: true'] : []),
+      ...(options.importableSettings === true
+        ? ['    - id: ui-settings-general', "      name: '@xmoon76/dsh-pi-tui/ui-settings-general'"]
+        : []),
       '',
     ].join('\n'))
     symlinkSync(bundleDir, join(profileDir, 'node_modules', PREFERENCES_BUNDLE), 'dir')

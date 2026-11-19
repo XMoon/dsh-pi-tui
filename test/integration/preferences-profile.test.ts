@@ -73,6 +73,10 @@ function descriptorOf(ctx: Context) {
   return settingsOf(ctx).describe().find(entry => entry.ns === ROW_ID)
 }
 
+function descriptorByNs(ctx: Context, ns: string) {
+  return settingsOf(ctx).describe().find(entry => entry.ns === ns)
+}
+
 async function bootPlane(life: TestLifecycle, root: string, options: PreferencesPlaneOptions = {}): Promise<Plane> {
   const ctx = new Context()
   await ctx.plugin(Loader)
@@ -254,40 +258,64 @@ test('the official settings importer and the Host migration interleave without l
   const life = testLifecycle(t)
   const root = life.tempDir('prefs-importer-race-')
   // The retired document is present BEFORE the real SettingsForms service is
-  // constructed, so its official importer (rename -> import sections) races
-  // the Host migration that reads the same document.
+  // constructed. It carries a section the OFFICIAL importer can actually
+  // commit (`ui-settings-general` has a mounted entry) plus the TUI section the
+  // Host migration owns, so this test interleaves two real profile writes.
   writeFileSync(join(root, 'settings.yaml'), [
     'dsh-pi-tui:',
     '  theme: dark',
     '  responseStyle: concise',
+    'ui-settings-general:',
+    '  welcomeNoticeVersion: legacy-ack',
     '',
   ].join('\n'))
-  const plane = await bootPlane(life, root, { resetUserDocument: true })
-  // Start the migration immediately: it must either read the live file or the
-  // importer's .imported backup, never a half-written one.
+  const plane = await bootPlane(life, root, { resetUserDocument: true, importableSettings: true })
+  const realForms = settingsOf(plane.ctx)
+  let importerWriteObserved = false
+  // The migration has already READ its sources when it calls mutate(). Hold the
+  // canonical write until the official importer has COMMITTED its own entry;
+  // then release it. The final profile must contain BOTH writes, proving the
+  // official rename/import transaction and the migration do not drop or
+  // overwrite each other.
+  const forms = {
+    describe: (...args: Parameters<RealSettingsForms['describe']>) => realForms.describe(...args),
+    mutate: async (...args: Parameters<RealSettingsForms['mutate']>) => {
+      if (args[0] === ROW_ID && !importerWriteObserved) {
+        const deadline = Date.now() + 10_000
+        while (Date.now() < deadline) {
+          const imported = descriptorByNs(plane.ctx, 'ui-settings-general')
+          if ((imported?.user as { welcomeNoticeVersion?: string } | undefined)?.welcomeNoticeVersion === 'legacy-ack') {
+            importerWriteObserved = true
+            break
+          }
+          await new Promise(resolve => setTimeout(resolve, 10))
+        }
+        assert.equal(importerWriteObserved, true,
+          'the official importer never committed its own settings.yaml section')
+      }
+      return realForms.mutate(...args)
+    },
+  }
   const report = await migrateProfileTuiPreferences({
     patchPath: plane.patchPath,
     configEditor: (plane.ctx as unknown as { configEditor: ProfileConfigEditorLike }).configEditor,
-    forms: settingsOf(plane.ctx),
+    forms: forms as unknown as ReturnType<typeof settingsOf>,
     home: root,
     resolvePreset: async () => {},
     diag: { warn: () => {}, info: () => {} },
   })
   assert.equal(report.status, 'migrated')
-  // Let the official importer finish its own rename/import work.
-  for (let attempt = 0; attempt < 100 && !existsSync(join(root, 'settings.yaml.imported')); attempt += 1) {
-    await new Promise(resolve => setTimeout(resolve, 10))
-  }
   assert.equal(existsSync(join(root, 'settings.yaml')), false,
     'the official importer renames the retired document before its first write')
   const imported = readFileSync(join(root, 'settings.yaml.imported'), 'utf8')
   assert.match(imported, /theme: dark/u, 'the imported backup retains the original opinion')
+  const importedGeneral = descriptorByNs(plane.ctx, 'ui-settings-general')
+  assert.equal((importedGeneral?.user as { welcomeNoticeVersion?: string } | undefined)?.welcomeNoticeVersion,
+    'legacy-ack', 'the official importer committed its section exactly once')
   const canonical = descriptorOf(plane.ctx)
   assert.deepEqual(canonical?.user, {
     theme: 'dark', responseStyle: 'concise', legacySettingsMigrationVersion: 2,
   }, 'the canonical values survived the importer interleave exactly once')
-  assert.equal((canonical?.user as { legacySettingsMigrationVersion?: number }).legacySettingsMigrationVersion, 2,
-    'the marker advances only after the complete canonical write')
   const document = parseYaml(readFileSync(plane.patchPath, 'utf8')) as Array<Record<string, unknown>>
   assert.equal(document.some(row => row.id === 'dsh-pi-tui'), false,
     'the importer must not create a second legacy preference entry')
