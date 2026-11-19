@@ -288,6 +288,15 @@ async function conversationMarkers(page, marker) {
     const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT)
     let node = walker.nextNode()
     while (node !== null) {
+      // A DRAFT is not a submitted turn: text that belongs to the composer
+      // (contenteditable textbox, textarea or input) can never satisfy a
+      // conversation assertion, or a marker still sitting in the draft would
+      // be counted as an already-sent message.
+      const composerOwned = node.parentElement?.closest('textarea, input, [role=textbox], [contenteditable="true"]') ?? null
+      if (composerOwned !== null) {
+        node = walker.nextNode()
+        continue
+      }
       if ((node.textContent ?? '').includes(text)) {
         let element = node.parentElement
         while (element !== null && element !== document.body) {
@@ -431,8 +440,25 @@ async function sendPrompt(page, text) {
   await composer.click()
   await composer.fill(text)
   await waitControl(page, { aria: 'Send message' }, 30_000, 'the Send-message control')
+  // A click that no longer submits (for example while an attachment is still
+  // uploading) must fail HERE instead of letting a later conversation wait
+  // match the previous turns. Arm the request barrier before the click.
+  const promptRequest = page.waitForRequest(
+    candidate => new URL(candidate.url()).pathname === '/api/session/prompt' && candidate.method() === 'POST',
+    { timeout: 30_000 },
+  )
   await clickSend(page)
+  try {
+    await promptRequest
+  } catch {
+    throw new Error('the Send gesture produced no POST /api/session/prompt request; the draft was never submitted')
+  }
   result.browserClientActions.push('send-prompt')
+}
+
+/** Whether the composer still paints an in-flight upload card. */
+async function composerUploading(page) {
+  return page.evaluate(() => /Uploading/u.test(document.body.innerText ?? ''))
 }
 
 /**
@@ -1620,7 +1646,25 @@ const cases = {
     const upload = join(coordinationDir, 'browser-local-sentinel.txt')
     writeFileSync(upload, `prd-browser-local-${nonce}\n`, { mode: 0o600 })
     const input = page.locator('input[type=file]').last()
+    // The card appears BEFORE the bytes reach the Host: arm the real upload
+    // response first and require it to complete, then require the card to
+    // leave its in-flight state. Sending while the card still says Uploading
+    // produces no prompt at all.
+    const uploadResponse = page.waitForResponse(
+      candidate => new URL(candidate.url()).pathname === '/api/session/uploadFileBinary'
+        && candidate.request().method() === 'POST',
+      { timeout: 120_000 },
+    )
     await input.setInputFiles(upload, { timeout: 20_000 })
+    const uploaded = await uploadResponse
+    if (uploaded.status() !== 200) {
+      throw new Error(`the browser-local upload answered HTTP ${String(uploaded.status())}, not 200`)
+    }
+    const uploadDeadline = Date.now() + 120_000
+    while (await composerUploading(page)) {
+      if (Date.now() > uploadDeadline) throw new Error('the composer stayed in the Uploading state for the browser-local file')
+      await page.waitForTimeout(250)
+    }
     const painted = await page.evaluate(() => (document.body.innerText ?? '').includes('browser-local-sentinel.txt'))
     if (!painted) throw new Error('the composer painted no card for the browser-local file')
     // The prompt names the sentinel so the TUI transcript and Host events can

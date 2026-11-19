@@ -41,6 +41,7 @@ import {
   lastSurfaceStatus,
   productionBuildId,
   readJson,
+  readProcessFacts,
   readStartIdentity,
   seatFree,
   waitForCondition,
@@ -328,7 +329,12 @@ export const runWebProductQualification = async context => {
     `PR-D SPLIT_PROCESS_PLAYWRIGHT_ROOT has no pinned Playwright install: ${playwrightRoot}`)
   const browsers = process.env.SPLIT_PROCESS_PLAYWRIGHT_BROWSERS ?? join(playwrightRoot, 'browsers')
   assert(existsSync(browsers), `PR-D the Playwright browser install is missing: ${browsers}`)
-  const chromiumLibs = process.env.SPLIT_PROCESS_CHROMIUM_LIBS ?? join(playwrightRoot, 'libs', 'usr', 'lib', 'x86_64-linux-gnu')
+  // The Linux Chromium needs the extra shared libraries the pinned install
+  // ships beside it; a Darwin Chromium links its own frameworks and takes no
+  // LD_LIBRARY_PATH (setting one there is inert at best).
+  const linuxLibs = process.platform === 'linux'
+    ? process.env.SPLIT_PROCESS_CHROMIUM_LIBS ?? join(playwrightRoot, 'libs', 'usr', 'lib', 'x86_64-linux-gnu')
+    : undefined
   const driverPath = join(SCRIPT_DIR, 'fixtures', 'm5-web-product-browser.mjs')
   assert(existsSync(driverPath), 'PR-D the product Browser driver is missing')
   const driverEnv = {
@@ -336,7 +342,9 @@ export const runWebProductQualification = async context => {
     M5_WEB_DSH_HOME: dshHome,
     M5_WEB_PLAYWRIGHT_ROOT: playwrightRoot,
     PLAYWRIGHT_BROWSERS_PATH: browsers,
-    LD_LIBRARY_PATH: `${chromiumLibs}${process.env.LD_LIBRARY_PATH === undefined ? '' : `:${process.env.LD_LIBRARY_PATH}`}`,
+    ...(linuxLibs === undefined
+      ? {}
+      : { LD_LIBRARY_PATH: `${linuxLibs}${process.env.LD_LIBRARY_PATH === undefined ? '' : `:${process.env.LD_LIBRARY_PATH}`}` }),
   }
   // The isolated-fixture facts the official Web UI needs on top of the C1
   // workload: the first-run notice acknowledgement and the Workspace
@@ -386,7 +394,7 @@ export const runWebProductQualification = async context => {
   const startHost = async (scenario, label, extraEnv = {}, patch = productPatch) => {
     // The FIRST Host relies on the kernel claim; every later Host uses the
     // scope this case learned from its own first real Ready, never T08's.
-    if (webScopeSuffix !== undefined) await seatFree(`\0dsh-pi-tui-h-${webScopeSuffix}`, 15_000)
+    if (webScopeId !== undefined) await seatFree(`\0dsh-pi-tui-h-${webScopeSuffix}`, 15_000, { scopeId: webScopeId })
     const workRoot = productWorkRoot(label)
     const host = new EntryProcess('host', entries.host, {
       ...base,
@@ -400,6 +408,10 @@ export const runWebProductQualification = async context => {
     })
     hosts.push(host)
     const ready = await host.waitFor(record => record.m4a0 === 'ready', `${label} Host ready`, 240_000)
+    // Linux spells the seat name with a 40-char scope suffix; Darwin holds the
+    // seat as an `O_EXLOCK` file keyed by the FULL scope id. Keep both so the
+    // platform-aware `seatFree` can observe the real claim on either OS.
+    if (webScopeId === undefined) webScopeId = ready.localHost.scopeId
     if (webScopeSuffix === undefined) webScopeSuffix = ready.localHost.scopeId.slice(0, 40)
     evidence.hostIdentity(label, {
       ...ready.localHost,
@@ -600,6 +612,7 @@ export const runWebProductQualification = async context => {
     assert(notActive.length === 0, `the Web rows are not active: ${notActive.map(([id, state]) => `${id}:${state ?? 'missing'}`).join(',')}`)
   }
   let browserRun = 0
+  let webScopeId
   let webScopeSuffix
   const browserCase = async (caseId, config, body) => {
     const coord = join(browserRoot, `${caseId}-${String(++browserRun)}`)
@@ -1124,6 +1137,16 @@ export const runWebProductQualification = async context => {
       await handle.waitFact('upload', 'WP-09 Browser upload', 240_000)
       hostShellFact = await handle.waitFact('host-shell', 'WP-09 Host terminal command', 240_000)
     })
+    // The HOST is the authority: the Browser's upload must be ONE durable
+    // user message carrying this run's marker AND its file attachment before
+    // any transcript assertion is trusted. A Browser driver that never really
+    // submitted (or submitted without the file) fails here with a precise
+    // fact instead of a 180s display timeout.
+    const browserAttachmentMarker = `wp09 attachment ${productNonce}`
+    await waitForCondition(() => durableOf(sessionToggle).some(event => event.type === 'user/message'
+      && JSON.stringify(event).includes(browserAttachmentMarker)
+      && JSON.stringify(event).includes('browser-local-sentinel.txt')),
+    'WP-09 Host durable Browser attachment message', 120_000)
     await tuiLocal.waitForScreen('browser-local-sentinel.txt', 'WP-09 TUI sees the Browser attachment', 180_000)
     // The TUI Client-local intake reads the image in the TUI process; the
     // bytes are encoded into the prompt and the Host attachment owner stores
@@ -1135,12 +1158,31 @@ export const runWebProductQualification = async context => {
       && JSON.stringify(event).includes('"type":"image"')),
     'WP-09 the TUI Client-local image never reached the Host user message')
     // A real Client-local export: `/copy` writes the last assistant message
-    // through the client clipboard policy (the OSC 52 leg is observable on
-    // the PTY and never reaches the Host).
+    // through the client clipboard policy and never reaches the Host.
+    //
+    // The OBSERVABLE channel differs by driver and neither is a weaker claim:
+    // both read the SAME product fact (the copied text reached its sink).
+    // Linux owns the Client's real byte stream, so the OSC 52 sequence is
+    // visible there. A Darwin pane is a REAL terminal: it consumes the escape,
+    // and the product's tmux leg leaves the text in the pane's own buffer.
+    // The Linux byte window must start BEFORE the command is sent.
     const rawBeforeCopy = tuiLocal.raw.length
     tuiLocal.send('/copy\r')
-    await waitForCondition(() => tuiLocal.raw.slice(rawBeforeCopy).includes('\u001b]52;'),
-      'WP-09 Client-local clipboard export', 30_000)
+    if (process.platform === 'darwin') {
+      // The pane consumes the escape sequence, so the product's tmux leg is the
+      // observable: it must carry the REAL last answer, not just any buffer.
+      const lastAnswer = durableOf(sessionToggle)
+        .filter(event => event.type === 'assistant/message')
+        .map(event => JSON.stringify(event.data?.content?.map(block => block?.text ?? '').join('') ?? ''))
+        .at(-1)
+      assert(typeof lastAnswer === 'string' && lastAnswer !== '',
+        'WP-09 the Host Session records no assistant message to copy')
+      await waitForCondition(async () => (await tuiLocal.clipboardText() ?? '').includes(JSON.parse(lastAnswer)),
+        'WP-09 Client-local clipboard export', 30_000)
+    } else {
+      await waitForCondition(() => tuiLocal.raw.slice(rawBeforeCopy).includes('\u001b]52;'),
+        'WP-09 Client-local clipboard export', 30_000)
+    }
     // The Host storage holds the OFFICIAL uploads of both Clients' sentinel
     // bytes, but never the TUI-private file that was never attached.
     const storageMatches = async needle => {
@@ -1190,20 +1232,17 @@ export const runWebProductQualification = async context => {
     const privateLeak = await storageMatches(`prd-tui-private-${productNonce}`)
     assert(privateLeak === undefined, `WP-09 the Host read a TUI-private file that was never attached: ${String(privateLeak)}`)
     const localityHeader = await waitForHostSessionHeader(dshHome, sessionToggle, 'WP-09 Session header')
-    // Read the REAL process facts from /proc: the TUI's own cwd/HOME/PATH and
-    // the Host's own cwd/HOME/PATH. Creating tuiCwd/tuiHome is not isolation.
+    // Read the REAL process facts from the OS (Linux /proc, Darwin lsof+ps):
+    // the TUI's own cwd/HOME/PATH and the Host's own cwd/HOME/PATH. Creating
+    // tuiCwd/tuiHome is not isolation.
     const tuiPid = tuiLocal.records.filter(record => record.m4a0 === 'ready').at(-1)?.pid
     assert(Number.isInteger(tuiPid) && tuiPid > 0, 'WP-09 the TUI published no business PID')
-    const procCwd = pid => realpathSync(readlinkSync(`/proc/${String(pid)}/cwd`))
-    const procEnv = pid => Object.fromEntries(readFileSync(`/proc/${String(pid)}/environ`).toString('utf8')
-      .split('\0').filter(Boolean).map(entry => {
-        const equals = entry.indexOf('=')
-        return [entry.slice(0, equals), entry.slice(equals + 1)]
-      }))
-    const tuiCwdActual = procCwd(tuiPid)
-    const hostCwdActual = procCwd(groupA.ready.pid)
-    const tuiEnvActual = procEnv(tuiPid)
-    const hostEnvActual = procEnv(groupA.ready.pid)
+    const tuiFacts = readProcessFacts(tuiPid)
+    const hostFacts = readProcessFacts(groupA.ready.pid)
+    const tuiCwdActual = tuiFacts.cwd
+    const hostCwdActual = hostFacts.cwd
+    const tuiEnvActual = tuiFacts.env
+    const hostEnvActual = hostFacts.env
     assert(tuiCwdActual === realpathSync(tuiCwd),
       `WP-09 the TUI process cwd is ${tuiCwdActual}, not the isolated tuiCwd`)
     assert(hostCwdActual !== tuiCwdActual,
@@ -1221,7 +1260,7 @@ export const runWebProductQualification = async context => {
       tui: { cwd: tuiCwdActual, home: tuiEnvActual.HOME, path: tuiEnvActual.PATH },
       sessionWorkspace: localityHeader.cwd,
     })
-    assert(typeof localityHeader.cwd === 'string' && !localityHeader.cwd.startsWith(tuiCwd),
+    assert(typeof localityHeader.cwd === 'string' && !localityHeader.cwd.startsWith(realpathSync(tuiCwd)),
       `WP-09 the Session workspace is the TUI client cwd (${String(localityHeader.cwd)}) instead of a Host workspace`)
     assert(!existsSync(join(tuiCwd, 'browser-local-sentinel.txt')),
       'WP-09 the Browser-local file was written into the TUI Client cwd')
@@ -1964,8 +2003,12 @@ export const runWebProductQualification = async context => {
             // DEDICATED, disposable Default-workspace folder under this lane's
             // isolated product root — never the profile directory, the smoke
             // work root itself, or the developer's repository.
-            assert(resolve(wp11Cwd) === resolve(dedicatedWorkspace),
-              `WP-11 the Session cwd is not the dedicated Default workspace of this lane: ${wp11Cwd} != ${dedicatedWorkspace}`)
+            // Compare CANONICAL paths: a Host records the real path, while the
+            // lane builds `productRoot` from a temp dir that Darwin exposes
+            // through the `/var -> /private/var` symlink. The two spellings name
+            // one directory; only the canonical comparison proves that.
+            assert(realpathSync(wp11Cwd) === realpathSync(dedicatedWorkspace),
+              `WP-11 the Session cwd is not the dedicated Default workspace of this lane: ${realpathSync(wp11Cwd)} != ${realpathSync(dedicatedWorkspace)}`)
             assert(existsSync(dedicatedWorkspace) === true, 'WP-11 the dedicated workspace folder does not exist')
             // The isolated, disposable Git work tree at the Session's OWN cwd.
             const git = args => spawnSync('git', args, { cwd: wp11Cwd, encoding: 'utf8' })
@@ -2420,6 +2463,17 @@ export const runWebProductQualification = async context => {
         : browserSubsetPassed ? 'BLOCKED' : 'INCOMPLETE'
     const browserSubset = browserSubsetPassed ? 'PASS' : 'FAIL'
     evidence.finish({ status: finalStatus, browserSubset, wc, browserCases: browserRun })
+    // A SELECTED run reports what it actually executed: the Browser×TUI subset
+    // as PASS, plus the owner-deferred half as its own NOT_VERIFIED boundary.
+    // The full lane keeps its single DEFERRED_WITH_OWNER verdict string, which
+    // must not be read as "the Tern GUI half passed".
+    if (mode === 'selected' && finalStatus === 'DEFERRED_WITH_OWNER') {
+      context.reportBoundary({
+        boundary: 'wc12-real-tern-gui',
+        reason: 'the Tern GUI half of WC-12 has no path to the serving Split Host WebAccessPort in the current composition; Owner-approved DEFERRED_WITH_OWNER (M5-W owner), re-entry on a composition change',
+      })
+      return { status: 'PASS', browserSubset, wc, deferred: 'WC-12' }
+    }
     trace('t75-web-product', {
       status: finalStatus,
       browserSubset,

@@ -391,7 +391,7 @@ registry fact, not a user API: every selected case — and a whole `--suite`,
 refused as a unit, never silently filtered — must support the current OS, and
 an unsupported selection fails closed as
 `INPUT_UNQUALIFIED` / `INPUT_PLATFORM_CASE_UNSUPPORTED` before the candidate is
-inspected, a work root exists or anything is installed. Eight audited shared
+inspected, a work root exists or anything is installed. Nine audited shared
 cases are qualified on both Linux and macOS; every other case stays
 Linux-only until real native evidence exists. On macOS the no-selector form of
 `smoke:macos-split` is the legacy A/P/M/L parity scene, unchanged; a

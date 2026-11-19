@@ -428,7 +428,7 @@ test('listing selectable split cases does not install a profile or claim complet
   assert.deepEqual(readdirSync(dir), [], 'a listing must not install or write a report')
 })
 
-test('every registry entry declares a conservative platform list and the eight shared cases are dual-platform', () => {
+test('every registry entry declares a conservative platform list and the nine shared cases are dual-platform', () => {
   const shared = [
     'surface.sessionless-host-file-f5b',
     'surface.generic-file-upload-f4',
@@ -438,6 +438,10 @@ test('every registry entry declares a conservative platform list and the eight s
     'mcp.servers-fr3',
     'mcp.servers-fr4',
     'multi-client.shared-session-interactions',
+    // The product Browser×TUI matrix reads its process facts through the
+    // platform seam (Linux /proc, Darwin lsof+ps) and drives the Browser from
+    // the pinned Playwright install, so it is qualified on both platforms.
+    'web.product-browser-tui',
   ]
   const cases = listSelectableCases()
   for (const entry of cases) {

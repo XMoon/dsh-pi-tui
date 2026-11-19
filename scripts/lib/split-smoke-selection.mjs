@@ -359,6 +359,7 @@ const CASE_REGISTRY = Object.freeze([
     suite: 'web',
     id: 'web.product-browser-tui',
     title: 'the product Browser and real TUI share one Host across the 22-case WP matrix',
+    platforms: LINUX_DARWIN,
     run: runWebProductQualification,
   }),
   Object.freeze({

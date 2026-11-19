@@ -215,6 +215,20 @@ export function createDarwinSurfacePtyScope() {
         while (lines.length < rows) lines.push('')
         return lines.slice(0, rows)
       },
+      /**
+       * The pane's tmux buffer, when something copied into it.
+       *
+       * The product's Client-local copy policy tries the tmux leg first when
+       * `TMUX` is set (a real pane always sets it) and `tmux load-buffer -w -`
+       * resolves the socket from `$TMUX`, so the text lands in THIS private
+       * server's buffer. That is the Darwin-observable fact for a copy: the
+       * pane consumes the OSC 52 bytes, so the client's byte stream cannot
+       * carry them here.
+       */
+      bufferText() {
+        const shown = tmux(['show-buffer'], `show-buffer ${role}`, { allowMissing: true })
+        return shown.status === 0 ? shown.stdout : undefined
+      },
       /** The pane's death fact: `dead` plus the wrapper-recorded exit status. */
       deadFacts() {
         const exists = tmux(['has-session', '-t', session], `has-session ${role}`, { allowMissing: true })

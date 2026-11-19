@@ -16,7 +16,7 @@
  */
 
 import { spawn, spawnSync } from 'node:child_process'
-import { chmodSync, existsSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, readFileSync, readlinkSync, readdirSync, realpathSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:net'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -70,6 +70,56 @@ export function alive(pid) {
   } catch {
     return false
   }
+}
+
+/**
+ * The REAL cwd and environment of one live process, read from the OS rather
+ * than from the directory a test only created.
+ *
+ * Linux reads `/proc/<pid>/cwd` and `/proc/<pid>/environ`; Darwin has neither,
+ * so it asks the same questions through `lsof` (the cwd file descriptor) and
+ * `ps -Eww` (the environment `ps` appends after the command line). Both
+ * platforms report the same two facts, so a locality assertion can require the
+ * SAME evidence wherever the lane runs instead of skipping the check.
+ */
+export function readProcessFacts(pid, platform = process.platform) {
+  if (!Number.isInteger(pid) || pid <= 0) throw new SplitSmokeAssertionError(`invalid process id for process facts: ${String(pid)}`)
+  if (platform === 'linux') {
+    const cwd = realpathSync(readlinkSync(`/proc/${String(pid)}/cwd`))
+    const env = Object.fromEntries(readFileSync(`/proc/${String(pid)}/environ`).toString('utf8')
+      .split('\0').filter(Boolean).map(entry => {
+        const equals = entry.indexOf('=')
+        return [entry.slice(0, equals), entry.slice(equals + 1)]
+      }))
+    return { cwd, env }
+  }
+  if (platform === 'darwin') {
+    const cwdLines = spawnSync('lsof', ['-a', '-p', String(pid), '-d', 'cwd', '-Fn'], { encoding: 'utf8' })
+    if (cwdLines.status !== 0) {
+      throw new SplitSmokeAssertionError(`cannot read the cwd of process ${String(pid)}: ${cwdLines.stderr ?? cwdLines.error?.message ?? 'lsof failed'}`)
+    }
+    const cwdPath = (cwdLines.stdout ?? '').split('\n').find(line => line.startsWith('n'))
+    if (cwdPath === undefined) throw new SplitSmokeAssertionError(`process ${String(pid)} reports no cwd file descriptor`)
+    const psLines = spawnSync('ps', ['-Eww', '-p', String(pid)], { encoding: 'utf8' })
+    if (psLines.status !== 0) {
+      throw new SplitSmokeAssertionError(`cannot read the environment of process ${String(pid)}: ${psLines.stderr ?? psLines.error?.message ?? 'ps failed'}`)
+    }
+    // `ps -Eww` prints `  PID TTY TIME CMD <argv…> <KEY=VALUE>…`: the environment
+    // is appended after the command line, so the LAST occurrence of a key wins.
+    // Values may contain spaces, so slice between assignment starts instead of
+    // splitting on whitespace.
+    const command = (psLines.stdout ?? '').split('\n')[1] ?? ''
+    const assignments = [...command.matchAll(/(?:^|\s)([A-Za-z_][A-Za-z0-9_]*)=/gu)]
+      .map(match => ({ key: match[1], start: match.index + match[0].length - match[1].length - 1, valueAt: match.index + match[0].length }))
+    const env = {}
+    for (const [index, assignment] of assignments.entries()) {
+      const next = assignments[index + 1]
+      const valueEnd = next === undefined ? command.length : next.start - 1
+      env[assignment.key] = command.slice(assignment.valueAt, valueEnd)
+    }
+    return { cwd: realpathSync(cwdPath.slice(1)), env }
+  }
+  throw new SplitSmokeAssertionError(`process facts are not supported on ${platform}`)
 }
 
 /**
@@ -477,6 +527,22 @@ export function createSplitProcessScope() {
       })
     }
 
+    /**
+     * The text a Client-local copy actually handed to the terminal/tmux
+     * clipboard sink, when the driver can observe it.
+     *
+     * Linux owns the Client's byte stream, so the OSC 52 sequence is read from
+     * `raw`. A Darwin pane is a REAL terminal: it consumes the escape and the
+     * product's tmux leg (`load-buffer -w -`, socket from `$TMUX`) leaves the
+     * text in this pane's private tmux buffer. Both are the same product fact —
+     * the confirmed copy reached its sink — read through the platform's own
+     * observable.
+     */
+    async clipboardText() {
+      if (this.platform !== 'darwin') return undefined
+      return this.darwin.bufferText()
+    }
+
     /** Flush the headless terminal and return its visible viewport. */
     async viewport() {
       if (this.platform === 'darwin') {
@@ -831,7 +897,29 @@ export async function waitForAnyReady(processes, label, timeoutMs) {
   })
 }
 
-export async function seatFree(name, timeoutMs = 5_000) {
+/**
+ * Wait until one seat is released.
+ *
+ * The seat is a platform fact, not a lane choice: Linux abstracts it as a
+ * `\0`-prefixed abstract socket that can be re-bound, while Darwin holds an
+ * `O_EXLOCK` file under the account home (there is no abstract-socket
+ * namespace to re-bind). `options.scopeId` is the FULL scope id the Darwin
+ * seat file is keyed by; the Linux name carries only its 40-char prefix, so a
+ * Darwin caller must pass the untruncated id.
+ */
+export async function seatFree(name, timeoutMs = 5_000, options = {}) {
+  const platform = options.platform ?? process.platform
+  if (platform === 'darwin') {
+    const scopeId = options.scopeId
+    assert(typeof scopeId === 'string' && scopeId !== '',
+      `the Darwin seat probe needs the full scope id, not the truncated name ${JSON.stringify(name)}`)
+    if (await darwinHostSeatFileFree(scopeId, { timeoutMs })) return
+    throw new SplitSmokeWaitError('WAIT_TIMEOUT', {
+      code: 'SEAT_RELEASE_TIMEOUT',
+      waitLabel: 'abstract seat release',
+      elapsedMs: timeoutMs,
+    })
+  }
   const started = Date.now()
   const deadline = started + timeoutMs
   while (Date.now() < deadline) {
