@@ -130,6 +130,8 @@ dsh --profile pi-tui --continue            # 继续当前 Host Workspace 中最�
 
 ### Daemon（Linux / macOS，可选）
 
+使用 Daemon 的简明步骤、Client 退出与后台 Host 停止的区别，见 [Daemon 用户指南](docs/guides/daemon.md)；下文保留升级、回滚及 ACP 的详细说明。
+
 候选版提供 Linux 与 macOS 本地 daemon 后端，**默认仍是 Direct**（进程内 TUI）。它不改变现有安装，只有显式选择后才生效：
 
 - **选择**：本次启动设置 `DSH_PI_TUI_BACKEND=daemon`，或在 `/settings → General → Backend` 保存 `Daemon`（官方 Profile 配置项 `tui-startup.backend`）。优先级为 `DSH_PI_TUI_BACKEND` > 已保存 Profile 配置 > `direct`；非法值、空串与非 Linux/macOS 平台会非零退出，不会静默回退 Direct。选择只影响下一次冷启动，不会热切换当前进程，也不会重启任何 Host。
@@ -241,7 +243,7 @@ try {
 
 已有 Session 可将 `session.new` 换成 `acp.methods.agent.session.resume`，参数为 `{ sessionId, cwd }`。每个 ACP 连接至多持有一个 Session View，同一 Session 同时至多一个 ACP View，TUI 不受此限制；`session/close` **仅 detach**，不删除 Session 或 dispose 共享 Agent。关闭 Host 会清理 Listener，自有 stale Socket 可在下一次启动时安全回收。
 
-连接数默认上限 **4**，Host 启动环境可设置 `DSH_PI_TUI_ACP_MAX_CONNECTIONS=1..16`。提供 `initialize`、`session/new|resume|prompt|cancel|close`、标准文本、`resource_link`、能力协商后的图片输入以及已提交的 Assistant/Tool 内容。不支持 `session/list`、`session/load`、`session/set_config_option`、ACP 端的 MCP Server 注册或专用文件/产物传输；`resource_link` 不代表 Host 会抓取 URI。协议错误可检查 JSON-RPC `data.code` 中的 `LOCAL_ACP_*` 分类。详细语义参见 [Host/Client 合同](docs/architecture/host-client.md)。
+连接数默认上限 **4**，Host 启动环境可设置 `DSH_PI_TUI_ACP_MAX_CONNECTIONS=1..16`。提供 `initialize`、`session/new|resume|prompt|cancel|close`、标准文本、`resource_link`、能力协商后的图片输入以及已提交的 Assistant/Tool 内容。不支持 `session/list`、`session/load`、`session/set_config_option`、ACP 端的 MCP Server 注册或专用文件/产物传输；`resource_link` 不代表 Host 会抓取 URI。协议错误可检查 JSON-RPC `data.code` 中的 `LOCAL_ACP_*` 分类。ACP 的完整技术约束参见 [ACP Host 合同](docs/architecture/host-acp.md)。
 
 
 ## 功能

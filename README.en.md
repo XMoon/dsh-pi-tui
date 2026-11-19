@@ -133,6 +133,8 @@ A bare or whitespace-only `--session` opens Browse All. **Only a canonical full 
 
 ### Daemon (Linux / macOS, opt-in)
 
+For quick setup, Client detach versus Host shutdown, and safe control commands, see the [daemon user guide](docs/guides/daemon.md). The details below cover upgrade, rollback and ACP behavior.
+
 The candidate release offers a local Linux and macOS daemon backend. **Direct (the in-process TUI) stays the default.** Nothing changes in an existing installation until the user opts in explicitly:
 
 - **Selection**: set `DSH_PI_TUI_BACKEND=daemon` for this launch, or save `Daemon` in `/settings → General → Backend` (the official Profile Config entry `tui-startup.backend`). Precedence is `DSH_PI_TUI_BACKEND` > saved Profile config > `direct`; an illegal value, an empty string or a non-Linux/macOS platform exits nonzero and never silently falls back to Direct. The choice applies only to the next cold launch and never hot-switches the running process or restarts a Host.
@@ -244,7 +246,7 @@ try {
 
 For an existing Session, replace `session.new` with `acp.methods.agent.session.resume`, passing `{ sessionId, cwd }`. Each ACP connection owns at most one Session View, and a Session allows at most one ACP View at a time; TUI clients are unaffected. `session/close` **only detaches** the View; it neither deletes the Session nor disposes the shared Agent. Host shutdown retires the listener, and an owned stale socket is safely reclaimed on the next start.
 
-The default maximum is **4** connections, configurable in the Host startup environment with `DSH_PI_TUI_ACP_MAX_CONNECTIONS=1..16`. Available operations include `initialize`, `session/new|resume|prompt|cancel|close`, standard text, `resource_link`, capability-negotiated prompt images and committed Assistant/Tool content. `session/list`, `session/load`, `session/set_config_option`, ACP-side MCP Server registration and dedicated file/artifact transfer are unsupported; `resource_link` never causes the Host to fetch a URI. For protocol errors inspect JSON-RPC `data.code` for `LOCAL_ACP_*`. See the [Host/Client contract](docs/architecture/host-client.md) for details.
+The default maximum is **4** connections, configurable in the Host startup environment with `DSH_PI_TUI_ACP_MAX_CONNECTIONS=1..16`. Available operations include `initialize`, `session/new|resume|prompt|cancel|close`, standard text, `resource_link`, capability-negotiated prompt images and committed Assistant/Tool content. `session/list`, `session/load`, `session/set_config_option`, ACP-side MCP Server registration and dedicated file/artifact transfer are unsupported; `resource_link` never causes the Host to fetch a URI. For protocol errors inspect JSON-RPC `data.code` for `LOCAL_ACP_*`. See the [Host ACP contract](docs/architecture/host-acp.md) for the complete semantics.
 
 
 ## Features
