@@ -1992,6 +1992,10 @@ async function main() {
     })
     await waitPainted(archiveTui, 'MAC09-11 archived Session')
     await waitComposer(archiveTui, 'MAC09-11 archived Session')
+    // The legacy surface keeps the child's result body behind the common
+    // tool-detail master (Ctrl+O); expand it once, then page to the card.
+    sendNamedKey(archiveTui, 'C-o', 'MAC09-11 archive expand')
+    await sleep(500)
     // The archived Session is the DIRECT one: its nested `cua · screenshot`
     // card is the SAME TSP projection, so the same expansion + frozen
     // '[IMAGE] … W×H' row proves the attachment is still viewable while the
