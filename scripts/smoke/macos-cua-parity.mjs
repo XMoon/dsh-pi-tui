@@ -522,12 +522,38 @@ async function waitCuaResult(dshHome, sessionId, subCallId, label, timeoutMs = T
   }, label, timeoutMs)
 }
 
-async function waitTurnEnd(dshHome, sessionId, afterIndex, label, timeoutMs = TIMEOUTS.turn) {
-  return await waitFor(() => {
-    const events = eventsOf(dshHome, sessionId)
-    const index = events.findIndex((event, position) => position >= afterIndex && event.type === 'turn/end')
-    return index < 0 ? undefined : { index, events }
-  }, label, timeoutMs)
+/**
+ * First event position that belongs to the turn carrying this durable prompt.
+ *
+ * The `user/message` that carries the prompt is the ONLY durable fact that
+ * identifies its turn. The Session length sampled BEFORE sending is not: it also
+ * covers the tail of the previous turn, whose `turn/end` then satisfies the
+ * completion wait and the caller reads a trace that is still being written
+ * (run 61: MAC09-08's prompt was spliced into turn 4 while turn 3's end at
+ * event 68 satisfied a wait).
+ *
+ * @param prompt - The durable `user/message` evidence returned by sendPrompt.
+ * @returns The first position of the awaited turn.
+ */
+export function turnPromptAnchor(prompt) {
+  return prompt.index + 1
+}
+
+/**
+ * The turn/end that closes the turn this durable prompt belongs to.
+ *
+ * @param events - Every event of the Session, in order.
+ * @param prompt - The durable `user/message` evidence of the awaited turn.
+ * @returns The closing event and its index, or undefined while the turn runs.
+ */
+export function nextTurnEnd(events, prompt) {
+  const afterIndex = turnPromptAnchor(prompt)
+  const index = events.findIndex((event, position) => position >= afterIndex && event.type === 'turn/end')
+  return index < 0 ? undefined : { index, events }
+}
+
+async function waitTurnEnd(dshHome, sessionId, prompt, label, timeoutMs = TIMEOUTS.turn) {
+  return await waitFor(() => nextTurnEnd(eventsOf(dshHome, sessionId), prompt), label, timeoutMs)
 }
 
 function sessionIdFromFrame(frame) {
@@ -933,10 +959,9 @@ async function sendPrompt({ tui, dshHome, prompt, label }) {
  * durable snapshot index and the matching dispatch-start data.
  */
 async function promptAndWaitCua({ tui, dshHome, sessionId, prompt, label, method, timeoutMs = TIMEOUTS.turn }) {
-  const before = sessionId === undefined ? 0 : eventsOf(dshHome, sessionId).length
   const message = await sendPrompt({ tui, dshHome, prompt, label })
   const session = sessionId ?? message.sessionId
-  const afterIndex = sessionId === undefined ? message.index + 1 : before
+  const afterIndex = turnPromptAnchor(message)
   const dispatch = await waitFor(() => cuaDispatches(eventsOf(dshHome, session), afterIndex)
     .find(candidate => method === undefined || dispatchMethod(candidate) === method),
   `${label} official cua ${method ?? 'dispatch'}`, timeoutMs)
@@ -945,18 +970,17 @@ async function promptAndWaitCua({ tui, dshHome, sessionId, prompt, label, method
 
 /** Wait for a completed turn after a prompt without any new `cua` dispatch. */
 async function promptAndRequireNoCua({ tui, dshHome, sessionId, prompt, label }) {
-  const before = sessionId === undefined ? 0 : eventsOf(dshHome, sessionId).length
   const message = await sendPrompt({ tui, dshHome, prompt, label })
   const session = sessionId ?? message.sessionId
-  const afterIndex = sessionId === undefined ? message.index + 1 : before
-  const turn = await waitTurnEnd(dshHome, session, afterIndex, `${label} model turn completed`)
+  const afterIndex = turnPromptAnchor(message)
+  const turn = await waitTurnEnd(dshHome, session, message, `${label} model turn completed`)
   const dispatches = cuaDispatches(turn.events, afterIndex)
   assert(dispatches.length === 0,
     `${label}: a non-CUA/non-enabled Session received ${String(dispatches.length)} official cua dispatch(es)`)
   await sleep(1_000)
   assert(cuaDispatches(eventsOf(dshHome, session), afterIndex).length === 0,
     `${label}: the cua dispatch appeared after the turn boundary`)
-  return { sessionId: session, turnIndex: turn.index }
+  return { sessionId: session, message, turnIndex: turn.index }
 }
 
 async function newSession(tui, label) {
@@ -1757,7 +1781,7 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
     answers: 1,
     resultSettled: true,
   })
-  await waitTurnEnd(dshHome, consent.sessionId, consent.afterIndex, 'MAC09-05 consent turn completed')
+  await waitTurnEnd(dshHome, consent.sessionId, consent.message, 'MAC09-05 consent turn completed')
 
   // MAC09-07: the official screenshot lands in the Host Attachment Store and
   // the Client paints the image identity row (name/dimensions/bytes).
@@ -1847,7 +1871,7 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
     height: dimensions.height,
     clientRowDigest: sha16(imageFrame),
   })
-  await waitTurnEnd(dshHome, screenshot.sessionId, screenshot.afterIndex, 'MAC09-07 screenshot turn completed')
+  await waitTurnEnd(dshHome, screenshot.sessionId, screenshot.message, 'MAC09-07 screenshot turn completed')
 
   // MAC09-08: one safe, bounded TextEdit input, verified through the same
   // official CUA observation (the window's accessibility tree).
@@ -1888,7 +1912,7 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
   })
   // The program is only finished when the turn is: settle BEFORE reading the
   // trace, otherwise a later segment can still appear and never be audited.
-  await waitTurnEnd(dshHome, input.sessionId, input.afterIndex, 'MAC09-08 controlled turn completed')
+  await waitTurnEnd(dshHome, input.sessionId, input.message, 'MAC09-08 controlled turn completed')
   // The audit judges the WHOLE user turn: every CUA dispatch of this turn, not
   // only the selected root call. A second root that typed would otherwise be
   // invisible while the selected root still looked controlled.
@@ -1975,7 +1999,7 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
     independentQuestionDigest: sha16(deniedQuestion),
     sessionBDecision: 'deny',
   })
-  await waitTurnEnd(dshHome, deniedSession.sessionId, deniedSession.afterIndex, 'MAC09-06 deny turn completed')
+  await waitTurnEnd(dshHome, deniedSession.sessionId, deniedSession.message, 'MAC09-06 deny turn completed')
 
   report.directSessions = {
     primary: sha16(consent.sessionId),
@@ -2012,7 +2036,7 @@ async function sceneSplit({ installation, workRoot, report, textEditPid, runToke
     'Split cua capability result', TIMEOUTS.consent)
   assert(capabilitiesResult.result.isError !== true,
     `Split cua capability failed: ${dispatchErrorCode(capabilitiesResult.result) ?? 'unknown error'}`)
-  await waitTurnEnd(dshHome, capabilities.sessionId, capabilities.afterIndex, 'Split capability turn completed')
+  await waitTurnEnd(dshHome, capabilities.sessionId, capabilities.message, 'Split capability turn completed')
 
   const screenshot = await promptAndWaitCua({
     tui,
@@ -2092,7 +2116,7 @@ async function sceneSplit({ installation, workRoot, report, textEditPid, runToke
   const splitImageFrame = await waitFrameText(tui, '[IMAGE]', 'Split Client image identity row', TIMEOUTS.mount)
   assert(splitImageFrame.includes(`${String(splitDimensions.width)}×${String(splitDimensions.height)}`),
     'Split Client image row does not name the admitted screenshot dimensions')
-  await waitTurnEnd(dshHome, screenshot.sessionId, screenshot.afterIndex, 'Split screenshot turn completed')
+  await waitTurnEnd(dshHome, screenshot.sessionId, screenshot.message, 'Split screenshot turn completed')
 
   // MAC09-10: a fresh Session asks its own consent; the Client exits while the
   // Question is pending. A new Client on the same Session must paint no stale
