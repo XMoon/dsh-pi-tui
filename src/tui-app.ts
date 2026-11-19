@@ -22438,8 +22438,12 @@ export class TuiApp {
         // Result lines are truncated to the width: a dropped match would shift
         // every later raw ordinal. Anchor the body, never enumerate.
         regions.push({ sourceKey: transcriptSearchSourceKey({ kind: 'subcall-field', subCallIds: path, field: 'result' }), anchorRow: resultStart, rowStart: resultStart, rowEnd: resultStart + resultLines.length, enumerable: false })
+        // The projection already sanitized every line: terminal stdout keeps the
+        // whitelisted SGR (`sanitizeDisplayLog`), plain text and image identity
+        // are escape-free. Re-projecting here with `sanitizedPhysicalLine` would
+        // strip that SGR and change the established terminal-output contract.
         for (const line of resultLines) {
-          card.addChild(new Text(truncateToWidth(`${pad}  ${color.textDim(sanitizedPhysicalLine(line))}`, width, '…'), 0, 0))
+          card.addChild(new Text(truncateToWidth(`${pad}  ${color.textDim(line)}`, width, '…'), 0, 0))
           rows += 1
         }
       }

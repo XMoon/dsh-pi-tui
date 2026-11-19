@@ -194,6 +194,10 @@ export class CuaAccessSettingsController {
       ptc: this.state.bundle.phase === 'disabled' ? this.state.ptc : { phase: 'loading' },
       preset: this.readPreset(),
     })
+    // The basis this ENTIRE read belongs to. A provider replacement during the
+    // read makes every collected value belong to the old generation, so it can
+    // never be adopted as the new page snapshot.
+    const basisAtStart = this.deps.cuaAccess.observation.readSnapshot()
     const run = (async () => {
       const bundle = await this.readBundle(epoch, sequence)
       if (!this.current(epoch, sequence)) return
@@ -226,15 +230,28 @@ export class CuaAccessSettingsController {
         this.readGroup(epoch, sequence, 'icons', () => this.deps.cuaAccess.readApplicationIcons()),
         this.readGroup(epoch, sequence, 'ptc', () => this.deps.cuaAccess.readPtcConfiguration()),
       ])
-      if (this.current(epoch, sequence)) {
-        // The settled read is the page's NEW basis: a provider replacement that
-        // triggered this refresh must not keep refusing the next action against
-        // the old snapshot. A further change during the read re-invalidates the
-        // epoch (the subscribe path), so this assignment still cannot bless a
-        // stale generation.
-        this.observedBasis = this.deps.cuaAccess.observation.readSnapshot()
-        this.patch({ busy: this.actionInFlight })
+      if (!this.current(epoch, sequence)) return
+      const basisAtEnd = this.deps.cuaAccess.observation.readSnapshot()
+      if (!Object.is(basisAtStart, basisAtEnd)) {
+        // The read CROSSED a provider replacement: these values describe the old
+        // service and must not be painted or adopted as the current generation.
+        // Publish the unknown state and read once more at the settled basis.
+        this.observedBasis = basisAtEnd
+        this.epoch += 1
+        this.readSequence += 1
+        this.patch({
+          system: { phase: 'unknown', reason: 'The Host CUA provider changed during the read; refresh again to read the new generation.' },
+          applications: { phase: 'unknown', reason: 'The Host CUA provider changed during the read; refresh again to read the new generation.' },
+          icons: { phase: 'unknown', reason: 'The Host CUA provider changed during the read; refresh again to read the new generation.' },
+          ptc: { phase: 'unknown', reason: 'The Host CUA provider changed during the read; refresh again to read the new generation.' },
+          busy: this.actionInFlight,
+        })
+        this.readInFlight = this.refresh().catch(() => {})
+        return
       }
+      // The settled read is the page's NEW basis.
+      this.observedBasis = basisAtEnd
+      this.patch({ busy: this.actionInFlight })
     })()
     this.readInFlight = run.catch(() => {})
     await this.readInFlight
@@ -448,13 +465,39 @@ export class CuaAccessSettingsController {
     }
     this.actionInFlight = true
     const epoch = this.epoch
+    // The provider this action was ADMITTED against. Direct's observation
+    // subscription is a no-op, so a replacement between admission and the
+    // queued dispatch is invisible to `epoch`: the identity must be re-read at
+    // the dispatch boundary and again at settlement.
+    const admittedBasis = basis
     const task = this.tail.then(async () => {
       if (this.closed || epoch !== this.epoch) return
       this.patch({ busy: true })
+      if (!Object.is(this.deps.cuaAccess.observation.readSnapshot(), admittedBasis)) {
+        // Replaced before dispatch: the target the user acted on belongs to the
+        // old provider, so nothing is dispatched.
+        this.patch({
+          action: {
+            ...receipt,
+            kind,
+            state: 'unknown',
+            text: 'The Host CUA provider changed before the action was dispatched; nothing was sent. Refresh and act again.',
+            at: Date.now(),
+          },
+          busy: false,
+        })
+        return
+      }
       try {
         await run()
         if (this.closed) return
         if (epoch !== this.epoch) {
+          this.publishUnknown(receipt, kind)
+          return
+        }
+        if (!Object.is(this.deps.cuaAccess.observation.readSnapshot(), admittedBasis)) {
+          // The write may have reached the OLD provider while its result is no
+          // longer attributable: never paint it as a success.
           this.publishUnknown(receipt, kind)
           return
         }

@@ -1279,6 +1279,14 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
   await sendKeys(tui, '/preset default standard', 'MAC09-02 standard preset')
   await waitComposer(tui, 'MAC09-02 standard preset settled')
   await newSession(tui, 'MAC09-02 standard Session')
+  // The negative's claim is about THIS Session's admission, so read the
+  // Session's OWN preset back from the live command surface instead of trusting
+  // the switch command or the static preset definition.
+  await sendKeys(tui, '/preset status', 'MAC09-02 negative Session preset readback')
+  const negativePresetFrame = await waitFrameText(tui, 'preset: standard',
+    'MAC09-02 negative Session reports the standard preset', TIMEOUTS.mount)
+  assert(!negativePresetFrame.includes('preset: ptc'),
+    'MAC09-02: the negative Session is still a PTC Session; the negative proves nothing')
   const enabledNegative = await promptAndRequireNoCua({
     tui,
     dshHome,
@@ -1302,7 +1310,15 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
   // negative above cannot change later cases' admission.
   await sendKeys(tui, '/preset default ptc', 'MAC09-02 restore PTC default')
   await waitComposer(tui, 'MAC09-02 PTC default restored')
-  await newSession(tui, 'MAC09-02 restore PTC Session')
+  const restored = await newSession(tui, 'MAC09-02 restore PTC Session')
+  await sendKeys(tui, '/preset status', 'MAC09-02 restored Session preset readback')
+  const restoredPresetFrame = await waitFrameText(tui, 'preset: ptc',
+    'MAC09-02 the restored Session is a PTC Session', TIMEOUTS.mount)
+  report.macos02Preset = {
+    negative: sha16(negativePresetFrame),
+    restored: sha16(restoredPresetFrame),
+    restoredSession: sha16(restored),
+  }
   pushRow(report, 'MAC09-02', 'PASS', {
     sessionId: sha16(capabilities.sessionId),
     subCallId: sha16(capabilities.dispatch.subCallId),
@@ -1312,6 +1328,8 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
     enabledNonPtcSession: sha16(enabledNegative.sessionId),
     enabledNonPtcCuaDispatches: 0,
     standardPresetHasPtcExecutor: false,
+    negativeSessionPreset: 'standard (live /preset status readback)',
+    restoredSessionPreset: 'ptc (live /preset status readback)',
     bundle: CUA_BUNDLE,
     agentPreset: composition.agentPreset,
     negativeEvidence: 'Host: profile selection absent + mounted roster has no cua row before enable; bounded zero cua dispatch; model compliance recorded separately',

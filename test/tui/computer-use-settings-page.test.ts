@@ -366,6 +366,72 @@ test('a provider basis rollover refreshes the page and DISCARDS the pre-refresh 
   mounted.page.dispose()
 })
 
+test('a read that CROSSES a provider replacement is never adopted as the new basis', async () => {
+  let basis = 1
+  let releaseRead!: () => void
+  const held = new Promise<void>(resolve => { releaseRead = resolve })
+  const mounted = mount({
+    cua: {
+      observation: { readSnapshot: () => basis, subscribe: () => () => {} },
+      // The applications read belongs to the OLD provider and is held while the
+      // provider is replaced; the NEW provider's own list differs. Adopting the
+      // crossed read would paint the old list.
+      readApplications: async () => {
+        const forBasis = basis
+        if (forBasis === 1) await held
+        return forBasis === 1
+          ? APPLICATIONS
+          : { ...APPLICATIONS, allowedApps: [{ id: 'app-9', name: 'NewlyAllowed', executablePath: '/Applications/NewlyAllowed.app' }] }
+      },
+    },
+  })
+  // The page paints the settled system row while the applications read is held.
+  await settle(mounted, 'Accessibility: Not allowed')
+  // The page is waiting on the held read; the provider is now replaced.
+  basis = 2
+  releaseRead()
+  await new Promise(resolve => setTimeout(resolve, 20))
+  const frame = await settle(mounted, 'NewlyAllowed')
+  const text = frame.join('\n')
+  assert.doesNotMatch(text, /TextEdit/u,
+    'the crossed read\'s old-provider application list may not be adopted as current')
+  mounted.page.dispose()
+})
+
+test('a replacement between admission and the queued dispatch sends nothing', async () => {
+  let basis = 1
+  // The write itself replaces the provider while the action is in flight: the
+  // receipt may not be painted ok, because the write no longer belongs to the
+  // provider the page showed.
+  const mounted = mount({
+    cua: {
+      observation: { readSnapshot: () => basis, subscribe: () => () => {} },
+      requestPermission: async (permission, locale) => {
+        mounted.calls.push(`request:${permission}:${locale}`)
+        basis = 2
+        return STATUS
+      },
+    },
+  })
+  await settle(mounted, 'Accessibility: Not allowed')
+  let cursor = 0
+  for (; cursor < 20; cursor += 1) {
+    mounted.page.handleInput('\x1b[B')
+    if (/>.*\[Request permission\]/u.test(mounted.render().join('\n'))) break
+  }
+  assert.ok(cursor < 20, 'the Request Accessibility action is reachable by keyboard')
+  mounted.page.handleInput('\r')
+  await new Promise(resolve => setTimeout(resolve, 10))
+  assert.deepEqual(mounted.calls.filter(call => call.startsWith('request:')), ['request:accessibility:zh'],
+    'the write was admitted once against the provider the page showed')
+  const frame = mounted.render().join('\n').replace(/\s+/gu, ' ')
+  assert.match(frame, /unconfirmed/u,
+    'a write whose provider was replaced may not be presented as a success')
+  assert.doesNotMatch(frame, /Request sent\. Complete the guidance/u,
+    'the page must not claim the replaced provider received the request')
+  mounted.page.dispose()
+})
+
 test('a stale-basis confirmation never revokes the replaced provider\'s application', async () => {
   let basis = 1
   const mounted = mount({ cua: { observation: { readSnapshot: () => basis, subscribe: () => () => {} } } })
