@@ -288,10 +288,16 @@ Do not copy their evolving commands, test rosters or CI job inventory here.
 - Type-only Host package imports still count toward the Client boundary
   gate. Node strip-only TypeScript paths do not support parameter
   properties. Keep shared interface test fakes in sync with actual changes.
-- Source Mode requires its isolated `source:*` tasks and a READY doctor;
-  do not repair it with a plain `pnpm install` or a globally installed DSH.
-  `main` is the released npm compatibility line, `next` the forward
-  integration line; promote with an actual merge, not a reset or squash.
+- `main` is the released npm compatibility line; `next` is the
+  forward-integration line and may use its tracked Source Mode.
+  Promote with an actual merge, not a reset or squash.
+- A worktree already materialized in Source Mode must not run `mise run setup`.
+  Check `mise run source:doctor` first. For a non-ready source environment,
+  use `mise run source:bootstrap` and require a subsequent READY doctor.
+  Do not repair Source Mode with a plain `pnpm install` or globally installed DSH.
+- `compat:dsh:source` is a full distribution-boundary verification, not a
+  routine test after ordinary TUI changes. Run it only when the Source
+  distribution/compatibility boundary changes or the Owner requests it.
 - Check `git diff --check`, review the full diff and distinguish local
   checks from CI/physical verification. Never push or publish without the
   applicable user approval from the execution discipline and release rules.
