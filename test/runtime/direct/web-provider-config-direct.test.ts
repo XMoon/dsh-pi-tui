@@ -27,13 +27,18 @@ import type { HostContextLike } from '../../../src/runtime/direct/config-direct.
 interface Descriptor {
   ns: string
   value?: unknown
+  base?: unknown
   user?: unknown
   revision?: number
 }
 
+type RecordedOp =
+  | { readonly op: 'set'; readonly path: readonly string[]; readonly value: unknown }
+  | { readonly op: 'unset'; readonly path: readonly string[] }
+
 interface Recorded {
   readonly ns: string
-  readonly ops: readonly { readonly op: 'set'; readonly path: readonly string[]; readonly value: unknown }[]
+  readonly ops: readonly RecordedOp[]
   readonly revision: number | undefined
 }
 
@@ -54,13 +59,28 @@ function settingsService(initial: Record<string, Descriptor>) {
         throw new Error(`settings namespace "${ns}" changed since it was read (expected revision ${expectedRevision})`)
       }
       recorded.push({ ns, ops, revision: expectedRevision })
-      const next = { ...(descriptor.value as Record<string, unknown>) }
+      const nextValue = { ...(descriptor.value as Record<string, unknown>) }
+      const nextUser = { ...(descriptor.user as Record<string, unknown>) }
+      const base = (descriptor.base ?? {}) as Record<string, unknown>
       for (const op of ops) {
         const [key] = op.path
         if (key === undefined) throw new Error('the test store only applies top-level paths')
-        next[key] = op.value
+        if (op.op === 'set') {
+          nextValue[key] = op.value
+          nextUser[key] = op.value
+          continue
+        }
+        // The rc.5 official `mutate` substitutes `set(base)` for an `unset`
+        // whose path has a deployment value; otherwise it deletes the own field.
+        if (base[key] !== undefined) {
+          nextValue[key] = base[key]
+          nextUser[key] = base[key]
+        } else {
+          delete nextValue[key]
+          delete nextUser[key]
+        }
       }
-      descriptors.set(ns, { ...descriptor, value: next, revision: (descriptor.revision ?? 0) + 1 })
+      descriptors.set(ns, { ...descriptor, value: nextValue, user: nextUser, revision: (descriptor.revision ?? 0) + 1 })
     },
   }
 }
@@ -87,12 +107,23 @@ function host(options: {
   /** Overrides for the `web-deepseek-api` section value (merged over the pure
    *  rc.2 defaults; use `undefined` fields deliberately). */
   readonly api?: Record<string, unknown>
+  /** The `web` descriptor's deployment layer. The shipped base composes
+   *  `fetchProvider: http` and no Search provider. */
+  readonly base?: Record<string, unknown>
+  /** The `web` descriptor's raw USER layer. The default pins the effective
+   *  ids as USER overrides (a stored profile). */
+  readonly user?: Record<string, unknown>
 } = {}) {
   const settings = settingsService({
     ...options.omitWeb === true ? {} : {
       web: {
         ns: 'web',
         revision: 3,
+        base: options.base ?? { fetchProvider: 'http' },
+        user: options.user ?? {
+          searchProvider: options.searchProvider ?? 'deepseek-official',
+          ...(options.fetchProvider === undefined || options.fetchProvider === 'http' ? {} : { fetchProvider: options.fetchProvider }),
+        },
         value: {
           ...options.searchProvider === undefined ? { searchProvider: 'deepseek-official' } : { searchProvider: options.searchProvider },
           ...options.fetchProvider === undefined ? { fetchProvider: 'http' } : { fetchProvider: options.fetchProvider },
@@ -127,6 +158,10 @@ test('read() maps the pure rc.2 defaults, the credential presence and nothing el
   assert.deepEqual(settings, {
     searchProvider: 'acme-search',
     fetchProvider: 'http',
+    providerSelection: {
+      search: { baseId: undefined, userSet: true, userId: 'acme-search' },
+      fetch: { baseId: 'http', userSet: false, userId: undefined },
+    },
     api: { searchBilling: 'auto', fetchBilling: 'auto', count: 10, sendOriginalQuestion: true },
     advanced: {},
     credential: { configured: true, source: 'file' },
@@ -255,6 +290,10 @@ test('the provider selections, API options and billing modes write the exact off
   assert.deepEqual(await config.read(), {
     searchProvider: 'deepseek-search-api',
     fetchProvider: 'deepseek-fetch-api',
+    providerSelection: {
+      search: { baseId: undefined, userSet: true, userId: 'deepseek-search-api' },
+      fetch: { baseId: 'http', userSet: true, userId: 'deepseek-fetch-api' },
+    },
     api: { searchBilling: 'account', fetchBilling: 'api-key', count: 20, sendOriginalQuestion: false },
     advanced: {},
     credential: { configured: false },
@@ -352,4 +391,129 @@ test('the DirectConfigPort exposes the same sub-domain through the assembly', as
   assert.deepEqual(h.settings.recorded, [
     { ns: 'web-deepseek-api', ops: [{ op: 'set', path: ['sendOriginalQuestion'], value: false }], revision: 5 },
   ])
+})
+
+// ── PR2: the SAME descriptor's USER/base layer projection + official reset ──
+
+test('read() projects the SAME web descriptor value/base/user layers as detached facts', async () => {
+  const h = host({
+    searchProvider: 'deepseek-search-api',
+    fetchProvider: 'deepseek-fetch-api',
+    base: { searchProvider: 'deepseek-official', fetchProvider: 'http' },
+    user: { searchProvider: 'deepseek-search-api', fetchProvider: 'deepseek-fetch-api' },
+  })
+  const read = await new DirectWebProviderConfig(h.ctx).read()
+  assert.deepEqual(read?.providerSelection, {
+    search: { baseId: 'deepseek-official', userSet: true, userId: 'deepseek-search-api' },
+    fetch: { baseId: 'http', userSet: true, userId: 'deepseek-fetch-api' },
+  }, 'baseId and the USER own-field are different facts from the effective value')
+
+  // A present but EMPTY raw USER value keeps `userSet: true` with no userId: it
+  // is a real override state, never folded into "no override".
+  const empty = host({ user: { searchProvider: '' } })
+  assert.deepEqual((await new DirectWebProviderConfig(empty.ctx).read())?.providerSelection.search, {
+    baseId: undefined,
+    userSet: true,
+    userId: undefined,
+  })
+  // A USER value EQUAL to the deployment value is still an own-field override
+  // (the plan's AC03): the effective/base comparison cannot see it.
+  const equal = host({
+    searchProvider: 'deepseek-official',
+    base: { fetchProvider: 'http', searchProvider: 'deepseek-official' },
+    user: { searchProvider: 'deepseek-official' },
+  })
+  assert.deepEqual((await new DirectWebProviderConfig(equal.ctx).read())?.providerSelection.search, {
+    baseId: 'deepseek-official',
+    userSet: true,
+    userId: 'deepseek-official',
+  })
+
+  // An unreadable layer is UNAVAILABLE, never "no USER override".
+  for (const layer of ['base', 'user'] as const) {
+    const missing = host()
+    Reflect.deleteProperty(missing.settings.descriptors.get('web')!, layer)
+    assert.equal(await new DirectWebProviderConfig(missing.ctx).read(), undefined,
+      `a missing ${layer} layer makes the whole Web read unavailable`)
+  }
+})
+
+test('restore providers send the exact official unset at the read revision and skip a true no-op', async () => {
+  const h = host()
+  const config = new DirectWebProviderConfig(h.ctx)
+  await config.restoreSearchProvider()
+  assert.deepEqual(h.settings.recorded, [
+    { ns: 'web', ops: [{ op: 'unset', path: ['searchProvider'] }], revision: 3 },
+  ], 'the reset is ONE official unset path op with the descriptor revision')
+  // The second reset finds no USER own-field: a real no-op, zero Host writes.
+  await config.restoreFetchProvider()
+  assert.equal(h.settings.recorded.length, 1, 'no unset is dispatched when the USER field is absent')
+  // The authoritative read-back reports the post-reset layers/effective value.
+  const read = await config.read()
+  assert.deepEqual(read?.providerSelection, {
+    search: { baseId: undefined, userSet: false, userId: undefined },
+    fetch: { baseId: 'http', userSet: false, userId: undefined },
+  })
+  assert.equal(read?.searchProvider, undefined, 'Search base is absent, so the effective value is Automatic')
+  assert.equal(read?.fetchProvider, 'http', 'Fetch keeps the shipped deployment HTTP value')
+  assert.deepEqual(read?.api, { searchBilling: 'auto', fetchBilling: 'auto', count: 10, sendOriginalQuestion: true },
+    'a provider reset never touches the web-deepseek-api section')
+})
+
+test('a CUSTOM effective route is restorable through unset while an explicit official set stays refused', async () => {
+  const h = host({
+    searchProvider: 'acme-search',
+    base: { searchProvider: 'deepseek-official', fetchProvider: 'http' },
+    user: { searchProvider: 'acme-search' },
+  })
+  const config = new DirectWebProviderConfig(h.ctx)
+  assert.equal((await config.read())?.providerSelection.search.baseId, 'deepseek-official')
+  await assert.rejects(config.setSearchProvider('deepseek-search-api'), /custom route/u,
+    'the explicit-set protection keeps refusing to overwrite a custom route')
+  assert.deepEqual(h.settings.recorded, [], 'the refused explicit set wrote nothing')
+  await config.restoreSearchProvider()
+  assert.deepEqual(h.settings.recorded, [
+    { ns: 'web', ops: [{ op: 'unset', path: ['searchProvider'] }], revision: 3 },
+  ], 'the USER reset is the official unset, never a custom-id write')
+  const read = await config.read()
+  assert.equal(read?.searchProvider, 'deepseek-official', 'the deployment default now applies')
+  assert.equal(read?.fetchProvider, 'http', 'the Fetch sibling is untouched')
+})
+
+test('an unreadable USER/base layer refuses the reset instead of assuming no override', async () => {
+  for (const layer of ['base', 'user'] as const) {
+    const h = host()
+    Reflect.deleteProperty(h.settings.descriptors.get('web')!, layer)
+    const config = new DirectWebProviderConfig(h.ctx)
+    await assert.rejects(config.restoreSearchProvider(), /USER\/base layers/u)
+    await assert.rejects(config.restoreFetchProvider(), /USER\/base layers/u)
+    assert.deepEqual(h.settings.recorded, [], 'an unreadable layer is never a write authorization')
+  }
+})
+
+test('read() returns the provider layers observed at its synchronous return, not before the credential await', async () => {
+  const h = host()
+  let releaseCredential: () => void = () => {}
+  let credentialStarted = false
+  const gate = new Promise<void>(resolve => { releaseCredential = resolve })
+  h.credentials.describe = async () => {
+    credentialStarted = true
+    await gate
+    return { configured: false }
+  }
+  const pending = new DirectWebProviderConfig(h.ctx).read()
+  while (!credentialStarted) await new Promise(resolve => setImmediate(resolve))
+  // Another writer moves the provider while the credential read is pending.
+  const descriptor = h.settings.descriptors.get('web')!
+  descriptor.user = { searchProvider: 'deepseek-search-api' }
+  descriptor.value = { searchProvider: 'deepseek-search-api', fetchProvider: 'http' }
+  descriptor.revision = (descriptor.revision ?? 0) + 1
+  releaseCredential()
+  const read = await pending
+  assert.deepEqual(read?.providerSelection.search, {
+    baseId: undefined,
+    userSet: true,
+    userId: 'deepseek-search-api',
+  }, 'the returned layer facts are the state at the synchronous return, not a snapshot the credential read outlived')
+  assert.equal(read?.searchProvider, 'deepseek-search-api')
 })

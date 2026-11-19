@@ -64,6 +64,7 @@ import {
   assertWebApiBilling,
   readWebApiBilling,
   webApiAdvancedFactsOf,
+  webProviderSelectionFactsOf,
 } from '../../domain/web-provider-settings.ts'
 import type {
   AccountBalanceOutcome,
@@ -2059,11 +2060,30 @@ export class DirectWebProviderConfig implements WebProviderConfig {
   async read(): Promise<WebProviderSettings | undefined> {
     const settings = this.settings()
     if (settings === undefined) return undefined
+    // Availability is the cheap synchronous pre-check: a half-mounted
+    // configuration is UNAVAILABLE before the credential store is consulted.
+    if (readSettingsDescriptor(settings, WEB_PROVIDER_NS) === undefined
+      || readSettingsDescriptor(settings, WEB_SEARCH_API_NS) === undefined) return undefined
+    // The credential presence is the read's ONLY await. Every descriptor fact
+    // is projected AFTER it, so the returned value/base/user facts are the
+    // Host state at this SYNCHRONOUS return. That is what lets the command
+    // queue's reset decision and the adapter's revision-checked dispatch act on
+    // the same state instead of a snapshot the credential read outlived.
+    const credential = await this.credentialFact()
     // Both official descriptors must be readable form projections: a missing
-    // or malformed one is UNAVAILABLE, never a defaulted value.
-    const provider = formValueOf(readSettingsDescriptor(settings, WEB_PROVIDER_NS))
+    // or malformed one is UNAVAILABLE, never a defaulted value. The `web`
+    // descriptor is read ONCE: its `value`, `base` and `user` are the same
+    // snapshot, so the layering facts can never be stitched from mismatched
+    // reads.
+    const providerDescriptor = readSettingsDescriptor(settings, WEB_PROVIDER_NS)
+    const provider = formValueOf(providerDescriptor)
     const api = formValueOf(readSettingsDescriptor(settings, WEB_SEARCH_API_NS))
     if (provider === undefined || api === undefined) return undefined
+    // `base`/`user` are official projections (always objects when the section
+    // is readable). A missing/non-object layer is UNAVAILABLE — never "there is
+    // no USER override".
+    const providerSelection = webProviderSelectionFrom(providerDescriptor)
+    if (providerSelection === undefined) return undefined
     // There is NO single `baseURL` requirement: an unset Search/Fetch endpoint
     // keeps the read ready (the Host selects the actual provider at request
     // time). A missing/foreign billing value, though, is UNAVAILABLE — never a
@@ -2078,9 +2098,10 @@ export class DirectWebProviderConfig implements WebProviderConfig {
     return {
       searchProvider: optionalId(provider.searchProvider),
       fetchProvider: optionalId(provider.fetchProvider),
+      providerSelection,
       api: { searchBilling, fetchBilling, count, sendOriginalQuestion },
       advanced: webApiAdvancedFactsOf(api),
-      credential: await this.credentialFact(),
+      credential,
     }
   }
 
@@ -2134,12 +2155,52 @@ export class DirectWebProviderConfig implements WebProviderConfig {
     await this.mutate(WEB_SEARCH_API_NS, [{ op: 'set', path: ['fetchBilling'], value: mode }])
   }
 
+  async restoreSearchProvider(): Promise<void> {
+    await this.restoreProvider('searchProvider')
+  }
+
+  async restoreFetchProvider(): Promise<void> {
+    await this.restoreProvider('fetchProvider')
+  }
+
+  /** The ONE official USER-layer reset of one provider selection: a single
+   *  `unset` path op at the descriptor revision the reset decision read. A
+   *  readable section whose USER layer does not own the field is a real no-op
+   *  (there is nothing to remove); an unreadable `base`/`user` layer is an
+   *  error, never an assumed "no override". This deliberately does NOT consult
+   *  the effective value: a custom route is a reason to refuse an explicit SET,
+   *  never a reason to hide an official reset of the USER layer.
+   *
+   *  The synchronous descriptor read below is the CAS source on purpose: it runs
+   *  in the same Promise-continuation chain as the command owner's fresh read
+   *  (after that read's final synchronous projection there is no macrotask
+   *  boundary before this method), so the revision submitted as
+   *  `expectedRevision` belongs to the state the user's reset intent was just
+   *  validated against. A Host writer's SettingsForms/ConfigEditor commit is
+   *  file-I/O based and cannot interleave there; any writer that commits after
+   *  this read makes the CAS fail rather than silently overwriting. */
+  private async restoreProvider(field: 'searchProvider' | 'fetchProvider'): Promise<void> {
+    const settings = this.settings()
+    if (settings === undefined) throw new Error('settings service unavailable')
+    const descriptor = readSettingsDescriptor(settings, WEB_PROVIDER_NS)
+    if (descriptor === undefined) {
+      throw new Error(`the official Host settings section "${WEB_PROVIDER_NS}" is not mounted`)
+    }
+    const user = plainRecordOf(descriptor.user)
+    const base = plainRecordOf(descriptor.base)
+    if (user === undefined || base === undefined) {
+      throw new Error('the official Host Web settings section does not report its USER/base layers')
+    }
+    if (!Object.hasOwn(user, field)) return
+    await settings.mutate(WEB_PROVIDER_NS, [{ op: 'unset', path: [field] }], descriptor.revision)
+  }
+
   /** One revision-checked official settings mutation. The section must be a
    *  real configured entry: an unmounted section is an explicit failure rather
    *  than a write against an invented namespace. */
   private async mutate(
     ns: typeof WEB_PROVIDER_NS | typeof WEB_SEARCH_API_NS,
-    ops: readonly { op: 'set'; path: readonly string[]; value: unknown }[],
+    ops: readonly SettingsMutationOp[],
     validate?: (descriptor: SettingsDescriptorLike) => void,
   ): Promise<void> {
     const settings = this.settings()
@@ -2158,9 +2219,24 @@ export class DirectWebProviderConfig implements WebProviderConfig {
 /** The form-projected value of one settings descriptor (volatile fields only),
  *  or `undefined` when the descriptor or its value is unusable. */
 function formValueOf(descriptor: SettingsDescriptorLike | undefined): Record<string, unknown> | undefined {
-  const value = descriptor?.value
+  return plainRecordOf(descriptor?.value)
+}
+
+/** One detached plain record, or `undefined` for a non-object value. */
+function plainRecordOf(value: unknown): Record<string, unknown> | undefined {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
   return value as Record<string, unknown>
+}
+
+/** The SAME `web` descriptor's per-capability layering facts, or `undefined`
+ *  when either the `base` or the `user` projection is unreadable. */
+function webProviderSelectionFrom(
+  descriptor: SettingsDescriptorLike | undefined,
+): WebProviderSettings['providerSelection'] | undefined {
+  const search = webProviderSelectionFactsOf(descriptor?.base, descriptor?.user, 'searchProvider')
+  const fetch = webProviderSelectionFactsOf(descriptor?.base, descriptor?.user, 'fetchProvider')
+  if (search === undefined || fetch === undefined) return undefined
+  return { search, fetch }
 }
 
 /** A configured provider id, or `undefined` for an absent/empty selection. */

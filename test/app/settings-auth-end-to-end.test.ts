@@ -226,6 +226,10 @@ function open(width = 120, height = 40, authorizationOverride?: unknown): Harnes
         read: async () => ({
           searchProvider: 'deepseek-official',
           fetchProvider: 'http',
+          providerSelection: {
+            search: { baseId: 'deepseek-official', userSet: false, userId: undefined },
+            fetch: { baseId: 'http', userSet: false, userId: undefined },
+          },
           api: { searchBilling: 'auto', fetchBilling: 'auto', count: 10, sendOriginalQuestion: true },
           advanced: {},
           credential: configuredRefs.has('DEEPSEEK_API_KEY')

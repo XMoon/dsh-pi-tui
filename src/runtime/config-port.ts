@@ -30,6 +30,7 @@
 import type { FooterCommandConfig } from '../domain/footer/command-config.ts'
 import type { FooterCustomItemsParseResult } from '../domain/footer/custom-items.ts'
 import type { McpClassifiedServerEntry } from '../domain/mcp/server-config.ts'
+import type { WebProviderSelectionFacts } from '../domain/web-provider-settings.ts'
 
 /** The TUI settings document (theme/iconStyle/footer/footerLayout/
  * footerCustomItems/fullscreen/busyEnter/localShellSandbox/homeEndKeys/
@@ -700,6 +701,15 @@ export interface WebProviderSettings {
   searchProvider: string | undefined
   /** `web.fetchProvider`, with the same absent-selection semantics. */
   fetchProvider: string | undefined
+  /** The SAME `web` descriptor's per-capability layering facts: the deployment
+   *  `baseId`, the USER own-field presence and its raw id. These are NOT
+   *  derivable from the effective ids above (`value === base` does not mean the
+   *  USER layer is empty), and they are what an official reset decision and its
+   *  stale guard read. */
+  providerSelection: {
+    readonly search: WebProviderSelectionFacts
+    readonly fetch: WebProviderSelectionFacts
+  }
   /** The `web-deepseek-api` API options (official defaults when unset). */
   api: {
     /** `searchBilling`: the Search API's official billing mode. */
@@ -756,6 +766,14 @@ export interface WebProviderConfig {
   setSearchProvider(id: 'deepseek-official' | 'deepseek-search-api'): Promise<void>
   /** Pin the official fetch provider (`web.fetchProvider`). */
   setFetchProvider(id: 'http' | 'deepseek-fetch-api'): Promise<void>
+  /** Restore the deployment selection for Search: the ONE official `unset`
+   *  path op, which lets the `base` layer apply again. It carries NO id (an
+   *  automatic choice is not a provider id). A readable section with no USER
+   *  own-field is a no-op; an UNREADABLE USER layer is an error, never an
+   *  assumed absence. */
+  restoreSearchProvider(): Promise<void>
+  /** Restore the deployment selection for Fetch (the same official `unset`). */
+  restoreFetchProvider(): Promise<void>
   /** `web-deepseek-api.count`: an integer from 1 through 50 (the official rule). */
   setSearchApiCount(count: number): Promise<void>
   /** `web-deepseek-api.sendOriginalQuestion`: whether the next API search may

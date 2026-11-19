@@ -21,6 +21,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { executeModelToolFixture } from '@deepseek-ai/dsh-tool-testkit'
 import { Context } from '@deepseek-ai/cordis'
@@ -102,6 +103,8 @@ interface Booted {
   readonly agent: Agent
   readonly config: DirectWebProviderConfig
   readonly transport: Transport
+  /** The REAL profile patch document the official ConfigEditor owns. */
+  readonly patchPath: string
 }
 
 /** Mount the real Web provider composition over the real configuration plane. */
@@ -123,7 +126,7 @@ async function boot(
   await mountAgentLoopTestDependencies(ctx)
   await ctx.plugin(Loader)
   await ctx.plugin(LocalCredentials, { path: join(workRoot, '.credentials.yaml'), watch: false })
-  await mountWebProviderPlane(ctx, workRoot, { providers: options.providers })
+  const { patchPath } = await mountWebProviderPlane(ctx, workRoot, { providers: options.providers })
   const harness: AgentLoopTestHarness = await mountAgentLoopTestHarness(ctx)
   const agent = await harness.create(SessionId(SESSION), {}, { cwd: workRoot })
   // One completed human turn: the official provider reads the latest human
@@ -148,7 +151,7 @@ async function boot(
   }
   const transport = installTransport()
   life.defer(transport.restore)
-  return { ctx, agent, config: new DirectWebProviderConfig(ctx as never), transport }
+  return { ctx, agent, config: new DirectWebProviderConfig(ctx as never), transport, patchPath }
 }
 
 /** One search inside the OFFICIAL initiator boundary (the same boundary the
@@ -171,6 +174,10 @@ test('the shipped base defaults read ready with AUTOMATIC search routing', async
   assert.deepEqual(await booted.config.read(), {
     searchProvider: undefined,
     fetchProvider: 'http',
+    providerSelection: {
+      search: { baseId: undefined, userSet: false, userId: undefined },
+      fetch: { baseId: 'http', userSet: false, userId: undefined },
+    },
     api: { searchBilling: 'auto', fetchBilling: 'auto', count: 10, sendOriginalQuestion: true },
     advanced: {},
     credential: { configured: false },
@@ -221,6 +228,14 @@ test('a TUI settings write switches the NEXT search to the DeepSeek Search API w
   assert.deepEqual(await booted.config.read(), {
     searchProvider: 'deepseek-search-api',
     fetchProvider: 'http',
+    // The official rc.5 ConfigEditor materializes the COMPOSED section on the
+    // first profile write, so the fetched deployment value also becomes an
+    // explicit USER field of the same section. That is the real Host answer,
+    // not a TUI projection.
+    providerSelection: {
+      search: { baseId: 'deepseek-official', userSet: true, userId: 'deepseek-search-api' },
+      fetch: { baseId: 'http', userSet: true, userId: 'http' },
+    },
     api: { searchBilling: 'api-key', fetchBilling: 'auto', count: 20, sendOriginalQuestion: true },
     advanced: {},
     credential: { configured: true, source: 'file' },
@@ -1017,4 +1032,176 @@ test('the missing credential makes rc.1 withhold web_search and dispatch no requ
   assert.match(refused!, /web_search/u)
   await app.waitFor(() => app.view().includes('web_search'), 'the refused tool call is painted in the TUI')
   assert.deepEqual(transport.requests, [], 'the withheld tool dispatches no provider request')
+})
+
+// ── rc.5 USER-layer reset semantics (real SettingsForms + ConfigEditor) ─────
+// The official `mutate({op:'unset'})` restores the effective value; the rc.5
+// base-substitution keeps an explicit USER value equal to the deployment base
+// while the SAME `web` section still carries another USER override. These cases
+// pin what the real Host really persists, because the TUI's reset verdict must
+// be judged from exactly this read-back.
+
+/** The own fields the REAL profile patch declares for the `web` entry. */
+function webPatchFields(patchPath: string): readonly string[] {
+  const document = readFileSync(patchPath, 'utf8')
+  const row = document.split(/\n(?=- id: )/u).find(section => /^- id: web$/mu.test(section))
+  if (row === undefined) return []
+  return [...row.matchAll(/^ {4}([A-Za-z]+):/gmu)].map(match => match[1] as string)
+}
+
+test('the real rc.5 unset restores the deployment value and clears the USER field only when the section empties', async t => {
+  const life = testLifecycle(t)
+
+  // Case 1: base Search absent, explicit Search USER pin. Clearing Search lets
+  // the whole section equal the base, so the USER config is dropped entirely.
+  {
+    const booted = await boot(life, { providers: 'base-defaults' })
+    await booted.config.setSearchProvider('deepseek-search-api')
+    assert.deepEqual([...webPatchFields(booted.patchPath)].sort(), ['fetchProvider', 'searchProvider'],
+      'the first profile write materializes the composed section (rc.5 ConfigEditor)')
+    await booted.config.restoreSearchProvider()
+    const read = await booted.config.read()
+    assert.equal(read?.searchProvider, undefined, 'the deployment has no Search provider')
+    assert.deepEqual(read?.providerSelection.search, { baseId: undefined, userSet: false, userId: undefined })
+    assert.deepEqual(webPatchFields(booted.patchPath), [], 'the USER section was dropped entirely')
+  }
+
+  // Case 2: base Search absent, TWO USER fields. Clearing Search removes only
+  // its own field and keeps the sibling Fetch override.
+  {
+    const booted = await boot(life, { providers: 'base-defaults' })
+    await booted.config.setSearchProvider('deepseek-search-api')
+    await booted.config.setFetchProvider('deepseek-fetch-api')
+    await booted.config.restoreSearchProvider()
+    const read = await booted.config.read()
+    assert.equal(read?.searchProvider, undefined)
+    assert.deepEqual(read?.providerSelection.search, { baseId: undefined, userSet: false, userId: undefined },
+      'a base-absent field is really deleted from the USER layer')
+    const fetchAfter = await booted.config.read()
+    assert.equal(fetchAfter?.fetchProvider, 'deepseek-fetch-api', 'the sibling Fetch override is untouched')
+    assert.deepEqual(fetchAfter?.providerSelection.fetch, { baseId: 'http', userSet: true, userId: 'deepseek-fetch-api' })
+    assert.deepEqual(webPatchFields(booted.patchPath), ['fetchProvider'],
+      'only the untouched sibling remains in the profile patch')
+  }
+
+  // Case 3: base Fetch is HTTP, only USER Fetch is the API. Clearing Fetch makes
+  // the section equal the base, so the USER config is dropped and the effective
+  // value returns to HTTP.
+  {
+    const booted = await boot(life, { providers: 'base-defaults' })
+    await booted.config.setFetchProvider('deepseek-fetch-api')
+    assert.equal((await booted.config.read())?.fetchProvider, 'deepseek-fetch-api')
+    await booted.config.restoreFetchProvider()
+    const read = await booted.config.read()
+    assert.equal(read?.fetchProvider, 'http', 'the deployment HTTP provider applies again')
+    assert.deepEqual(read?.providerSelection.fetch, { baseId: 'http', userSet: false, userId: undefined })
+    assert.deepEqual(webPatchFields(booted.patchPath), [], 'the USER section was dropped entirely')
+  }
+
+  // Case 4 (RISK-UPSTREAM-01, Owner-accepted): base Fetch HTTP with a sibling
+  // USER override. rc.5 keeps `fetchProvider: http` as an explicit USER value;
+  // the effective value still returns to the deployment HTTP.
+  {
+    const booted = await boot(life, { providers: 'base-defaults' })
+    await booted.config.setSearchProvider('deepseek-search-api')
+    await booted.config.setFetchProvider('deepseek-fetch-api')
+    await booted.config.restoreFetchProvider()
+    const read = await booted.config.read()
+    assert.equal(read?.fetchProvider, 'http', 'the deployment value IS restored')
+    assert.deepEqual(read?.providerSelection.fetch, { baseId: 'http', userSet: true, userId: 'http' },
+      'rc.5 keeps an explicit USER copy of the deployment value while the sibling override exists')
+    assert.deepEqual([...webPatchFields(booted.patchPath)].sort(), ['fetchProvider', 'searchProvider'],
+      'the persisted USER section keeps both fields')
+  }
+
+  // Case 5: a deployment that DOES compose a Search provider behaves the same
+  // way — the unset restores it and keeps the USER copy while a sibling exists.
+  {
+    const booted = await boot(life, { providers: 'messages' })
+    await booted.config.setSearchProvider('deepseek-search-api')
+    await booted.config.setFetchProvider('deepseek-fetch-api')
+    await booted.config.restoreSearchProvider()
+    const read = await booted.config.read()
+    assert.equal(read?.searchProvider, 'deepseek-official', 'the composed Search provider applies again')
+    assert.deepEqual(read?.providerSelection.search, { baseId: 'deepseek-official', userSet: true, userId: 'deepseek-official' })
+    assert.equal(read?.fetchProvider, 'deepseek-fetch-api', 'the sibling stays untouched')
+  }
+})
+
+test('after the official Search reset the NEXT DeepSeek-model search takes the server-side route', async t => {
+  const life = testLifecycle(t)
+  const booted = await boot(life, {
+    providers: 'base-defaults',
+    requestContext: { provider: 'deepseek-official', model: 'deepseek-chat' },
+  })
+  await booted.config.setSearchProvider('deepseek-search-api')
+  assert.equal((await booted.config.read())?.searchProvider, 'deepseek-search-api')
+  // While the USER pin exists the explicit API route owns the call.
+  const signal = new AbortController().signal
+  const toolSet = await booted.ctx.tools.resolve({
+    agent: booted.agent,
+    modelSelection: { provider: 'deepseek-official', model: 'deepseek-chat' },
+    signal,
+  })
+  const agents = booted.ctx.get('agents') as { withInitiator<T>(agent: Agent, operation: () => T): T }
+  const pinned = await agents.withInitiator(booted.agent, () =>
+    executeModelToolFixture(booted.ctx, {
+      signal,
+      callId: ToolCallId('web-l5-reset-pin'),
+      name: 'web_search',
+      arguments: { queries: ['harness release'] },
+      agent: booted.agent,
+      toolSet,
+    }))
+  const pinnedText = ((pinned.content ?? []) as readonly { readonly text?: string }[]).map(block => block.text ?? '').join('\n')
+  assert.match(pinnedText, /https:\/\/example\.test\/api/u, 'the explicit pin still owns the call')
+  assert.deepEqual(booted.transport.requests.map(request => request.url), [SEARCH_ENDPOINT])
+
+  // The official reset removes the USER selection; the NEXT call is decided by
+  // the Host's automatic routing from the SAME real Session request context.
+  await booted.config.restoreSearchProvider()
+  assert.equal((await booted.config.read())?.searchProvider, undefined, 'the reset reads back Automatic')
+  const serverSide = await agents.withInitiator(booted.agent, () =>
+    executeModelToolFixture(booted.ctx, {
+      signal,
+      callId: ToolCallId('web-l5-reset-auto-deepseek'),
+      name: 'web_search',
+      arguments: { queries: ['harness release'] },
+      agent: booted.agent,
+      toolSet,
+    }))
+  const routeText = ((serverSide.content ?? []) as readonly { readonly text?: string }[]).map(block => block.text ?? '').join('\n')
+  assert.match(routeText, /https:\/\/example\.test\/messages/u, 'the DeepSeek model route takes server-side search again')
+  assert.deepEqual(booted.transport.requests.map(request => request.url), [SEARCH_ENDPOINT, MESSAGES_ENDPOINT],
+    'the reset changed the REAL routing of the NEXT call')
+})
+
+test('after the official Search reset a non-DeepSeek model still prefers the Search API', async t => {
+  const life = testLifecycle(t)
+  const booted = await boot(life, {
+    providers: 'base-defaults',
+    requestContext: { provider: 'mock', model: 'model' },
+  })
+  await booted.config.setSearchProvider('deepseek-search-api')
+  await booted.config.restoreSearchProvider()
+  assert.equal((await booted.config.read())?.searchProvider, undefined)
+  const signal = new AbortController().signal
+  const toolSet = await booted.ctx.tools.resolve({
+    agent: booted.agent,
+    modelSelection: { provider: 'mock', model: 'model' },
+    signal,
+  })
+  const agents = booted.ctx.get('agents') as { withInitiator<T>(agent: Agent, operation: () => T): T }
+  const result = await agents.withInitiator(booted.agent, () =>
+    executeModelToolFixture(booted.ctx, {
+      signal,
+      callId: ToolCallId('web-l5-reset-auto-api'),
+      name: 'web_search',
+      arguments: { queries: ['harness release'] },
+      agent: booted.agent,
+      toolSet,
+    }))
+  const text = ((result.content ?? []) as readonly { readonly text?: string }[]).map(block => block.text ?? '').join('\n')
+  assert.match(text, /https:\/\/example\.test\/api/u, 'the non-DeepSeek route uses the Search API')
+  assert.deepEqual(booted.transport.requests.map(request => request.url), [SEARCH_ENDPOINT])
 })

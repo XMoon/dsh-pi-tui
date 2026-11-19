@@ -66,6 +66,45 @@ const DEFAULT_DOC: TuiSettingsDoc = {
   wheelScrollLines: '3',
 }
 
+/** The `web` descriptor's layer facts one page case pins: `baseId` is the
+ *  deployment layer, a present `userId` means the USER layer really owns the
+ *  field (its raw id; `undefined` models a present-but-empty USER value). */
+function providerLayers(options: {
+  readonly searchBase?: string
+  readonly searchUser?: { readonly id?: string }
+  readonly fetchBase?: string
+  readonly fetchUser?: { readonly id?: string }
+} = {}): WebProviderSettings['providerSelection'] {
+  return {
+    search: {
+      baseId: options.searchBase,
+      userSet: options.searchUser !== undefined,
+      userId: options.searchUser?.id,
+    },
+    fetch: {
+      baseId: options.fetchBase,
+      userSet: options.fetchUser !== undefined,
+      userId: options.fetchUser?.id,
+    },
+  }
+}
+
+/** Complete a page settings literal with the layer projection its case means.
+ *  The default is an inherited deployment value (no USER override). */
+function webSettingsOf(
+  settings: Omit<WebProviderSettings, 'providerSelection'> & {
+    readonly providerSelection?: WebProviderSettings['providerSelection']
+  },
+): WebProviderSettings {
+  return {
+    ...settings,
+    providerSelection: settings.providerSelection ?? providerLayers({
+      searchBase: settings.searchProvider,
+      fetchBase: settings.fetchProvider,
+    }),
+  }
+}
+
 interface Harness {
   readonly vt: VirtualTerminal
   /** Every semantic Web write, in order. */
@@ -127,6 +166,9 @@ function setup(options: {
    *  AUTOMATIC routing state and is kept as `undefined` — never replaced by
    *  the historical default provider; omit the field for the stored default. */
   readonly searchProvider?: string
+  /** The stored `web.fetchProvider` (default `http`; the shipped deployment
+   *  value is also the default layer). */
+  readonly fetchProvider?: string
   /** The stored `web-deepseek-api.count` (a value outside the presets stays). */
   readonly count?: number
   /** Whether the official credential reference reads as configured. */
@@ -135,6 +177,14 @@ function setup(options: {
   readonly credentialStore?: boolean
   /** The rc.2 YAML-only advanced override facts the Host descriptor reports. */
   readonly advanced?: WebProviderSettings['advanced']
+  /** The exact `web` layer facts the Host read reports. Defaults to the rc.5
+   *  shipped base (no Search provider) plus a USER pin for a stored Search id,
+   *  and the shipped Fetch base (`http`, no USER override). */
+  readonly selection?: WebProviderSettings['providerSelection']
+  /** The layer facts the Host reports AFTER an official reset (the default is
+   *  the effective "single USER field removed" answer; a case modelling the
+   *  rc.5 sibling-residual behaviour supplies its own). */
+  readonly restoreSelection?: WebProviderSettings['providerSelection']
 }
 = {}): Harness {
   const columns = options.columns ?? 140
@@ -162,11 +212,24 @@ function setup(options: {
     keptProviderValue: undefined as string | undefined,
     web: {
       searchProvider: 'searchProvider' in options ? options.searchProvider : 'deepseek-official',
-      fetchProvider: 'http',
+      fetchProvider: options.fetchProvider ?? 'http',
+      providerSelection: structuredClone(options.selection ?? providerLayers({
+        // The harness default is a stored USER pin (the shipped rc.5 base has
+        // no Search provider); explicit `searchProvider: undefined` is the
+        // genuine automatic state with no USER override.
+        searchUser: ('searchProvider' in options ? options.searchProvider : 'deepseek-official') === undefined
+          ? undefined
+          : { id: 'searchProvider' in options ? options.searchProvider : 'deepseek-official' },
+        fetchBase: 'http',
+        fetchUser: options.fetchProvider !== undefined && options.fetchProvider !== 'http'
+          ? { id: options.fetchProvider }
+          : undefined,
+      })),
       api: { searchBilling: 'auto', fetchBilling: 'auto', count: options.count ?? 10, sendOriginalQuestion: true },
       advanced: options.advanced ?? {},
       credential: options.configured === false ? { configured: false } : { configured: true, source: 'file' },
     } as WebProviderSettings,
+    restoreSelection: options.restoreSelection === undefined ? undefined : structuredClone(options.restoreSelection),
   }
   const doc: TuiSettingsDoc = { ...DEFAULT_DOC }
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
@@ -285,7 +348,7 @@ function setup(options: {
           const held = readHoldAll
           // A held read stays the snapshot of the moment it was ISSUED: a real
           // Host read cannot observe a write that happens while it is pending.
-          const captured = { ...store.web, api: { ...store.web.api } }
+          const captured = { ...store.web, providerSelection: structuredClone(store.web.providerSelection), api: { ...store.web.api } }
           const throws = store.readThrows
           const unreadable = !store.available || store.readUndefined
           try {
@@ -301,8 +364,49 @@ function setup(options: {
             readsSettled += 1
           }
         },
-        setSearchProvider: async (id: string) => { await write(`search:${id}`, () => { store.web.searchProvider = store.keptProviderValue ?? id }, store.writeDelayMs) },
-        setFetchProvider: async (id: string) => { await write(`fetch:${id}`, () => { store.web.fetchProvider = id }) },
+        setSearchProvider: async (id: string) => {
+          await write(`search:${id}`, () => {
+            const kept = store.keptProviderValue
+            store.web.searchProvider = kept ?? id
+            if (kept === undefined) {
+              store.web.providerSelection = {
+                ...store.web.providerSelection,
+                search: { baseId: store.web.providerSelection.search.baseId, userSet: true, userId: id },
+              }
+            }
+          }, store.writeDelayMs)
+        },
+        setFetchProvider: async (id: string) => {
+          await write(`fetch:${id}`, () => {
+            store.web.fetchProvider = id
+            store.web.providerSelection = {
+              ...store.web.providerSelection,
+              fetch: { baseId: store.web.providerSelection.fetch.baseId, userSet: true, userId: id },
+            }
+          })
+        },
+        restoreSearchProvider: async () => {
+          await write('restore-search', () => {
+            const restored = store.restoreSelection?.search ?? {
+              baseId: store.web.providerSelection.search.baseId,
+              userSet: false,
+              userId: undefined,
+            }
+            store.web.providerSelection = { ...store.web.providerSelection, search: { ...restored } }
+            store.web.searchProvider = restored.baseId
+          })
+        },
+        restoreFetchProvider: async () => {
+          await write('restore-fetch', () => {
+            const restored = store.restoreSelection?.fetch ?? {
+              baseId: store.web.providerSelection.fetch.baseId,
+              userSet: false,
+              userId: undefined,
+            }
+            store.web.providerSelection = { ...store.web.providerSelection, fetch: { ...restored } }
+            store.web.fetchProvider = restored.baseId
+          })
+        },
         setSearchApiCount: async (count: number) => { await write(`count:${count}`, () => { store.web.api.count = count }) },
         setSendOriginalQuestion: async (enabled: boolean) => { await write(`ori:${String(enabled)}`, () => { store.web.api.sendOriginalQuestion = enabled }) },
         setSearchBilling: async (mode: string) => { await write(`searchBilling:${mode}`, () => { store.web.api.searchBilling = mode as 'auto' | 'account' | 'api-key' }, store.writeDelayMs) },
@@ -640,7 +744,7 @@ test('the workspace row reports the configured providers and opens the Web page 
 
   // Enter opens the Detail, the highlight moves, Enter confirms EXACTLY once.
   await key(h, ENTER)
-  await chooseCandidate(h, 1) // server-side -> DeepSeek Search API
+  await chooseCandidate(h, 2) // server-side -> DeepSeek Search API
   assert.equal(h.writes.length, 0, 'choosing a candidate never writes')
   await key(h, ENTER)
   await awaitWriteSettlement(h, 'search:deepseek-search-api', 0)
@@ -660,7 +764,7 @@ test('a failed write is reported as Not saved and never claims a save', async t 
   await openWebPage(h)
   h.store.failNext = 'settings mutate rejected'
   await openWebRow(h, 0)
-  await chooseCandidate(h, 1)
+  await chooseCandidate(h, 2)
   await key(h, ENTER)
   const refused = await settlePainted(h, 'the failed write reported as Not saved', frame =>
     frame.includes('Not saved') && !frame.includes('Saving…'))
@@ -677,7 +781,7 @@ test('two confirmed intents commit in FIFO order and never overlap', async t => 
   await openWebPage(h)
   // Intent A (search provider): dispatched, deliberately slow.
   await openWebRow(h, 0)
-  await chooseCandidate(h, 1)
+  await chooseCandidate(h, 2)
   await key(h, ENTER)
   // Intent B (count 10 -> 20) while A is still in flight: it joins the SAME
   // single FIFO, so it can only START after A settled.
@@ -704,7 +808,7 @@ test('a resolved provider mutation the Host does not commit is Not saved, never 
   await openWebPage(h)
   h.store.keptProviderValue = 'deepseek-official'
   await openWebRow(h, 0)
-  await chooseCandidate(h, 1)
+  await chooseCandidate(h, 2)
   await key(h, ENTER)
   const refused = await settlePainted(h, 'the refused mutation to paint Not saved', frame =>
     frame.includes('Not saved') && !frame.includes('Saving…'))
@@ -720,7 +824,7 @@ test('a resolved provider mutation the Host does not commit is Not saved, never 
   await webListTop(h)
   await openWebRow(h, 0)
   const markSecond = settledWritesMark(h)
-  await chooseCandidate(h, 1)
+  await chooseCandidate(h, 2)
   await key(h, ENTER)
   await awaitWriteSettlement(h, 'search:deepseek-search-api', markSecond)
   assert.deepEqual(h.writes, ['search:deepseek-search-api', 'search:deepseek-search-api'],
@@ -734,7 +838,7 @@ test('two confirmed selections end on the Host value when the second is not comm
 
   // First: server-side -> DeepSeek Search API (verified).
   await openWebRow(h, 0)
-  await chooseCandidate(h, 1)
+  await chooseCandidate(h, 2)
   const markFirst = settledWritesMark(h)
   await key(h, ENTER)
   await awaitWriteSettlement(h, 'search:deepseek-search-api', markFirst)
@@ -747,7 +851,7 @@ test('two confirmed selections end on the Host value when the second is not comm
   await webListTop(h)
   await openWebRow(h, 0)
   h.store.keptProviderValue = 'deepseek-search-api'
-  await chooseCandidate(h, 0)
+  await chooseCandidate(h, 1)
   const markSecond = settledWritesMark(h)
   await key(h, ENTER)
   await awaitWriteSettlement(h, 'search:deepseek-official', markSecond)
@@ -760,7 +864,7 @@ test('two confirmed selections end on the Host value when the second is not comm
   // the OTHER candidate — never the rejected intent again.
   await webListTop(h)
   await openWebRow(h, 0)
-  await chooseCandidate(h, 0)
+  await chooseCandidate(h, 1)
   const markThird = settledWritesMark(h)
   await key(h, ENTER)
   await awaitWriteSettlement(h, 'search:deepseek-official', markThird)
@@ -795,7 +899,7 @@ test('closing and reopening the page shows the committed values', async t => {
   t.after(h.dispose)
   await openWebPage(h)
   await openWebRow(h, 0)
-  await chooseCandidate(h, 1)
+  await chooseCandidate(h, 2)
   await key(h, ENTER)
   await awaitWriteSettlement(h, 'search:deepseek-search-api', 0)
   await settlePainted(h, 'the verified write', frame => frame.includes('Verified'))
@@ -856,9 +960,17 @@ test('the AUTOMATIC search state reads `Search: Automatic` and an explicit Confi
   await key(h, ENTER)
   const page = await settleWebPage(h)
   assert.match(page, /Current: Automatic/u, 'the page states the Automatic current fact')
-  assert.doesNotMatch(page, /\[current\]/u, 'no candidate is painted as the current value')
+  assert.match(page, /› Automatic \[current\] · the Host selects per request/u,
+    'the Automatic option is the real current choice, not a fabricated provider')
   await openWebRow(h, 0)
-  await chooseCandidate(h, 1) // Automatic -> DeepSeek Search API
+  // Confirming the CURRENT Automatic option is a real zero-write Verified: the
+  // USER layer already has no override, so there is nothing to reset.
+  const automaticMark = settledWritesMark(h)
+  await key(h, ENTER)
+  await settlePainted(h, 'the zero-write Automatic verdict', frame => frame.includes('Verified'))
+  assert.deepEqual(h.writes, [], 'confirming the inherited Automatic state writes nothing')
+  assert.equal(h.settledWrites().length, automaticMark)
+  await chooseCandidate(h, 2) // Automatic -> DeepSeek Search API
   await key(h, ENTER)
   await awaitWriteSettlement(h, 'search:deepseek-search-api', 0)
   await settlePainted(h, 'the verified explicit write', frame =>
@@ -944,7 +1056,7 @@ test('a Billing confirm queued while writable is REFUSED after the Host moved th
   assert.equal(h.store.web.api.searchBilling, 'auto')
 })
 
-test('a configured custom provider id stays visible and offers no candidate', async t => {
+test('a configured custom provider stays visible and offers ONLY the deployment reset', async t => {
   const h = setup({ searchProvider: 'acme-search' })
   t.after(h.dispose)
   const page = await openWebPage(h)
@@ -953,12 +1065,17 @@ test('a configured custom provider id stays visible and offers no candidate', as
   const detail = h.view()
   assert.match(detail, /Current: acme-search/u)
   assert.match(detail, /CUSTOM route/u, 'the Detail states that it is not selectable here')
-  assert.doesNotMatch(detail, /› /u, 'no selectable candidate is painted')
-  assert.doesNotMatch(detail, /Confirm \[Enter\]/u, 'no Confirm affordance exists for a custom route')
+  assert.doesNotMatch(detail, /› DeepSeek (server-side search|Search API)/u,
+    'no official candidate is offered to REPLACE the custom route')
+  assert.match(detail, /› Automatic · the Host selects per request/u,
+    'the deployment composes no Search provider, so the official reset is offered')
+  assert.match(detail, /Confirm \[Enter\]/u, 'the reset entry is really executable')
+  const mark = settledWritesMark(h)
   await key(h, ENTER)
-  await new Promise(resolve => setTimeout(resolve, 10))
-  await h.vt.waitForRender()
-  assert.deepEqual(h.writes, [], 'a custom route is never silently replaced')
+  await awaitWriteSettlement(h, 'restore-search', mark)
+  assert.deepEqual(h.writes, ['restore-search'], 'the ONE official unset runs, never a provider id write')
+  assert.equal(h.store.web.searchProvider, undefined, 'the deployment default (Automatic) applies')
+  assert.match(h.view(), /Current: Automatic/u, 'the read-back is the authority the page paints')
 })
 
 test('a billing write joins the SAME FIFO: no Web write overlaps another', async t => {
@@ -968,7 +1085,7 @@ test('a billing write joins the SAME FIFO: no Web write overlaps another', async
   await openWebPage(h)
   // Queue the (slow) provider write first.
   await openWebRow(h, 0)
-  await chooseCandidate(h, 1)
+  await chooseCandidate(h, 2)
   await key(h, ENTER)
   // Then confirm a Search billing choice: with ONE owner FIFO the billing write
   // starts only after the provider write settled.
@@ -1163,7 +1280,7 @@ test('an OLD read settling after a write never repaints the page with the pre-wr
   // A real write, then the held R1 settles: its pre-write snapshot must not
   // overwrite the committed facts.
   await openWebRow(h, 0)
-  await chooseCandidate(h, 1)
+  await chooseCandidate(h, 2)
   const markWrite = settledWritesMark(h)
   await key(h, ENTER)
   await awaitWriteSettlement(h, 'search:deepseek-search-api', markWrite)
@@ -1186,7 +1303,7 @@ test('a SUPERSEDED write readback never decides the verdict', async t => {
   // an UNREADABLE Host and is held while a NEWER read R2 (the page's `r`)
   // observes the post-write facts.
   await openWebRow(h, 0)
-  await chooseCandidate(h, 1)
+  await chooseCandidate(h, 2)
   const markMutation = settledWritesMark(h)
   const releaseR1 = await dispatchWithHeldUnreadableReadback(h, () => key(h, ENTER))
   t.after(releaseR1)
@@ -1216,7 +1333,7 @@ test('a superseded readback settling while the newer read is STILL pending never
   await openWebPage(h)
 
   await openWebRow(h, 0)
-  await chooseCandidate(h, 1)
+  await chooseCandidate(h, 2)
   const markR1Write = settledWritesMark(h)
   const releaseR1 = await dispatchWithHeldUnreadableReadback(h, () => key(h, ENTER))
   t.after(releaseR1)
@@ -1463,7 +1580,7 @@ test('a stale backend keeps the readable facts but offers no candidate and dispa
   h.setReadiness('ready')
   await key(h, 'r')
   await settlePainted(h, 'the recovered candidates', frame => frame.includes('Confirm [Enter]'))
-  await chooseCandidate(h, 1) // server-side (the current value) -> DeepSeek Search API
+  await chooseCandidate(h, 2) // server-side (the current value) -> DeepSeek Search API
   await key(h, ENTER)
   await settlePainted(h, 'the recovered verified write', frame => frame.includes('Verified'))
   assert.deepEqual(h.writes, ['search:deepseek-search-api'])
@@ -1529,7 +1646,7 @@ test('an EXTERNAL provider change after the page read is never overwritten by a 
   h.store.web.searchProvider = 'acme-search'
   // Confirm without refreshing the page: the queue head must re-read the Host
   // and refuse with ZERO writes instead of overwriting the external value.
-  await chooseCandidate(h, 1)
+  await chooseCandidate(h, 2)
   await key(h, ENTER)
   const refused = await settlePainted(h, 'the external custom route refusal', frame =>
     frame.includes('Not saved') && !frame.includes('Saving…'))
@@ -1631,7 +1748,7 @@ test('a list wheel re-anchors the Detail on the NEW row authoritative candidates
   t.after(h.dispose)
   await openWebPage(h)
   await openWebRow(h, 0) // provider Detail keeps the keyboard
-  await chooseCandidate(h, 1) // DeepSeek Search API highlighted, not confirmed
+  await chooseCandidate(h, 2) // DeepSeek Search API highlighted, not confirmed
   assert.match(h.view(), /› DeepSeek Search API/u)
   const listY = 5 // header + metadata + rule + pane header + row 0 (1-based SGR cell)
   // The wheel moves the list SELECTION while the Detail keeps the keyboard.
@@ -1639,7 +1756,7 @@ test('a list wheel re-anchors the Detail on the NEW row authoritative candidates
   await h.vt.waitForRender()
   const after = h.view()
   assert.match(after, /Current: HTTP/u, 'the Detail followed the scrolled row')
-  assert.match(after, /› HTTP \[current\] · anonymous · no billed API/u,
+  assert.match(after, /› HTTP \[current\] · deployment default/u,
     `the NEW row's current candidate is highlighted, never the stale index:\n${after}`)
   assert.doesNotMatch(after, /› DeepSeek Fetch API/u)
   // Enter confirms the NEW row's CURRENT value (already-current → zero writes).
@@ -1669,7 +1786,7 @@ test('a dispatched choice write never advertises Confirm [Enter] while it is sav
   h.store.writeDelayMs = 300
   await openWebPage(h)
   await openWebRow(h, 0)
-  await chooseCandidate(h, 1)
+  await chooseCandidate(h, 2)
   const mark = settledWritesMark(h)
   await key(h, ENTER)
   const saving = h.view()
@@ -1784,10 +1901,15 @@ test('a long custom provider id is wholly readable in the scrollable Detail', as
   t.after(h.dispose)
   await openWebPage(h)
   await openWebRow(h, 0) // the provider Detail (narrow, 4 body rows)
-  const first = h.view()
-  assert.doesNotMatch(first, /TAIL-ID/u, `the tail is below the first viewport:\n${first}`)
-  // Scroll the Detail: the whole Host id is reachable, never dropped by fit().
-  let scrolled = first
+  // The anchor reveals the CURRENT (Automatic) option, so the FIRST viewport may
+  // start inside the long id; both the head and the tail must stay reachable.
+  let head = h.view()
+  for (let step = 0; step < 4 && !head.includes('acme-'); step += 1) {
+    await key(h, '\x1b[5~') // PgUp
+    head = h.view()
+  }
+  assert.match(head, /acme-/u, `the custom id head is reachable:\n${head}`)
+  let scrolled = h.view()
   for (let step = 0; step < 8 && !scrolled.includes('TAIL-ID'); step += 1) {
     await key(h, '\x1b[6~')
     scrolled = h.view()
@@ -1818,7 +1940,7 @@ test('a long Host failure reason is wholly readable in the Detail', async t => {
   await openWebPage(h)
   await openWebRow(h, 0)
   h.store.failNext = longReason
-  await chooseCandidate(h, 1)
+  await chooseCandidate(h, 2)
   await key(h, ENTER)
   await settlePainted(h, 'the long refused verdict', frame => frame.includes('Not saved'))
   let frame = h.view()
@@ -1857,7 +1979,7 @@ test('the page states the automatic routing facts, billing and read-only overrid
   assert.match(compact(), /routes AUTOMATICALLY/u)
   assert.match(compact(), /DeepSeek server-side search \(no per-search charge\)/u)
   assert.match(compact(), /billed per Search API call/u)
-  assert.match(compact(), /An explicit selection always overrides the automatic routing/u)
+  assert.match(compact(), /An explicit USER selection always overrides the automatic routing/u)
   assert.doesNotMatch(compact(), /official default is the/u)
   // The Search billing row states the three explicit modes' credential claims
   // and the per-call billing fact; Automatic is a persisted choice, not a reset.
@@ -1884,6 +2006,7 @@ test('the page states the automatic routing facts, billing and read-only overrid
     settings: {
       searchProvider: 'deepseek-search-api',
       fetchProvider: 'http',
+      providerSelection: providerLayers({ searchBase: 'deepseek-search-api', fetchBase: 'http' }),
       api: { searchBilling: 'auto', fetchBilling: 'auto', count: 10, sendOriginalQuestion: true },
       advanced: {
         searchBaseURL: 'https://alice:p1@p2@search.example.test/v1?token=x',
@@ -1948,6 +2071,7 @@ test('the page bar publishes the complete Esc span in its OWN content columns', 
     settings: {
       searchProvider: 'deepseek-official',
       fetchProvider: 'http',
+      providerSelection: providerLayers({ searchBase: 'deepseek-official', fetchBase: 'http' }),
       api: { searchBilling: 'auto', fetchBilling: 'auto', count: 10, sendOriginalQuestion: true },
       advanced: {},
       credential: { configured: true, source: 'file' },
@@ -2026,6 +2150,7 @@ test('the delegated Confirm re-proves the LIVE authority and revokes a stale ges
     settings: {
       searchProvider: 'deepseek-official',
       fetchProvider: 'http',
+      providerSelection: providerLayers({ searchBase: 'deepseek-official', fetchBase: 'http' }),
       api: { searchBilling: 'auto', fetchBilling: 'auto', count: 10, sendOriginalQuestion: true },
       advanced: {},
       credential: { configured: true, source: 'file' },
@@ -2038,7 +2163,7 @@ test('the delegated Confirm re-proves the LIVE authority and revokes a stale ges
     credentialAvailable: () => true,
     commit: async (id, requested) => {
       commits.push(`${id}:${requested}`)
-      return { kind: 'verified', actual: requested }
+      return { kind: 'verified', actual: typeof requested === 'string' ? requested : 'restore' }
     },
     refresh: () => {},
     navigateToModels: () => {},
@@ -2059,8 +2184,9 @@ test('the delegated Confirm re-proves the LIVE authority and revokes a stale ges
     // still joins the command owner's FIFO exactly once.
     page.activateBarSpan('web:confirm')
     await drainCommitSettlement()
-    assert.deepEqual(commits, ['web-search-provider:deepseek-official'],
-      'the delegated Confirm runs the original confirmSelected sink exactly once')
+    assert.equal(commits.length, 1, 'the delegated Confirm runs the original confirmSelected sink exactly once')
+    assert.match(commits[0]!, /^web-search-provider:/u, 'the provider row confirmed its typed intent')
+    assert.match(commits[0]!, /\[object Object\]/u, 'the typed provider intent is not a bare provider id')
     // A DISPATCHED write owns the row: the same target cannot enqueue a second
     // intent while the phase is saving.
     page.activateBarSpan('web:confirm')
@@ -2083,6 +2209,7 @@ test('the delegated Confirm re-proves the LIVE authority and revokes a stale ges
       settings: {
         searchProvider: 'custom-route',
         fetchProvider: 'http',
+        providerSelection: providerLayers({ searchBase: 'custom-route', fetchBase: 'http' }),
         api: { searchBilling: 'auto', fetchBilling: 'auto', count: 10, sendOriginalQuestion: true },
         advanced: {},
         credential: { configured: true, source: 'file' },
@@ -2122,6 +2249,7 @@ test('a wide Detail whose candidate is cropped by a long verdict publishes no Co
     settings: {
       searchProvider: 'deepseek-official',
       fetchProvider: 'http',
+      providerSelection: providerLayers({ searchBase: 'deepseek-official', fetchBase: 'http' }),
       api: { searchBilling: 'auto', fetchBilling: 'auto', count: 10, sendOriginalQuestion: true },
       advanced: {},
       credential: { configured: true, source: 'file' },
@@ -2159,8 +2287,8 @@ test('a wide Detail whose candidate is cropped by a long verdict publishes no Co
     assert.deepEqual(page.paintedBarSpans(), [], 'a cropped candidate publishes no delegated span')
     page.activateBarSpan('web:confirm')
     await drainVerdict()
-    assert.deepEqual(commits, ['web-search-provider:deepseek-search-api'],
-      'only the keyboard dispatch is a commit; the absent span dispatches nothing')
+    assert.equal(commits.length, 1, 'only the keyboard dispatch is a commit; the absent span dispatches nothing')
+    assert.match(commits[0]!, /^web-search-provider:/u, 'the keyboard dispatch carried the typed provider intent')
     // The same state at a roomy grant really paints the candidate and restores
     // the delegated target; the positive control proves the probe was not
     // vacuous.
@@ -2187,6 +2315,7 @@ test('a wide Detail wheel onto the candidate row keeps the bar and the activatio
     settings: {
       searchProvider: 'deepseek-official',
       fetchProvider: 'http',
+      providerSelection: providerLayers({ searchBase: 'deepseek-official', fetchBase: 'http' }),
       api: { searchBilling: 'auto', fetchBilling: 'auto', count: 10, sendOriginalQuestion: true },
       advanced: {},
       credential: { configured: true, source: 'file' },
@@ -2247,6 +2376,7 @@ test('Billing rows are Not selected and inert when their API provider is not the
     settings: {
       searchProvider: 'deepseek-official',
       fetchProvider: 'http',
+      providerSelection: providerLayers({ searchBase: 'deepseek-official', fetchBase: 'http' }),
       api: { searchBilling: 'auto', fetchBilling: 'auto', count: 10, sendOriginalQuestion: true },
       advanced: {},
       credential: { configured: false },
@@ -2305,6 +2435,7 @@ test('Host override values are terminal-sanitized before the Configured override
     settings: {
       searchProvider: 'deepseek-search-api',
       fetchProvider: 'deepseek-fetch-api',
+      providerSelection: providerLayers({ searchBase: 'deepseek-search-api', fetchBase: 'http' }),
       api: { searchBilling: 'auto', fetchBilling: 'auto', count: 10, sendOriginalQuestion: true },
       advanced: { searchBaseURL: hostileUrl, searchApiKeyEnv: hostileEnv },
       credential: { configured: true, source: 'file' },
@@ -2376,7 +2507,7 @@ test('a delegated mouse Confirm is the ONE write through the existing Web FIFO',
   t.after(h.dispose)
   await openWebPage(h)
   await openWebRow(h, 0)
-  await chooseCandidate(h, 1) // server-side -> DeepSeek Search API (draft only)
+  await chooseCandidate(h, 2) // server-side -> DeepSeek Search API (draft only)
   assert.deepEqual(h.writes, [], 'moving the draft writes nothing')
   const mark = settledWritesMark(h)
   const point = paintedWordCell(h, 'Confirm [Enter]')
@@ -2396,7 +2527,7 @@ test('a Host read between the Confirm press and release writes nothing', async t
   t.after(h.dispose)
   await openWebPage(h)
   await openWebRow(h, 0)
-  await chooseCandidate(h, 1)
+  await chooseCandidate(h, 2)
   const point = paintedWordCell(h, 'Confirm [Enter]')
   h.vt.sendInput(`\x1b[<0;${point.column + 1};${point.row + 1}M`)
   // A Host refresh between the press and the release makes the authority
@@ -2426,7 +2557,7 @@ test('two mouse Confirms join the ONE FIFO and never overlap', async t => {
   // Intent A (search provider): its Host setter STARTS and is held in flight.
   const releaseA = h.holdNextWrite()
   await openWebRow(h, 0)
-  await chooseCandidate(h, 1)
+  await chooseCandidate(h, 2)
   const first = paintedWordCell(h, 'Confirm [Enter]')
   pointerClick(h, first.row, first.column + 1)
   await waitForFrame(() => h.view(), () => h.log.includes('begin:search:deepseek-search-api'),
@@ -2468,7 +2599,7 @@ test('closing the page mid-write keeps the command-owned write settling without 
   h.store.writeDelayMs = 300
   await openWebPage(h)
   await openWebRow(h, 0)
-  await chooseCandidate(h, 1)
+  await chooseCandidate(h, 2)
   const mark = settledWritesMark(h)
   await key(h, ENTER) // dispatch the ONE write through the command owner FIFO
   await settlePainted(h, 'the saving phase', frame => frame.includes('Saving…'))
@@ -2478,4 +2609,282 @@ test('closing the page mid-write keeps the command-owned write settling without 
   assert.equal(h.store.web.searchProvider, 'deepseek-search-api',
     'the command-owned write still settles after its page was retired')
   assert.doesNotMatch(h.view(), /Verified/u, 'the closed page never repaints a verdict')
+})
+
+// ── PR2: the official USER-layer restore through the real page/queue ───────
+
+test('the Search Detail restores the deployment default through ONE official unset and re-evaluates Billing', async t => {
+  const h = setup({ searchProvider: 'deepseek-search-api' })
+  t.after(h.dispose)
+  await openWebPage(h)
+  await openWebRow(h, 0)
+  assert.match(h.view(), /Current: DeepSeek Search API/u)
+  await chooseCandidate(h, 0) // Automatic (the deployment composes no Search provider)
+  assert.match(h.view(), /› Automatic/u, 'the Automatic row is a real confirmable entry')
+  const mark = settledWritesMark(h)
+  await key(h, ENTER)
+  await awaitWriteSettlement(h, 'restore-search', mark)
+  await settlePainted(h, 'the restored Search selection', frame =>
+    frame.includes('Verified') && frame.includes('Current: Automatic'))
+  assert.deepEqual(h.writes, ['restore-search'], 'exactly ONE official unset, never a provider id write')
+  assert.equal(h.store.web.searchProvider, undefined, 'the deployment value applies again')
+  assert.equal(h.store.web.providerSelection.search.userSet, false, 'the only Search USER field is gone')
+  // The Billing row follows the FRESH effective route: Automatic no longer
+  // selects the billed Search API, so it is inert with zero writes.
+  await webListTop(h)
+  await openWebRow(h, 4)
+  assert.match(h.view(), /Current: Not selected/u)
+  assert.doesNotMatch(h.view(), /Confirm \[Enter\]/u, 'Billing is not writable for an Automatic route')
+  await key(h, ENTER)
+  await new Promise(resolve => setTimeout(resolve, 10))
+  await h.vt.waitForRender()
+  assert.deepEqual(h.writes, ['restore-search'], 'the Billing row never writes after the reset')
+})
+
+test('the Fetch Detail restores the deployment HTTP default and the sibling Web fields are untouched', async t => {
+  const h = setup({ fetchProvider: 'deepseek-fetch-api' })
+  t.after(h.dispose)
+  await openWebPage(h)
+  await openWebRow(h, 1)
+  assert.match(h.view(), /Current: DeepSeek Fetch API/u)
+  await chooseCandidate(h, 0) // HTTP — the deployment default row
+  assert.match(h.view(), /› HTTP · deployment default/u,
+    'the highlight moved to the deployment-default row while the API row keeps [current]')
+  const mark = settledWritesMark(h)
+  await key(h, ENTER)
+  await awaitWriteSettlement(h, 'restore-fetch', mark)
+  await settlePainted(h, 'the restored Fetch selection', frame =>
+    frame.includes('Verified') && frame.includes('Current: HTTP'))
+  assert.deepEqual(h.writes, ['restore-fetch'])
+  assert.equal(h.store.web.fetchProvider, 'http')
+  assert.deepEqual(h.store.web.api, { searchBilling: 'auto', fetchBilling: 'auto', count: 10, sendOriginalQuestion: true },
+    'the reset never touches the web-deepseek-api section')
+  assert.deepEqual(h.store.web.credential, { configured: true, source: 'file' },
+    'the reset never touches the credential fact')
+  await webListTop(h)
+  await openWebRow(h, 5)
+  assert.match(h.view(), /Current: Not selected/u, 'HTTP is not the billed Fetch API route')
+  // The base HTTP candidate is now the inherited current value: confirming it
+  // is a real zero-write Verified, and the Esc ladder leaves the page.
+  await webListTop(h)
+  await openWebRow(h, 1)
+  await chooseCandidate(h, 0)
+  const inheritedMark = settledWritesMark(h)
+  await key(h, ENTER)
+  await settlePainted(h, 'the zero-write deployment verdict', frame => frame.includes('Verified'))
+  assert.equal(h.settledWrites().length, inheritedMark, 'the inherited deployment value needs no write')
+  await key(h, ESC)
+  await key(h, ESC)
+  assert.doesNotMatch(h.view(), /Search API Result Count/u, 'the provider reset path returns to the Tools rows')
+})
+
+test('the rc.5 sibling residual is reported truthfully: the reset Verifies on the restored effective value', async t => {
+  // The real rc.5 Host keeps an explicit USER value equal to the deployment
+  // base while the same section carries another override. The page must credit
+  // the reset by the FRESH effective value and state the residual, never claim
+  // the USER field vanished.
+  const h = setup({
+    fetchProvider: 'deepseek-fetch-api',
+    restoreSelection: providerLayers({ fetchBase: 'http', fetchUser: { id: 'http' } }),
+  })
+  t.after(h.dispose)
+  await openWebPage(h)
+  await openWebRow(h, 1)
+  await chooseCandidate(h, 0)
+  const mark = settledWritesMark(h)
+  await key(h, ENTER)
+  await awaitWriteSettlement(h, 'restore-fetch', mark)
+  await settlePainted(h, 'the residual reset verdict', frame =>
+    frame.includes('Verified') && frame.includes('Current: HTTP'))
+  assert.deepEqual(h.writes, ['restore-fetch'])
+  assert.equal(h.store.web.providerSelection.fetch.userSet, true, 'the official Host kept the explicit USER value')
+  // The residual is stated in the Detail notes, below the candidate rows.
+  let notes = h.view()
+  for (let step = 0; step < 6 && !notes.includes('USER layer still carries'); step += 1) {
+    await key(h, '\x1b[6~')
+    notes = h.view()
+  }
+  assert.match(notes, /USER layer still carries this value\s+explicitly/u,
+    `the page states the residual instead of claiming a removal:\n${notes}`)
+})
+
+test('a stale restore gesture is refused with ZERO writes after another Writer moves the USER layer', async t => {
+  const h = setup({ searchProvider: 'deepseek-search-api' })
+  t.after(h.dispose)
+  await openWebPage(h)
+  await openWebRow(h, 0)
+  await chooseCandidate(h, 0) // Automatic, observed against the old Search USER pin
+  // Another Host writer restores the server-side pin between the page read and
+  // the Confirm. The queue head must refuse the stale clear gesture.
+  h.store.web.searchProvider = 'deepseek-official'
+  h.store.web.providerSelection = providerLayers({ searchUser: { id: 'deepseek-official' }, fetchBase: 'http' })
+  await key(h, ENTER)
+  const refused = await settlePainted(h, 'the stale restore refusal', frame =>
+    frame.includes('Not saved') && !frame.includes('Saving…'))
+  assert.match(refused, /the Host USER selection changed since the page read it/u)
+  assert.deepEqual(h.writes, [], 'a stale clear gesture writes NOTHING')
+  assert.equal(h.store.web.searchProvider, 'deepseek-official', 'the external value is preserved')
+})
+
+test('a restore gesture is refused when the deployment selection changed under it', async t => {
+  const h = setup({ searchProvider: 'deepseek-search-api' })
+  t.after(h.dispose)
+  await openWebPage(h)
+  await openWebRow(h, 0)
+  await chooseCandidate(h, 0) // Automatic under a deployment with no Search provider
+  h.store.web.providerSelection = providerLayers({
+    searchBase: 'deepseek-official',
+    searchUser: { id: 'deepseek-search-api' },
+    fetchBase: 'http',
+  })
+  await key(h, ENTER)
+  const refused = await settlePainted(h, 'the deployment-change refusal', frame =>
+    frame.includes('Not saved') && !frame.includes('Saving…'))
+  assert.match(refused, /the Host deployment selection changed since the page read it/u)
+  assert.deepEqual(h.writes, [], 'a gesture decided against another deployment default writes NOTHING')
+  assert.equal(h.store.web.providerSelection.search.baseId, 'deepseek-official')
+})
+
+test('a rejected restore is attributed from a fresh read and never claims Verified', async t => {
+  const h = setup({ fetchProvider: 'deepseek-fetch-api' })
+  t.after(h.dispose)
+  await openWebPage(h)
+  await openWebRow(h, 1)
+  await chooseCandidate(h, 0)
+  h.store.failNext = 'SETTINGS_CONFLICT: revision moved'
+  const mark = settledWritesMark(h)
+  await key(h, ENTER)
+  await awaitWriteSettlement(h, 'restore-fetch', mark)
+  const refused = await settlePainted(h, 'the rejected restore verdict', frame =>
+    frame.includes('Not saved') && !frame.includes('Saving…'))
+  assert.match(refused, /SETTINGS_CONFLICT/u)
+  assert.doesNotMatch(refused, /Verified/u)
+  assert.deepEqual(h.writes, [], 'the rejected official unset did not land')
+  assert.equal(h.store.web.fetchProvider, 'deepseek-fetch-api', 'the Host keeps its value')
+})
+
+test('a restore whose read-back is unreadable is Outcome unknown, never Verified', async t => {
+  const h = setup({ fetchProvider: 'deepseek-fetch-api' })
+  t.after(h.dispose)
+  await openWebPage(h)
+  await openWebRow(h, 1)
+  await chooseCandidate(h, 0)
+  const releaseReadback = await dispatchWithHeldUnreadableReadback(h, () => key(h, ENTER))
+  t.after(releaseReadback)
+  releaseReadback()
+  const unknown = await settlePainted(h, 'the unreadable restore read-back', frame =>
+    frame.includes('Outcome unknown') && !frame.includes('Saving…'))
+  assert.match(unknown, /could not be read back/u)
+  assert.doesNotMatch(unknown, /Verified/u)
+  assert.deepEqual(h.writes, ['restore-fetch'], 'the official unset really ran')
+})
+
+test('a deployment-composed official Search provider is restored through the official reset, then inherited confirms write nothing', async t => {
+  const h = setup({
+    searchProvider: 'deepseek-search-api',
+    selection: providerLayers({
+      searchBase: 'deepseek-official',
+      searchUser: { id: 'deepseek-search-api' },
+      fetchBase: 'http',
+    }),
+  })
+  t.after(h.dispose)
+  await openWebPage(h)
+  await openWebRow(h, 0)
+  assert.match(h.view(), /Current: DeepSeek Search API/u)
+  assert.match(h.view(), /DeepSeek server-side search · deployment default/u,
+    'the deployment-composed candidate is named as the deployment default')
+  assert.match(h.view(), /› DeepSeek Search API \[current\]/u,
+    'the USER override owns the current chip until it is reset')
+  // Select the server-side candidate (the deployment value, not an explicit
+  // provider-id write) — the row maps to the official reset.
+  await chooseCandidate(h, 0)
+  const mark = settledWritesMark(h)
+  await key(h, ENTER)
+  await awaitWriteSettlement(h, 'restore-search', mark)
+  await settlePainted(h, 'the deployment-default reset', frame =>
+    frame.includes('Verified') && frame.includes('Current: DeepSeek server-side search'))
+  assert.deepEqual(h.writes, ['restore-search'], 'the deployment value is restored through unset only')
+  assert.equal(h.store.web.providerSelection.search.userSet, false)
+  // Confirming the same inherited candidate again performs no write.
+  const inheritedMark = settledWritesMark(h)
+  await key(h, ENTER)
+  await settlePainted(h, 'the inherited confirm verdict', frame => frame.includes('Verified'))
+  assert.equal(h.settledWrites().length, inheritedMark, 'an inherited value is never re-pinned by a confirm')
+})
+
+test('a custom deployment selection is restorable through its ONE "Use deployment default" entry', async t => {
+  const h = setup({
+    searchProvider: 'acme-search',
+    selection: providerLayers({
+      searchBase: 'acme-provider-v2',
+      searchUser: { id: 'acme-search' },
+      fetchBase: 'http',
+    }),
+  })
+  t.after(h.dispose)
+  await openWebPage(h)
+  await openWebRow(h, 0)
+  const detail = h.view()
+  assert.match(detail, /Current: acme-search/u)
+  assert.match(detail, /› Use deployment default · deployment default: acme-provider-v2/u,
+    'the custom deployment value is shown safely next to the reset entry')
+  assert.doesNotMatch(detail, /› DeepSeek (server-side search|Search API)/u,
+    'no explicit official candidate is offered while the custom route is effective')
+  await chooseCandidate(h, 0)
+  const mark = settledWritesMark(h)
+  await key(h, ENTER)
+  await awaitWriteSettlement(h, 'restore-search', mark)
+  await settlePainted(h, 'the custom deployment restore', frame =>
+    frame.includes('Verified') && frame.includes('Current: acme-provider-v2'))
+  assert.deepEqual(h.writes, ['restore-search'], 'the custom id is never written as a provider')
+  assert.equal(h.store.web.searchProvider, 'acme-provider-v2')
+})
+
+test('an inherited custom deployment route offers no reset and no write', async t => {
+  const h = setup({
+    searchProvider: 'acme-provider-v2',
+    selection: providerLayers({ searchBase: 'acme-provider-v2', fetchBase: 'http' }),
+  })
+  t.after(h.dispose)
+  await openWebPage(h)
+  await openWebRow(h, 0)
+  const detail = h.view()
+  assert.match(detail, /Current: acme-provider-v2/u)
+  assert.match(detail, /CUSTOM route/u)
+  assert.doesNotMatch(detail, /› /u, 'an inherited custom route has nothing to reset')
+  assert.doesNotMatch(detail, /Confirm \[Enter\]/u)
+  await key(h, ENTER)
+  await new Promise(resolve => setTimeout(resolve, 10))
+  await h.vt.waitForRender()
+  assert.deepEqual(h.writes, [], 'an inherited custom route is never silently replaced or reset')
+})
+
+test('a USER value equal to the deployment base is still an override: choosing it sends the official reset', async t => {
+  // AC03: the effective/base comparison cannot see this override; only the raw
+  // USER own-field can. Confirming the deployment candidate must therefore run
+  // the official unset (never a zero-write verdict).
+  const h = setup({
+    searchProvider: 'deepseek-official',
+    selection: providerLayers({
+      searchBase: 'deepseek-official',
+      searchUser: { id: 'deepseek-official' },
+      fetchBase: 'http',
+    }),
+  })
+  t.after(h.dispose)
+  await openWebPage(h)
+  await openWebRow(h, 0)
+  assert.match(h.view(), /Current: DeepSeek server-side search/u)
+  assert.match(h.view(), /DeepSeek server-side search \[current\] · deployment default/u,
+    'the base candidate is current on the EFFECTIVE value')
+  await chooseCandidate(h, 0)
+  const mark = settledWritesMark(h)
+  await key(h, ENTER)
+  await awaitWriteSettlement(h, 'restore-search', mark)
+  await settlePainted(h, 'the same-value override reset', frame =>
+    frame.includes('Verified') && frame.includes('Current: DeepSeek server-side search'))
+  assert.deepEqual(h.writes, ['restore-search'],
+    'a USER own-field equal to the base is not treated as already-inherited')
+  assert.equal(h.store.web.providerSelection.search.userSet, false)
 })

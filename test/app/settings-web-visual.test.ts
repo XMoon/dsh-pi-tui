@@ -118,6 +118,16 @@ function setup(options: {
     web: {
       searchProvider: 'searchProvider' in options ? options.searchProvider : 'deepseek-official',
       fetchProvider: 'http',
+      providerSelection: {
+        search: ('searchProvider' in options ? options.searchProvider : 'deepseek-official') === undefined
+          ? { baseId: undefined, userSet: false, userId: undefined }
+          : {
+              baseId: undefined,
+              userSet: true,
+              userId: 'searchProvider' in options ? options.searchProvider : 'deepseek-official',
+            },
+        fetch: { baseId: 'http', userSet: false, userId: undefined },
+      },
       api: { searchBilling: 'auto', fetchBilling: 'auto', count: 10, sendOriginalQuestion: true },
       advanced: {},
       credential: { configured: true, source: 'file' },
@@ -215,9 +225,47 @@ function setup(options: {
       },
       web: {
         available: () => store.available,
-        read: async () => store.available ? { ...store.web, api: { ...store.web.api } } : undefined,
-        setSearchProvider: async (id: string) => { write(() => { store.web.searchProvider = id }) },
-        setFetchProvider: async (id: string) => { write(() => { store.web.fetchProvider = id }) },
+        read: async () => store.available
+          ? { ...store.web, providerSelection: structuredClone(store.web.providerSelection), api: { ...store.web.api } }
+          : undefined,
+        setSearchProvider: async (id: string) => {
+          write(() => {
+            store.web.searchProvider = id
+            store.web.providerSelection = {
+              ...store.web.providerSelection,
+              search: { baseId: store.web.providerSelection.search.baseId, userSet: true, userId: id },
+            }
+          })
+        },
+        setFetchProvider: async (id: string) => {
+          write(() => {
+            store.web.fetchProvider = id
+            store.web.providerSelection = {
+              ...store.web.providerSelection,
+              fetch: { baseId: store.web.providerSelection.fetch.baseId, userSet: true, userId: id },
+            }
+          })
+        },
+        restoreSearchProvider: async () => {
+          write(() => {
+            const baseId = store.web.providerSelection.search.baseId
+            store.web.searchProvider = baseId
+            store.web.providerSelection = {
+              ...store.web.providerSelection,
+              search: { baseId, userSet: false, userId: undefined },
+            }
+          })
+        },
+        restoreFetchProvider: async () => {
+          write(() => {
+            const baseId = store.web.providerSelection.fetch.baseId
+            store.web.fetchProvider = baseId
+            store.web.providerSelection = {
+              ...store.web.providerSelection,
+              fetch: { baseId, userSet: false, userId: undefined },
+            }
+          })
+        },
         setSearchApiCount: async (count: number) => { write(() => { store.web.api.count = count }) },
         setSendOriginalQuestion: async (enabled: boolean) => { write(() => { store.web.api.sendOriginalQuestion = enabled }) },
         setSearchBilling: async (mode: string) => { write(() => { store.web.api.searchBilling = mode as 'auto' | 'account' | 'api-key' }) },
@@ -649,7 +697,8 @@ test('the AUTOMATIC page offers a complete pointer-only route: click the row, th
   t.after(h.dispose)
   await openWebPage(h)
   assert.match(h.view(), /Current: Automatic/u, 'the page states the AUTOMATIC current fact')
-  assert.doesNotMatch(h.view(), /\[current\]/u, 'no candidate claims the current value')
+  assert.match(h.view(), /› Automatic \[current\] · the Host selects per request/u,
+    'the Automatic entry is the current choice under the official automatic routing')
   const providerRow = h.plain().findIndex(line => line.includes('Web Search Provider'))
   assert.ok(providerRow >= 0)
   press(h, providerRow, 4)
@@ -678,6 +727,43 @@ test('the AUTOMATIC page offers a complete pointer-only route: click the row, th
   await waitForPainted(h, 'the pointer Back to return to the list', frame =>
     frame.includes('Enter open') && !frame.includes('Confirm [Enter]'))
 })
+
+for (const [columns, rows] of [[120, 40], [44, 20]] as const) {
+  test(`the provider Detail restores the deployment default through the complete pointer route at ${columns}×${rows}`, async t => {
+    const h = setup({ columns, rows })
+    t.after(h.dispose)
+    await openWebPage(h)
+    // Row click opens the Detail.
+    const providerRow = h.plain().findIndex(line => line.includes('Web Search Provider'))
+    assert.ok(providerRow >= 0)
+    press(h, providerRow, 4)
+    release(h, providerRow, 4)
+    await waitForPainted(h, 'the provider Detail', frame => frame.includes('Current: DeepSeek server-side search'))
+    // Option click only moves the draft to the Automatic (official reset) row.
+    const optionRow = h.plain().findIndex(line => line.includes('Automatic · the Host selects per request'))
+    assert.ok(optionRow >= 0, `the Automatic reset row is painted:\n${h.view()}`)
+    const optionColumn = h.plain()[optionRow]!.indexOf('Automatic')
+    press(h, optionRow, optionColumn + 1)
+    release(h, optionRow, optionColumn + 1)
+    await h.vt.waitForRender()
+    assert.equal(h.store.web.searchProvider, 'deepseek-official', 'the option click never writes')
+    assert.match(h.view(), /› Automatic · the Host selects per request/u)
+    // The complete painted Confirm [Enter] is the ONE delegated reset target.
+    clickWord(h, 'Confirm [Enter]')
+    await waitForPainted(h, 'the verified deployment reset', frame =>
+      frame.includes('Verified') && frame.includes('Current: Automatic'))
+    assert.equal(h.store.web.searchProvider, undefined, 'the official unset restored the deployment selection')
+    assert.equal(h.store.web.providerSelection.search.userSet, false)
+    // The painted Back span returns to the list without a keyboard Esc.
+    const back = paintedWordPoint(h, 'Back [Esc]')
+    press(h, back.row, back.column)
+    await h.vt.waitForRender()
+    release(h, back.row, back.column)
+    await waitForPainted(h, 'the pointer Back to the list', frame =>
+      frame.includes('Enter open') && !frame.includes('Confirm [Enter]'))
+    for (const line of h.plain()) assert.ok(visibleWidth(line) <= columns)
+  })
+}
 
 test('a Confirm press followed by a key, wheel or resize never writes on release', async t => {
   const h = setup({ columns: 120, rows: 40 })
@@ -755,7 +841,8 @@ for (const [columns, rows] of [[80, 24], [44, 20], [44, 8]] as const) {
       await openWebPage(h)
       await selectListRow(h, 0)
       await key(h, ENTER)
-      await key(h, HOME) // DeepSeek Search API -> server-side search
+      await key(h, HOME) // Automatic -> server-side search
+      await key(h, DOWN)
       const frame = h.view()
       assert.match(frame, /Confirm \[Enter\] · Back \[Esc\]/u,
         `the complete delegated span is painted at ${columns}x${rows}:\n${frame}`)

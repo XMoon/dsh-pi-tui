@@ -1271,8 +1271,38 @@ specialist-page contract below).
   never writes a provider merely to display it; an explicitly configured id
   always takes precedence. A configured provider id
   outside those candidates is a CUSTOM route: it is displayed verbatim, it is
-  never replaced by a default and the page offers NO confirmable candidate for
-  it. The count row offers the `5/10/20/50` presets while the official domain
+  never replaced by a default and the page offers no confirmable provider id for
+  it (only the separate deployment-reset entry described below).
+
+  The two provider rows map the OFFICIAL `web` descriptor's THREE distinct
+  facts — the effective `value`, the deployment `base` layer and the raw USER
+  section — so "no USER override" is decided by the USER own-field, never by an
+  effective value that merely equals the deployment default. When the deployment
+  composes no provider for a capability, the Detail offers an `Automatic` row
+  that means the official USER-layer reset (never a persisted provider id); when
+  the deployment's own value is one of the official candidates, that candidate
+  is named `deployment default` and choosing it runs the SAME official reset
+  instead of re-writing the id. A deployment value outside the candidates is
+  shown verbatim; while the USER layer overrides it, the Detail offers ONE
+  `Use deployment default` row that maps to the official reset only — it never
+  writes the custom id and never touches another field of the section. An
+  inherited custom route (no USER own-field) is displayed as-is and offers no
+  reset. The reset is the official
+  `settings.mutate('web', [{op:'unset', path:[field]}], revision)`; the page
+  never substitutes `''`, `null`, `undefined`, `auto` or the deployment id and
+  never edits the profile document. Its settled verdict comes from a fresh
+  authoritative read: `Verified` requires the read to be ready AND the effective
+  raw id to equal the fresh deployment `baseId` (including `undefined`). The
+  Host may keep an explicit USER value equal to that base while the same section
+  carries another USER override; the page reports that residual state as a fact
+  rather than claiming the USER field vanished. A provider write in flight
+  carries the action (reset vs explicit id) and the layer facts the frame
+  painted; the queue head refuses (`Not saved`, zero writes) a gesture whose
+  deployment default or USER layer another writer already changed. Confirming a
+  provider the authority already holds with a USER own-field of the same id is a
+  zero-write `Verified`; an explicit candidate that is only inherited still
+  issues the ONE official setter and is `Verified` only when the fresh USER
+  own-field really carries it. The count row offers the `5/10/20/50` presets while the official domain
   stays 1–50: a stored integer outside the presets (for example `7`) is reported
   exactly and is never rewritten by navigation or refresh. `Share Original
   Question` is `on` by default and states the payload boundary (up to 128
@@ -1310,17 +1340,20 @@ specialist-page contract below).
   the same `confirmSelected()` path runs. At its turn the intent re-proves
   readiness and section availability, takes the NEWEST committed read as its
   base, refuses a custom-route/candidate violation with ZERO writes and
-  dispatches the ONE official setter. A fresh read-back then decides the
-  settled word: `Verified` only when the authority holds the requested identity, `Not saved` (with the
-  value the Host really keeps) when a readable authority differs, and `Outcome
-  unknown` when the result cannot be read back. A superseded read never decides
+  dispatches the ONE official setter (or the official reset described above). A
+  fresh read-back then decides the settled word: `Verified` only when the
+  authority holds the requested identity (for a provider row, the provider
+  layer rule above), `Not saved` (with the value the Host really keeps) when a
+  readable authority differs, and `Outcome unknown` when the result cannot be
+  read back. A superseded read never decides
   a verdict; a newer read is awaited first, and a page closed mid-write only
   loses its own repaint — the dispatched Host operation still settles in the
   command owner. Confirming a value the authority already holds performs NO
   setter (that states the current fact, never a promise about the stored USER
-  layer); the AUTOMATIC (absent) provider state never satisfies an explicit
-  candidate — confirming one always issues the ONE real setter and verifies
-  from the fresh read-back.
+  layer) — except that a provider row's already-current shortcut additionally
+  requires the USER own-field to carry that id; the AUTOMATIC (absent) provider
+  state never satisfies an explicit candidate — confirming one always issues the
+  ONE real setter and verifies from the fresh read-back.
   `Loading…` on page entry or `r` is a real pending state, never a last-known
   value presented as current; every read that settles refreshes the Tools row
   summary and the mounted page from the same facts.

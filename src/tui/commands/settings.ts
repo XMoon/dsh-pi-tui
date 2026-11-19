@@ -64,7 +64,9 @@ import {
   webAdvancedOverrideFields,
   webBillingLabel,
   type WebCommitResult,
+  type WebProviderCommitIntent,
   type WebSettingRowId,
+  type WebSettingsCommitRequest,
   type WebSettingsFacts,
 } from '../panels/web-settings-page.ts'
 import { ModelsWorkspacePage, type ModelsInitialView, type ModelsWorkspaceSource } from '../panels/models-workspace-page.ts'
@@ -831,8 +833,6 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
   const webSettledValue = (id: WebSettingRowId): string | undefined => {
     if (webSettings === undefined) return undefined
     switch (id) {
-      case 'web-search-provider': return providerLabel(WEB_SEARCH_PROVIDER_VALUES, webSettings.searchProvider)
-      case 'web-fetch-provider': return providerLabel(WEB_FETCH_PROVIDER_VALUES, webSettings.fetchProvider)
       case 'web-search-count': return String(webSettings.api.count)
       case 'web-send-original-question': return webSettings.api.sendOriginalQuestion ? 'on' : 'off'
       case 'web-search-billing': return webBillingLabel(webSettings.api.searchBilling)
@@ -883,14 +883,11 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
    *  rows are read-only facts: they never carry a write. */
   const webWriteFor = (id: WebSettingRowId, value: string): (() => Promise<void>) | undefined => {
     switch (id) {
-      case 'web-search-provider': {
-        const candidate = WEB_SEARCH_PROVIDER_VALUES.find(entry => entry.label === value || entry.id === value)
-        return candidate === undefined ? undefined : () => runner.config.web.setSearchProvider(candidate.id)
-      }
-      case 'web-fetch-provider': {
-        const candidate = WEB_FETCH_PROVIDER_VALUES.find(entry => entry.label === value || entry.id === value)
-        return candidate === undefined ? undefined : () => runner.config.web.setFetchProvider(candidate.id)
-      }
+      case 'web-search-provider':
+      case 'web-fetch-provider':
+        // The provider rows commit through the typed intent path; this
+        // value-only mapping must never become a second provider writer.
+        return undefined
       case 'web-search-count': {
         const count = Number(value)
         return Number.isInteger(count) && count >= 1 && count <= 50
@@ -920,9 +917,8 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
   const webRequestedIdentity = (id: WebSettingRowId, requested: string): string | undefined => {
     switch (id) {
       case 'web-search-provider':
-        return WEB_SEARCH_PROVIDER_VALUES.find(entry => entry.id === requested || entry.label === requested)?.id
       case 'web-fetch-provider':
-        return WEB_FETCH_PROVIDER_VALUES.find(entry => entry.id === requested || entry.label === requested)?.id
+        return undefined
       case 'web-search-count': {
         const count = Number(requested)
         return Number.isInteger(count) && count >= 1 && count <= 50 ? String(count) : undefined
@@ -946,8 +942,6 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
    *  display-only). */
   const webCommittedIdentity = (settings: WebProviderSettings, id: WebSettingRowId): string | undefined => {
     switch (id) {
-      case 'web-search-provider': return settings.searchProvider
-      case 'web-fetch-provider': return settings.fetchProvider
       case 'web-search-count': return String(settings.api.count)
       case 'web-send-original-question': return settings.api.sendOriginalQuestion ? 'on' : 'off'
       case 'web-search-billing': return settings.api.searchBilling
@@ -987,7 +981,172 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
    * An already-current request writes NOTHING and is `verified` from the real
    * authority (browsing/confirming the current value is not a mutation).
    */
-  const commitWebIntent = async (id: WebSettingRowId, requested: string): Promise<WebCommitResult> =>
+  /** The provider capability one provider row addresses (undefined for every
+   *  other row, which keeps its plain value request). */
+  const providerCapability = (id: WebSettingRowId): 'search' | 'fetch' | undefined =>
+    id === 'web-search-provider' ? 'search' : id === 'web-fetch-provider' ? 'fetch' : undefined
+
+  /** One provider's display identity (the raw Automatic state is a fact, not a
+   *  missing read). */
+  const webProviderDisplay = (capability: 'search' | 'fetch', id: string | undefined): string => {
+    if (id === undefined) return 'Automatic'
+    return providerLabel(capability === 'search' ? WEB_SEARCH_PROVIDER_VALUES : WEB_FETCH_PROVIDER_VALUES, id) ?? id
+  }
+
+  /** The latest Host facts one provider decision needs, from the SAME read. */
+  const webProviderSnapshot = (
+    settings: WebProviderSettings,
+    capability: 'search' | 'fetch',
+  ): { readonly baseId: string | undefined; readonly userSet: boolean; readonly userId: string | undefined; readonly effective: string | undefined } => ({
+    ...(capability === 'search' ? settings.providerSelection.search : settings.providerSelection.fetch),
+    effective: capability === 'search' ? settings.searchProvider : settings.fetchProvider,
+  })
+
+  /**
+   * ONE typed provider commit. The page already decided the OFFICIAL semantic
+   * (`select` -> set, `restore` -> unset) against the SAME Host read; this
+   * queue-head re-read only proves that the gesture still describes the Host:
+   *
+   * - a deployment (`base`) change invalidates the page-time decision for BOTH
+   *   actions (`Not saved`, zero writes) — the deployment default the user saw
+   *   is not the one that now applies;
+   * - a USER-layer change invalidates a RESET gesture only (an explicit set
+   *   intentionally replaces the USER value), so the stale "clear" can never
+   *   erase a value another writer just stored;
+   * - `Verified` for a reset is the fresh effective value equal to the fresh
+   *   deployment `baseId` (the official Host may keep an explicit USER value
+   *   equal to the base while the same section carries another override; that
+   *   is the official rc.5 reset behaviour and is NOT reported as a failed
+   *   write). An explicit set is only Verified when the fresh USER own-field
+   *   really carries the requested id — never from an inherited effective value.
+   */
+  const commitWebProviderIntent = async (
+    id: 'web-search-provider' | 'web-fetch-provider',
+    capability: 'search' | 'fetch',
+    intent: WebProviderCommitIntent,
+    base: WebProviderSettings,
+  ): Promise<WebCommitResult> => {
+    const observed = intent.observed
+    const fresh = webProviderSnapshot(base, capability)
+    if (fresh.baseId !== observed.baseId) {
+      return {
+        kind: 'not-saved',
+        reason: 'the Host deployment selection changed since the page read it; nothing was written',
+      }
+    }
+    if (intent.kind === 'provider-restore') {
+      if (fresh.userSet !== observed.userSet || fresh.userId !== observed.userId) {
+        return {
+          kind: 'not-saved',
+          reason: 'the Host USER selection changed since the page read it; nothing was written',
+          ...fresh.effective === undefined ? {} : { actual: webProviderDisplay(capability, fresh.effective) },
+        }
+      }
+      if (!fresh.userSet) {
+        if (fresh.effective === fresh.baseId) {
+          return { kind: 'verified', actual: webProviderDisplay(capability, fresh.effective) }
+        }
+        return {
+          kind: 'not-saved',
+          reason: `the USER selection is already absent, but the Host reads "${webProviderDisplay(capability, fresh.effective)}" instead of "${webProviderDisplay(capability, fresh.baseId)}"`,
+          ...fresh.effective === undefined ? {} : { actual: webProviderDisplay(capability, fresh.effective) },
+        }
+      }
+      try {
+        await (capability === 'search' ? runner.config.web.restoreSearchProvider() : runner.config.web.restoreFetchProvider())
+      } catch (error) {
+        const reason = safeErrorMessage(error)
+        await settleWebReadAfterWrite()
+        if (webSettings === undefined) return { kind: 'outcome-unknown', reason }
+        const after = webProviderSnapshot(webSettings, capability)
+        if (after.effective === after.baseId) {
+          return {
+            kind: 'outcome-unknown',
+            reason: `${reason}; the Host now reads "${webProviderDisplay(capability, after.effective)}" as the deployment default, so the rejection cannot be attributed`,
+          }
+        }
+        return { kind: 'not-saved', reason, actual: webProviderDisplay(capability, after.effective) }
+      }
+      await settleWebReadAfterWrite()
+      if (webSettings === undefined) {
+        return { kind: 'outcome-unknown', reason: 'the Host reset could not be verified: the Web settings could not be read back' }
+      }
+      const after = webProviderSnapshot(webSettings, capability)
+      if (after.effective === after.baseId) {
+        return { kind: 'verified', actual: webProviderDisplay(capability, after.effective) }
+      }
+      return {
+        kind: 'not-saved',
+        reason: `the Host keeps "${webProviderDisplay(capability, after.effective)}" instead of the deployment default "${webProviderDisplay(capability, after.baseId)}"`,
+        actual: webProviderDisplay(capability, after.effective),
+      }
+    }
+    // Explicit selection: the official setter, NEVER the base-substitution.
+    let write: (() => Promise<void>) | undefined
+    if (capability === 'search') {
+      const target = WEB_SEARCH_PROVIDER_VALUES.find(candidate => candidate.id === intent.id)
+      if (target !== undefined) write = () => runner.config.web.setSearchProvider(target.id)
+    } else {
+      const target = WEB_FETCH_PROVIDER_VALUES.find(candidate => candidate.id === intent.id)
+      if (target !== undefined) write = () => runner.config.web.setFetchProvider(target.id)
+    }
+    if (write === undefined) {
+      return { kind: 'not-saved', reason: `"${intent.id}" is not an official provider this page writes` }
+    }
+    // A CUSTOM effective route is displayed verbatim and is NEVER overwritten
+    // here: zero writes, explicit cause. Only a fresh authority can change that.
+    if (fresh.effective !== undefined
+      && !(capability === 'search' ? WEB_SEARCH_PROVIDER_VALUES : WEB_FETCH_PROVIDER_VALUES)
+        .some(candidate => candidate.id === fresh.effective)) {
+      return {
+        kind: 'not-saved',
+        reason: `the configured provider is a custom route (${fresh.effective}); only the official candidates are selectable here`,
+      }
+    }
+    // The USER layer really carrying the requested id satisfies the intent with
+    // zero writes; an inherited effective value does NOT (the page's explicit
+    // pin intent must reach the official setter).
+    if (fresh.effective === intent.id && fresh.userSet && fresh.userId === intent.id) {
+      return { kind: 'verified', actual: intent.id }
+    }
+    try {
+      await write()
+    } catch (error) {
+      const reason = safeErrorMessage(error)
+      await settleWebReadAfterWrite()
+      if (webSettings === undefined) return { kind: 'outcome-unknown', reason }
+      const after = webProviderSnapshot(webSettings, capability)
+      if (after.effective !== intent.id) {
+        return { kind: 'not-saved', reason, actual: webProviderDisplay(capability, after.effective) }
+      }
+      return {
+        kind: 'outcome-unknown',
+        reason: `${reason}; the Host now reads the submitted value, so the rejection cannot be attributed`,
+      }
+    }
+    await settleWebReadAfterWrite()
+    if (webSettings === undefined) {
+      return { kind: 'outcome-unknown', reason: 'the Host write could not be verified: the Web settings could not be read back' }
+    }
+    const after = webProviderSnapshot(webSettings, capability)
+    if (after.effective === intent.id && after.userSet && after.userId === intent.id) {
+      return { kind: 'verified', actual: intent.id }
+    }
+    if (after.effective === intent.id) {
+      return {
+        kind: 'not-saved',
+        reason: `the Host reads "${webProviderDisplay(capability, after.effective)}" only as an inherited value; the requested USER selection was not stored`,
+        actual: intent.id,
+      }
+    }
+    return {
+      kind: 'not-saved',
+      reason: `the Host keeps "${webProviderDisplay(capability, after.effective)}" instead of the submitted value`,
+      actual: webProviderDisplay(capability, after.effective),
+    }
+  }
+
+  const commitWebIntent = async (id: WebSettingRowId, requested: WebSettingsCommitRequest): Promise<WebCommitResult> =>
     queueWebOperation(async (): Promise<WebCommitResult> => {
       if (!webSettingsAvailable()) {
         return { kind: 'not-saved', reason: 'the Host Web provider settings are unavailable on this backend' }
@@ -1006,6 +1165,19 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
       const base = webSettings
       if (base === undefined) {
         return { kind: 'not-saved', reason: 'the current Web settings could not be read' }
+      }
+      // The two provider rows commit through the TYPED intent (the page decided
+      // restore vs explicit select from the same read); every other row keeps
+      // its plain value request.
+      const capability = providerCapability(id)
+      if (capability !== undefined) {
+        if (typeof requested === 'string') {
+          return { kind: 'not-saved', reason: `"${requested}" is not a supported provider intent` }
+        }
+        return commitWebProviderIntent(id as 'web-search-provider' | 'web-fetch-provider', capability, requested, base)
+      }
+      if (typeof requested !== 'string') {
+        return { kind: 'not-saved', reason: 'a provider intent can only address the two provider rows' }
       }
       const requestedIdentity = webRequestedIdentity(id, requested)
       if (requestedIdentity === undefined) {
@@ -1042,26 +1214,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
           }
         }
       }
-      if (id === 'web-search-provider' || id === 'web-fetch-provider') {
-        const candidates = id === 'web-search-provider' ? WEB_SEARCH_PROVIDER_VALUES : WEB_FETCH_PROVIDER_VALUES
-        const currentId = webCommittedIdentity(base, id)
-        // A CUSTOM route is displayed verbatim and is NEVER overwritten here:
-        // zero writes, explicit cause. Only a fresh authority can change that.
-        if (currentId !== undefined && !candidates.some(candidate => candidate.id === currentId)) {
-          return {
-            kind: 'not-saved',
-            reason: `the configured provider is a custom route (${currentId}); only the official candidates are selectable here`,
-          }
-        }
-        // The authority ALREADY holding the requested identity satisfies the
-        // request with zero writes (this is not a pin promise). An AUTOMATIC
-        // (undefined) current value never satisfies an explicit candidate:
-        // confirming one always issues the real official write and verifies
-        // from a fresh read-back.
-        if (currentId === requestedIdentity) {
-          return { kind: 'verified', actual: requestedIdentity }
-        }
-      } else if (webCommittedIdentity(base, id) === requestedIdentity) {
+      if (webCommittedIdentity(base, id) === requestedIdentity) {
         return { kind: 'verified', actual: requestedIdentity }
       }
       const write = webWriteFor(id, requested)
