@@ -1205,10 +1205,17 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
   ])
   await waitComposer(tui, 'MAC09-01 composer restored')
 
-  // MAC09-02 NEGATIVE: a standard (non-PTC) session has no CUA tool, and the
-  // bundle is still disabled. The completed model turn is the causal barrier
-  // for the bounded "no dispatch" fact.
+  // MAC09-02 NEGATIVE: the bundle is still DISABLED, so the Host never mounts
+  // the CUA provider/tool at all. That Host admission fact is read from the
+  // real profile (official Plugin Manager selection + the mounted roster),
+  // not inferred from model compliance; the completed model turn then adds the
+  // bounded "no dispatch" fact on top of the absent tool.
   setCase(report, 'MAC09-02')
+  assert(!verifyBundleSelected(installation.profileDir),
+    'MAC09-02: the profile already selected the CUA bundle before the operator enabled it')
+  const preEnableEntries = dumpProfile(installation, 'MAC09-02 before enable')
+  assert(preEnableEntries.every(entry => entry?.id !== 'cua'),
+    'MAC09-02: a disabled bundle still mounts the CUA provider row before enable')
   const negative = await promptAndRequireNoCua({
     tui,
     dshHome,
@@ -1246,7 +1253,7 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
     'MAC09-02 cua capabilities result', TIMEOUTS.consent)
   assert(capabilitiesResult.result.isError !== true,
     `MAC09-02: the official cua tool failed: ${dispatchErrorCode(capabilitiesResult.result) ?? 'unknown error'}`)
-  pushRow(report, 'MAC09-02', 'NOT_VERIFIED', {
+  pushRow(report, 'MAC09-02', 'PASS', {
     sessionId: sha16(capabilities.sessionId),
     subCallId: sha16(capabilities.dispatch.subCallId),
     dispatchMethod: dispatchMethod(capabilities.dispatch),
@@ -1254,8 +1261,9 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
     nonPtcCuaDispatches: 0,
     bundle: CUA_BUNDLE,
     agentPreset: composition.agentPreset,
-    negativeEvidence: 'model turn instructed "Without using any tools"; zero cua dispatch does not prove Agent tool admission',
-  }, 'the PTC positive is observed, but the standard-session negative is model-compliance evidence only; a Host tool-catalog/preset admission fact is still required')
+    negativeEvidence: 'Host: profile selection absent + mounted roster has no cua row before enable; bounded zero cua dispatch; model compliance recorded separately',
+    hostAdmission: { selectionBeforeEnable: 'absent', rosterBeforeEnable: 'no cua row', selectionAfterEnable: 'present', ptcPositive: 'getCapabilities ok' },
+  })
 
   // MAC09-03: the REAL helper reports its observed macOS permissions. The
   // operator grants Accessibility + Screen Recording in System Settings; the
