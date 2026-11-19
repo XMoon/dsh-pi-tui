@@ -707,10 +707,14 @@ export async function installLocalTransport(
         if (installed.generation.getSnapshot() === undefined) {
           throw new LocalScopeError('HOST_UNRESPONSIVE', 'local transport: no current authenticated Host generation')
         }
-        // A later peer always needs the refreshed Cookie (the Host releases the
-        // old peer when its mux socket closed); the archive call is a one-shot
-        // user action, never a hot-loop path.
-        await refreshCookie(init?.signal ?? undefined)
+        // The borrowed fetch speaks with the SAME operator Cookie as the live
+        // connection: minting a second operator here would make this request
+        // arrive as a different Peer than the one that owns the open
+        // forwarded-event stream, and the Gateway refuses that Peer's answer
+        // ("$events/result: Remote event result belongs to another Peer").
+        // The connection's own re-admit is the ONLY Cookie rotation point (the
+        // socket factory refreshes before every RE-open), so a reconnect
+        // carries the new operator and this fetch simply follows it.
         if (disposed) throw new Error('local transport: the authenticated fetch is unavailable after disposal')
         if (fatalError !== undefined) throw fatalError
         return await fetchAuthenticated(input, init)
