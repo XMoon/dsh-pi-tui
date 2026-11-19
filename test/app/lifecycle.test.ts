@@ -13,8 +13,9 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { createExitController, formatDaemonDetachHint } from '../../src/app/bootstrap/exit.ts'
 import { createExitIntentCoordinator, type ExitIntentCoordinator, type StopCurrentWorkOutcome } from '../../src/app/bootstrap/exit-intent.ts'
+import { createExitIntentFacts } from '../../src/app/bootstrap/exit-facts.ts'
 import type { ExitChoiceModel, SurfaceExitChoiceSeam } from '../../src/app/surface/exit-choice.ts'
-import type { LiveSessionScope } from '../../src/app/session/scope.ts'
+import type { LiveSessionScope, SessionScope } from '../../src/app/session/scope.ts'
 import { classifyExitIntent, type ExitBackendKind, type ExitSessionActivity } from '../../src/domain/command/policy.ts'
 import { cancellationError, isCancellation, runDetached, runOwned } from '../../src/runtime/process/tasks.ts'
 import { createDiag, type Diag } from '../../src/runtime/process/diagnostics.ts'
@@ -940,12 +941,19 @@ interface ExitIntentHarness {
   /** Every created model (open + update) in creation order. */
   readonly models: ExitChoiceModel[]
   readonly stopCalls: Array<{ readonly scope: LiveSessionScope; readonly signal: AbortSignal }>
+  /** The runner diagnostics lines the owned task recorded. */
+  readonly diagLines: string[]
   readonly state: {
     backend: ExitBackendKind
     activity: ExitSessionActivity
-    scope: LiveSessionScope | undefined
+    /** The live projection; undefined models a sessionless surface. */
+    live: LiveSessionScope | undefined
     scopeCurrent: boolean
     mounted: boolean
+    /** A reentrant hook run from the presenter's close (focus restoration). */
+    onClose: (() => void) | undefined
+    /** Optional presenter failure injection (phase: 'open' | 'update' | 'close'). */
+    presenterFault: ((phase: 'open' | 'update' | 'close') => void) | undefined
     stop: (signal: AbortSignal) => Promise<StopCurrentWorkOutcome>
   }
   closed(): number
@@ -953,10 +961,17 @@ interface ExitIntentHarness {
   dispose(): void
 }
 
+/** A stand-in SESSIONLESS scope: a real identity with no Session id. */
+function sessionlessScope(): SessionScope {
+  return { sessionId: undefined } as unknown as SessionScope
+}
+
 function exitIntentHarness(options: {
   readonly backend?: ExitBackendKind
   readonly activity?: ExitSessionActivity
-  readonly scope?: LiveSessionScope | undefined
+  /** Explicit live projection; `undefined` (with `sessionless`) models no Session. */
+  readonly live?: LiveSessionScope | undefined
+  readonly sessionless?: boolean
   readonly scopeCurrent?: boolean
   readonly mounted?: boolean
   readonly stop?: (signal: AbortSignal) => Promise<StopCurrentWorkOutcome>
@@ -972,21 +987,48 @@ function exitIntentHarness(options: {
   const state: ExitIntentHarness['state'] = {
     backend: options.backend ?? 'daemon',
     activity: options.activity ?? 'idle',
-    scope: 'scope' in options ? options.scope : exitScope(),
+    live: options.sessionless === true ? undefined : (options.live ?? exitScope()),
     scopeCurrent: options.scopeCurrent ?? true,
     mounted: options.mounted ?? true,
+    onClose: undefined,
+    presenterFault: undefined,
     stop: options.stop ?? (async () => ({ kind: 'stopped' })),
   }
   const seam: SurfaceExitChoiceSeam = {
-    open: (model) => { currentModel = model; opens.push(model); models.push(model) },
-    update: (model) => { currentModel = model; updates.push(model); models.push(model) },
-    close: () => { currentModel = undefined; closes += 1 },
+    open: (model) => {
+      state.presenterFault?.('open')
+      currentModel = model
+      opens.push(model)
+      models.push(model)
+    },
+    update: (model) => {
+      state.presenterFault?.('update')
+      currentModel = model
+      updates.push(model)
+      models.push(model)
+    },
+    close: () => {
+      currentModel = undefined
+      closes += 1
+      state.onClose?.()
+      state.presenterFault?.('close')
+    },
   }
+  const diagLines: string[] = []
+  const diag = createDiag({
+    filePath: undefined,
+    stderrLevel: 'off',
+    sinks: [{ write: (line: string) => { diagLines.push(line) } }],
+  })
   const coordinator = createExitIntentCoordinator({
-    diag: { info: () => {}, error: () => {} },
+    diag,
     facts: {
       currentBackend: () => state.backend,
-      capture: () => ({ scope: state.scope, activity: state.activity }),
+      capture: () => ({
+        scope: state.live ?? sessionlessScope(),
+        live: state.live,
+        activity: state.activity,
+      }),
       isScopeCurrent: () => state.scopeCurrent,
     },
     commit: (options) => { commits.push(options) },
@@ -1003,6 +1045,7 @@ function exitIntentHarness(options: {
     updates,
     models,
     stopCalls,
+    diagLines,
     state,
     closed: () => closes,
     current: () => currentModel,
@@ -1031,7 +1074,7 @@ test('exit intent: a proven idle Direct session exits immediately with no choice
 
 test('exit intent: a sessionless surface exits/detaches immediately', () => {
   for (const backend of ['direct', 'daemon'] as const) {
-    const h = exitIntentHarness({ backend, activity: 'idle', scope: undefined })
+    const h = exitIntentHarness({ backend, activity: 'idle', sessionless: true })
     h.coordinator.request('keyboard')
     assert.deepEqual(h.commits, [{ workStopped: false }], `${backend}: sessionless exit is immediate`)
     assert.equal(h.opens.length, 0)
@@ -1039,7 +1082,7 @@ test('exit intent: a sessionless surface exits/detaches immediately', () => {
 })
 
 test('exit intent: a sessionless surface with an open admission is unknown, not idle', () => {
-  const h = exitIntentHarness({ backend: 'direct', activity: 'working', scope: undefined })
+  const h = exitIntentHarness({ backend: 'direct', activity: 'working', sessionless: true })
   h.coordinator.request('slash')
   assert.equal(h.opens.length, 1, 'a pending admission without a Session fails safe')
   assert.equal(h.commits.length, 0)
@@ -1266,4 +1309,221 @@ test('exit intent: a committed session switch retires the open choice with zero 
   stable.coordinator.request('slash')
   stable.coordinator.retireIfStale()
   assert.equal(stable.current()?.kind, 'daemon-busy', 'a still-current choice survives')
+})
+
+// --- M6 UX PR1: the live exit facts (the composition seam the keyboard and
+// the choice read) ---
+
+interface ExitFactsHarness {
+  readonly facts: ReturnType<typeof createExitIntentFacts>
+  readonly state: {
+    backend: ExitBackendKind
+    sessionId: string | undefined
+    current: boolean
+    transition: boolean
+    admission: boolean
+    shell: boolean
+    running: boolean | undefined
+    tokenCurrent: boolean
+    agentRunning: boolean | undefined
+    tokenSessionIds: string[]
+  }
+}
+
+function exitFactsHarness(): ExitFactsHarness {
+  const state: ExitFactsHarness['state'] = {
+    backend: 'daemon',
+    sessionId: 'session-a',
+    current: true,
+    transition: false,
+    admission: false,
+    shell: false,
+    running: false,
+    tokenCurrent: true,
+    agentRunning: false,
+    tokenSessionIds: [],
+  }
+  const facts = createExitIntentFacts({
+    backend: () => state.backend,
+    scopes: {
+      capture: () => ({ sessionId: state.sessionId }) as unknown as SessionScope,
+      captureLive: () => state.sessionId === undefined
+        ? undefined
+        : ({ sessionId: state.sessionId } as unknown as LiveSessionScope),
+      isCurrent: () => state.current,
+    },
+    transitionPending: () => state.transition,
+    admissionPending: () => state.admission,
+    shellRunning: () => state.shell,
+    remote: {
+      running: () => state.running,
+      captureTransportToken: (sessionId) => {
+        state.tokenSessionIds.push(sessionId)
+        return { generation: 1, binding: sessionId }
+      },
+      isTransportTokenCurrent: () => state.tokenCurrent,
+    },
+    directAgentRunning: () => state.agentRunning,
+  })
+  return { facts, state }
+}
+
+test('exit facts: a Remote admission/shell working state still captures the transport identity', () => {
+  // RFL-001: the activity shortcut must not skip the identity capture, or the
+  // confirm fence can never pass and Keep/Stop silently do nothing.
+  const h = exitFactsHarness()
+  h.state.admission = true
+  const captured = h.facts.capture()
+  assert.equal(captured.activity, 'working')
+  assert.notEqual(captured.transportToken, undefined, 'the transport token is captured beside the scope')
+  assert.deepEqual(h.state.tokenSessionIds, ['session-a'])
+  assert.equal(h.facts.isScopeCurrent(captured.scope, captured.transportToken), true)
+  h.state.tokenCurrent = false
+  assert.equal(h.facts.isScopeCurrent(captured.scope, captured.transportToken), false,
+    'a Connection/binding rollover invalidates the captured identity')
+
+  const shell = exitFactsHarness()
+  shell.state.shell = true
+  assert.equal(shell.facts.capture().activity, 'working')
+  assert.notEqual(shell.facts.capture().transportToken, undefined)
+})
+
+test('exit facts: the official Remote running bit and its absence decide working/idle/unknown', () => {
+  const h = exitFactsHarness()
+  h.state.running = true
+  assert.equal(h.facts.capture().activity, 'working')
+  h.state.running = false
+  assert.equal(h.facts.capture().activity, 'idle')
+  h.state.running = undefined
+  assert.equal(h.facts.capture().activity, 'unknown', 'a missing running bit is never idle')
+  h.state.running = false
+  h.state.tokenCurrent = false
+  assert.equal(h.facts.capture().activity, 'unknown', 'a rolled transport is never idle')
+})
+
+test('exit facts: a pending navigation is unknown, never idle or working', () => {
+  // RFL-002: the transition authority is part of the idle proof.
+  const h = exitFactsHarness()
+  h.state.transition = true
+  assert.equal(h.facts.capture().activity, 'unknown')
+  h.state.sessionId = undefined
+  assert.equal(h.facts.capture().activity, 'unknown', 'a pending create with no Session is unknown too')
+})
+
+test('exit facts: a sessionless capture is a real generation and its first Session invalidates it', () => {
+  // RFL-003: a sessionless choice must be retired when the first Session
+  // publishes; otherwise the old choice could exit the new owner.
+  const h = exitFactsHarness()
+  h.state.sessionId = undefined
+  h.state.admission = true
+  const captured = h.facts.capture()
+  assert.deepEqual(captured.scope.sessionId, undefined)
+  assert.equal(captured.activity, 'working')
+  assert.deepEqual(h.state.tokenSessionIds, [''], 'the Connection generation is fenced with the empty-session sentinel')
+  assert.equal(h.facts.isScopeCurrent(captured.scope, captured.transportToken), true)
+  h.state.current = false
+  assert.equal(h.facts.isScopeCurrent(captured.scope, captured.transportToken), false,
+    'the published first Session makes the old sessionless choice stale')
+  h.state.current = true
+  h.state.sessionId = undefined
+  h.state.admission = false
+  assert.equal(h.facts.capture().activity, 'idle')
+})
+
+test('exit facts: Direct uses the attached Agent status, never a cached busy row', () => {
+  const h = exitFactsHarness()
+  h.state.backend = 'direct'
+  h.state.agentRunning = true
+  assert.equal(h.facts.capture().activity, 'working')
+  h.state.agentRunning = false
+  assert.equal(h.facts.capture().activity, 'idle')
+  h.state.agentRunning = undefined
+  assert.equal(h.facts.capture().activity, 'unknown', 'a live scope without an observable Agent is unknown')
+  assert.equal(h.facts.isScopeCurrent(exitScope(), undefined), true, 'Direct currentness is the ownership scope')
+})
+
+test('exit intent: a stale sessionless choice never exits the newly published Session', () => {
+  // RFL-003 end to end through the coordinator: the choice captured the
+  // sessionless generation; the first Session lands; the old Exit must be a
+  // no-op (zero commit, zero cancel).
+  const h = exitIntentHarness({ backend: 'direct', activity: 'working', sessionless: true })
+  h.coordinator.request('slash')
+  assert.equal(h.current()?.kind, 'direct-unknown')
+  h.state.scopeCurrent = false
+  h.coordinator.retireIfStale()
+  assert.equal(h.commits.length, 0)
+  assert.equal(h.stopCalls.length, 0)
+  assert.equal(h.current(), undefined, 'the stale sessionless choice is retired')
+})
+
+test('exit intent: a reentrant focus callback that opens a NEW choice owns the decision', () => {
+  // RFL-007: closing the old choice can synchronously run another owner's
+  // onFocus, which may open a fresh intent. The old confirmation must not
+  // commit after it.
+  const h = exitIntentHarness({ backend: 'daemon', activity: 'working' })
+  h.coordinator.request('slash')
+  h.state.onClose = () => {
+    h.state.onClose = undefined
+    h.coordinator.request('keyboard')
+  }
+  h.current()!.select('keep-and-disconnect')
+  assert.equal(h.opens.length, 2, 'the reentrant callback opened the newer choice')
+  assert.deepEqual(h.commits, [], 'the old Keep never exits the newer owner')
+  assert.equal(h.current()?.kind, 'daemon-busy')
+})
+
+test('exit intent: a Stop proof cannot commit after a newer choice takes over', async () => {
+  const h = exitIntentHarness({ backend: 'daemon', activity: 'working' })
+  h.coordinator.request('slash')
+  h.state.onClose = () => {
+    h.state.onClose = undefined
+    h.state.activity = 'working'
+    h.coordinator.request('slash')
+  }
+  h.current()!.select('stop-and-disconnect')
+  await new Promise<void>(resolve => setImmediate(resolve))
+  assert.equal(h.opens.length, 2, 'the close-time callback opened a newer choice')
+  assert.deepEqual(h.commits, [], 'the stopped proof belongs to the retired intent')
+})
+
+test('exit intent: dismissing the choice during a Stop aborts the wait', async () => {
+  // RFL-005: the choice owns the local wait; dismissing it must end that wait.
+  let seen: AbortSignal | undefined
+  const h = exitIntentHarness({
+    backend: 'daemon',
+    activity: 'working',
+    stop: signal => new Promise(resolve => {
+      seen = signal
+      signal.addEventListener('abort', () => resolve({ kind: 'unconfirmed', detail: 'aborted' }), { once: true })
+    }),
+  })
+  h.coordinator.request('slash')
+  h.current()!.select('stop-and-disconnect')
+  assert.equal(seen?.aborted, false)
+  h.current()!.dismiss()
+  assert.equal(seen?.aborted, true, 'the dismissed choice aborted its own wait')
+  await new Promise<void>(resolve => setImmediate(resolve))
+  assert.deepEqual(h.commits, [])
+})
+
+test('exit intent: a presenter failure is recorded and never becomes an unhandled rejection', async () => {
+  // RFL-004: the WHOLE stop task (presentation included) is owned.
+  const unhandled: unknown[] = []
+  const listener = (reason: unknown): void => { unhandled.push(reason) }
+  process.on('unhandledRejection', listener)
+  try {
+    const h = exitIntentHarness({ backend: 'daemon', activity: 'working' })
+    h.state.presenterFault = (phase) => {
+      if (phase === 'update') throw new Error('presenter-update-failed')
+    }
+    h.coordinator.request('slash')
+    h.current()!.select('stop-and-disconnect')
+    await new Promise<void>(resolve => setImmediate(resolve))
+    await new Promise<void>(resolve => setImmediate(resolve))
+    assert.deepEqual(unhandled, [], 'no rejection escapes the owned task')
+    assert.match(h.diagLines.join('\n'), /presenter-update-failed/, 'the failure is recorded for diagnostics')
+    assert.deepEqual(h.commits, [], 'a broken presentation never claims a stop or an exit')
+  } finally {
+    process.off('unhandledRejection', listener)
+  }
 })

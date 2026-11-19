@@ -62,6 +62,9 @@ export interface ExitChoiceModel {
   readonly title: string
   /** Body paragraphs, already final English copy. */
   readonly body: readonly string[]
+  /** The ONE short risk/status line used when the box cannot host the full body
+   *  (a low-height terminal). Always a subset of the same contract. */
+  readonly shortBody: string
   /** One status/detail line (a proven refusal, or the Stop progress line). */
   readonly status: string | undefined
   /** The actable options in keyboard order; empty while stopping. */
@@ -148,6 +151,9 @@ export function exitChoiceAsking(
     phase: 'choose',
     title: exitChoiceTitle(kind),
     body: body(kind),
+    shortBody: kind === 'daemon-busy' || kind === 'direct-busy'
+      ? 'Session is working.'
+      : 'State cannot be verified.',
     status: undefined,
     options: viewOptions(baseOptions(kind)),
     focus: baseFocus(kind),
@@ -173,6 +179,7 @@ export function exitChoiceStopping(
       'Waiting for the current session to become idle.',
       'No other session will be stopped.',
     ],
+    shortBody: 'Stopping current work…',
     status: undefined,
     options: [],
     focus: undefined,
@@ -196,6 +203,7 @@ export function exitChoiceUnconfirmed(
     phase: 'unconfirmed',
     title: exitChoiceTitle('daemon-busy'),
     body: ['Stop could not be confirmed. The daemon may still be working.'],
+    shortBody: 'Stop could not be confirmed.',
     status: detail,
     options: viewOptions(['disconnect-without-stop', 'stay']),
     focus: 'disconnect-without-stop',

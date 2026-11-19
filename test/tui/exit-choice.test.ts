@@ -157,16 +157,68 @@ test('mouse: press and release on different segments never act; a foreign frame 
   assert.equal(seat.component.handleMouse(mouseEvent('press', 4, stayRow, 58, height)), undefined)
 })
 
-test('mouse: a clipped option registers no clickable segment', () => {
+test('an unusably narrow box paints only the safe fallback and no target', () => {
   const seat = mountRecorder(select => exitChoiceAsking('daemon-busy', select, () => {}))
-  // 4 columns cannot paint ANY full option (even the compact `Stay`); no row
-  // may claim a target that is not fully readable.
+  // 4 columns cannot paint ANY action; the seat degrades to the truthful
+  // Escape-Stay line instead of a clipped destructive action.
   const lines = seat.component.render(4).map(stripAnsi)
-  assert.ok(lines.some(line => line.includes('…')), 'the frame is genuinely clipped')
+  assert.equal(lines.length, 1)
+  assert.ok(visibleWidth(lines[0]!) <= 4, `the fallback is bounded by the frame: ${lines[0]}`)
   for (const [index, line] of lines.entries()) {
     assert.equal(seat.component.handleMouse(mouseEvent('press', 0, index, 4, lines.length)), undefined,
-      `no hit on a clipped row: ${line}`)
+      `no hit on a fallback row: ${line}`)
   }
+  // Keyboard: Down/Enter cannot select anything hidden; Esc stays.
+  seat.component.handleInput('\x1b[B')
+  seat.component.handleInput('\r')
+  assert.deepEqual(seat.selections, [])
+  seat.component.handleInput('\x1b')
+  assert.deepEqual(seat.selections, ['stay'])
+})
+
+test('a 20-column box makes only Stay actable, never the clipped Stop', () => {
+  // RFL-009: the compact labels still do not fit 20 columns; a hidden Stop
+  // must not remain keyboard-selectable.
+  const seat = mountRecorder(select => exitChoiceAsking('daemon-busy', select, () => {}))
+  const lines = seat.component.render(20).map(stripAnsi)
+  const text = lines.join('\n')
+  assert.ok(!text.includes('Stop'), `no clipped Stop is painted: ${text}`)
+  assert.match(text, /Stay/u)
+  seat.component.handleInput('\x1b[B')
+  seat.component.handleInput('\r')
+  assert.deepEqual(seat.selections, ['stay'], 'the only actable option is Stay')
+})
+
+test('a low box hides no actable action: the three options need their own rows', () => {
+  // RFL-009: with only 2-3 content rows the box cannot show the three actions;
+  // only Stay remains actable. At 5 rows the short risk line plus all three
+  // actions still fit.
+  const safe = mountRecorder(select => exitChoiceAsking('daemon-busy', select, () => {}))
+  safe.component.setMaxRows(3)
+  safe.component.render(60)
+  safe.component.handleInput('\x1b[B')
+  safe.component.handleInput('\r')
+  assert.deepEqual(safe.selections, ['stay'], 'a 3-row box cannot reach Stop')
+
+  const compact = mountRecorder(select => exitChoiceAsking('daemon-busy', select, () => {}))
+  compact.component.setMaxRows(5)
+  const compactText = compact.component.render(60).map(stripAnsi).join('\n')
+  assert.match(compactText, /Session is working\./u, 'the short risk line survives the compact layout')
+  compact.component.handleInput('\x1b[B')
+  compact.component.handleInput('\r')
+  assert.deepEqual(compact.selections, ['stop-and-disconnect'], 'all three actions are truly visible and actable')
+})
+
+test('a one-row box keeps only the Escape-Stay fallback', () => {
+  const seat = mountRecorder(select => exitChoiceAsking('daemon-busy', select, () => {}))
+  seat.component.setMaxRows(1)
+  const lines = seat.component.render(60).map(stripAnsi)
+  assert.equal(lines.length, 1)
+  assert.match(lines[0]!, /Esc Stay/u)
+  seat.component.handleInput('\r')
+  assert.deepEqual(seat.selections, [], 'no action is reachable by Enter')
+  seat.component.handleInput('\x03')
+  assert.deepEqual(seat.selections, ['stay'], 'Ctrl+C still stays')
 })
 
 test('a phase update drops a focus the new options no longer offer', () => {

@@ -4,22 +4,29 @@
  * One single-purpose component: it paints the Client-local exit model and
  * forwards the ONE selection callback. It owns no business decision — the
  * currentness fence, the daemon Stop/idle proof and the final exit commit all
- * stay with the exit-intent coordinator. Three real, mutually exclusive
- * actions are always painted together (never a hidden or clipped action), and
- * a click activates only the EXACT option segment of the current frame.
+ * stay with the exit-intent coordinator.
+ *
+ * Operability is a REAL terminal property, not a style: an option is actable
+ * only when its complete label fits the painted width AND the painted box can
+ * show every actable option. When the terminal cannot host the three actions,
+ * the seat degrades to the truthful safe path (Stay) instead of leaving a
+ * clipped or off-screen destructive action keyboard-reachable. A pointer only
+ * activates the exact complete option segment of the current frame.
  *
  * @module @xmoon76/dsh-pi-tui/tui/interaction/exit-choice
  */
 
 import { matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi } from '@xmoon76/pi-tui'
 import type { Component, Focusable, TuiMouseEvent, TuiMouseEventResult } from '@xmoon76/pi-tui'
-import type { ExitChoiceModel, ExitChoiceOption } from '../../app/surface/exit-choice.ts'
+import type { ExitChoiceModel, ExitChoiceOption, ExitChoiceOptionView } from '../../app/surface/exit-choice.ts'
 import { color } from '../theme/runtime.ts'
 
 /** Below this inner width the compact option labels are used. */
 const NARROW_WIDTH = 40
 /** The visible focus marker of the focused option row. */
 const FOCUS_MARK = '❯'
+/** The fallback content height before the mounting frame reports a budget. */
+const DEFAULT_MAX_ROWS = 20
 
 /** One painted option's clickable segment. */
 interface OptionHit {
@@ -27,6 +34,19 @@ interface OptionHit {
   readonly y: number
   readonly start: number
   readonly end: number
+}
+
+/** The content plan of one frame: only what the granted box can really show. */
+interface FramePlan {
+  /** The single fallback line when nothing else fits (never an action). */
+  readonly minimal: string | undefined
+  readonly title: boolean
+  /** The full risk paragraphs (otherwise the short line). */
+  readonly body: 'full' | 'short' | 'none'
+  readonly status: boolean
+  /** The actable options, in keyboard order. */
+  readonly options: readonly ExitChoiceOptionView[]
+  readonly hint: boolean
 }
 
 /** The component dependencies (the mounting owner supplies the seat). */
@@ -45,6 +65,10 @@ export class ExitChoicePanel implements Component, Focusable {
   private disposed = false
   private pressed: ExitChoiceOption | undefined
   private lastOptionHits: readonly OptionHit[] = []
+  /** The options the LAST painted frame made actable (keyboard + pointer). */
+  private lastOperable: readonly ExitChoiceOptionView[] = []
+  /** The content rows granted by the owning responsive frame. */
+  private maxRows = DEFAULT_MAX_ROWS
   /** The content width of the last painted frame (the pointer-frame fence). */
   private lastFrameWidth = 0
 
@@ -59,7 +83,7 @@ export class ExitChoicePanel implements Component, Focusable {
   constructor(options: ExitChoicePanelOptions) {
     this.options = options
     this.model = options.model
-    this.focus = options.model.focus
+    this.focus = options.model.focus ?? options.model.options[0]?.id
   }
 
   /** Replace the painted model (a phase transition of the SAME choice). */
@@ -69,9 +93,14 @@ export class ExitChoicePanel implements Component, Focusable {
     // Reset focus when the new phase no longer offers the current option;
     // otherwise keep the user's focus across an update of the same list.
     if (this.focus === undefined || !model.options.some(option => option.id === this.focus)) {
-      this.focus = model.focus
+      this.focus = model.focus ?? model.options[0]?.id
     }
     this.pressed = undefined
+  }
+
+  /** Content-row budget from the owning responsive frame. */
+  setMaxRows(rows: number): void {
+    this.maxRows = Math.max(1, Math.floor(rows))
   }
 
   handleInput(data: string): void {
@@ -79,19 +108,18 @@ export class ExitChoicePanel implements Component, Focusable {
     // While the daemon Stop is in flight the choice is LOCKED: no key can
     // dispatch a second cancel or turn the wait into an exit.
     if (this.model.phase === 'stopping') return
-    if (matchesKey(data, 'escape') || (matchesKey(data, 'ctrl+c'))) {
+    if (matchesKey(data, 'escape') || matchesKey(data, 'ctrl+c')) {
       this.model.select('stay')
       return
     }
-    const options = this.model.options
-    if (options.length === 0) return
+    const operable = this.lastOperable
+    if (operable.length === 0) return
     if (matchesKey(data, 'up') || matchesKey(data, 'down') || matchesKey(data, 'tab') || matchesKey(data, 'shift+tab')) {
       const forward = !matchesKey(data, 'up') && !matchesKey(data, 'shift+tab')
-      const index = this.focusIndex()
-      const next = forward
-        ? (index + 1) % options.length
-        : (index - 1 + options.length) % options.length
-      this.focus = options[next]!.id
+      const index = operable.findIndex(option => option.id === this.focusedOption())
+      const from = index < 0 ? 0 : index
+      const next = forward ? (from + 1) % operable.length : (from - 1 + operable.length) % operable.length
+      this.focus = operable[next]!.id
       this.options.requestRender()
       return
     }
@@ -139,41 +167,118 @@ export class ExitChoicePanel implements Component, Focusable {
 
   render(width: number): string[] {
     const inner = Math.max(1, width)
-    const narrow = inner < NARROW_WIDTH
-    const lines: string[] = []
     this.lastFrameWidth = inner
     this.lastOptionHits = []
-    lines.push(truncateToWidth(color.textStrong(this.title(narrow)), inner, ''))
-    lines.push('')
-    for (const paragraph of this.model.body) {
-      for (const row of wrapTextWithAnsi(paragraph, inner)) {
+    const narrow = inner < NARROW_WIDTH
+    const plan = this.plan(inner)
+    this.lastOperable = plan.options
+    if (plan.minimal !== undefined) {
+      this.lastOperable = []
+      return [truncateToWidth(color.textDim(plan.minimal), inner, '')]
+    }
+    const lines: string[] = []
+    if (plan.title) lines.push(truncateToWidth(color.textStrong(this.title(narrow)), inner, ''))
+    if (plan.body === 'full') {
+      lines.push('')
+      for (const paragraph of this.model.body) {
+        for (const row of wrapTextWithAnsi(paragraph, inner)) {
+          lines.push(truncateToWidth(color.text(row), inner, ''))
+        }
+      }
+    } else if (plan.body === 'short') {
+      for (const row of wrapTextWithAnsi(this.model.shortBody, inner)) {
         lines.push(truncateToWidth(color.text(row), inner, ''))
       }
     }
-    if (this.model.status !== undefined && this.model.status !== '') {
+    if (plan.status && this.model.status !== undefined && this.model.status !== '') {
       lines.push('')
       for (const row of wrapTextWithAnsi(this.model.status, inner)) {
         lines.push(truncateToWidth(color.warning(row), inner, ''))
       }
     }
-    lines.push('')
-    const hits: OptionHit[] = []
-    for (const option of this.model.options) {
-      const focused = option.id === this.focusedOption()
-      const label = narrow ? option.shortLabel : option.label
-      const marker = focused ? FOCUS_MARK : ' '
-      const text = `${marker} ${label}`
-      const complete = visibleWidth(text) <= inner
-      const painted = complete ? text : truncateToWidth(text, inner, '…')
-      lines.push(focused ? color.primary(painted) : color.text(painted))
-      // Register a target only for a WHOLE label: a clipped option must never
-      // be clickable as if it were fully readable.
-      if (complete) hits.push({ option: option.id, y: lines.length - 1, start: 0, end: visibleWidth(text) })
+    if (plan.options.length > 0) {
+      if (plan.body === 'full') lines.push('')
+      const hits: OptionHit[] = []
+      for (const option of plan.options) {
+        const focused = option.id === this.focusedOption()
+        const label = narrow ? option.shortLabel : option.label
+        const text = `${focused ? FOCUS_MARK : ' '} ${label}`
+        const complete = visibleWidth(text) <= inner
+        const painted = complete ? text : truncateToWidth(text, inner, '…')
+        lines.push(focused ? color.primary(painted) : color.text(painted))
+        // Register a target only for a WHOLE label: a clipped option must never
+        // be clickable or keyboard-actable as if it were fully readable.
+        if (complete) hits.push({ option: option.id, y: lines.length - 1, start: 0, end: visibleWidth(text) })
+      }
+      this.lastOptionHits = hits
     }
-    this.lastOptionHits = hits
-    lines.push('')
-    lines.push(truncateToWidth(`  ${color.textDim(this.hintText())}`, inner, ''))
+    if (plan.hint) {
+      lines.push('')
+      lines.push(truncateToWidth(`  ${color.textDim(this.hintText())}`, inner, ''))
+    }
     return lines
+  }
+
+  /**
+   * Choose the richest truthful layout the granted box can host. A destructive
+   * option is actable only when EVERY offered option is fully readable and the
+   * box can paint them all; otherwise only Stay remains (or no action at all).
+   */
+  private plan(inner: number): FramePlan {
+    const narrow = inner < NARROW_WIDTH
+    const model = this.model
+    const label = (option: ExitChoiceOptionView): string => narrow ? option.shortLabel : option.label
+    const fits = (option: ExitChoiceOptionView): boolean => visibleWidth(`${FOCUS_MARK} ${label(option)}`) <= inner
+    const widthOptions = model.options.length === 0
+      ? []
+      : model.options.every(fits)
+        ? [...model.options]
+        : model.options.filter(option => option.id === 'stay' && fits(option))
+    const wrapRows = (text: string): number => Math.max(1, wrapTextWithAnsi(text, inner).length)
+    const bodyRows = model.body.reduce((rows, paragraph) => rows + wrapRows(paragraph), 0)
+    const shortRows = wrapRows(model.shortBody)
+    const statusRows = model.status === undefined || model.status === '' ? 0 : 2
+    const minimal = (): FramePlan => ({
+      minimal: model.phase === 'stopping' ? 'Stopping current work…' : 'Esc Stay',
+      title: false,
+      body: 'none',
+      status: false,
+      options: [],
+      hint: false,
+    })
+
+    // The Stopping phase offers no option: paint the bounded progress text.
+    if (model.options.length === 0) {
+      const fullNeeded = 1 + 1 + bodyRows + 1
+      if (this.maxRows >= fullNeeded) {
+        return { minimal: undefined, title: true, body: 'full', status: false, options: [], hint: true }
+      }
+      if (this.maxRows >= 1 + shortRows) {
+        return { minimal: undefined, title: true, body: 'short', status: false, options: [], hint: false }
+      }
+      return minimal()
+    }
+    // Nothing actable fits this width: only the truthful safe exit remains.
+    if (widthOptions.length === 0) return minimal()
+
+    const fullNeeded = 1 + 1 + bodyRows + statusRows + widthOptions.length + 1 + 1
+    if (this.maxRows >= fullNeeded) {
+      return { minimal: undefined, title: true, body: 'full', status: statusRows > 0, options: widthOptions, hint: true }
+    }
+    const compactNeeded = 1 + shortRows + widthOptions.length
+    if (this.maxRows >= compactNeeded) {
+      return { minimal: undefined, title: true, body: 'short', status: false, options: widthOptions, hint: false }
+    }
+    const optionsOnlyNeeded = 1 + widthOptions.length
+    if (this.maxRows >= optionsOnlyNeeded) {
+      return { minimal: undefined, title: true, body: 'none', status: false, options: widthOptions, hint: false }
+    }
+    // The box cannot host every actable option: keep ONLY the safe path.
+    const stay = widthOptions.find(option => option.id === 'stay')
+    if (stay !== undefined && this.maxRows >= 2) {
+      return { minimal: undefined, title: true, body: 'none', status: false, options: [stay], hint: false }
+    }
+    return minimal()
   }
 
   private title(narrow: boolean): string {
@@ -188,15 +293,8 @@ export class ExitChoicePanel implements Component, Focusable {
 
   /** The option that currently owns the keyboard focus, if any. */
   private focusedOption(): ExitChoiceOption | undefined {
-    const options = this.model.options
-    if (options.length === 0) return undefined
-    return options.find(option => option.id === this.focus)?.id ?? options[0]!.id
-  }
-
-  private focusIndex(): number {
-    const options = this.model.options
-    const focused = this.focusedOption()
-    const index = options.findIndex(option => option.id === focused)
-    return index < 0 ? 0 : index
+    const operable = this.lastOperable
+    if (operable.length === 0) return undefined
+    return operable.find(option => option.id === this.focus)?.id ?? operable[0]!.id
   }
 }

@@ -105,6 +105,7 @@ import type { DirectPrepareInputDeps } from './submission/direct-message-prepara
 import { dshVersion } from '../client/launcher/version.ts'
 import { createExitController, formatDaemonDetachHint } from './bootstrap/exit.ts'
 import { createExitIntentCoordinator, type StopCurrentWorkOutcome } from './bootstrap/exit-intent.ts'
+import { createExitIntentFacts } from './bootstrap/exit-facts.ts'
 import { type SessionRetirementReport } from '../app/session/owner-access.ts'
 import { mergeDraft, refuseByTransitionFence, type SteerSubjectLike } from './submission/steer.ts'
 import { createDirectApplicationRuntime, type DirectApplicationRuntime } from '../app/direct/runtime.ts'
@@ -3270,46 +3271,35 @@ export function applyRunnerWithRuntime(
      */
     const exitIntent = createExitIntentCoordinator({
       diag,
-      facts: {
-        currentBackend: () => selectedRuntime.kind === 'direct' ? 'direct' : 'daemon',
-        capture: () => {
-          const scope = sessionScope.captureLive()
-          // A submission admission that already holds the composer (an
-          // in-flight send) forbids declaring the surface idle even before a
-          // Session exists. A running user shell is likewise never silently
-          // destroyed by an unconfirmed exit.
-          const admissionPending = submission.composerHoldActive()
-          const shellRunning = localShell.isRunning()
-          if (scope === undefined) {
-            return { scope, activity: admissionPending ? 'working' as const : 'idle' as const }
+      // The live facts are their own testable composition seam: the full
+      // Session scope (sessionless generation included), the Remote transport
+      // identity captured on EVERY path, the transition/admission/shell facts
+      // and the official running status. Nothing is cached between calls.
+      facts: createExitIntentFacts({
+        backend: () => selectedRuntime.kind === 'direct' ? 'direct' : 'daemon',
+        scopes: sessionScope,
+        transitionPending: () => ownership.gate.pending || ownership.barrier.inTransition,
+        admissionPending: () => submission.composerHoldActive(),
+        shellRunning: () => localShell.isRunning(),
+        ...(selectedRuntime.kind === 'remote'
+          ? {
+            remote: {
+              running: (sessionId: string) => remoteSources?.sessionFacts.running(sessionId),
+              captureTransportToken: (sessionId: string) => remoteSources?.sessionFacts.captureTransportToken(sessionId),
+              isTransportTokenCurrent: (sessionId: string, token: unknown) =>
+                remoteSources?.sessionFacts.isTransportTokenCurrent(sessionId, token) === true,
+            },
           }
-          if (admissionPending || shellRunning) {
-            return { scope, activity: 'working' as const }
+          : {}),
+        ...(selectedRuntime.kind === 'direct'
+          ? {
+            directAgentRunning: () => {
+              const agent = agentNow()
+              return agent === undefined ? undefined : agent.status === 'running'
+            },
           }
-          if (selectedRuntime.kind === 'remote') {
-            const facts = remoteSources?.sessionFacts
-            if (facts === undefined) return { scope, activity: 'unknown' as const }
-            const transportToken = facts.captureTransportToken(scope.sessionId)
-            if (!facts.isTransportTokenCurrent(scope.sessionId, transportToken)) {
-              return { scope, activity: 'unknown' as const, transportToken }
-            }
-            const running = facts.running(scope.sessionId)
-            return {
-              scope,
-              activity: running === true ? 'working' as const : running === false ? 'idle' as const : 'unknown' as const,
-              transportToken,
-            }
-          }
-          const agent = agentNow()
-          // A live Direct scope always carries its attached Agent; a missing
-          // one is unobservable (never an idle claim).
-          if (agent === undefined) return { scope, activity: 'unknown' as const }
-          return { scope, activity: agent.status === 'running' ? 'working' as const : 'idle' as const }
-        },
-        isScopeCurrent: (scope, transportToken) => sessionScope.isCurrent(scope)
-          && (selectedRuntime.kind === 'direct'
-            || (remoteSources?.sessionFacts.isTransportTokenCurrent(scope.sessionId, transportToken) ?? false)),
-      },
+          : {}),
+      }),
       commit: ({ workStopped }) => {
         exitWorkStopped = workStopped
         requestExit()
@@ -3835,6 +3825,10 @@ export function applyRunnerWithRuntime(
           // stream and its Dock label consume.
           queueOpenKeys,
           requestExit: () => exitIntent.request('keyboard'),
+          // The pre-bind emergency Ctrl+C and the fatal fallback use the FINAL
+          // exit controller directly: there is no mounted choice surface yet,
+          // and a startup emergency must never wait for one.
+          requestImmediateExit: () => requestExit(),
           onFatal: rendererOnFatal,
           log: (message, fields) => diag.info(message, fields),
           logError: (message, fields) => diag.error(message, fields),

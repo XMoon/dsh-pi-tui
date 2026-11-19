@@ -443,11 +443,18 @@ export interface TspRendererOptions {
    */
   readonly displayState?: DisplayState
   /**
-   * The exit intent: invoked ONCE on the quit key. Routes through the SAME
-   * exit orchestration as `/exit` (surface teardown, Host retirement,
-   * appExit) — never `process.exit`.
+   * The exit INTENT: invoked on a BOUND quit key. Routes through the SAME
+   * exit-intent decision as `/exit` (it may present the in-place choice) —
+   * never `process.exit`. It is NOT a final-exit verdict and never latches.
    */
   readonly requestExit: () => void
+  /**
+   * The FINAL exit commit used by the PRE-BIND emergency Ctrl+C and the fatal
+   * fallback: the existing exit controller directly (surface teardown, Host
+   * retirement, appExit). Absent (standalone/test mounts) keeps
+   * {@link requestExit} as the fallback.
+   */
+  readonly requestImmediateExit?: () => void
   /**
    * The FATAL intent: a mounted renderer failure (the SDK input loop died —
    * the tty owner is gone). Routes through the runner's fatal lifecycle
@@ -807,7 +814,8 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     `)
   }
   let disposed = false
-  let exitRequested = false
+  /** The ONE fatal latch (never a normal exit intent). */
+  let fatalExitRequested = false
   /** Monotonic renderer-local identities (notices; scope epochs). */
   let noticeSeq = 0
   let scopeEpoch = 0
@@ -818,12 +826,15 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
    * lifecycle (error outcome, no resume hint) — never a normal exit and never
    * a second invocation.
    */
+  /** The FINAL exit commit (pre-bind emergency + fatal fallback). */
+  const requestImmediateExit = (): void => (options.requestImmediateExit ?? options.requestExit)()
+
   const routeFatal = (error: unknown): void => {
-    if (exitRequested) return
-    exitRequested = true
+    if (fatalExitRequested) return
+    fatalExitRequested = true
     const fatal = options.onFatal
     if (fatal !== undefined) fatal(error)
-    else options.requestExit()
+    else requestImmediateExit()
   }
 
   // ── Renderer-local presentation state ──
@@ -1145,7 +1156,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     render: () => render(),
     // A frame/focus failure while settling a prompt must reach the runner's
     // fatal lifecycle (the tty owner is broken), never become a silent modal
-    // cancellation; a repeated failure keeps the FIRST fatal (exitRequested).
+    // cancellation; a repeated failure keeps the FIRST fatal (fatalExitRequested).
     onFatal: (error) => { routeFatal(error) },
     notify: (text, kind) => { display.notify(text, kind) },
     setSettledQuestionAnswersLookup: (lookup) => {
@@ -4504,13 +4515,15 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     return false
   }
 
-  /** Route one exit-intent decision to the BOUND handler when bound. */
+  /**
+   * Route one PRE-BIND emergency exit. It is the FINAL commit, never the
+   * session-aware intent: a busy/unknown startup must not need a choice
+   * surface that does not exist yet, and no terminal latch is set before the
+   * real commit (a later fatal still reaches its own lifecycle).
+   */
   const routeExit = (held: boolean): void => {
-    if (exitRequested) return
-    exitRequested = true
     options.log?.('tsp renderer: exit key', { held })
-    if (boundHandlers !== undefined) boundHandlers.exit()
-    else options.requestExit()
+    requestImmediateExit()
   }
 
   /**

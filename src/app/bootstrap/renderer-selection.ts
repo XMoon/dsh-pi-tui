@@ -218,7 +218,10 @@ export interface ProductionTspConnectorDeps {
   /** The ONE live display authority the composition root resolved before the
    *  first compose; forwarded as the SAME object, never a boot-time snapshot. */
   readonly displayState: DisplayState
+  /** The session-aware exit INTENT (it may present the in-place choice). */
   readonly requestExit: () => void
+  /** The FINAL exit commit for the pre-bind emergency and the fatal fallback. */
+  readonly requestImmediateExit?: () => void
   readonly onFatal: (error: unknown) => void
   readonly log: (message: string, fields?: Record<string, unknown>) => void
   readonly logError: (message: string, fields?: Record<string, unknown>) => void

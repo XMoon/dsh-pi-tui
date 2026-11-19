@@ -21,10 +21,21 @@
  * and any renderer state. It keeps no cached Host-running fact and never turns
  * an unknown state into idle.
  *
+ * Identity rules:
+ * - the choice captures a FULL `SessionScope`, so a sessionless choice is
+ *   invalidated by the first Session publication exactly like a switched live
+ *   owner;
+ * - every confirmation re-checks the backend, the scope and the Remote
+ *   transport token BEFORE any action;
+ * - a close can synchronously restore another owner's focus and run plugin
+ *   callbacks that open a NEWER intent or publish a NEWER owner: the final
+ *   commit therefore re-proves that the old intent still owns the decision
+ *   after the close, and the newer operation always wins.
+ *
  * @module @xmoon76/dsh-pi-tui/app/bootstrap/exit-intent
  */
 
-import type { LiveSessionScope } from '../session/scope.ts'
+import type { LiveSessionScope, SessionScope } from '../session/scope.ts'
 import {
   classifyExitIntent,
   type ExitBackendKind,
@@ -41,7 +52,8 @@ import {
   type SurfaceExitChoiceSeam,
 } from '../surface/exit-choice.ts'
 import { safeErrorMessage } from '../../runtime/process/errors.ts'
-import type { ExitDiagLike } from './exit.ts'
+import { runOwned } from '../../runtime/process/tasks.ts'
+import type { Diag } from '../../runtime/process/diagnostics.ts'
 
 /**
  * The exact owner-cancel + idle-proof result of one daemon Stop. Only `stopped`
@@ -57,24 +69,26 @@ export interface ExitIntentFacts {
   /** The backend selected for THIS process (never a cold-launch preference). */
   currentBackend(): ExitBackendKind
   /**
-   * ONE synchronous capture of the exact scope and authoritative activity.
-   * `scope` is undefined only for a sessionless surface; a pending submission
-   * admission without a Session must report `activity: 'working'` (the
-   * classifier then fails safe).
+   * ONE synchronous capture of the exact scope, its live projection and the
+   * authoritative activity. `live` is undefined for a sessionless surface,
+   * while `scope` is ALWAYS a real identity (the sessionless generation
+   * included); a pending submission admission without a Session reports
+   * `activity: 'working'` and a pending navigation reports `'unknown'`.
    */
   capture(): {
-    readonly scope: LiveSessionScope | undefined
+    readonly scope: SessionScope
+    readonly live: LiveSessionScope | undefined
     readonly activity: ExitSessionActivity
     /** The Remote transport identity captured beside the scope (undefined on Direct). */
     readonly transportToken?: unknown
   }
   /** Whether a captured scope still pins the live owner AND its transport. */
-  isScopeCurrent(scope: LiveSessionScope, transportToken: unknown): boolean
+  isScopeCurrent(scope: SessionScope, transportToken: unknown): boolean
 }
 
 /** The narrow dependencies of the coordinator. */
 export interface ExitIntentCoordinatorDeps {
-  readonly diag: ExitDiagLike
+  readonly diag: Diag
   readonly facts: ExitIntentFacts
   /**
    * The ONE final exit commit — the existing `createExitController.requestExit`.
@@ -113,7 +127,8 @@ export interface ExitIntentCoordinator {
 interface CapturedChoice {
   readonly kind: ExitChoiceKind
   readonly backend: ExitBackendKind
-  readonly scope: LiveSessionScope | undefined
+  readonly scope: SessionScope
+  readonly live: LiveSessionScope | undefined
   readonly transportToken: unknown
 }
 
@@ -127,7 +142,7 @@ export function createExitIntentCoordinator(deps: ExitIntentCoordinatorDeps): Ex
   let open: ExitChoiceModel | undefined
   /** The exact identity the open choice captured (frozen at open). */
   let captured: CapturedChoice | undefined
-  /** The in-flight daemon Stop wait, if any. */
+  /** The in-flight daemon Stop wait, if any (owned by the open choice). */
   let stopWait: AbortController | undefined
   let disposed = false
 
@@ -144,15 +159,22 @@ export function createExitIntentCoordinator(deps: ExitIntentCoordinatorDeps): Ex
     try {
       return deps.presenter()
     } catch (error) {
-      safeDiag('error', 'exit choice surface unavailable', { error: error instanceof Error ? error.message : String(error) })
+      safeDiag('error', 'exit choice surface unavailable', { error: safeErrorMessage(error) })
       return undefined
     }
   }
 
+  /**
+   * Drop the coordinator's choice state. A local Stop wait is OWNED by the
+   * choice, so retiring the choice always aborts it first: a dismissed or
+   * disposed seat must never leave an idle/generation listener behind, and a
+   * later settlement can never commit an exit the user withdrew.
+   */
   const clearChoice = (): void => {
+    stopWait?.abort()
+    stopWait = undefined
     open = undefined
     captured = undefined
-    stopWait = undefined
   }
 
   /** Hide the open choice and return to the idle state. */
@@ -168,6 +190,43 @@ export function createExitIntentCoordinator(deps: ExitIntentCoordinatorDeps): Ex
     // The renderer dropped the seat itself (Host modal preemption / teardown):
     // tell the seam only if it still owns a window; a redundant close is idle.
     presenter()?.close()
+  }
+
+  /** Whether the captured identity still owns the decision. */
+  const identityCurrent = (identity: CapturedChoice): boolean =>
+    deps.facts.currentBackend() === identity.backend
+    && deps.facts.isScopeCurrent(identity.scope, identity.transportToken)
+
+  /**
+   * Close the choice, then commit ONLY if the close did not hand the decision
+   * to a newer operation. Closing can synchronously restore another owner's
+   * focus; its `onFocus` callback may open a fresh Exit Choice or publish a new
+   * Session owner. The newer operation always wins: an old confirmation never
+   * exits a surface it no longer owns.
+   */
+  const commitAfterClose = (identity: CapturedChoice, workStopped: boolean): void => {
+    closeChoice()
+    if (open !== undefined) return
+    if (!identityCurrent(identity)) return
+    deps.commit({ workStopped })
+  }
+
+  /** Show the same-seat unconfirmed state; never a stopped claim. */
+  const settleUnconfirmed = (detail: string): void => {
+    if (disposed) return
+    open = exitChoiceUnconfirmed(detail, select, dismiss)
+    presenter()?.update(open)
+  }
+
+  /** The whole Stop task's failure settlement (see `runStop`). */
+  const settleStopFailure = (error: unknown): void => {
+    // runOwned has already recorded the task failure; this is the SEAT
+    // settlement. A throwing presentation here is a handler failure and is
+    // captured by runOwned's handler-failure sink — never an unhandled
+    // rejection, never a stopped claim.
+    if (disposed) return
+    stopWait = undefined
+    settleUnconfirmed(`The stop request failed: ${safeErrorMessage(error)}`)
   }
 
   const select = (option: ExitChoiceOption): void => {
@@ -197,8 +256,7 @@ export function createExitIntentCoordinator(deps: ExitIntentCoordinatorDeps): Ex
       closeChoice()
       return
     }
-    const scope = identity.scope
-    if (scope !== undefined && !deps.facts.isScopeCurrent(scope, identity.transportToken)) {
+    if (!deps.facts.isScopeCurrent(identity.scope, identity.transportToken)) {
       safeDiag('info', 'exit choice retired: the captured session scope is no longer current')
       closeChoice()
       return
@@ -206,13 +264,11 @@ export function createExitIntentCoordinator(deps: ExitIntentCoordinatorDeps): Ex
     // `stop-and-exit` runs the EXISTING Direct controller: its owned-session
     // retirement is the only Direct cancel. Nothing is claimed as stopped here.
     if (option === 'stop-and-exit' || option === 'exit-local') {
-      closeChoice()
-      deps.commit({ workStopped: false })
+      commitAfterClose(identity, false)
       return
     }
     if (option === 'keep-and-disconnect' || option === 'disconnect-without-stop') {
-      closeChoice()
-      deps.commit({ workStopped: false })
+      commitAfterClose(identity, false)
       return
     }
     if (option === 'stop-and-disconnect') {
@@ -222,17 +278,10 @@ export function createExitIntentCoordinator(deps: ExitIntentCoordinatorDeps): Ex
         closeChoice()
         return
       }
-      if (scope === undefined) {
-        // No live Session remains: nothing to stop; detach without a cancel.
-        closeChoice()
-        deps.commit({ workStopped: false })
-        return
-      }
       if (facts.activity === 'idle') {
         // The exact owner became idle by itself: the SAME captured identity is
         // already proven current above, so detach without sending a cancel.
-        closeChoice()
-        deps.commit({ workStopped: true })
+        commitAfterClose(identity, true)
         return
       }
       if (facts.activity === 'unknown') {
@@ -242,7 +291,19 @@ export function createExitIntentCoordinator(deps: ExitIntentCoordinatorDeps): Ex
         closeChoice()
         return
       }
-      void runStop(scope) // allowlist: the ONE Stop wait owns its own unconfirmed settlement; every rejection is converted into the same-seat unconfirmed state, never leaked
+      if (identity.live === undefined) {
+        // No live Session remains: nothing to stop; detach without a cancel.
+        commitAfterClose(identity, false)
+        return
+      }
+      // The WHOLE async Stop task (both presenter calls and the exact-owner
+      // operation) is one owned task: task failures are recorded and settle
+      // the unconfirmed seat; handler failures reach the handler sink.
+      runOwned('exit intent stop', () => runStop(identity), {
+        diag: deps.diag,
+        sessionId: () => identity.live?.sessionId,
+        onError: settleStopFailure,
+      })
       return
     }
     // An option this model did not offer: keep the choice, dispatch nothing.
@@ -263,46 +324,40 @@ export function createExitIntentCoordinator(deps: ExitIntentCoordinatorDeps): Ex
       safeDiag('error', 'exit intent requires a choice but no surface is mounted')
       return
     }
-    captured = { kind, backend, scope: facts.scope, transportToken: facts.transportToken }
+    captured = {
+      kind,
+      backend,
+      scope: facts.scope,
+      live: facts.live,
+      transportToken: facts.transportToken,
+    }
     open = exitChoiceAsking(kind, select, dismiss)
     seam.open(open)
   }
 
-  const runStop = async (scope: LiveSessionScope): Promise<void> => {
-    const identity = captured
-    if (identity === undefined) return
+  const runStop = async (identity: CapturedChoice): Promise<void> => {
+    const live = identity.live
+    if (live === undefined) throw new Error('a daemon Stop requires a captured live Session')
     const controller = new AbortController()
     stopWait = controller
     open = exitChoiceStopping(select, dismiss)
     presenter()?.update(open)
-    let outcome: StopCurrentWorkOutcome
-    try {
-      outcome = await deps.stopCurrentWork(scope, controller.signal)
-    } catch (error) {
-      // An unexpected stop failure is never a "stopped" claim and never
-      // escapes as an unhandled rejection: the same unconfirmed state owns it.
-      if (disposed || stopWait !== controller) return
-      stopWait = undefined
-      open = exitChoiceUnconfirmed(`The stop request failed: ${safeErrorMessage(error)}`, select, dismiss)
-      presenter()?.update(open)
-      return
-    }
+    const outcome = await deps.stopCurrentWork(live, controller.signal)
+    // The choice (or the whole coordinator) was withdrawn while waiting: its
+    // abort/settlement owns the state now, and no exit may be committed.
     if (disposed || stopWait !== controller) return
     stopWait = undefined
     if (outcome.kind === 'stopped') {
-      // The idle proof is bound to the exact generation; re-check the session
-      // scope it belongs to before committing the ONE exit.
-      if (identity.scope === undefined || !deps.facts.isScopeCurrent(identity.scope, identity.transportToken)) {
-        open = exitChoiceUnconfirmed('The captured session is no longer current.', select, dismiss)
-        presenter()?.update(open)
+      // The idle proof is bound to the exact generation; the commit re-checks
+      // the captured identity after the close-time focus callbacks.
+      if (!identityCurrent(identity)) {
+        settleUnconfirmed('The captured session is no longer current.')
         return
       }
-      closeChoice()
-      deps.commit({ workStopped: true })
+      commitAfterClose(identity, true)
       return
     }
-    open = exitChoiceUnconfirmed(outcome.detail, select, dismiss)
-    presenter()?.update(open)
+    settleUnconfirmed(outcome.detail)
   }
 
   const request = (entry: ExitIntentEntry): void => {
@@ -315,7 +370,7 @@ export function createExitIntentCoordinator(deps: ExitIntentCoordinatorDeps): Ex
     const backend = deps.facts.currentBackend()
     const decision = classifyExitIntent({
       currentBackend: backend,
-      sessionPresence: facts.scope === undefined ? 'none' : 'live',
+      sessionPresence: facts.scope.sessionId === undefined ? 'none' : 'live',
       activity: facts.activity,
       entry,
     })
@@ -336,27 +391,25 @@ export function createExitIntentCoordinator(deps: ExitIntentCoordinatorDeps): Ex
     }
   }
 
+  const retireIfStale = (): void => {
+    if (disposed) return
+    const identity = captured
+    if (open === undefined || identity === undefined) return
+    if (!identityCurrent(identity)) {
+      // The Stop wait (if any) is abandoned too: it can only prove a generation
+      // the Client already left, so it can never commit an exit.
+      safeDiag('info', 'exit choice retired: the captured identity is no longer current')
+      closeChoice()
+    }
+  }
+
   return {
     request,
     activity: () => deps.facts.capture().activity,
-    retireIfStale: () => {
-      if (disposed) return
-      const identity = captured
-      if (open === undefined || identity === undefined) return
-      const backend = deps.facts.currentBackend()
-      if (backend !== identity.backend
-        || (identity.scope !== undefined && !deps.facts.isScopeCurrent(identity.scope, identity.transportToken))) {
-        // The Stop wait (if any) is abandoned too: it can only prove a
-        // generation the Client already left, so it can never commit an exit.
-        stopWait?.abort()
-        safeDiag('info', 'exit choice retired: the captured identity is no longer current')
-        closeChoice()
-      }
-    },
+    retireIfStale,
     dispose: () => {
       if (disposed) return
       disposed = true
-      stopWait?.abort()
       clearChoice()
     },
   }

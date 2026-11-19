@@ -4277,11 +4277,16 @@ export class TuiApp {
   } | undefined
   /** M6 UX PR1: the ONE Client-local Exit Choice seat. It outlives no
    *  session: the exit-intent coordinator owns its decision state and asks
-   *  this app only to paint/withdraw the model. */
+   *  this app only to paint/withdraw the model. The seat is published BEFORE
+   *  its physical mount, because that mount can synchronously run another
+   *  owner's blur/focus callback which may preempt it. */
   private clientExitChoiceOverlay: {
-    readonly handle: OverlayHandle
     readonly component: ExitChoicePanel
     model: ExitChoiceModel
+    /** The physical overlay handle, assigned once the synchronous mount returns. */
+    handle: OverlayHandle | undefined
+    /** A real Host modal withdrew this seat while it was mounting. */
+    preempted: boolean
     close(): void
   } | undefined
   /** The injected Ctrl+R search source (the runner wires the file-backed
@@ -27456,9 +27461,10 @@ export class TuiApp {
   /**
    * M6 UX PR1: present the ONE Client-local Exit Choice. The coordinator owns
    * the model (title/copy/options and the ONE select callback); this app owns
-   * only the overlay lifetime. A second open replaces the previous seat — the
-   * coordinator never opens two, and a defensive replace can never leave a
-   * hidden seat accepting keys.
+   * only the overlay lifetime. The seat is REMOUNTABLE across a fullscreen
+   * screen swap and is published before its physical mount, so a blur/focus
+   * callback that runs inside that mount can preempt it without leaving a
+   * hidden ghost the coordinator still believes is open.
    * @param model - the coordinator's frozen choice model.
    */
   openExitChoice(model: ExitChoiceModel): void {
@@ -27469,25 +27475,63 @@ export class TuiApp {
       return
     }
     this.closeExitChoice()
-    let handle: OverlayHandle | undefined
-    let hidden = false
-    let closeHandle: () => void = () => {}
     const component = new ExitChoicePanel({
       model,
       requestRender: () => { this.requestRender() },
       onClosed: () => {
-        if (this.clientExitChoiceOverlay?.handle === handle) this.clientExitChoiceOverlay = undefined
+        if (this.clientExitChoiceOverlay?.component === component) this.clientExitChoiceOverlay = undefined
       },
     })
-    const frame = new FocusForwardingFrame(component, true)
-    handle = this.showOverlayOnHost(frame, { width: 64, maxHeight: 20 })
-    closeHandle = (): void => {
+    const seat: NonNullable<TuiApp['clientExitChoiceOverlay']> = {
+      component,
+      model,
+      handle: undefined,
+      preempted: false,
+      close: () => {},
+    }
+    // Publish the logical seat BEFORE the mount: showOverlayOnHost can
+    // synchronously run another overlay's blur/focus callbacks, whose Host
+    // modal must be able to withdraw this seat while it is mounting.
+    this.clientExitChoiceOverlay = seat
+    const geometryOptions = { width: 64, maxHeight: 20 }
+    const geometryOf = (): ResponsiveOverlayGeometry => {
+      const width = Math.max(1, Math.min(this.terminal.columns, geometryOptions.width))
+      const maxHeight = Math.max(1, Math.min(this.terminal.rows, geometryOptions.maxHeight))
+      return { width, maxHeight, key: `${this.terminal.columns}:${this.terminal.rows}:${width}:${maxHeight}` }
+    }
+    const createFrame = (): ResponsiveOverlayFrame => new ResponsiveOverlayFrame(
+      component,
+      geometryOf,
+      geometry => { component.setMaxRows(Math.max(1, geometry.maxHeight - 2)) },
+    )
+    let handle: OverlayHandle | undefined
+    handle = this.showOverlayOnHost(createFrame(), { width: geometryOptions.width, maxHeight: geometryOptions.maxHeight }, {
+      remountable: true,
+      // A fullscreen screen swap REBINDS the same seat: destroying the only
+      // projection while the coordinator still owns an open choice would leave
+      // an invisible decision that blocks every later exit intent.
+      remount: (logical) => {
+        if (this.clientExitChoiceOverlay !== seat) return
+        this.rebindOverlayRaw(logical, createFrame(), { width: geometryOptions.width, maxHeight: geometryOptions.maxHeight })
+      },
+    })
+    seat.handle = handle
+    let hidden = false
+    seat.close = (): void => {
       if (hidden) return
       hidden = true
-      if (this.clientExitChoiceOverlay?.handle === handle) this.clientExitChoiceOverlay = undefined
-      handle?.hide()
+      if (this.clientExitChoiceOverlay === seat) this.clientExitChoiceOverlay = undefined
+      if (seat.handle !== undefined) this.overlayRemounts.delete(seat.handle)
+      seat.handle?.hide()
+      // A remountable overlay opts out of disposeOnHide: the final close owns
+      // the component's lifecycle explicitly.
+      component.dispose()
     }
-    this.clientExitChoiceOverlay = { handle, component, model, close: closeHandle }
+    if (seat.preempted) {
+      // A mount-time callback already withdrew the seat: never publish a
+      // visible ghost after it.
+      seat.close()
+    }
   }
 
   /** Replace the painted model of the OPEN Exit Choice (a phase transition). */
@@ -27510,13 +27554,17 @@ export class TuiApp {
   /**
    * Withdraw the open Exit Choice because a real Host modal took the seat.
    * The model's dismiss() reaches the coordinator with ZERO business action
-   * (no Host write, no exit); a later user intent opens a fresh choice.
+   * (no Host write, no exit); a later user intent opens a fresh choice. Safe
+   * during the synchronous mount window: the seat is already published, and
+   * the pending physical handle is hidden as soon as it exists.
    */
   private preemptClientExitChoice(): void {
     const seat = this.clientExitChoiceOverlay
     if (seat === undefined) return
+    seat.preempted = true
+    this.clientExitChoiceOverlay = undefined
     seat.model.dismiss()
-    this.closeExitChoice()
+    seat.close()
   }
 
   /** Close the Team-disable confirmation seat, if one is open and not

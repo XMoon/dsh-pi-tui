@@ -35,7 +35,10 @@ interface Harness {
   readonly pane: TspPane
   renderer: TspRenderer
   readonly cancels: number[]
+  /** The session-aware exit INTENT count (the coordinator). */
   readonly exits: number[]
+  /** The FINAL exit-commit count (the pre-bind emergency / fatal fallback). */
+  readonly immediateExits: number[]
   readonly fatals: unknown[]
   activity: ExitSessionActivity
   readonly ops: () => readonly (readonly unknown[])[]
@@ -48,12 +51,14 @@ async function mountHarness(): Promise<Harness> {
   assert.ok(session !== null, 'the scripted pane is accepted by the shipped SDK')
   const cancels: number[] = []
   const exits: number[] = []
+  const immediateExits: number[] = []
   const fatals: unknown[] = []
   const harness: Harness = {
     pane,
     renderer: undefined as unknown as TspRenderer,
     cancels,
     exits,
+    immediateExits,
     fatals,
     activity: 'idle',
     ops: () => pane.frames().flatMap(frame => frame.ops),
@@ -65,6 +70,7 @@ async function mountHarness(): Promise<Harness> {
   const renderer = mountTspRenderer(session, {
     copyVisual: async () => false,
     requestExit: () => { exits.push(1) },
+    requestImmediateExit: () => { immediateExits.push(1) },
     onFatal: error => { fatals.push(error) },
   })
   harness.renderer = renderer
@@ -173,11 +179,16 @@ test('TSP bound: unknown Ctrl+C refuses to arm and states the unobservable state
   }
 })
 
-test('TSP pre-bind: Ctrl+C keeps its emergency exit', async () => {
+test('TSP pre-bind: Ctrl+C is the FINAL emergency exit, never a session intent', async () => {
+  // RFL-010: a busy/unknown startup has no mounted choice surface; the
+  // pre-bind emergency must reach the exit controller directly, without
+  // latching the session intent or the fatal lifecycle.
   const h = await mountHarness()
   try {
+    h.activity = 'working'
     h.pane.key('\x03')
-    await waitFor(() => h.exits.length === 1, 'the pre-bind emergency exit ran')
+    await waitFor(() => h.immediateExits.length === 1, 'the pre-bind emergency reached the final commit')
+    assert.equal(h.exits.length, 0, 'the session-aware coordinator was never asked for a choice')
     assert.equal(h.cancels.length, 0, 'no business cancel exists before the bind')
   } finally {
     await h.dispose()

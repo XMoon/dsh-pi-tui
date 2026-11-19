@@ -66,8 +66,18 @@ before confirmation, no cancel is sent and the exit proceeds on the same
 identity. While the wait is in flight the same seat shows the Stopping state and
 accepts no second selection.
 
-**Choice currentness.** A choice captures the backend, the exact scope and the
-Remote transport identity at open. Any confirmation re-reads them first: a
+**Every action must be really actable.** The choice is size-aware: an option is
+keyboard- and pointer-actable only while its complete label is painted AND the
+box can show every actable option. When the terminal cannot host the three
+actions (a very narrow or very low viewport), the seat degrades to the truthful
+safe path — the `Stay` action, or a single `Esc Stay` line when even that row
+cannot fit — rather than leaving a clipped or off-screen destructive action
+reachable. The seat is remountable across a fullscreen screen swap, so an open
+decision can never become an invisible one; a Host Question/Approval withdraws
+it with no business action and it is never restored automatically.
+
+**Choice currentness.** A choice captures the backend, the full Session scope
+(the sessionless generation included) and the Remote transport identity at open. Any confirmation re-reads them first: a
 Session/connection rollover retires the old choice with zero side effects (the
 user re-triggers the intent), an Idle→Working transition re-opens the Busy
 Choice through the normal entry, and a Busy→Idle transition lets Keep proceed

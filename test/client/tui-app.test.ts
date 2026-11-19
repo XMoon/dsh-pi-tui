@@ -27,6 +27,10 @@ import type { AssistantLiveChunk, AssistantLiveInput } from '../../src/runtime/a
 import { TuiApp, ThinkingCompactComponent, TODO_COMPACT_LIMIT, TODO_SHORT_COMPACT_LIMIT, TODO_SHORT_SCREEN_MAX_ROWS, todoCompactLimit, type OwnedRunner } from '../../src/tui-app.ts'
 import type { ExitSessionActivity as ExitActivity } from '../../src/domain/command/policy.ts'
 import { exitChoiceAsking, type ExitChoiceOption } from '../../src/app/surface/exit-choice.ts'
+import { createExitIntentFacts } from '../../src/app/bootstrap/exit-facts.ts'
+import { createExitIntentCoordinator } from '../../src/app/bootstrap/exit-intent.ts'
+import { pituiExitChoiceSeam } from '../../src/app/surface/exit-choice-pitui.ts'
+import type { LiveSessionScope, SessionScope } from '../../src/app/session/scope.ts'
 import { Text, stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
 import { ExtensionLedger } from '../../src/extension/internal/ledger.ts'
 import { SurfaceHost } from '../../src/extension/internal/surface-host.ts'
@@ -6471,4 +6475,175 @@ test('the exit choice never stacks above a live Host approval', async () => {
   surface.vt.sendInput('n')
   await surface.vt.waitForRender()
   assert.equal(await pending, 'rejected')
+})
+
+// --- M6 UX PR1: the Exit Choice physical lifecycle / real terminal budget ---
+
+/** Start an app on an explicit terminal size (the choice is geometry-aware). */
+function startSizedApp(columns: number, rows: number): { vt: VirtualTerminal; app: TuiApp } {
+  const vt = new VirtualTerminal(columns, rows)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  return { vt, app }
+}
+
+test('the exit choice survives a fullscreen screen swap and keeps its model', async () => {
+  const surface = startApp()
+  await surface.vt.waitForRender()
+  const selections: ExitChoiceOption[] = []
+  surface.app.openExitChoice(exitChoiceAsking('daemon-busy', option => { selections.push(option) }, () => {}))
+  await surface.vt.waitForRender()
+  assert.match(surface.vt.getViewport().join('\n'), /Keep working and disconnect/)
+  surface.app.setFullscreen(true)
+  await surface.vt.waitForRender()
+  assert.match(surface.vt.getViewport().join('\n'), /Keep working and disconnect/,
+    'the physical screen swap rebinds the seat instead of destroying the open decision')
+  surface.vt.sendInput('\x1b[B')
+  await surface.vt.waitForRender()
+  surface.vt.sendInput('\r')
+  await surface.vt.waitForRender()
+  assert.deepEqual(selections, ['stop-and-disconnect'], 'the rebound seat drives the SAME model callback')
+})
+
+test('a 20-column terminal makes only Stay actable (no clipped Stop)', async () => {
+  // RFL-009: a narrow real viewport must never leave a clipped destructive
+  // action keyboard-reachable.
+  const surface = startSizedApp(20, 24)
+  await surface.vt.waitForRender()
+  const selections: ExitChoiceOption[] = []
+  surface.app.openExitChoice(exitChoiceAsking('daemon-busy', option => { selections.push(option) }, () => {}))
+  await surface.vt.waitForRender()
+  const view = surface.vt.getViewport().join('\n')
+  assert.ok(!view.includes('Stop'), `no clipped Stop is painted:\n${view}`)
+  assert.match(view, /Stay/u)
+  surface.vt.sendInput('\x1b[B')
+  await surface.vt.waitForRender()
+  surface.vt.sendInput('\r')
+  await surface.vt.waitForRender()
+  assert.deepEqual(selections, ['stay'], 'the only actable option is Stay')
+})
+
+test('a six-row terminal fits a short title plus all three real actions', async () => {
+  // Four content rows are the title + the three actions: every painted action
+  // is actable, and nothing is clipped.
+  const surface = startSizedApp(80, 6)
+  await surface.vt.waitForRender()
+  const selections: ExitChoiceOption[] = []
+  surface.app.openExitChoice(exitChoiceAsking('daemon-busy', option => { selections.push(option) }, () => {}))
+  await surface.vt.waitForRender()
+  const view = surface.vt.getViewport().join('\n')
+  assert.match(view, /Keep working and disconnect/u)
+  assert.match(view, /Stop current work and disconnect/u)
+  assert.match(view, /Stay in the TUI/u)
+  surface.vt.sendInput('\x1b[B')
+  await surface.vt.waitForRender()
+  surface.vt.sendInput('\r')
+  await surface.vt.waitForRender()
+  assert.deepEqual(selections, ['stop-and-disconnect'], 'a truly painted action remains actable')
+})
+
+test('an eight-row terminal keeps the short risk line with all three actions', async () => {
+  const surface = startSizedApp(80, 8)
+  await surface.vt.waitForRender()
+  const selections: ExitChoiceOption[] = []
+  surface.app.openExitChoice(exitChoiceAsking('daemon-busy', option => { selections.push(option) }, () => {}))
+  await surface.vt.waitForRender()
+  const view = surface.vt.getViewport().join('\n')
+  assert.match(view, /Session is working\./u, 'the compact risk line survives')
+  assert.match(view, /Stop current work and disconnect/u)
+  surface.vt.sendInput('\x1b[B')
+  await surface.vt.waitForRender()
+  surface.vt.sendInput('\r')
+  await surface.vt.waitForRender()
+  assert.deepEqual(selections, ['stop-and-disconnect'])
+})
+
+test('a three-row terminal offers only the Escape-Stay fallback', async () => {
+  const surface = startSizedApp(80, 3)
+  await surface.vt.waitForRender()
+  const selections: ExitChoiceOption[] = []
+  surface.app.openExitChoice(exitChoiceAsking('daemon-busy', option => { selections.push(option) }, () => {}))
+  await surface.vt.waitForRender()
+  const view = surface.vt.getViewport().join('\n')
+  assert.ok(!view.includes('Stop current work'), `the box cannot host three actions:\n${view}`)
+  assert.match(view, /Esc Stay/u)
+  surface.vt.sendInput('\x1b[B')
+  await surface.vt.waitForRender()
+  surface.vt.sendInput('\r')
+  await surface.vt.waitForRender()
+  assert.deepEqual(selections, [], 'no action is reachable when the box cannot paint it')
+  surface.vt.sendInput('\x1b')
+  await surface.vt.waitForRender()
+  assert.deepEqual(selections, ['stay'], 'the safe exit path stays operable')
+})
+
+test('a preempted choice never reappears after the Host modal settles', async () => {
+  // RFL-008/§3.6: a real Host Question/Approval withdraws the Client choice
+  // and the choice is NEVER restored automatically afterwards.
+  const surface = startApp()
+  await surface.vt.waitForRender()
+  let dismissed = 0
+  surface.app.openExitChoice(exitChoiceAsking('daemon-busy', () => {}, () => { dismissed += 1 }))
+  await surface.vt.waitForRender()
+  const pending = surface.app.showApprovalPrompt({ toolName: 'bash', reason: 'needs a shell', arguments: '{}' })
+  await surface.vt.waitForRender()
+  assert.equal(dismissed, 1, 'the Host modal withdrew the Client choice')
+  surface.vt.sendInput('n')
+  await surface.vt.waitForRender()
+  assert.equal(await pending, 'rejected')
+  assert.ok(!surface.vt.getViewport().join('\n').includes('Keep working and disconnect'),
+    'the withdrawn choice stays gone after the Host modal settles')
+})
+
+test('the live facts -> coordinator -> real PiTui seat -> ONE commit chain', async () => {
+  // The composition seam (facts) and the renderer seam (the real TuiApp seat)
+  // are exercised together, so this is a source -> decision -> sink path, not
+  // two independently injected conclusions.
+  const surface = startApp()
+  await surface.vt.waitForRender()
+  let live: LiveSessionScope | undefined = { sessionId: 'session-a' } as unknown as LiveSessionScope
+  let running = true
+  let current = true
+  let tokenCurrent = true
+  const facts = createExitIntentFacts({
+    backend: () => 'daemon',
+    scopes: {
+      capture: () => (live ?? ({ sessionId: undefined } as unknown as SessionScope)),
+      captureLive: () => live,
+      isCurrent: () => current,
+    },
+    transitionPending: () => false,
+    admissionPending: () => false,
+    shellRunning: () => false,
+    remote: {
+      running: () => running,
+      captureTransportToken: () => ({ generation: 1 }),
+      isTransportTokenCurrent: () => tokenCurrent,
+    },
+  })
+  const commits: Array<{ workStopped: boolean }> = []
+  const coordinator = createExitIntentCoordinator({
+    diag: createDiag({ filePath: undefined, stderrLevel: 'off', sinks: [] }),
+    facts,
+    commit: options => { commits.push(options) },
+    presenter: () => pituiExitChoiceSeam(surface.app),
+    stopCurrentWork: async () => assert.fail('Keep must never reach the Stop operation'),
+  })
+  coordinator.request('slash')
+  await surface.vt.waitForRender()
+  assert.match(surface.vt.getViewport().join('\n'), /Keep working and disconnect/)
+  surface.vt.sendInput('\r')
+  await surface.vt.waitForRender()
+  assert.deepEqual(commits, [{ workStopped: false }], 'Enter on the default Keep is the ONE commit')
+  // The SAME chain detaches immediately once the live authority proves idle.
+  running = false
+  coordinator.request('slash')
+  assert.deepEqual(commits, [{ workStopped: false }, { workStopped: false }])
+  // A rolled transport turns the same input into the truthful unknown choice.
+  tokenCurrent = false
+  running = true
+  coordinator.request('slash')
+  await surface.vt.waitForRender()
+  assert.match(surface.vt.getViewport().join('\n'), /Disconnect without stopping/)
 })
