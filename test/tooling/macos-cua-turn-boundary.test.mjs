@@ -68,6 +68,14 @@ const RUN_61_SHAPE = [
   { type: 'tool/ptc-dispatch-start', data: { name: 'cua', arguments: { method: 'typeText' } } }, // 75
 ]
 
-test('the measured run-61 prefix has NO completion to return', () => {
-  assert.equal(nextTurnEnd(RUN_61_SHAPE, RUN_61_SHAPE[72]), undefined)
+test('the measured run-61 prefix stays pending, and completes only when turn 4 ends', () => {
+  // The argument is the prompt EVIDENCE the producers return (an index), not the
+  // raw user/message event: the anchor is derived from that index.
+  const prompt = { index: 72 }
+  assert.equal(nextTurnEnd(RUN_61_SHAPE, prompt), undefined,
+    'the prefix must stay pending: turn 3 already ended and turn 4 has no end yet')
+  const closed = [...RUN_61_SHAPE, { type: 'turn/end', data: { turn: 4 } }]
+  const matched = nextTurnEnd(closed, prompt)
+  assert.equal(matched.events[matched.index].data.turn, 4,
+    'the await must close on the turn that carries this prompt')
 })
