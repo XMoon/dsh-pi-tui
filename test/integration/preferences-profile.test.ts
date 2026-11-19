@@ -271,40 +271,43 @@ test('the official settings importer and the Host migration interleave without l
   ].join('\n'))
   const plane = await bootPlane(life, root, { resetUserDocument: true, importableSettings: true })
   const realForms = settingsOf(plane.ctx)
-  let importerWriteObserved = false
-  // The migration has already READ its sources when it calls mutate(). Hold the
-  // canonical write until the official importer has COMMITTED its own entry;
-  // then release it. The final profile must contain BOTH writes, proving the
-  // official rename/import transaction and the migration do not drop or
-  // overwrite each other.
-  const forms = {
-    describe: (...args: Parameters<RealSettingsForms['describe']>) => realForms.describe(...args),
-    mutate: async (...args: Parameters<RealSettingsForms['mutate']>) => {
-      if (args[0] === ROW_ID && !importerWriteObserved) {
+  const realEditor = (plane.ctx as unknown as { configEditor: ProfileConfigEditorLike }).configEditor
+  let canonicalEditControlReached = false
+  // Intercept the PRODUCTION write entry (ConfigEditor.edit), not a test-only
+  // form helper. The wait happens BEFORE the official profile lock, so the
+  // importer can commit; after that the real edit runs unchanged and its
+  // callback re-reads the raw sources under the lock.
+  const editor = {
+    entries: () => realEditor.entries(),
+    edit: async (...args: Parameters<ProfileConfigEditorLike['edit']>) => {
+      if (args[0].options.id === ROW_ID && !canonicalEditControlReached) {
+        canonicalEditControlReached = true
         const deadline = Date.now() + 10_000
+        let imported = false
         while (Date.now() < deadline) {
-          const imported = descriptorByNs(plane.ctx, 'ui-settings-general')
-          if ((imported?.user as { welcomeNoticeVersion?: string } | undefined)?.welcomeNoticeVersion === 'legacy-ack') {
-            importerWriteObserved = true
+          const row = descriptorByNs(plane.ctx, 'ui-settings-general')
+          if ((row?.user as { welcomeNoticeVersion?: string } | undefined)?.welcomeNoticeVersion === 'legacy-ack') {
+            imported = true
             break
           }
           await new Promise(resolve => setTimeout(resolve, 10))
         }
-        assert.equal(importerWriteObserved, true,
-          'the official importer never committed its own settings.yaml section')
+        assert.equal(imported, true, 'the official importer never committed its own settings.yaml section')
       }
-      return realForms.mutate(...args)
+      return realEditor.edit(...args)
     },
   }
   const report = await migrateProfileTuiPreferences({
     patchPath: plane.patchPath,
-    configEditor: (plane.ctx as unknown as { configEditor: ProfileConfigEditorLike }).configEditor,
-    forms: forms as unknown as ReturnType<typeof settingsOf>,
+    configEditor: editor as unknown as ProfileConfigEditorLike,
+    forms: realForms,
     home: root,
     resolvePreset: async () => {},
     diag: { warn: () => {}, info: () => {} },
   })
   assert.equal(report.status, 'migrated')
+  assert.equal(canonicalEditControlReached, true,
+    'the canonical ConfigEditor.edit control point must actually run')
   assert.equal(existsSync(join(root, 'settings.yaml')), false,
     'the official importer renames the retired document before its first write')
   const imported = readFileSync(join(root, 'settings.yaml.imported'), 'utf8')
