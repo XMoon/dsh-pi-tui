@@ -388,6 +388,18 @@ function actionBarOf(frame) {
   return ''
 }
 
+/** The Host fixture's TEST-ONLY mutation-ingress counters: a snapshot that must
+ *  be equal across an inert Enter (ZERO official mutation calls) and must grow
+ *  by one for the same field on a real Billing confirm (positive calibration). */
+function billingMutationsOf(event) {
+  return event.mutationCounts?.[`${WEB_API_NS}:searchBilling`] ?? 0
+}
+
+function totalMutationsOf(event) {
+  const counts = event.mutationCounts ?? {}
+  return Object.values(counts).reduce((sum, value) => sum + (typeof value === 'number' ? value : 0), 0)
+}
+
 /** The page's real Confirm affordability: BOTH wordings the page has used must
  *  be proven absent, never just the retired one (a regression that exposes the
  *  live `Confirm [Enter]` must fail this assertion). */
@@ -957,8 +969,11 @@ export async function runWebProviderSettingsF3(context) {
       'Billing is EDITABLE HERE', 'UI_L6 automatic billing route gate')
     const automaticAfter = await requestWebProvider(root, 'observe', undefined,
       'UI_L6 automatic revision after')
-    assert(automaticAfter.apiRevision === automaticBefore.apiRevision,
-      `UI_L6 automatic: the inert Billing row mutated the Billing namespace (revision ${String(automaticBefore.apiRevision)} -> ${String(automaticAfter.apiRevision)})`)
+    assert(JSON.stringify(automaticAfter.mutationCounts) === JSON.stringify(automaticBefore.mutationCounts),
+      `UI_L6 automatic: the inert Billing row called the official mutation ingress (${JSON.stringify(automaticBefore.mutationCounts)} -> ${JSON.stringify(automaticAfter.mutationCounts)})`)
+    assert(billingMutationsOf(automaticAfter) === billingMutationsOf(automaticBefore)
+      && totalMutationsOf(automaticAfter) === totalMutationsOf(automaticBefore),
+    'UI_L6 automatic: ZERO official mutation calls are allowed for the inert Billing row')
     trace('f3.ui-l6', {
       verdict: 'UI_L6_PASS',
       phase: 'automatic-billing-inert',
@@ -980,8 +995,11 @@ export async function runWebProviderSettingsF3(context) {
       'Billing is EDITABLE HERE', 'UI_L6 custom billing route gate')
     const customAfter = await requestWebProvider(root, 'observe', undefined,
       'UI_L6 custom revision after')
-    assert(customAfter.apiRevision === customBefore.apiRevision,
-      `UI_L6 custom: the inert Billing row mutated the Billing namespace (revision ${String(customBefore.apiRevision)} -> ${String(customAfter.apiRevision)})`)
+    assert(JSON.stringify(customAfter.mutationCounts) === JSON.stringify(customBefore.mutationCounts),
+      `UI_L6 custom: the inert Billing row called the official mutation ingress (${JSON.stringify(customBefore.mutationCounts)} -> ${JSON.stringify(customAfter.mutationCounts)})`)
+    assert(billingMutationsOf(customAfter) === billingMutationsOf(customBefore)
+      && totalMutationsOf(customAfter) === totalMutationsOf(customBefore),
+    'UI_L6 custom: ZERO official mutation calls are allowed for the inert Billing row')
     trace('f3.ui-l6', {
       verdict: 'UI_L6_PASS',
       phase: 'custom-billing-inert',
@@ -1009,6 +1027,8 @@ export async function runWebProviderSettingsF3(context) {
     await confirmCandidate(clientA, BILLING_LABELS['api-key'], 'UI_L6 billing control write')
     const billingControlAfter = await requestWebProvider(root, 'observe', undefined,
       'UI_L6 billing control revision after')
+    assert(billingMutationsOf(billingControlAfter) === billingMutationsOf(billingControlBefore) + 1,
+      `UI_L6 positive calibration: the real TUI Billing confirm must be counted EXACTLY once at the mutation ingress (${String(billingMutationsOf(billingControlBefore))} -> ${String(billingMutationsOf(billingControlAfter))})`)
     assert(billingControlAfter.apiRevision > billingControlBefore.apiRevision,
       `UI_L6 positive calibration: a real Billing mutation must bump the observed Billing-namespace revision (${String(billingControlBefore.apiRevision)} -> ${String(billingControlAfter.apiRevision)})`)
     trace('f3.ui-l6', {

@@ -1420,6 +1420,21 @@ export async function apply(ctx) {
         // search provider to AUTOMATIC (unset), a CUSTOM id, or an explicit
         // official id through ONE official Settings mutation, so the inert
         // Billing row's zero-write evidence runs on the real Host path.
+        // F8: a TEST-ONLY counter at the REAL SettingsForms mutation ingress.
+        // The Settings revision only moves when serialized row state changes,
+        // so a rejected/same-value call is invisible there; counting the
+        // ingress itself is what proves ZERO Billing mutation calls.
+        const mutationCounts = {}
+        const settingsService = ctx.settings
+        const originalMutate = settingsService.mutate
+        settingsService.mutate = async function countedMutate(namespace, ops, expected) {
+          const fields = Array.isArray(ops)
+            ? ops.map(op => Array.isArray(op?.path) ? op.path.join('.') : '').join(',')
+            : ''
+          mutationCounts[namespace] = (mutationCounts[namespace] ?? 0) + 1
+          mutationCounts[`${namespace}:${fields}`] = (mutationCounts[`${namespace}:${fields}`] ?? 0) + 1
+          return originalMutate.call(this, namespace, ops, expected)
+        }
         const webRequestPath = join(root, 'f3-web-provider-request.json')
         let webRequestBusy = false
         const applyWebProvider = async request => {
@@ -1445,6 +1460,7 @@ export async function apply(ctx) {
             // (the `web` revision only tracks provider changes).
             revision: descriptor?.revision,
             apiRevision: apiDescriptor?.revision,
+            mutationCounts: { ...mutationCounts },
           })
         }
         const webRequestTimer = setInterval(() => {
