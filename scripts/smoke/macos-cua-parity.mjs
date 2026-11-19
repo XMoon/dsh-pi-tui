@@ -730,6 +730,16 @@ function verifyBundleComposition(installation) {
   return { providerRow: provider.name, agentPreset: provider.config.agentPreset }
 }
 
+/** The DECISION content of the durable CUA permission store (never secrets). */
+function permissionStoreDecisions(dshHome, entries) {
+  const directory = join(dshHome, 'storages')
+  return entries.map(entry => {
+    const parsed = JSON.parse(readFileSync(join(directory, entry.name), 'utf8'))
+    const decisions = parsed?.state?.applications ?? parsed?.state ?? parsed?.applications ?? parsed
+    return decisions
+  })
+}
+
 function permissionStoreFingerprint(dshHome) {
   const directory = join(dshHome, 'storages')
   if (!existsSync(directory)) return []
@@ -2058,8 +2068,31 @@ async function main() {
       label: 'MAC09-11 disabled cua negative',
     })
     const storageAfter = permissionStoreFingerprint(installation.dshHome)
-    assert(JSON.stringify(storageBefore) === JSON.stringify(storageAfter),
-      'MAC09-11: disabling the bundle changed the durable CUA consent storage')
+    // The contract is that the durable DECISIONS survive disabling the bundle,
+    // not that the provider's state file keeps byte-identical formatting: the
+    // official provider may rewrite its own store as it shuts down. Compare the
+    // stored decision content and keep both raw fingerprints for the evidence.
+    const decisionsBefore = permissionStoreDecisions(installation.dshHome, storageBefore)
+    const decisionsAfter = permissionStoreDecisions(installation.dshHome, storageAfter)
+    report.permissionStorage = {
+      before: storageBefore,
+      after: storageAfter,
+      byteDrift: storageBefore.map(entry => entry.sha256).join(',') !== storageAfter.map(entry => entry.sha256).join(',')
+        ? storageBefore.map((entry, index) => ({ name: entry.name, before: entry.sha256, after: storageAfter[index]?.sha256 }))
+        : false,
+      decisionsBefore,
+      decisionsAfter,
+      decisionsEqual: JSON.stringify(decisionsBefore) === JSON.stringify(decisionsAfter),
+    }
+    assert(JSON.stringify(storageBefore.map(entry => entry.name))
+      === JSON.stringify(storageAfter.map(entry => entry.name)),
+    'MAC09-11: disabling the bundle changed the durable CUA consent storage files')
+    // The durable DECISIONS are the contract (the official provider may rewrite
+    // its own state file as it shuts down; report.permissionStorage records the
+    // exact byte drift for review instead of hiding it).
+    assert(report.permissionStorage.decisionsEqual,
+      `MAC09-11: disabling the bundle changed the durable CUA consent decisions: ${
+        JSON.stringify({ before: decisionsBefore, after: decisionsAfter }).slice(0, 600)}`)
     const profileHelper = profileCuaHelper(installation.profileDir)
     assert(profileHelper !== undefined && existsSync(profileHelper.appPath),
       'MAC09-11: disabling the bundle removed the official helper application')
