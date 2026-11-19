@@ -1828,13 +1828,19 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
   // scene re-runs the SAME bounded program once with an explicit instruction and
   // records the retry. Every attempt keeps its own random marker, so the
   // identity checks below always bind the attempt that actually ran.
+  // The program uses ONE API style: `tools.cua` is the raw binding whose result
+  // is plain JSON (bridge.ts: CuaToolBinding -> Promise<JsonValue>), so getApp
+  // returns an `appHandle`, NOT an object with methods. The object facade only
+  // comes from connectCua/createCuaApi, which this scene does not use; mixing
+  // them made the "exact program" throw a TypeError that the model had to repair
+  // itself (a likely source of the earlier multi-attempt traces).
   // `show` restores a window WITHOUT raising or focusing it (rc.5 provider:
   // AXAccess.restoreWindow), and an app-scoped typeText goes to AXFocusedWindow.
   // The program therefore has to (1) prove the owned window is the app's focused
   // window BEFORE typing, (2) type, and (3) read the observation WINDOW-SCOPED,
   // so the marker is proven to be in the owned window and not in another
   // restored document of the same app.
-  const controlledProgram = marker => `Run exactly this in run_code and DO NOT stop early — every call below must run in this one program: const app = await tools.cua({ method: 'getApp', params: { selector: '${String(textEditPid)}' } }); const windows = await tools.cua({ method: 'listWindows', params: { appHandle: app.appHandle } }); const window = windows.find(item => String(item.title ?? '').includes('${runToken}')); if (!window) throw new Error('the controlled TextEdit window was not found'); await tools.cua({ method: 'show', params: { appHandle: app.appHandle, windowId: window.windowId } }); await tools.cua({ method: 'activate', params: { appHandle: app.appHandle } }); const before = await tools.cua({ method: 'getState', params: { appHandle: app.appHandle } }); if (String(before.focusedWindowId) !== String(window.windowId)) throw new Error('the owned TextEdit window is not the focused window'); await app.typeText('${marker}'); const after = await tools.cua({ method: 'getState', params: { appHandle: app.appHandle, windowId: window.windowId } }); return JSON.stringify(after.tree).includes('${marker}') ? 'MARKER_PRESENT' : 'MARKER_MISSING'`
+  const controlledProgram = marker => `Run exactly this in run_code and DO NOT stop early — every call below must run in this one program: const app = await tools.cua({ method: 'getApp', params: { selector: '${String(textEditPid)}' } }); const windows = await tools.cua({ method: 'listWindows', params: { appHandle: app.appHandle } }); const window = windows.find(item => String(item.title ?? '').includes('${runToken}')); if (!window) throw new Error('the controlled TextEdit window was not found'); await tools.cua({ method: 'show', params: { appHandle: app.appHandle, windowId: window.windowId } }); await tools.cua({ method: 'activate', params: { appHandle: app.appHandle } }); const before = await tools.cua({ method: 'getState', params: { appHandle: app.appHandle } }); if (String(before.focusedWindowId) !== String(window.windowId)) throw new Error('the owned TextEdit window is not the focused window'); await tools.cua({ method: 'typeText', params: { appHandle: app.appHandle, text: '${marker}' } }); const after = await tools.cua({ method: 'getState', params: { appHandle: app.appHandle, windowId: window.windowId } }); return JSON.stringify(after.tree).includes('${marker}') ? 'MARKER_PRESENT' : 'MARKER_MISSING'`
   let input
   let marker
   let attempts = 0
