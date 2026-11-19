@@ -1369,6 +1369,33 @@ export async function auditControlledTrace({ trace, textEditPid, runToken, marke
       assert(dispatchParams(typeText)?.text === marker,
         'MAC09-08: the controlled call typed text other than this run\'s marker')
     }
+    if (final && typeIndexes.length === 1) {
+      // TARGET PROOF 1 (before the input): the rc.5 provider's `show` ->
+      // restoreWindow only clears AXHidden/AXMinimized and never raises or
+      // focuses (AXAccess.swift, rc.5 tag), while an app-scoped typeText goes to
+      // AXFocusedWindow (AXWorker.swift keyboardRecipient). Showing the owned
+      // window therefore proves NOTHING about where the input lands: the app
+      // must actually FOCUS the owned window before the input, and the trace
+      // must carry that read.
+      const beforeInput = segment.slice(0, typeIndexes[0])
+        .filter(dispatch => dispatchMethod(dispatch) === 'getState')
+      const focusedRead = beforeInput.find(dispatch => {
+        const focused = resolveJson(dispatch)?.focusedWindowId
+        return focused !== undefined && focused !== null && String(focused) === String(ownedWindowId)
+      })
+      assert(focusedRead !== undefined,
+        `MAC09-08: the owned window was not the app's focused window before the input (read focusedWindowId ${JSON.stringify(beforeInput.map(d => resolveJson(d)?.focusedWindowId))}, owned ${JSON.stringify(ownedWindowId)})`)
+      // TARGET PROOF 2 (after the input): the observation must be a
+      // WINDOW-SCOPED read of the owned window, and the provider must report
+      // that same windowId. An app-scoped tree can contain the marker in a
+      // different restored document.
+      const observation = segment.at(-1)
+      assert(dispatchMethod(observation) === 'getState'
+        && String(dispatchParams(observation)?.windowId) === String(ownedWindowId),
+      'MAC09-08: the observation is not a window-scoped read of the owned window')
+      assert(String(resolveJson(observation)?.windowId) === String(ownedWindowId),
+        `MAC09-08: the window-scoped observation reported another window: ${JSON.stringify(resolveJson(observation)?.windowId)}`)
+    }
     segmentFacts.push({ methods, handle, ownedWindowId, typeTexts: segmentTypeTexts.length })
   }
   assert(segmentFacts.at(-1).typeTexts === 1,
@@ -1394,6 +1421,25 @@ export async function auditControlledTrace({ trace, textEditPid, runToken, marke
     listWindowsDispatch, showDispatch, activateDispatch, typeDispatch, attemptStateDispatch,
     previews, controlledHandle, controlledWindows, segmentFacts, typeTextSettled,
   }
+}
+
+/**
+ * Classify the settlements of the dead Client's pending CUA dispatch (MAC09-10).
+ *
+ * The rc.5 contract is that the request signal ends the channel with
+ * `ASK_ABORTED` (client/ui-user-questions slots.ts). That terminal fact — NOT
+ * the mere absence of a late answer — is what proves the abandoned Host ask is
+ * no longer live, so the classifier returns the two facts separately and the
+ * caller must require `aborts.length > 0`.
+ *
+ * @param results - every recorded result for the dead dispatch's subCallId.
+ * @returns The disconnect aborts and every other (late/foreign) settlement.
+ */
+export function classifyDisconnectSettlements(results) {
+  const codeOf = item => item.error?.code ?? dispatchErrorCode(item)
+  const aborts = results.filter(item => item.isError === true && codeOf(item) === 'ASK_ABORTED')
+  const late = results.filter(item => !(item.isError === true && codeOf(item) === 'ASK_ABORTED'))
+  return { aborts, late }
 }
 
 // ── Direct scene ──────────────────────────────────────────────────────────
@@ -1782,7 +1828,13 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
   // scene re-runs the SAME bounded program once with an explicit instruction and
   // records the retry. Every attempt keeps its own random marker, so the
   // identity checks below always bind the attempt that actually ran.
-  const controlledProgram = marker => `Run exactly this in run_code and DO NOT stop early — every call below must run in this one program: const app = await tools.cua({ method: 'getApp', params: { selector: '${String(textEditPid)}' } }); const windows = await tools.cua({ method: 'listWindows', params: { appHandle: app.appHandle } }); const window = windows.find(item => String(item.title ?? '').includes('${runToken}')); if (!window) throw new Error('the controlled TextEdit window was not found'); await tools.cua({ method: 'show', params: { appHandle: app.appHandle, windowId: window.windowId } }); await tools.cua({ method: 'activate', params: { appHandle: app.appHandle } }); await app.typeText('${marker}'); const tree = await app.getAccessibilityTree(); return JSON.stringify(tree).includes('${marker}') ? 'MARKER_PRESENT' : 'MARKER_MISSING'`
+  // `show` restores a window WITHOUT raising or focusing it (rc.5 provider:
+  // AXAccess.restoreWindow), and an app-scoped typeText goes to AXFocusedWindow.
+  // The program therefore has to (1) prove the owned window is the app's focused
+  // window BEFORE typing, (2) type, and (3) read the observation WINDOW-SCOPED,
+  // so the marker is proven to be in the owned window and not in another
+  // restored document of the same app.
+  const controlledProgram = marker => `Run exactly this in run_code and DO NOT stop early — every call below must run in this one program: const app = await tools.cua({ method: 'getApp', params: { selector: '${String(textEditPid)}' } }); const windows = await tools.cua({ method: 'listWindows', params: { appHandle: app.appHandle } }); const window = windows.find(item => String(item.title ?? '').includes('${runToken}')); if (!window) throw new Error('the controlled TextEdit window was not found'); await tools.cua({ method: 'show', params: { appHandle: app.appHandle, windowId: window.windowId } }); await tools.cua({ method: 'activate', params: { appHandle: app.appHandle } }); const before = await tools.cua({ method: 'getState', params: { appHandle: app.appHandle } }); if (String(before.focusedWindowId) !== String(window.windowId)) throw new Error('the owned TextEdit window is not the focused window'); await app.typeText('${marker}'); const after = await tools.cua({ method: 'getState', params: { appHandle: app.appHandle, windowId: window.windowId } }); return JSON.stringify(after.tree).includes('${marker}') ? 'MARKER_PRESENT' : 'MARKER_MISSING'`
   let input
   let marker
   let attempts = 0
@@ -2080,16 +2132,31 @@ async function sceneSplit({ installation, workRoot, report, textEditPid, runToke
   // the fail-closed disconnect outcome, NOT a late answer: the claim under test
   // is that the dead Client's dispatch is never settled by an ANSWER, and that
   // the resumed Client neither repaints the Question nor answers it.
-  const staleResults = cuaResults(eventsOf(dshHome, reconnect.sessionId), 0)
-    .filter(item => item.subCallId === reconnect.dispatch.subCallId)
   // The official disconnect classification is carried by the structured error
   // envelope (`error.code`), not by the model-facing sentence (whose message
   // text does not repeat the uppercase code).
   const settleCode = item => item.error?.code ?? dispatchErrorCode(item)
-  const disconnectSettles = staleResults.filter(item => item.isError === true
-    && settleCode(item) === 'ASK_ABORTED')
-  const lateAnswers = staleResults.filter(item => !(item.isError === true
-    && settleCode(item) === 'ASK_ABORTED'))
+  const staleOf = () => classifyDisconnectSettlements(
+    cuaResults(eventsOf(dshHome, reconnect.sessionId), 0)
+      .filter(item => item.subCallId === reconnect.dispatch.subCallId))
+  // ABSENCE OF A LATE ANSWER IS NOT PROOF THAT THE OLD ASK RETIRED. The rc.5
+  // contract is that the request signal ends the channel with ASK_ABORTED
+  // (packages/client/ui-user-questions .../slots.ts): that terminal fact — not
+  // "nothing arrived for two seconds" — is what shows the abandoned Host ask is
+  // no longer live. Wait for it boundedly; if it never appears the case is
+  // NOT_VERIFIED with that exact missing fact, never PASS.
+  let disconnectSettles = []
+  try {
+    disconnectSettles = await waitFor(() => {
+      const aborted = staleOf().aborts
+      return aborted.length > 0 ? aborted : undefined
+    }, 'MAC09-10 the official disconnect terminal (ASK_ABORTED) for the dead dispatch', TIMEOUTS.consent)
+  } catch {
+    const observed = staleOf().late.concat(staleOf().aborts)
+    throw new CuaNotVerifiedError(
+      `MAC09-10: the abandoned consent ask has no authoritative terminal outcome — ${observed.length === 0 ? 'the dead Client\'s dispatch never settled at all' : `it settled ${JSON.stringify(observed.map(item => settleCode(item) ?? 'no-code'))}`}; "no late answer" does not prove the old ask retired`)
+  }
+  const lateAnswers = staleOf().late
   assert(lateAnswers.length === 0,
     `MAC09-10: the dead Client's dispatch settled by something other than the official disconnect abort: ${
       JSON.stringify(lateAnswers.map(item => ({

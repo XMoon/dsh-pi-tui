@@ -29,7 +29,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { auditControlledTrace } from '../../scripts/smoke/macos-cua-parity.mjs'
+import { auditControlledTrace, classifyDisconnectSettlements } from '../../scripts/smoke/macos-cua-parity.mjs'
 
 const PID = 4242
 const RUN_TOKEN = 'cua-blank-abc12345'
@@ -68,8 +68,9 @@ function typeText(subCallId, appHandle, text) {
   return dispatch('typeText', { appHandle, text }, { subCallId })
 }
 
-function getState(subCallId, appHandle) {
-  return dispatch('getState', { appHandle }, { subCallId })
+function getState(subCallId, appHandle, options = {}) {
+  return dispatch('getState', options.windowId === undefined ? { appHandle } : { appHandle, windowId: options.windowId },
+    { subCallId, result: { windowId: options.windowId ?? null, focusedWindowId: options.focusedWindowId ?? null } })
 }
 
 /** The owned window plus, optionally, a foreign document of the same app. */
@@ -105,12 +106,13 @@ test('a single-segment chain is admitted', async () => {
     listWindows('w1', 'app-1', ownedWindows()),
     show('s1', 'app-1', OWNED_WINDOW),
     activate('a1', 'app-1'),
+    getState('f1', 'app-1', { focusedWindowId: OWNED_WINDOW }),
     typeText('t1', 'app-1', MARKER),
-    getState('e1', 'app-1'),
+    getState('e1', 'app-1', { windowId: OWNED_WINDOW, focusedWindowId: OWNED_WINDOW }),
   ])
-  assert.equal(admitted.inputSequence.join(','), 'getApp,listWindows,show,activate,typeText,getState')
+  assert.equal(admitted.inputSequence.join(','), 'getApp,listWindows,show,activate,getState,typeText,getState')
   assert.equal(admitted.segmentStarts.length, 1)
-  assert.equal(admitted.previews, 0)
+  assert.equal(admitted.previews, 1)
   assert.equal(admitted.controlledHandle, 'app-1')
 })
 
@@ -118,13 +120,14 @@ test('a bounded read-only preview before the input is admitted', async () => {
   const admitted = await audit([
     getApp('g1'),
     listWindows('w1', 'app-1', ownedWindows()),
-    getState('p1', 'app-1'),
+    getState('p1', 'app-1', { focusedWindowId: OTHER_WINDOW }),
     show('s1', 'app-1', OWNED_WINDOW),
     activate('a1', 'app-1'),
+    getState('f1', 'app-1', { focusedWindowId: OWNED_WINDOW }),
     typeText('t1', 'app-1', MARKER),
-    getState('e1', 'app-1'),
+    getState('e1', 'app-1', { windowId: OWNED_WINDOW, focusedWindowId: OWNED_WINDOW }),
   ])
-  assert.equal(admitted.previews, 1)
+  assert.equal(admitted.previews, 2)
   assert.equal(admitted.attemptStateDispatch.subCallId, 'e1',
     'the observation is the LAST getState, never the preview')
 })
@@ -141,14 +144,48 @@ test('a recovered retry whose final getApp returns a NEW handle is admitted', as
     listWindows('w2', 'app-2', ownedWindows()),
     show('s2', 'app-2', OWNED_WINDOW),
     activate('a2', 'app-2'),
+    getState('f2', 'app-2', { focusedWindowId: OWNED_WINDOW }),
     typeText('t2', 'app-2', MARKER),
-    getState('e2', 'app-2'),
+    getState('e2', 'app-2', { windowId: OWNED_WINDOW, focusedWindowId: OWNED_WINDOW }),
   ])
   assert.equal(admitted.segmentStarts.length, 2)
   assert.equal(admitted.controlledHandle, 'app-2', 'the final segment owns the qualifying handle')
   assert.equal(admitted.listWindowsDispatch.subCallId, 'w2',
     'listWindows must come from the FINAL segment, never an earlier one')
   assert.equal(admitted.typeDispatch.subCallId, 't2')
+})
+
+test('a show that NEVER moved focus is refused before the input (rc.5 provider proof)', async () => {
+  // The rc.5 provider's show -> restoreWindow only clears AXHidden/AXMinimized;
+  // it does not raise or focus the window (AXAccess.swift, rc.5 tag). An
+  // app-scoped typeText targets AXFocusedWindow, so a trace that shows the
+  // owned window while the app still focuses ANOTHER restored document must be
+  // refused — it would type into that other document.
+  await rejection([
+    getApp('g1', PID, 'app-1'),
+    listWindows('w1', 'app-1', ownedWindows()),
+    show('s1', 'app-1', OWNED_WINDOW),
+    dispatch('getState', { appHandle: 'app-1' },
+      { subCallId: 'f1', result: { windowId: null, focusedWindowId: OTHER_WINDOW } }),
+    typeText('t1', 'app-1', MARKER),
+    dispatch('getState', { appHandle: 'app-1', windowId: OWNED_WINDOW },
+      { subCallId: 'e1', result: { windowId: OWNED_WINDOW, focusedWindowId: OTHER_WINDOW } }),
+  ], /was not the app's focused window before the input/u)
+})
+
+test('an APP-scoped observation after the input is refused', async () => {
+  // The marker must be read from a window-scoped getState of the owned window;
+  // an app-scoped tree can contain the marker in a DIFFERENT document.
+  await rejection([
+    getApp('g1', PID, 'app-1'),
+    listWindows('w1', 'app-1', ownedWindows()),
+    show('s1', 'app-1', OWNED_WINDOW),
+    dispatch('getState', { appHandle: 'app-1' },
+      { subCallId: 'f1', result: { windowId: null, focusedWindowId: OWNED_WINDOW } }),
+    typeText('t1', 'app-1', MARKER),
+    dispatch('getState', { appHandle: 'app-1' },
+      { subCallId: 'e1', result: { windowId: null, focusedWindowId: OTHER_WINDOW } }),
+  ], /observation is not a window-scoped read of the owned window/u)
 })
 
 // ── negative shapes that MUST be refused ───────────────────────────────────
@@ -236,4 +273,39 @@ test('a method the scene does not audit is refused', async () => {
     typeText('t1', 'app-1', MARKER),
     getState('e1', 'app-1'),
   ], /dispatched a method the scene does not audit: click/u)
+})
+
+// ── MAC09-10 disconnect-terminal classification ───────────────────────────
+
+test('MAC09-10: ZERO settlements never classify as a disconnect abort', () => {
+  // The external review's counterexample: the dead Client's ask produces no
+  // settlement at all during the post-resume window. "No late answer" must not
+  // be read as "the old ask retired".
+  const classified = classifyDisconnectSettlements([])
+  assert.deepEqual(classified.aborts, [])
+  assert.deepEqual(classified.late, [])
+})
+
+test('MAC09-10: the official ASK_ABORTED terminal is classified as the abort', () => {
+  const classified = classifyDisconnectSettlements([
+    { isError: true, error: { code: 'ASK_ABORTED' }, content: [] },
+  ])
+  assert.equal(classified.aborts.length, 1)
+  assert.deepEqual(classified.late, [])
+})
+
+test('MAC09-10: a late ANSWER is classified as a late settlement, never as the abort', () => {
+  const classified = classifyDisconnectSettlements([
+    { isError: false, content: [{ type: 'text', text: 'allow once' }] },
+  ])
+  assert.deepEqual(classified.aborts, [])
+  assert.equal(classified.late.length, 1)
+})
+
+test('MAC09-10: a DIFFERENT error code is a late settlement, never the abort', () => {
+  const classified = classifyDisconnectSettlements([
+    { isError: true, error: { code: 'CALLER_NOT_LIVE' }, content: [] },
+  ])
+  assert.deepEqual(classified.aborts, [])
+  assert.equal(classified.late.length, 1)
 })
