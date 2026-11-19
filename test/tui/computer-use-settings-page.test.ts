@@ -341,3 +341,26 @@ test('keyboard PageDown reaches the Help appended after the last action', async 
   assert.match(frame.join('\n'), /Help and recovery/u, 'keyboard scrolling reaches content below the last action')
   mounted.page.dispose()
 })
+
+test('a provider basis rollover refreshes first and still dispatches the fresh action', async () => {
+  let basis = 1
+  const mounted = mount({ cua: { observation: { readSnapshot: () => basis, subscribe: () => () => {} } } })
+  await settle(mounted, 'Accessibility: Not allowed')
+  // The provider is replaced AFTER the page opened; the page has not observed
+  // the change yet. Its action must refresh to the new basis and dispatch,
+  // never refuse a perfectly fresh action against the old snapshot.
+  basis = 2
+  let cursor = 0
+  for (; cursor < 20; cursor += 1) {
+    mounted.page.handleInput('\x1b[B')
+    if (/>.*\[Request permission\]/u.test(mounted.render().join('\n'))) break
+  }
+  assert.ok(cursor < 20, 'the Request Accessibility action is reachable by keyboard')
+  mounted.page.handleInput('\r')
+  await new Promise(resolve => setTimeout(resolve, 10))
+  assert.ok(mounted.calls.includes('request:accessibility:zh'),
+    'the action dispatches against the freshly refreshed basis')
+  assert.doesNotMatch(mounted.render().join('\n'), /NOT dispatched/u,
+    'the page does not paint a stale refusal for a fresh dispatch')
+  mounted.page.dispose()
+})

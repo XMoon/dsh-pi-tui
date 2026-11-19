@@ -153,12 +153,12 @@ export class CuaAccessSettingsController {
     // remain actionable or paintable after it. The callback invalidates the
     // current read epoch and immediately performs ONE fresh read.
     this.observedBasis = deps.cuaAccess.observation.readSnapshot()
-    this.unsubscribeObservation = deps.cuaAccess.observation.subscribe(() => this.invalidateObservation())
+    this.unsubscribeObservation = deps.cuaAccess.observation.subscribe(() => { void this.invalidateObservation() })
     // The official Plugin Manager is the Direct bundle-change authority (and
     // also observes same-connection Remote changes). A bundle enable/disable is
     // an observation boundary even when the CUA service object is unchanged.
     this.unsubscribePlugins = typeof deps.pluginManager.subscribeInvalidation === 'function'
-      ? deps.pluginManager.subscribeInvalidation(() => this.invalidateObservation())
+      ? deps.pluginManager.subscribeInvalidation(() => { void this.invalidateObservation() })
       : () => {}
   }
 
@@ -226,7 +226,15 @@ export class CuaAccessSettingsController {
         this.readGroup(epoch, sequence, 'icons', () => this.deps.cuaAccess.readApplicationIcons()),
         this.readGroup(epoch, sequence, 'ptc', () => this.deps.cuaAccess.readPtcConfiguration()),
       ])
-      if (this.current(epoch, sequence)) this.patch({ busy: this.actionInFlight })
+      if (this.current(epoch, sequence)) {
+        // The settled read is the page's NEW basis: a provider replacement that
+        // triggered this refresh must not keep refusing the next action against
+        // the old snapshot. A further change during the read re-invalidates the
+        // epoch (the subscribe path), so this assignment still cannot bless a
+        // stale generation.
+        this.observedBasis = this.deps.cuaAccess.observation.readSnapshot()
+        this.patch({ busy: this.actionInFlight })
+      }
     })()
     this.readInFlight = run.catch(() => {})
     await this.readInFlight
@@ -295,7 +303,7 @@ export class CuaAccessSettingsController {
     await this.disposed
   }
 
-  private invalidateObservation(): void {
+  private async invalidateObservation(): Promise<void> {
     if (this.closed) return
     this.epoch += 1
     this.readSequence += 1
@@ -310,7 +318,7 @@ export class CuaAccessSettingsController {
       // outcome. A read-only refresh may proceed independently.
       busy: this.actionInFlight,
     })
-    void this.refresh()
+    await this.refresh()
   }
 
   private async readBundle(epoch: number, sequence: number): Promise<CuaBundleState> {
@@ -394,18 +402,24 @@ export class CuaAccessSettingsController {
     // against an older generation is refused and the new generation is read.
     const basis = this.deps.cuaAccess.observation.readSnapshot()
     if (!Object.is(basis, this.observedBasis)) {
-      this.invalidateObservation()
-      this.patch({
-        action: {
-          ...receipt,
-          kind,
-          state: 'unknown',
-          text: 'The Host CUA provider changed; the action was NOT dispatched. Refresh before retrying.',
-          at: Date.now(),
-        },
-        busy: false,
-      })
-      return
+      // The page was opened against an older provider generation. Refresh
+      // FIRST and retry only when the settled read's own basis still matches;
+      // a provider that changes again during the read keeps the action
+      // refused (the genuine fail-closed case).
+      await this.invalidateObservation()
+      if (!Object.is(this.deps.cuaAccess.observation.readSnapshot(), this.observedBasis)) {
+        this.patch({
+          action: {
+            ...receipt,
+            kind,
+            state: 'unknown',
+            text: 'The Host CUA provider changed again while refreshing; the action was NOT dispatched. Refresh before retrying.',
+            at: Date.now(),
+          },
+          busy: false,
+        })
+        return
+      }
     }
     this.actionInFlight = true
     const epoch = this.epoch
