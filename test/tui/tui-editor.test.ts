@@ -323,3 +323,55 @@ test('a multi-space (tab-expanded) /image directory also reopens the dropdown at
   vt.sendInput('\x1b[C')
   await waitForDropdownRow(vt, 'deep.png', 'children after a multi-space directory accept')
 })
+
+test('a catalog-driven provider replacement re-asks the CURRENT @ draft', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
+  const port = workspacePort(root)
+  let queries = 0
+  const counting = {
+    listReferences: (scope: HostFileScope, query: string, options?: { signal?: AbortSignal }) => {
+      queries += 1
+      return port.listReferences(scope, query, options)
+    },
+    resolveReference: (scope: HostFileScope, path: string, options?: { signal?: AbortSignal }) => port.resolveReference(scope, path, options),
+    canonicalizeMentions: (scope: HostFileScope, text: string) => port.canonicalizeMentions(scope, text),
+  }
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {}, onCancel: () => {} })
+  app.setCommandCompletions([], root, counting, undefined, workspaceScope())
+  app.start()
+  startedApps.add(app)
+  life.defer(() => app.stop())
+  await vt.waitForRender()
+  vt.sendInput('@src')
+  await waitForDropdownRow(vt, 'src/', 'dropdown before the catalog replacement')
+  const before = queries
+  assert.ok(before >= 1, 'the first install must have asked the Host file port')
+  // The Host command catalog commits asynchronously and installs a NEW
+  // provider while the user's `@src` draft is still live. The fork's setter
+  // cancels the open dropdown and never re-asks, so without the host override
+  // the pending query would be dropped until the user typed again.
+  app.setCommandCompletions([], root, counting, undefined, workspaceScope())
+  await vt.waitForRender()
+  const deadline = Date.now() + 2000
+  while (queries === before && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10))
+  assert.ok(queries > before, 'the replacement provider must re-ask the live @ draft')
+  assert.equal(app.seatTextForTest(), '@src', 'the replacement must not alter the draft')
+  await waitForDropdownRow(vt, 'src/', 'dropdown after the catalog replacement')
+})
+
+test('a provider replacement does not reopen completion for plain prose', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
+  const { vt, app } = startApp(root)
+  life.defer(() => app.stop())
+  await vt.waitForRender()
+  vt.sendInput('ordinary words')
+  await vt.waitForRender()
+  app.setCommandCompletions([], root, workspacePort(root), undefined, workspaceScope())
+  await vt.waitForRender()
+  await new Promise(resolve => setTimeout(resolve, 80))
+  const view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('deep-nested.ts'), `plain prose must not pop a dropdown on a catalog refresh:\n${view}`)
+})

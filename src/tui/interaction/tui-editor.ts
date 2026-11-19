@@ -22,7 +22,7 @@
  * @module @xmoon76/dsh-pi-tui/tui/interaction/tui-editor
  */
 
-import { decodePrintableKey, Editor, matchesKey, truncateToWidth, type EditorTheme, type SelectListLayoutOptions, type TUI } from '@xmoon76/pi-tui'
+import { decodePrintableKey, Editor, matchesKey, truncateToWidth, type AutocompleteProvider, type EditorTheme, type SelectListLayoutOptions, type TUI } from '@xmoon76/pi-tui'
 import { SelectedMarquee } from '../components/marquee.ts'
 import { color } from '../theme/runtime.ts'
 import { classifyFileCompletionContext } from '../file-completion/context.ts'
@@ -219,6 +219,9 @@ export class TuiEditor extends Editor {
   onInputEnd?: () => void
   /** Re-entrancy depth of handleInput (the residual paste chunks re-enter). */
   private inputDepth = 0
+  /** Whether a completion provider has been installed through this host
+   *  override (the base field is private; the host only needs the fact). */
+  private autocompleteProviderInstalled = false
 
   constructor(tui: TUI, theme: EditorTheme, options: TuiEditorOptions = {}) {
     // paddingX: 2 reserves the left two cells for the mode prompt painted
@@ -791,6 +794,41 @@ export class TuiEditor extends Editor {
     const remaining = data.slice(end + '\x1b[201~'.length)
     if (remaining !== '') residuals.push(remaining)
     return residuals
+  }
+
+  /**
+   * Re-evaluate the CURRENT draft after a provider replacement.
+   *
+   * The command catalog commits asynchronously: a sessionless surface can be
+   * mounted and accept a user's `@`/slash input while a later catalog snapshot
+   * installs a NEW provider. The fork's `setAutocompleteProvider` cancels the
+   * active request and clears the dropdown but does NOT ask the new provider
+   * about the draft that is still in the editor — so an in-flight `@file`
+   * query would be dropped and never re-issued (the user would have to type
+   * again). Re-issue it through the SAME context gate the real triggers use:
+   * only a live file-completion position (`@` mention or a declared path
+   * argument) or a slash-command name/argument position may reopen, so plain
+   * prose never pops a dropdown just because the catalog refreshed.
+   */
+  override setAutocompleteProvider(provider: AutocompleteProvider): void {
+    super.setAutocompleteProvider(provider)
+    this.autocompleteProviderInstalled = true
+    this.reopenAutocompleteAfterProviderReplacement()
+  }
+
+  private reopenAutocompleteAfterProviderReplacement(): void {
+    if (!this.autocompleteProviderInstalled || this.isShowingAutocomplete()) return
+    const { line, col } = this.getCursor()
+    const textBeforeCursor = this.getLines()[line]?.slice(0, col) ?? ''
+    if (textBeforeCursor === '') return
+    const shellDocument = this.isShellDocumentLine(textBeforeCursor)
+    const fileContext = classifyFileCompletionContext(textBeforeCursor, FILE_ARGUMENT_COMMANDS, {
+      line,
+      shell: shellDocument,
+    })
+    const slashContext = !shellDocument && /^\/[^\s/]*(\s|$)/u.test(textBeforeCursor.trimStart())
+    if (fileContext.kind === 'none' && !slashContext) return
+    this.requestAutocomplete({ force: false, explicitTab: false })
   }
 
   /** Reopen `@dir/` mention completion right after a key closed it (e.g.
