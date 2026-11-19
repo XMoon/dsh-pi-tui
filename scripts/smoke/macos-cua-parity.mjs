@@ -1669,6 +1669,13 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
   // would silently bind the first attempt's handle).
   const trace = liveInputDispatches()
   const inputSequence = trace.map(dispatchMethod)
+  // The controlled trace must OPEN with getApp: a leading dispatch would sit
+  // before every segment and therefore outside the per-segment audit below, so
+  // an unowned `show`/`activate` (which can still raise an already-authorized
+  // foreign app and move focus) would have no this-run handle or owned target
+  // behind it. Fail closed instead of auditing such a prefix.
+  assert(inputSequence[0] === 'getApp',
+    `MAC09-08: the controlled call dispatched before obtaining an app handle: ${JSON.stringify(inputSequence)}`)
   const segmentStarts = inputSequence.flatMap((method, index) => method === 'getApp' ? [index] : [])
   const attemptDispatches = segmentStarts.length === 0 ? [] : trace.slice(segmentStarts.at(-1))
   const attemptMethods = attemptDispatches.map(dispatchMethod)
