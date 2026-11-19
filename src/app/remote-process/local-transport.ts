@@ -41,6 +41,8 @@ const NODE_CLIENT_MODULES = [
 
 /** Bound on the first real Gateway generation after HTTP authentication. */
 const GENERATION_READY_TIMEOUT_MS = 30_000
+/** Bounded wait for the re-admitted generation after an expired operator. */
+const OPERATOR_RECOVERY_TIMEOUT_MS = 30_000
 
 /** Connection states the official handle publishes. */
 export type ConnectionState = 'connected' | 'connecting' | 'disconnected'
@@ -58,6 +60,8 @@ export interface LocalTransportConnection {
     getSnapshot(): ConnectionGeneration | undefined
     subscribe(listener: () => void): () => void
   }
+  /** Reset retry progression and replace the current attempt immediately. */
+  reconnect(): void
 }
 
 /** A status snapshot built at call time from the official Connection. */
@@ -232,6 +236,15 @@ function cookieFetch(
   // never sets this variable.
   const dropModelAck = process.env.SPLIT_PROCESS_CLIENT_DROP_MODEL_ACK === '1'
   let modelAckDropped = false
+  const expireOperatorOnce = process.env.SPLIT_PROCESS_CLIENT_EXPIRE_OPERATOR_ONCE
+  /**
+   * Qualification-only delay before the forged operator expires: a real TTL
+   * can only elapse while the Client is already live, so the injected 401 must
+   * land mid-session instead of inside the startup request chain.
+   */
+  const expireOperatorAfterMs = Number(process.env.SPLIT_PROCESS_CLIENT_EXPIRE_OPERATOR_AFTER_MS ?? '0')
+  const installedAt = Date.now()
+  let expiredOperatorInjected = false
   return async (input, init = {}) => {
     const url = new URL(typeof input === 'string' ? input : input.href, `${origin}/`)
     if (url.origin !== origin) {
@@ -239,6 +252,20 @@ function cookieFetch(
     }
     const headers = new Headers(init.headers)
     if (includeCookie) headers.set('cookie', currentCookie())
+    // Qualification-only: forge the operator Cookie on exactly ONE replayable
+    // request whose route contains this substring ('1' matches any), so the
+    // Host answers a REAL 401 and the operator-recovery path runs against the
+    // real wire at a controlled point in the scene. Production never sets it.
+    const forgeThis = expireOperatorOnce !== undefined
+      && Date.now() - installedAt >= expireOperatorAfterMs
+      && (expireOperatorOnce === '1' || url.pathname.includes(expireOperatorOnce))
+    if (!expiredOperatorInjected && forgeThis
+      && typeof init.body === 'string' && !url.pathname.includes('$events/')) {
+      expiredOperatorInjected = true
+      const pair = currentCookie()
+      const separator = pair.indexOf('=')
+      headers.set('cookie', `${separator > 0 ? pair.slice(0, separator) : 'dsh-auth'}=qualification-forged-operator`)
+    }
     const request: LocalRequestInit = { ...init, headers, redirect: 'manual', cache: 'no-store' }
     if (dropPromptAck && !promptAckDropped && typeof init.body === 'string') {
       let method: unknown
@@ -401,6 +428,110 @@ function cookieWebSocketFactory(
     }, diag, () => { wrappers.delete(wrapper) })
     wrappers.add(wrapper)
     return wrapper
+  }
+}
+
+/**
+ * Wait until the official Connection publishes a generation OTHER than the one
+ * an expired operator belonged to. The recovery below must never retry a
+ * request before the re-admitted generation exists: the retried request has to
+ * arrive as the operator that owns the NEW stream, and the old generation must
+ * already be unable to commit further event results.
+ */
+function waitForReplacementGeneration(
+  connection: LocalTransportConnection,
+  previousId: number | undefined,
+  signal: AbortSignal | undefined,
+  timeoutMs: number,
+): Promise<void> {
+  return new Promise<void>((resolveWait, rejectWait) => {
+    let settled = false
+    let unsubscribe: (() => void) | undefined
+    const current = (): ConnectionGeneration | undefined => connection.generation.getSnapshot()
+    const cleanup = (): void => {
+      settled = true
+      unsubscribe?.()
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', onAbort)
+    }
+    const finish = (error?: Error): void => {
+      if (settled) return
+      cleanup()
+      if (error === undefined) resolveWait()
+      else rejectWait(error)
+    }
+    const onAbort = (): void => finish(signal?.reason instanceof Error
+      ? signal.reason
+      : new Error('local transport: operator recovery aborted'))
+    const timer = setTimeout(() => finish(new LocalScopeError(
+      'HOST_UNRESPONSIVE',
+      `local transport: no replacement Connection generation within ${String(timeoutMs / 1000)}s`,
+    )), timeoutMs)
+    if (signal?.aborted === true) {
+      onAbort()
+      return
+    }
+    unsubscribe = connection.generation.subscribe(() => {
+      const generation = current()
+      if (generation !== undefined && generation.id !== previousId) finish()
+    })
+    signal?.addEventListener('abort', onAbort, { once: true })
+    const afterSubscribe = current()
+    if (afterSubscribe !== undefined && afterSubscribe.id !== previousId) finish()
+  })
+}
+
+/**
+ * Whether one 401 answer may be retried after the operator was rebuilt. The two
+ * hard rules live here, not in the caller:
+ *
+ * - a forwarded-event RESULT belongs to the stream (and Peer) that received the
+ *   invocation; replaying it with the replacement operator would answer as
+ *   "another Peer", so the official generation abort + Host re-delivery is the
+ *   ONLY recovery for `$events/result`;
+ * - a body this transport cannot replay (a stream/FormData upload) is not
+ *   re-sent, because the first attempt may have consumed it.
+ */
+export function operatorRecoveryMayRetry(
+  input: string | URL,
+  init: RequestInit | undefined,
+  origin: string,
+): boolean {
+  if (init?.signal?.aborted === true) return false
+  if (init?.body !== undefined && typeof init.body !== 'string') return false
+  const route = new URL(typeof input === 'string' ? input : input.href, `${origin}/`)
+  return !route.pathname.includes('$events/result')
+}
+
+/**
+ * The ONE production recovery for an expired/invalidated operator Cookie.
+ *
+ * The official Connection is told to replace its attempt; that closes the
+ * current mux socket (its generation's tasks stop committing) BEFORE the socket
+ * factory mints the replacement operator for the RE-open. The caller then waits
+ * for the replacement generation so a retried request can only arrive on the new
+ * operator that owns the new stream. A request whose invocation was already
+ * dispatched to the old stream (`$events/result`) is NEVER retried: its clientId
+ * belongs to the old Peer and the official generation abort + Host re-delivery
+ * is the only correct recovery.
+ */
+function createOperatorRecovery(
+  current: () => LocalTransportConnection | undefined,
+  lifetime: AbortSignal,
+): (signal: AbortSignal | undefined) => Promise<void> {
+  let inflight: Promise<void> | undefined
+  return async signal => {
+    inflight ??= (async () => {
+      const connection = current()
+      if (connection === undefined) {
+        throw new LocalScopeError('HOST_UNRESPONSIVE', 'local transport: no Connection to re-admit')
+      }
+      const combined = signal === undefined ? lifetime : AbortSignal.any([signal, lifetime])
+      const previousId = connection.generation.getSnapshot()?.id
+      connection.reconnect()
+      await waitForReplacementGeneration(connection, previousId, combined, OPERATOR_RECOVERY_TIMEOUT_MS)
+    })().finally(() => { inflight = undefined })
+    await inflight
   }
 }
 
@@ -569,6 +700,8 @@ export async function installLocalTransport(
     includeCookie,
     options.qualificationPromptAckDropped,
   )
+  /** Borrowed-route send; re-assigned below once the Connection exists. */
+  let sendAuthenticated: (input: string | URL, init?: RequestInit) => Promise<Response> = fetchAuthenticated
 
   let typertFiber: Fiber | undefined
   let connectionFiber: Fiber | undefined
@@ -621,11 +754,35 @@ export async function installLocalTransport(
     options.signal?.throwIfAborted()
 
     const createWebSocket = cookieWebSocketFactory(origin, () => cookie, refreshCookie, sockets, wrappers, diag, includeCookie)
+    const recoverOperator = createOperatorRecovery(() => connection, disposal.signal)
+    /**
+     * The ONE auth-recovery wrapper for the official unary carrier and every
+     * borrowed authenticated route. A 401 here was rejected BEFORE Host
+     * dispatch, so retrying a replayable request after the re-admitted
+     * generation is ready cannot duplicate a write. `$events/result` is never
+     * retried (its payload belongs to the old stream's Peer), and a body this
+     * transport cannot replay is not retried either.
+     */
+    const withOperatorRecovery = (send: (input: string | URL, init?: RequestInit) => Promise<Response>) =>
+      async (input: string | URL, init?: RequestInit): Promise<Response> => {
+        const response = await send(input, init)
+        if (response.status !== 401) return response
+        if (!operatorRecoveryMayRetry(input, init, origin)) return response
+        try {
+          await recoverOperator(init?.signal ?? undefined)
+        } catch {
+          // A recovery that cannot re-admit leaves the original 401 with the
+          // caller: the authentication failure is never hidden.
+          return response
+        }
+        return await send(input, init)
+      }
+    sendAuthenticated = withOperatorRecovery(fetchAuthenticated)
     connectionFiber = context.plugin(connectionContext => {
       modules.connection.installConnection(connectionContext, {
         interactions: 'answer',
         transport: {
-          fetch: cookieFetch(origin, () => cookie, includeCookie, options.qualificationPromptAckDropped),
+          fetch: withOperatorRecovery(cookieFetch(origin, () => cookie, includeCookie, options.qualificationPromptAckDropped)),
           createWebSocket: url => {
             const socket = createWebSocket(url)
             options.qualificationWebSocketObserver?.(url, socket)
@@ -717,7 +874,7 @@ export async function installLocalTransport(
         // carries the new operator and this fetch simply follows it.
         if (disposed) throw new Error('local transport: the authenticated fetch is unavailable after disposal')
         if (fatalError !== undefined) throw fatalError
-        return await fetchAuthenticated(input, init)
+        return await sendAuthenticated(input, init)
       },
       dropWebSocketsForQualification(): void {
         for (const socket of [...sockets]) {
