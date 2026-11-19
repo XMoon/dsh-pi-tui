@@ -388,6 +388,13 @@ function actionBarOf(frame) {
   return ''
 }
 
+/** The page's real Confirm affordability: BOTH wordings the page has used must
+ *  be proven absent, never just the retired one (a regression that exposes the
+ *  live `Confirm [Enter]` must fail this assertion). */
+function hasConfirmAffordance(bar) {
+  return bar.includes('Confirm [Enter]') || bar.includes('Enter confirm')
+}
+
 function regionOf(frame) {
   const bar = actionBarOf(frame)
   // The credential Detail advertises `Enter open in Models` — check the DETAIL
@@ -601,7 +608,7 @@ async function assertInertBilling(client, documentPath, row, expectedValue, expe
   const detail = await waitForCurrentValue(client, expectedValue, `${label} current`)
   assert(detail.includes(expectedNote),
     `${label}: the inert Billing Detail must state its cause ${JSON.stringify(expectedNote)}: ${JSON.stringify(detail)}`)
-  assert(!actionBarOf(await frameOf(client)).includes('Enter confirm'),
+  assert(!hasConfirmAffordance(actionBarOf(await frameOf(client))),
     `${label}: an inert Billing row advertised a Confirm affordance: ${JSON.stringify(actionBarOf(await frameOf(client)))}`)
   const before = snapshot(namespaceConfig(documentPath, WEB_API_NS))
   client.send('\r')
@@ -964,7 +971,7 @@ export async function runWebProviderSettingsF3(context) {
       `UI_L6 override: the Search API Override row must paint the real masked Host fact: ${JSON.stringify(overridePane)}`)
     assert(!overridePane.includes('f3-masked') && !overridePane.includes('token='),
       `UI_L6 override: the raw override value (userinfo/query) reached the pane: ${JSON.stringify(overridePane)}`)
-    assert(!actionBarOf(await frameOf(clientA)).includes('Enter confirm'),
+    assert(!hasConfirmAffordance(actionBarOf(await frameOf(clientA))),
       'UI_L6 A search override: a read-only YAML-only row advertised a Confirm affordance')
     clientA.send('\r')
     await sleep(700)
@@ -1117,13 +1124,24 @@ export async function runWebProviderSettingsF3(context) {
       'UI_L6 automatic: the official user layer must not carry a searchProvider')
     await reopenWebPage(clientA, 'UI_L6 automatic A re-read')
     await waitForScreenText(clientA, 'Current: Automatic', 'UI_L6 automatic page current fact')
+    // The official Settings revision is the authoritative mutation ingress: it
+    // is read before and after the inert Enter, so a page that silently exposed
+    // Confirm (and a command that accepted it) cannot pass on an unchanged
+    // document snapshot alone.
+    const automaticBefore = await requestWebProvider(root, 'observe', undefined,
+      'UI_L6 automatic revision before')
     await assertInertBilling(clientA, documentPath, ROW.searchBilling, 'Not selected',
       'Billing is EDITABLE HERE', 'UI_L6 automatic billing route gate')
+    const automaticAfter = await requestWebProvider(root, 'observe', undefined,
+      'UI_L6 automatic revision after')
+    assert(automaticAfter.revision === automaticBefore.revision,
+      `UI_L6 automatic: the inert Billing row mutated the official Settings (revision ${String(automaticBefore.revision)} -> ${String(automaticAfter.revision)})`)
     trace('f3.ui-l6', {
       verdict: 'UI_L6_PASS',
       phase: 'automatic-billing-inert',
       searchProvider: 'Automatic',
       confirmed: false,
+      settingsRevision: [automaticBefore.revision, automaticAfter.revision],
       hostWrites: 0,
     })
 
@@ -1133,22 +1151,32 @@ export async function runWebProviderSettingsF3(context) {
       `UI_L6 custom: the official Host must keep the custom id: ${JSON.stringify(customWeb)}`)
     await reopenWebPage(clientA, 'UI_L6 custom A re-read')
     await waitForScreenText(clientA, CUSTOM_SEARCH_PROVIDER, 'UI_L6 custom page current fact')
+    const customBefore = await requestWebProvider(root, 'observe', undefined,
+      'UI_L6 custom revision before')
     await assertInertBilling(clientA, documentPath, ROW.searchBilling, 'Not selected',
       'Billing is EDITABLE HERE', 'UI_L6 custom billing route gate')
+    const customAfter = await requestWebProvider(root, 'observe', undefined,
+      'UI_L6 custom revision after')
+    assert(customAfter.revision === customBefore.revision,
+      `UI_L6 custom: the inert Billing row mutated the official Settings (revision ${String(customBefore.revision)} -> ${String(customAfter.revision)})`)
     trace('f3.ui-l6', {
       verdict: 'UI_L6_PASS',
       phase: 'custom-billing-inert',
       searchProvider: CUSTOM_SEARCH_PROVIDER,
       confirmed: false,
+      settingsRevision: [customBefore.revision, customAfter.revision],
       hostWrites: 0,
     })
 
     // Restore the explicit official provider so the later override/restore
-    // phases keep a writable Billing row.
+    // phases keep a writable Billing row. This successful mutation is ALSO the
+    // positive calibration of the observation: it must bump the revision.
     const explicitWeb = await requestWebProvider(root, 'explicit', 'deepseek-search-api',
       'UI_L6 restore explicit search provider')
     assert(explicitWeb.searchProvider === 'deepseek-search-api',
       `UI_L6 restore explicit: the official Host must pin the API again: ${JSON.stringify(explicitWeb)}`)
+    assert(explicitWeb.revision > customAfter.revision,
+      `UI_L6 positive calibration: a real official mutation must bump the observed Settings revision (${String(customAfter.revision)} -> ${String(explicitWeb.revision)})`)
 
     // ── 6. Both Clients drop and re-establish their Gateway carrier. ────────
     const documentBeforeReconnect = readFileSync(documentPath, 'utf8')

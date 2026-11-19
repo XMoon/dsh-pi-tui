@@ -1423,9 +1423,14 @@ export async function apply(ctx) {
         const webRequestPath = join(root, 'f3-web-provider-request.json')
         let webRequestBusy = false
         const applyWebProvider = async request => {
-          await ctx.settings.mutate(webNamespace, [request.mode === 'automatic'
-            ? { op: 'unset', path: ['searchProvider'] }
-            : { op: 'set', path: ['searchProvider'], value: String(request.value) }])
+          // `observe` is the AUTHORITATIVE zero-mutation probe: it never calls
+          // the official setter, and reports the namespace revision the smoke
+          // compares across an inert Enter.
+          if (request.mode !== 'observe') {
+            await ctx.settings.mutate(webNamespace, [request.mode === 'automatic'
+              ? { op: 'unset', path: ['searchProvider'] }
+              : { op: 'set', path: ['searchProvider'], value: String(request.value) }])
+          }
           const descriptor = ctx.settings.describe().find(entry => entry.ns === webNamespace)
           const value = plainValue(descriptor)
           record('f3-web-provider', {
@@ -1433,6 +1438,7 @@ export async function apply(ctx) {
             mode: request.mode,
             searchProvider: value?.searchProvider,
             fetchProvider: value?.fetchProvider,
+            revision: descriptor?.revision,
           })
         }
         const webRequestTimer = setInterval(() => {
