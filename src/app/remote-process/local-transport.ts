@@ -736,8 +736,17 @@ function assertIdentityStillCurrent(scope: LocalScope, expected: LocalInstanceRe
   assertRecordedHostKernelIdentityCurrent(expected)
 }
 
-/** Wait for a set of sockets to close, bounded so disposal cannot park forever. */
-async function closeRemainingSockets(sockets: Set<RawSocket>): Promise<void> {
+/**
+ * Wait for a set of sockets to close, bounded so disposal cannot park forever.
+ * The timeout is a HANG PROTECTION, not a second socket owner: the losing timer
+ * is cancelled on every path so a normally closed socket leaves no referenced
+ * Node handle behind disposal.
+ */
+export async function closeRemainingSockets(
+  sockets: Set<RawSocket>,
+  diag: Diag,
+  timeoutMs = 2_000,
+): Promise<void> {
   if (sockets.size === 0) return
   const closures: Promise<void>[] = []
   for (const socket of sockets) {
@@ -748,10 +757,56 @@ async function closeRemainingSockets(sockets: Set<RawSocket>): Promise<void> {
     }))
   }
   if (closures.length === 0) return
-  await Promise.race([
-    Promise.all(closures),
-    new Promise<void>(resolve => setTimeout(resolve, 2_000)),
-  ])
+  const startedAt = performance.now()
+  // The timeout is a BOUND on a genuinely hung close, not a second owner of
+  // the socket lifecycle: once the close promise wins, the losing timer must
+  // be cancelled or it keeps a referenced Node handle alive past disposal.
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const deadline = new Promise<void>(resolve => {
+    timer = setTimeout(resolve, timeoutMs)
+  })
+  try {
+    await Promise.race([Promise.all(closures), deadline])
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
+  }
+  diag.debug('local transport: remaining sockets settled', {
+    sockets: sockets.size,
+    durationMs: Math.round((performance.now() - startedAt) * 10) / 10,
+  })
+}
+
+/**
+ * Dispose ONE official Fiber under its ORIGINAL hang budget. This is a fault
+ * bound, never a second completion path: the timer is cancelled when the Fiber
+ * settles or rejects so a normal disposal cannot leave a referenced 5s handle
+ * keeping the Client process alive.
+ */
+export async function disposeFiberWithinDeadline(
+  fiber: { dispose(): Promise<unknown> },
+  label: string,
+  diag: Diag,
+  timeoutMs = 5_000,
+): Promise<void> {
+  const startedAt = performance.now()
+  let timedOut = false
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      timedOut = true
+      reject(new Error(`local transport: ${label} disposal timed out`))
+    }, timeoutMs)
+  })
+  try {
+    await Promise.race([fiber.dispose(), deadline])
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
+    diag.debug('local transport: fiber disposal settled', {
+      fiber: label,
+      timedOut,
+      durationMs: Math.round((performance.now() - startedAt) * 10) / 10,
+    })
+  }
 }
 
 /**
@@ -863,7 +918,7 @@ export async function installLocalTransport(
       }
     }
     try {
-      await closeRemainingSockets(sockets)
+      await closeRemainingSockets(sockets, diag)
     } catch (error) {
       errors.push(error)
     }
@@ -874,12 +929,7 @@ export async function installLocalTransport(
     ] as const) {
       if (fiber === undefined) continue
       try {
-        await Promise.race([
-          fiber.dispose(),
-          new Promise((_, reject) => {
-            setTimeout(() => reject(new Error(`local transport: ${label} disposal timed out`)), 5_000)
-          }),
-        ])
+        await disposeFiberWithinDeadline(fiber, label, diag)
       } catch (error) {
         errors.push(error)
       }

@@ -579,9 +579,27 @@ export async function runNonDestructiveClientLifecycle(context) {
       assertClientHostFacts(aBackOnX.host, hostBefore, 'M5N2 A back on X')
       const sessionsBeforeExit = hostSessionLogCount(dshHome)
       const aPid = aReady.pid
+      // B3: the ordinary exit must reach the REAL OS exit, not just disappear
+      // from the screen. The Client's own private records prove the disposal
+      // chain settled (cleanup-complete, no cleanup-failure) and the PID-gone
+      // wait proves the process itself left. Durations are TRACED, never a
+      // hard-coded CI performance assertion.
+      const exitRequestedAt = performance.now()
       await exitC1Client(clientA, 'M5N2 A')
       await waitGone(aPid, 15_000)
+      const exitObservedAt = performance.now()
       assert(!alive(aPid), 'M5N2 Client A survived its exit')
+      const shutdownRecords = clientA.records.filter(record => record.m4a0 === 'shutdown-stage')
+      assert(shutdownRecords.some(record => record.phase === 'cleanup-complete'),
+        'M5N2 the Client exit never reported its completed cleanup chain')
+      assert(!clientA.records.some(record => record.m4a0 === 'cleanup-failure'),
+        'M5N2 the Client exit reported a cleanup failure while the process still exited 0')
+      trace('m5n2-client-exit-timing', {
+        requestToPidGoneMs: Math.round(exitObservedAt - exitRequestedAt),
+        cleanupCompleteAtMs: shutdownRecords.find(record => record.phase === 'cleanup-complete')?.atMs,
+        clientClosed: clientA.records.some(record => record.m4b2s === 'client-closed'),
+        cleanupFailure: false,
+      })
       assert(alive(bReady.pid) && alive(hostBefore.hostPid), 'M5N2 the Client exit killed the Host or the second Client')
       assert(hostSessionLogCount(dshHome) === sessionsBeforeExit,
         'M5N2 the Client exit created or removed a durable Session')

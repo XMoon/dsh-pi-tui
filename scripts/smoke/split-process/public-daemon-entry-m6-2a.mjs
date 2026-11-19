@@ -266,9 +266,18 @@ export async function runPublicDaemonEntry({ installation, trace }) {
     assert(status.fields.unit === 'none', `daemon status invented an installed unit: ${JSON.stringify(status.fields)}`)
     trace('m6-2a-public-daemon-mounted', { host: counts.host, client: counts.client, manager: status.fields.manager, userManager: status.fields['user-manager'] })
     // Exit the real TUI through the ordinary /exit key path.
+    const exitRequestedAt = Date.now()
     positive.child.stdin.write('/exit\r')
     const exit = await Promise.race([positive.exit, sleep(60_000).then(() => ({ code: 'timeout', signal: null }))])
+    const supervisorExitedAt = Date.now()
     assert(exit.code === 0, `public-entry daemon: /exit exited ${JSON.stringify(exit)}`)
+    // B3: the supervisor's own exit is not enough. The ONE foreground Client
+    // must be a REAL exited OS process by the time the supervisor is gone
+    // (the supervisor holds its child disposal, so a live Client here is a
+    // false success). The duration is traced, never a hard-coded CI SLA.
+    assert(processCounts(dshHome).client === 0,
+      'public-entry daemon: the supervisor exited while its Client was still alive')
+    trace('m6-2a-public-daemon-exit', { requestToSupervisorExitMs: supervisorExitedAt - exitRequestedAt, clientPidGone: true })
   } finally {
     await reap(positive.child, installation)
   }

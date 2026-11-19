@@ -399,3 +399,129 @@ test('an unexpected management throw is a sanitized non-zero failure', async () 
   assert.match(stderr.join(''), /MANAGER_OR_OS_FAILURE/u)
   assert.doesNotMatch(stderr.join(''), /raw secret|\/home\/u/u)
 })
+
+// ── B3: the budget deadline is a fallback, never a lingering referenced timer ──
+
+/**
+ * Track timers created/cancelled during ONE operation (the local timer adapter).
+ * A cleared timer disappears from `live` immediately, so the assertions prove
+ * CANCELLATION of the deadline under test instead of relying on a process-wide
+ * handle inspection.
+ */
+function trackTimers(): { live(): number; restore(): void } {
+  const live = new Set<ReturnType<typeof setTimeout>>()
+  const realSetTimeout = globalThis.setTimeout
+  const realClearTimeout = globalThis.clearTimeout
+  globalThis.setTimeout = ((handler: (...args: never[]) => void, timeout?: number, ...args: never[]) => {
+    const handle = realSetTimeout(handler as never, timeout, ...args)
+    live.add(handle)
+    return handle
+  }) as unknown as typeof setTimeout
+  globalThis.clearTimeout = ((handle?: ReturnType<typeof setTimeout> | number | string) => {
+    if (handle !== undefined) live.delete(handle as ReturnType<typeof setTimeout>)
+    return realClearTimeout(handle as ReturnType<typeof setTimeout>)
+  }) as unknown as typeof clearTimeout
+  return {
+    live: () => live.size,
+    restore: () => {
+      globalThis.setTimeout = realSetTimeout
+      globalThis.clearTimeout = realClearTimeout
+    },
+  }
+}
+
+test('B3-U3: a child that exits after SIGTERM leaves NO referenced budget timer behind', async () => {
+  const { spawnImpl, children } = fakeSpawn()
+  const exitCodes: number[] = []
+  const timers = trackTimers()
+  try {
+    const c = coordinator(children, exitCodes, spawnImpl)
+    c.start()
+    children[0].autoExitSignal = 'SIGTERM'
+    assert.equal(await c.dispose(), true)
+    assert.equal(timers.live(), 0,
+      'the losing SIGTERM-phase deadline must be cancelled after the child really exited')
+    assert.deepEqual(children[0].kills, ['SIGTERM'], 'the early exit path never escalates')
+  } finally {
+    timers.restore()
+  }
+})
+
+test('B3-U3-ESCALATION: a SIGKILL exit also releases both phase deadlines', async () => {
+  const { spawnImpl, children } = fakeSpawn()
+  const exitCodes: number[] = []
+  const timers = trackTimers()
+  try {
+    const c = coordinator(children, exitCodes, spawnImpl, { shutdownBudgetMs: 80 })
+    c.start()
+    children[0].autoExitSignal = 'SIGKILL'
+    assert.equal(await c.dispose(), true)
+    assert.equal(timers.live(), 0, 'the escalated path leaves no phase deadline either')
+    assert.deepEqual(children[0].kills, ['SIGTERM', 'SIGKILL'])
+  } finally {
+    timers.restore()
+  }
+})
+
+test('B3-U3-NEG: an unresponsive child still consumes the whole budget and keeps the fatal result', async () => {
+  const { spawnImpl, children } = fakeSpawn()
+  const exitCodes: number[] = []
+  const fatalLines: string[] = []
+  const timers = trackTimers()
+  try {
+    const c = coordinator(children, exitCodes, spawnImpl, { shutdownBudgetMs: 60, reportFatal: (line: string) => { fatalLines.push(line) } })
+    c.start()
+    assert.equal(await c.dispose(), false, 'the timeout path must NOT report success')
+    assert.equal(timers.live(), 0, 'even a fired budget deadline is cleared after the race settles')
+    assert.equal(fatalLines.length, 1)
+    assert.match(fatalLines[0], /did not exit after SIGKILL/u)
+  } finally {
+    timers.restore()
+  }
+})
+
+test('B3-U4: a settled management operation leaves NO referenced 4s shutdown timer', async () => {
+  const exitCodes: number[] = []
+  let exited: (() => void) | undefined
+  const settled = new Promise<void>(resolve => { exited = resolve })
+  const timers = trackTimers()
+  try {
+    const runner = new DaemonControlRunner({
+      run: async () => ({ code: 0, stdout: '', stderr: '' }),
+      appExit: code => { exitCodes.push(code); exited?.() },
+      writeStdout: () => {},
+      writeStderr: () => {},
+    })
+    runner.start()
+    await settled
+    assert.equal(await runner.dispose(), true)
+    assert.equal(timers.live(), 0,
+      'a completed management command must not keep its losing 4s budget timer alive')
+  } finally {
+    timers.restore()
+  }
+})
+
+test('B3-U4-NEG: a hung management operation still takes the whole budget and reports the failure', async () => {
+  const exitCodes: number[] = []
+  const fatalLines: string[] = []
+  const timers = trackTimers()
+  try {
+    const runner = new DaemonControlRunner({
+      run: () => new Promise(() => {}),
+      appExit: code => { exitCodes.push(code) },
+      writeStdout: () => {},
+      writeStderr: () => {},
+      reportFatal: line => { fatalLines.push(line) },
+      shutdownBudgetMs: 20,
+    })
+    runner.start()
+    assert.equal(await runner.dispose(), false)
+    assert.equal(timers.live(), 0, 'the fired deadline is released after the abnormal result')
+    assert.equal(exitCodes.length, 0, 'a late operation never requests an exit after disposal')
+    assert.equal(fatalLines.length, 1)
+    assert.match(fatalLines[0], /did not settle within the shutdown budget/u)
+  } finally {
+    timers.restore()
+  }
+})

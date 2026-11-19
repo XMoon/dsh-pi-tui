@@ -145,8 +145,6 @@ export function buildChildEnvironment(
   return env
 }
 
-function sleep(ms: number): Promise<void> { return new Promise(resolve => setTimeout(resolve, ms)) }
-
 /** The child-exit mapping: a real code, or 128+signal when the child was signalled. */
 function exitCodeFor(code: number | null, signal: NodeJS.Signals | null): number {
   if (code !== null) return code
@@ -269,15 +267,33 @@ export class DaemonCoordinator {
       // that never stops the child cannot consume the whole budget.
       const killReserve = Math.min(1000, Math.max(50, Math.floor(this.shutdownBudgetMs * 0.25)))
       const killAt = budgetEnd - killReserve
-      const waitExitUntil = (absoluteDeadline: number): Promise<boolean> => Promise.race([
-        exited.then(() => true),
-        sleep(Math.max(0, absoluteDeadline - Date.now())).then(() => false),
-      ])
+      const disposeStartedAt = performance.now()
+      // The budget deadline is a LOSSING fallback, never a second completion
+      // path: cancel its timer whenever the child's real exit wins, otherwise
+      // the supervisor keeps a referenced timer alive after the child is gone.
+      const waitExitUntil = async (absoluteDeadline: number): Promise<boolean> => {
+        let timer: ReturnType<typeof setTimeout> | undefined
+        const deadline = new Promise<boolean>(resolve => {
+          timer = setTimeout(() => resolve(false), Math.max(0, absoluteDeadline - Date.now()))
+        })
+        try {
+          return await Promise.race([exited.then(() => true), deadline])
+        } finally {
+          if (timer !== undefined) clearTimeout(timer)
+        }
+      }
       try { child.kill('SIGTERM') } catch { /* already gone */ }
-      if (await waitExitUntil(killAt)) return true
+      const sigtermWaitAt = performance.now()
+      if (await waitExitUntil(killAt)) {
+        this.diag.debug('pi-tui daemon: client exited after SIGTERM', { durationMs: Math.round((performance.now() - sigtermWaitAt) * 10) / 10 })
+        return true
+      }
       // Escalate within the SAME budget; the total never exceeds shutdownBudgetMs.
       try { child.kill('SIGKILL') } catch { /* already gone */ }
-      if (await waitExitUntil(budgetEnd)) return true
+      if (await waitExitUntil(budgetEnd)) {
+        this.diag.debug('pi-tui daemon: client exited after SIGKILL', { durationMs: Math.round((performance.now() - disposeStartedAt) * 10) / 10 })
+        return true
+      }
       // A child that never exits inside the unified budget is an ABNORMAL cleanup
       // result, never reported as success: return false and surface a sanitized
       // line. NOTE: the official DSH SIGTERM shutdown calls shutdown.interrupt(0)
@@ -380,10 +396,19 @@ export class DaemonControlRunner {
   async dispose(): Promise<boolean> {
     this.disposed = true
     if (this.operation === undefined) return true
-    const settled = await Promise.race([
-      this.operation.then(() => true, () => true),
-      sleep(this.shutdownBudgetMs).then(() => false),
-    ])
+    // The budget deadline is only the abnormal-hang fallback: a completed
+    // management operation must not keep a referenced 4s timer (or the parent
+    // process) alive after it settled.
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const deadline = new Promise<boolean>(resolve => {
+      timer = setTimeout(() => resolve(false), this.shutdownBudgetMs)
+    })
+    let settled: boolean
+    try {
+      settled = await Promise.race([this.operation.then(() => true, () => true), deadline])
+    } finally {
+      if (timer !== undefined) clearTimeout(timer)
+    }
     if (!settled) this.reportFatal('dsh-pi-tui: the daemon management operation did not settle within the shutdown budget')
     return settled
   }
