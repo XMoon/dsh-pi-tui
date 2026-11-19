@@ -19,27 +19,13 @@ import {
 import { TranscriptFolder } from '../../src/transcript.ts'
 import { TranscriptWindowController } from '../../src/domain/transcript/window.ts'
 import { createPluginManagerWorkspacePanel } from '../../src/tui/plugin-manager/workspace.ts'
-import type { DeliveredFilesCapability, DeliveredFilesSnapshot } from '../../src/domain/deliverables/catalog.ts'
+import type { DeliveredFilesCapability } from '../../src/domain/deliverables/catalog.ts'
 
 /** The capability stub: present (so the tail keeps its capped disclosure and
  *  `/deliverables` entry) but with no catalog behind it. */
 export const deliveredFilesCapabilityStub: DeliveredFilesCapability = {
   snapshot: () => undefined,
   isCurrent: () => false,
-}
-
-/** One snapshot-backed capability over a fixed catalog, for fixtures that need
- *  the real reading path (currentness answers `true` until invalidated). */
-export function deliveredFilesCapabilityFor(
-  snapshot: DeliveredFilesSnapshot,
-): DeliveredFilesCapability & { readonly current: () => boolean; invalidate(): void } {
-  let current = true
-  return {
-    snapshot: () => (current ? snapshot : undefined),
-    isCurrent: (candidate) => current && candidate === snapshot,
-    current: () => current,
-    invalidate: () => { current = false },
-  }
 }
 
 /** One declared delivery for the folder fixture. */

@@ -775,6 +775,52 @@ it never changes the current listener, and its Detail states that explicitly.
 On Direct the runtime row is a truthful Unavailable while the persisted
 preference stays editable for the Split Host the user may later start.
 
+## ACP quick control (`/acp`)
+
+`/acp` is ONE local, sessionless Client command that controls the Split Host's
+local ACP v1 Unix-socket listener. It never creates a Session or Agent, submits
+a prompt, opens a browser or a Host, changes the default backend or disconnects
+the TUI; on the Direct backend it answers
+`ACP server controls are available only in a Split Client.` and opens nothing.
+The menu is a SHORT operation list, never a second Settings workspace: the
+default PiTui presentation is one `app.openSettings` overlay, and the TSP
+renderer presents one native `ui.picker` plus ONE read-only Details Reading.
+Both consume the SAME application-level presentation request, so the action
+vocabulary cannot fork between renderers.
+
+The menu reads the Host's current listener state on entry through the existing
+private `piTuiAcpAccess` port and offers exactly what that state admits:
+
+| Host state | Menu actions | What an action really does |
+|---|---|---|
+| `disabled` | Enable ACP, Details | the Host's own `setEnabled(true)` |
+| `enabled` | Disable ACP, Details | the Host's own `setEnabled(false)` |
+| `changing` | Details (no write) | nothing concurrent is submitted |
+| `unavailable` | Details (the reason is shown) | no implicit recovery or retry |
+| connection unreadable | the explicit unavailable statement, esc | no guessed Off, no write |
+
+Every operation is committed by the command, never by the presenter: one Host
+call, then ONE authoritative status re-read whose result is what the menu
+re-projects. The command binds the mutation to the Connection generation that
+produced the visible state, so an old menu cannot write to a newly connected
+Host; a refused write is stated once and never retried automatically. A
+dismissal retires the menu only and never undoes a Host-accepted change.
+
+Details is read-only and states that the host is the local Split Host for the
+same OS user with no TCP/HTTP, the current state, that enable/disable serves or
+retires this Host's listener, that `Start ACP automatically` in
+`/settings → General` applies on the next Host start, and that closing an ACP
+View only detaches it. No socket path, credential, cookie or private bind name
+enters the menu or Details; headless endpoint discovery stays `daemon status`.
+
+`/acp` and `/settings → Tools → ACP Server` share the same Host controller but
+remain independent entries: `/acp` is the immediate quick control and the
+Settings row stays the runtime control inside Settings. The persisted
+`pi-tui-acp-preferences.autoStart` preference remains a DIFFERENT authority
+(`/settings → General → Start ACP automatically`) and is never written by
+`/acp`. The TUI command never calls the daemon status HTTP route, and the daemon
+status command never opens a TUI.
+
 ## Save Location
 
 `/export` and `/transcript` open the ONE Client-local Save Location prompt in
@@ -1215,11 +1261,16 @@ specialist-page contract below).
 
   Authority is the Host `web` / `web-deepseek-api` sections through the
   `WebProviderConfig` read and its provider/count/question/Billing setters. The
-  provider choices are the official identities `Messages`↔`deepseek-official`
-  and `HTTP`↔`http`, plus the separately billed `DeepSeek Search API` /
-  `DeepSeek Fetch API`. With no explicit stored `web.searchProvider` the
-  official default is DeepSeek Search API; the page states that as an effective
-  default and never writes it merely to display it. A configured provider id
+  provider choices are the official identities `DeepSeek server-side
+  search`↔`deepseek-official` and `HTTP`↔`http`, plus the separately billed
+  `DeepSeek Search API` / `DeepSeek Fetch API`. HOST SELECTION IS AUTHORITATIVE:
+  an absent `web.searchProvider`/`web.fetchProvider` is no explicit provider —
+  the Host's AUTOMATIC routing state, and supported Host versions may choose the
+  actual provider per request based on the served model route (supported Host
+  versions may decide the automatic routing differently). The page paints that absence as
+  `Automatic`, never precomputes which provider one request would consume and
+  never writes a provider merely to display it; an explicitly configured id
+  always takes precedence. A configured provider id
   outside those candidates is a CUSTOM route: it is displayed verbatim, it is
   never replaced by a default and the page offers NO confirmable candidate for
   it. The count row offers the `5/10/20/50` presets while the official domain
@@ -1229,8 +1280,12 @@ specialist-page contract below).
   characters of the triggering human question as `ori_question`, never the full
   history or system prompt). `Search Billing` and `Fetch Billing` are two
   independent Host fields over the official closed enum `auto`/`account`/
-  `api-key`; each may be set only while its capability is selected and has no
-  advanced Host override. `auto` follows the current conversation's DeepSeek
+  `api-key`; each is editable ONLY while its official API provider is the
+  EXPLICITLY selected route and has no advanced Host override — under the
+  AUTOMATIC provider state the dedicated Billing row is read-only here with ZERO
+  writes (the official Client's product policy), because the Host may still
+  execute the billed API for other models' requests; a stored Billing mode is
+  kept, never deleted or reset. `auto` follows the current conversation's DeepSeek
   route and is not a claim that `DEEPSEEK_API_KEY` is configured. The two
   Override rows are READ-ONLY Host YAML facts: when set they name the official
   field/value the Host really uses (`searchBaseURL`/`searchApiKeyEnv` or
@@ -1263,7 +1318,10 @@ specialist-page contract below).
   a verdict; a newer read is awaited first, and a page closed mid-write only
   loses its own repaint — the dispatched Host operation still settles in the
   command owner. Confirming a value the authority already holds performs NO
-  setter (the official auto-selection already applies the default candidate).
+  setter (that states the current fact, never a promise about the stored USER
+  layer); the AUTOMATIC (absent) provider state never satisfies an explicit
+  candidate — confirming one always issues the ONE real setter and verifies
+  from the fresh read-back.
   `Loading…` on page entry or `r` is a real pending state, never a last-known
   value presented as current; every read that settles refreshes the Tools row
   summary and the mounted page from the same facts.

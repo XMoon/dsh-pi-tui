@@ -888,10 +888,11 @@ export async function ensureLocalHost(options: EnsureLocalHostOptions): Promise<
     return await authenticateLocalHost(existing, scope, options.signal)
   }
 
-  // Both public policies go through the cross-platform entry: macOS has no
-  // systemd user manager and detached-spawns there, while Linux delegates to
-  // the D0 installed-unit decision. A direct startPublicHostCandidate call here
-  // would reject Darwin before any Host could be spawned.
+  // Both public policies go through the cross-platform entry: Linux delegates
+  // to the D0 installed-unit decision, while macOS keeps the detached Host when
+  // no owned LaunchAgent is installed and otherwise starts through it. A direct
+  // startPublicHostCandidate call here would reject Darwin before any Host
+  // could be spawned.
   const spawnFailure = options.hostStartPolicy === 'public' || options.hostStartPolicy === 'public-managed'
     ? await startManagedHostCandidate(options)
     : spawnHostCandidate(options)

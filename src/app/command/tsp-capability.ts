@@ -23,12 +23,12 @@
  * The unconditional set is the exit pair plus the PR4-B2-A business builtins
  * whose ENTIRE outcome is carried by the existing business owner (Session
  * runtime, SessionWriter, permission writer, credential port, clipboard
- * policy) and needs no PiTui pane. Native Model, Preset and Session Browser
- * commands are admitted only when their mounted presenters are available, and
- * the Task Center family (`/tasks` + `/subagents`) only when the mounted
- * renderer's ONE Task Center capability is present; every other TUI builtin is
- * refused. `/logout` is the ONE input-shaped member: only its explicit-target
- * form is admitted (see the predicate).
+ * policy) and needs no PiTui pane. Native Model, Preset, ACP and Session
+ * Browser commands are admitted only when their mounted presenters are
+ * available, and the Task Center family (`/tasks` + `/subagents`) only when the
+ * mounted renderer's ONE Task Center capability is present; every other TUI
+ * builtin is refused. `/logout` is the ONE input-shaped member: only its
+ * explicit-target form is admitted (see the predicate).
  * @module @xmoon76/dsh-pi-tui/app/command/tsp-capability
  */
 
@@ -123,6 +123,14 @@ export interface TspBuiltinPickers {
   readonly modelPicker?: boolean
   readonly presetPicker?: boolean
   readonly sessionBrowser?: boolean
+  /**
+   * PO-5E: the mounted renderer installed the native `/acp` picker (ONE
+   * `ui.picker` + ONE read-only Details overlay). `/acp` is a Split-Client
+   * runtime control whose ONLY UI is that presenter, so an unnegotiated pane
+   * must refuse it before the handler — never run a handler that would open a
+   * page the client cannot present.
+   */
+  readonly acpPicker?: boolean
   /**
    * B3-A3: the mounted renderer's ONE Task Center reachability truth
    * (`SurfaceDisplaySeam.supportsTaskCenter`). The `/tasks` + `/subagents`
@@ -222,6 +230,7 @@ export function tspSelectedTuiBuiltinAvailability(
   if (name === 'queue') return pickers.queueManager === true ? { kind: 'available' } : { kind: 'unsupported' }
   return (name === 'model' && pickers.modelPicker === true)
     || (name === 'preset' && pickers.presetPicker === true)
+    || (name === 'acp' && pickers.acpPicker === true)
     || ((name === 'sessions' || name === 'resume' || name === 'search') && pickers.sessionBrowser === true)
     ? { kind: 'available' }
     : { kind: 'unsupported' }

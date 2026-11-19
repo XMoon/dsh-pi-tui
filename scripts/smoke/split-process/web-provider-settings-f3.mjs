@@ -14,7 +14,7 @@
  *      nine-row page, and Client B reads the same Host facts — neither Client
  *      paints a locally guessed value (the page stays `Loading…` until the
  *      Host read answers, and `Unavailable` when it does not);
- *   2. both providers are edited through the real page (`Messages` and
+ *   2. both providers are edited through the real page (`DeepSeek server-side search` and
  *      `HTTP`, then back to the two API providers): each is ONE verified
  *      official Settings CAS mutation, and a Billing row whose API provider is
  *      not the current route shows `Not selected` and offers no write;
@@ -157,7 +157,7 @@ const SEARCH_OVERRIDE_FACT = `searchBaseURL=${SEED_BASE_URL_MASKED}`
 const OVERRIDE_UNSET_FACT = 'Host YAML: not set'
 const SEARCH_API_PROVIDER_LABEL = 'DeepSeek Search API'
 const FETCH_API_PROVIDER_LABEL = 'DeepSeek Fetch API'
-const MESSAGES_PROVIDER_LABEL = 'Messages'
+const MESSAGES_PROVIDER_LABEL = 'DeepSeek server-side search'
 const HTTP_PROVIDER_LABEL = 'HTTP'
 const COUNT_CANDIDATES = ['5', '10', '20', '50']
 const QUESTION_ON = 0
@@ -165,6 +165,8 @@ const QUESTION_OFF = 1
 /** The fixture's ONE official late-override control file (under the private
  *  C1 work root): `{ nonce, op: 'set' | 'clear' }`. */
 const OVERRIDE_REQUEST_FILE = 'f3-search-override-request.json'
+const WEB_PROVIDER_REQUEST_FILE = 'f3-web-provider-request.json'
+const CUSTOM_SEARCH_PROVIDER = 'acme-search'
 /** The official settings sections the page owns. */
 const WEB_NS = 'web'
 const WEB_API_NS = 'web-deepseek-api'
@@ -386,6 +388,25 @@ function actionBarOf(frame) {
   return ''
 }
 
+/** The Host fixture's TEST-ONLY mutation-ingress counters: a snapshot that must
+ *  be equal across an inert Enter (ZERO official mutation calls) and must grow
+ *  by one for the same field on a real Billing confirm (positive calibration). */
+function billingMutationsOf(event) {
+  return event.mutationCounts?.[`${WEB_API_NS}:searchBilling`] ?? 0
+}
+
+function totalMutationsOf(event) {
+  const counts = event.mutationCounts ?? {}
+  return Object.values(counts).reduce((sum, value) => sum + (typeof value === 'number' ? value : 0), 0)
+}
+
+/** The page's real Confirm affordability: BOTH wordings the page has used must
+ *  be proven absent, never just the retired one (a regression that exposes the
+ *  live `Confirm [Enter]` must fail this assertion). */
+function hasConfirmAffordance(bar) {
+  return bar.includes('Confirm [Enter]') || bar.includes('Enter confirm')
+}
+
 function regionOf(frame) {
   const bar = actionBarOf(frame)
   // The credential Detail advertises `Enter open in Models` — check the DETAIL
@@ -537,15 +558,17 @@ function assertNamespaceWrite(documentPath, ns, before, assertConfig, label) {
   return snapshot(after)
 }
 
-/** The official Settings service PRUNES a `web` user layer when every value
- *  equals the shipped default. The effective value is then the default; a
- *  missing section is a PASS, not a lost write. */
+/** The official Settings service persists the EXACT requested field; the
+ *  assertion compares the field's PRESENCE (own property) AND its raw
+ *  content, because an ABSENT `web.searchProvider` is the rc.5 Host's
+ *  AUTOMATIC routing state — "absent before, explicit API now" must never
+ *  read as no-change (and no legacy default is substituted anywhere). */
 function assertWebEffective(documentPath, expected, label) {
   const after = namespaceConfig(documentPath, WEB_NS) ?? {}
-  assert((after.searchProvider ?? 'deepseek-search-api') === expected.searchProvider,
-    `${label}: effective searchProvider must be ${expected.searchProvider}: ${JSON.stringify(after)}`)
-  assert((after.fetchProvider ?? 'http') === expected.fetchProvider,
-    `${label}: effective fetchProvider must be ${expected.fetchProvider}: ${JSON.stringify(after)}`)
+  assert(Object.hasOwn(after, 'searchProvider') && after.searchProvider === expected.searchProvider,
+    `${label}: effective searchProvider must be the explicit ${expected.searchProvider}: ${JSON.stringify(after)}`)
+  assert(Object.hasOwn(after, 'fetchProvider') && after.fetchProvider === expected.fetchProvider,
+    `${label}: effective fetchProvider must be the explicit ${expected.fetchProvider}: ${JSON.stringify(after)}`)
 }
 
 /** The rc.2 `web-deepseek-api` schema NEVER writes the retired single-endpoint
@@ -597,7 +620,7 @@ async function assertInertBilling(client, documentPath, row, expectedValue, expe
   const detail = await waitForCurrentValue(client, expectedValue, `${label} current`)
   assert(detail.includes(expectedNote),
     `${label}: the inert Billing Detail must state its cause ${JSON.stringify(expectedNote)}: ${JSON.stringify(detail)}`)
-  assert(!actionBarOf(await frameOf(client)).includes('Enter confirm'),
+  assert(!hasConfirmAffordance(actionBarOf(await frameOf(client))),
     `${label}: an inert Billing row advertised a Confirm affordance: ${JSON.stringify(actionBarOf(await frameOf(client)))}`)
   const before = snapshot(namespaceConfig(documentPath, WEB_API_NS))
   client.send('\r')
@@ -622,6 +645,22 @@ async function requestSearchOverride(root, op, label) {
     120_000)
   assert(event.kind === 'f3-search-override',
     `${label}: the Host refused the official YAML-only override mutation: ${JSON.stringify(event)}`)
+  return event
+}
+
+/** Ask the Host fixture to move `web.searchProvider` through ONE official
+ *  Settings mutation: `automatic` (unset), `custom` (a non-official id), or an
+ *  explicit official id. The event is nonce-matched like the override control. */
+async function requestWebProvider(root, mode, value, label) {
+  const nonce = `f3-web-${mode}-${String(Date.now())}-${String(Math.random()).slice(2, 8)}`
+  writeFileSync(join(root, WEB_PROVIDER_REQUEST_FILE),
+    JSON.stringify({ nonce, mode, ...(value === undefined ? {} : { value }) }), { mode: 0o600 })
+  const event = await waitForC1WorkEvent(root,
+    entry => (entry.kind === 'f3-web-provider' || entry.kind === 'f3-web-provider-failed') && entry.nonce === nonce,
+    label,
+    120_000)
+  assert(event.kind === 'f3-web-provider',
+    `${label}: the Host refused the official search-provider mutation: ${JSON.stringify(event)}`)
   return event
 }
 
@@ -779,15 +818,16 @@ export async function runWebProviderSettingsF3(context) {
     await confirmCandidate(clientA, MESSAGES_PROVIDER_LABEL, 'UI_L6 A search provider write')
     assertNamespaceWrite(documentPath, WEB_NS, beforeSearchProvider, config => {
       assert(config.searchProvider === 'deepseek-official',
-        `UI_L6 A search provider: the official "web" user layer must hold Messages: ${JSON.stringify(config)}`)
+        `UI_L6 A search provider: the official "web" user layer must hold DeepSeek server-side search: ${JSON.stringify(config)}`)
       assert(config.fetchProvider === 'deepseek-fetch-api',
         `UI_L6 A search provider: the Fetch provider must stay unchanged: ${JSON.stringify(config)}`)
       assertNoLegacyEndpointKeys(config, 'UI_L6 A search provider')
     }, 'UI_L6 A search provider')
-    // Messages Search is not the billed Search API: its Billing row is inert
+    // Server-side Search is not the billed Search API: its Billing row is inert
     // and says so instead of pretending to be writable.
     await assertInertBilling(clientA, documentPath, ROW.searchBilling, 'Not selected',
-      'only the DeepSeek Search API uses Search Billing', 'UI_L6 A search billing route gate')
+      'Billing is EDITABLE HERE',
+      'UI_L6 A search billing route gate')
 
     const beforeSearchProviderBack = sectionsSnapshot(documentPath)
     await openWebRow(clientA, ROW.searchProvider, 'UI_L6 A search provider back')
@@ -805,7 +845,8 @@ export async function runWebProviderSettingsF3(context) {
     assertWebEffective(documentPath, { searchProvider: 'deepseek-search-api', fetchProvider: 'http' },
       'UI_L6 A fetch provider')
     await assertInertBilling(clientA, documentPath, ROW.fetchBilling, 'Not selected',
-      'only the DeepSeek Fetch API uses Fetch Billing', 'UI_L6 A fetch billing route gate')
+      'Billing is EDITABLE HERE',
+      'UI_L6 A fetch billing route gate')
 
     const beforeFetchProviderBack = sectionsSnapshot(documentPath)
     await openWebRow(clientA, ROW.fetchProvider, 'UI_L6 A fetch provider back')
@@ -907,6 +948,101 @@ export async function runWebProviderSettingsF3(context) {
       advancedOverrides: 'unset',
     })
 
+    // ── 5d. The REAL Host moves the Search provider to AUTOMATIC and to a
+    // CUSTOM id: the scheduled Billing row must stay inert with ZERO Host
+    // mutations in both states (the A5 matrix's remaining real-path cases).
+    const automaticWeb = await requestWebProvider(root, 'automatic', undefined,
+      'UI_L6 automatic search provider')
+    assert(automaticWeb.searchProvider === undefined,
+      `UI_L6 automatic: the official Host still pins a searchProvider: ${JSON.stringify(automaticWeb)}`)
+    assert(!Object.hasOwn(namespaceConfig(documentPath, WEB_NS) ?? {}, 'searchProvider'),
+      'UI_L6 automatic: the official user layer must not carry a searchProvider')
+    await reopenWebPage(clientA, 'UI_L6 automatic A re-read')
+    await waitForScreenText(clientA, 'Current: Automatic', 'UI_L6 automatic page current fact')
+    // The official Settings revision is the authoritative mutation ingress: it
+    // is read before and after the inert Enter, so a page that silently exposed
+    // Confirm (and a command that accepted it) cannot pass on an unchanged
+    // document snapshot alone.
+    const automaticBefore = await requestWebProvider(root, 'observe', undefined,
+      'UI_L6 automatic revision before')
+    await assertInertBilling(clientA, documentPath, ROW.searchBilling, 'Not selected',
+      'Billing is EDITABLE HERE', 'UI_L6 automatic billing route gate')
+    const automaticAfter = await requestWebProvider(root, 'observe', undefined,
+      'UI_L6 automatic revision after')
+    assert(JSON.stringify(automaticAfter.mutationCounts) === JSON.stringify(automaticBefore.mutationCounts),
+      `UI_L6 automatic: the inert Billing row called the official mutation ingress (${JSON.stringify(automaticBefore.mutationCounts)} -> ${JSON.stringify(automaticAfter.mutationCounts)})`)
+    assert(billingMutationsOf(automaticAfter) === billingMutationsOf(automaticBefore)
+      && totalMutationsOf(automaticAfter) === totalMutationsOf(automaticBefore),
+    'UI_L6 automatic: ZERO official mutation calls are allowed for the inert Billing row')
+    trace('f3.ui-l6', {
+      verdict: 'UI_L6_PASS',
+      phase: 'automatic-billing-inert',
+      searchProvider: 'Automatic',
+      confirmed: false,
+      billingNamespaceRevision: [automaticBefore.apiRevision, automaticAfter.apiRevision],
+      hostWrites: 0,
+    })
+
+    const customWeb = await requestWebProvider(root, 'custom', CUSTOM_SEARCH_PROVIDER,
+      'UI_L6 custom search provider')
+    assert(customWeb.searchProvider === CUSTOM_SEARCH_PROVIDER,
+      `UI_L6 custom: the official Host must keep the custom id: ${JSON.stringify(customWeb)}`)
+    await reopenWebPage(clientA, 'UI_L6 custom A re-read')
+    await waitForScreenText(clientA, CUSTOM_SEARCH_PROVIDER, 'UI_L6 custom page current fact')
+    const customBefore = await requestWebProvider(root, 'observe', undefined,
+      'UI_L6 custom revision before')
+    await assertInertBilling(clientA, documentPath, ROW.searchBilling, 'Not selected',
+      'Billing is EDITABLE HERE', 'UI_L6 custom billing route gate')
+    const customAfter = await requestWebProvider(root, 'observe', undefined,
+      'UI_L6 custom revision after')
+    assert(JSON.stringify(customAfter.mutationCounts) === JSON.stringify(customBefore.mutationCounts),
+      `UI_L6 custom: the inert Billing row called the official mutation ingress (${JSON.stringify(customBefore.mutationCounts)} -> ${JSON.stringify(customAfter.mutationCounts)})`)
+    assert(billingMutationsOf(customAfter) === billingMutationsOf(customBefore)
+      && totalMutationsOf(customAfter) === totalMutationsOf(customBefore),
+    'UI_L6 custom: ZERO official mutation calls are allowed for the inert Billing row')
+    trace('f3.ui-l6', {
+      verdict: 'UI_L6_PASS',
+      phase: 'custom-billing-inert',
+      searchProvider: CUSTOM_SEARCH_PROVIDER,
+      confirmed: false,
+      billingNamespaceRevision: [customBefore.apiRevision, customAfter.apiRevision],
+      hostWrites: 0,
+    })
+
+    // Restore the explicit official provider so the later override/restore
+    // phases keep a writable Billing row.
+    const explicitWeb = await requestWebProvider(root, 'explicit', 'deepseek-search-api',
+      'UI_L6 restore explicit search provider')
+    assert(explicitWeb.searchProvider === 'deepseek-search-api',
+      `UI_L6 restore explicit: the official Host must pin the API again: ${JSON.stringify(explicitWeb)}`)
+
+    // POSITIVE CALIBRATION on the SAME Billing ingress: a real TUI Billing
+    // confirm must bump the observed `web-deepseek-api` revision. Without this
+    // the read-before/read-after equality above could be a dead probe.
+    const billingControlBefore = await requestWebProvider(root, 'observe', undefined,
+      'UI_L6 billing control revision before')
+    await reopenWebPage(clientA, 'UI_L6 billing control A re-read')
+    await openWebRow(clientA, ROW.searchBilling, 'UI_L6 billing control row')
+    await selectCandidate(clientA, 2, 'UI_L6 billing control', BILLING_LABELS['api-key'])
+    await confirmCandidate(clientA, BILLING_LABELS['api-key'], 'UI_L6 billing control write')
+    const billingControlAfter = await requestWebProvider(root, 'observe', undefined,
+      'UI_L6 billing control revision after')
+    assert(billingMutationsOf(billingControlAfter) === billingMutationsOf(billingControlBefore) + 1,
+      `UI_L6 positive calibration: the real TUI Billing confirm must be counted EXACTLY once at the mutation ingress (${String(billingMutationsOf(billingControlBefore))} -> ${String(billingMutationsOf(billingControlAfter))})`)
+    assert(billingControlAfter.apiRevision > billingControlBefore.apiRevision,
+      `UI_L6 positive calibration: a real Billing mutation must bump the observed Billing-namespace revision (${String(billingControlBefore.apiRevision)} -> ${String(billingControlAfter.apiRevision)})`)
+    trace('f3.ui-l6', {
+      verdict: 'UI_L6_PASS',
+      phase: 'billing-mutation-calibration',
+      billing: 'api-key',
+      billingNamespaceRevision: [billingControlBefore.apiRevision, billingControlAfter.apiRevision],
+      hostWrites: 1,
+    })
+    // Restore the Billing mode the earlier phase left behind, so the later
+    // override assertions keep their own baseline.
+    await selectCandidate(clientA, 1, 'UI_L6 billing control restore', BILLING_LABELS.account)
+    await confirmCandidate(clientA, BILLING_LABELS.account, 'UI_L6 billing control restore write')
+
     // ── 5. The Host applies the rc.2 YAML-only Search override (outside the
     // TUI): its row must paint the MASKED read-only fact, Search Billing must
     // become inert with ZERO writes while Fetch Billing stays independently
@@ -942,7 +1078,7 @@ export async function runWebProviderSettingsF3(context) {
       `UI_L6 override: the Search API Override row must paint the real masked Host fact: ${JSON.stringify(overridePane)}`)
     assert(!overridePane.includes('f3-masked') && !overridePane.includes('token='),
       `UI_L6 override: the raw override value (userinfo/query) reached the pane: ${JSON.stringify(overridePane)}`)
-    assert(!actionBarOf(await frameOf(clientA)).includes('Enter confirm'),
+    assert(!hasConfirmAffordance(actionBarOf(await frameOf(clientA))),
       'UI_L6 A search override: a read-only YAML-only row advertised a Confirm affordance')
     clientA.send('\r')
     await sleep(700)
@@ -1052,18 +1188,21 @@ export async function runWebProviderSettingsF3(context) {
       'UI_L6 negative: an invalid provider/count write reached the official API section')
     const webAfterNegative = namespaceConfig(documentPath, WEB_NS) ?? {}
     const webBeforeNegative = JSON.parse(beforeNegativeWeb === 'undefined' ? '{}' : beforeNegativeWeb)
-    assert((webAfterNegative.searchProvider ?? 'deepseek-search-api') === (webBeforeNegative.searchProvider ?? 'deepseek-search-api'),
+    // Presence AND content: an absent field (the AUTOMATIC state) and an
+    // explicit id are different facts the negative probe must not conflate.
+    assert(Object.hasOwn(webAfterNegative, 'searchProvider') === Object.hasOwn(webBeforeNegative, 'searchProvider')
+      && webAfterNegative.searchProvider === webBeforeNegative.searchProvider,
       `UI_L6 negative: the web section's search provider changed during the negative probe: before=${beforeNegativeWeb} after=${JSON.stringify(webAfterNegative)}`)
     const customRouteSeeded = negative.customRouteSeeded === true
     if (customRouteSeeded) {
-      assert((webAfterNegative.fetchProvider ?? 'http') === 'http',
+      assert(webAfterNegative.fetchProvider === 'http',
         `UI_L6 negative: the custom-route restore did not return the official fetch provider: ${JSON.stringify(webAfterNegative)}`)
       assert(negative.customRouteRefusal?.rejected === true,
         `UI_L6 negative: the port accepted replacing a CUSTOM provider route: ${JSON.stringify(negative.customRouteRefusal)}`)
       assert(/custom route/u.test(negative.customRouteRefusal?.message ?? ''),
         `UI_L6 negative: the custom-route refusal lacks the official reason: ${JSON.stringify(negative.customRouteRefusal)}`)
     } else {
-      assert((webAfterNegative.fetchProvider ?? 'deepseek-fetch-api') === 'deepseek-fetch-api',
+      assert(webAfterNegative.fetchProvider === 'deepseek-fetch-api',
         `UI_L6 negative: the refused custom-route seed still changed the fetch provider: before=${beforeNegativeWeb} after=${JSON.stringify(webAfterNegative)}`)
       trace('f3.ui-l6', {
         verdict: 'UI_L6_PASS',
@@ -1149,7 +1288,7 @@ export async function runWebProviderSettingsF3(context) {
     await openWebRow(clientA, ROW.sendOriginalQuestion, 'UI_L6 restore original question')
     await selectCandidate(clientA, QUESTION_OFF, 'UI_L6 restore original question', 'off')
     await confirmCandidate(clientA, 'off', 'UI_L6 restore original question write')
-    // Providers back to the shipped stored defaults (Messages / HTTP).
+    // Providers back to the explicit restored selection (server-side / HTTP).
     await openWebRow(clientA, ROW.searchProvider, 'UI_L6 restore search provider')
     await selectCandidate(clientA, 0, 'UI_L6 restore search provider', MESSAGES_PROVIDER_LABEL)
     await confirmCandidate(clientA, MESSAGES_PROVIDER_LABEL, 'UI_L6 restore search provider write')
@@ -1161,7 +1300,7 @@ export async function runWebProviderSettingsF3(context) {
       fetchProviderLabel: HTTP_PROVIDER_LABEL,
       count: SEED_COUNT,
       sendOriginalQuestion: false,
-      // Messages/HTTP are not the billed API providers: both Billing rows are
+      // Server-side/HTTP are not the billed API providers: both Billing rows are
       // correctly inert on the restored route. The stored values are `auto`.
       searchBilling: 'Not selected',
       fetchBilling: 'Not selected',
@@ -1171,9 +1310,10 @@ export async function runWebProviderSettingsF3(context) {
     }
     const restoredWeb = namespaceConfig(documentPath, WEB_NS) ?? {}
     const restoredApi = namespaceConfig(documentPath, WEB_API_NS) ?? {}
-    assert((restoredWeb.searchProvider ?? 'deepseek-official') === 'deepseek-official'
-      && (restoredWeb.fetchProvider ?? 'http') === 'http',
-    `UI_L6 restore: the "web" section still holds a non-default value: ${JSON.stringify(restoredWeb)}`)
+    // The restore confirms were REAL writes: the explicit ids must be present.
+    assert(restoredWeb.searchProvider === 'deepseek-official'
+      && restoredWeb.fetchProvider === 'http',
+    `UI_L6 restore: the "web" section does not hold the explicit restored values: ${JSON.stringify(restoredWeb)}`)
     assert((restoredApi.count ?? SEED_COUNT) === SEED_COUNT
       && (restoredApi.sendOriginalQuestion ?? false) === false
       && (restoredApi.searchBilling ?? 'auto') === 'auto'

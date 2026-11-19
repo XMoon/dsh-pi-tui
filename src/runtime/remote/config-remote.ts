@@ -2420,9 +2420,10 @@ class RemoteWebProviderConfig implements WebProviderConfig {
       const webValue = plainRecord(web.value)
       const apiValue = plainRecord(api.value)
       if (webValue === undefined || apiValue === undefined) return undefined
-      // rc.2 has NO single `baseURL` requirement: the read stays ready without
-      // one. A missing/foreign billing value is UNAVAILABLE — never a silent
-      // `auto` — and the advanced overrides are detached read-only facts.
+      // There is NO single `baseURL` requirement: the read stays ready without
+      // one (the Host selects the actual provider at request time). A
+      // missing/foreign billing value is UNAVAILABLE — never a silent `auto` —
+      // and the advanced overrides are detached read-only facts.
       const searchBilling = readWebApiBilling(apiValue, 'searchBilling')
       const fetchBilling = readWebApiBilling(apiValue, 'fetchBilling')
       const count = apiValue.count

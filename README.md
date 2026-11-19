@@ -33,12 +33,12 @@ dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.5.6
 dsh --profile pi-tui
 ```
 
-### 候选预览（0.5.7 × 0.2.2-rc.3，未发布）
+### 候选预览（0.5.7 × 0.2.2-rc.5，未发布）
 
-本 checkout 携带尚未发布的 `0.5.7` 候选，针对 DSH `0.2.2-rc.3` 精确验证：运行时最低与精确验证目标均为 `>=0.2.2-rc.3`（不兼容 `0.2.2-rc.2` 及更早），并要求 Node.js `>=24.9.0`。`0.5.7` 尚未发布到 npm，暂不提供安装型 `dsh plugin add ...@0.5.7` 命令；请从本 checkout 构建并用 `pnpm compat:dsh:npm` 验证该预览配对。安装或升级 DSH 前先正常结束 Agent 回合、退出旧 TUI/Host；不支持热升级。
+本 checkout 携带尚未发布的 `0.5.7` 候选，针对 DSH `0.2.2-rc.5` 精确验证：运行时最低为 `>=0.2.2-rc.3`，精确验证目标为 `0.2.2-rc.5`（不兼容 `0.2.2-rc.2` 及更早；早于 rc.5 的 Host 上，Web 搜索的自动路由决策可能不同），并要求 Node.js `>=24.9.0`。`0.5.7` 尚未发布到 npm，暂不提供安装型 `dsh plugin add ...@0.5.7` 命令；请从本 checkout 构建并用 `pnpm compat:dsh:npm` 验证该预览配对。安装或升级 DSH 前先正常结束 Agent 回合、退出旧 TUI/Host；不支持热升级。
 
 ```sh
-npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty @deepseek-ai/dsh@0.2.2-rc.3
+npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty @deepseek-ai/dsh@0.2.2-rc.5
 pnpm compat:dsh:npm
 ```
 
@@ -74,7 +74,7 @@ pnpm compat:dsh:npm
 | TUI 包版本 | 对应的官方 DSH tags | 说明 |
 |---|---|---|
 | `0.5.6`（stable / `@latest`） | `dsh-v0.2.2-rc.1` | 已发布稳定版；最低与精确验证目标为 DSH `0.2.2-rc.1`，Node.js `>=24.9.0`；不兼容 `0.2.1-rc.*` |
-| `0.5.7`（候选预览，未发布） | `dsh-v0.2.2-rc.3` | 本 checkout 候选；最低与精确验证目标为 DSH `0.2.2-rc.3`，Node.js `>=24.9.0`；不兼容 `0.2.2-rc.2` 及更早 |
+| `0.5.7`（候选预览，未发布） | `dsh-v0.2.2-rc.5`（`0.2.2-rc.3` 起） | 本 checkout 候选；最低 DSH 为 `0.2.2-rc.3`，精确验证目标为 `0.2.2-rc.5`，Node.js `>=24.9.0`；不兼容 `0.2.2-rc.2` 及更早 |
 | `0.5.5`（stable，历史） | `dsh-v0.2.1-rc.2`、`dsh-v0.2.1-rc.3`、`dsh-v0.2.1-rc.4`、`dsh-v0.2.1-rc.5` | 上一正式版；最低 DSH 版本为 `0.2.1-rc.2` |
 | `0.5.4`（stable，历史） | `dsh-v0.2.1-rc.2`、`dsh-v0.2.1-rc.3`、`dsh-v0.2.1-rc.4` | 上一稳定版；最低 DSH 版本为 0.2.1-rc.2，已在该三个 DSH 版本通过官方 preset assembly |
 | `0.5.3`（stable，历史） | `dsh-v0.2.1-rc.2`、`dsh-v0.2.1-rc.3`、`dsh-v0.2.1-rc.4` | 上一稳定版；最低 DSH 版本为 0.2.1-rc.2，已在该三个 DSH 版本通过官方 preset assembly |
@@ -88,7 +88,7 @@ pnpm compat:dsh:npm
 | `0.4.6`（stable，历史） | `dsh-v0.1.5-rc.1`、`dsh-v0.1.5-rc.2` | 上一稳定版；0.1.5 runtime 的兼容 TUI |
 | `0.4.7-alpha.2`（next，历史） | `dsh-v0.1.6-alpha.2` | 上一条 next 线；0.1.6-alpha.2 runtime 的兼容 TUI |
 
-不要混装稳定线与 `@next` 预发布线。`0.5.6` 是已发布稳定版（`@latest`），要求 DSH `>=0.2.2-rc.1`，且不兼容 `0.2.1-rc.*`；`0.5.7` 是尚未发布的候选，目标 DSH `0.2.2-rc.3`。升级前让回合和后台任务结束，正常退出旧 TUI/Host，并备份 Profile/patch、Session 原始日志、Workspace 及所需 Host 资源与凭据引用；不支持热升级。0.2.2 写入的数据不保证能由 rc5 原地读取，回退时须恢复到独立目录并使用匹配的旧版 DSH/TUI。历史配对见上表；通用匹配和诊断方式见[兼容性指南](docs/guides/dsh-compatibility.md)，`@next` 集成状态见 [next 分支 README](https://github.com/XMoon/dsh-pi-tui/blob/next/README.md)。
+不要混装稳定线与 `@next` 预发布线。`0.5.6` 是已发布稳定版（`@latest`），要求 DSH `>=0.2.2-rc.1`，且不兼容 `0.2.1-rc.*`；`0.5.7` 是尚未发布的候选，最低 DSH `0.2.2-rc.3`，精确验证目标 `0.2.2-rc.5`。升级前让回合和后台任务结束，正常退出旧 TUI/Host，并备份 Profile/patch、Session 原始日志、Workspace 及所需 Host 资源与凭据引用；不支持热升级。0.2.2 写入的数据不保证能由 rc5 原地读取，回退时须恢复到独立目录并使用匹配的旧版 DSH/TUI。历史配对见上表；通用匹配和诊断方式见[兼容性指南](docs/guides/dsh-compatibility.md)，`@next` 集成状态见 [next 分支 README](https://github.com/XMoon/dsh-pi-tui/blob/next/README.md)。
 
 新的 Agent preset 使用当前 roster 中选定的 id。DSH 允许合法的自定义
 `code` preset；只要当前 roster 存在它，显式输入和持久化状态都会保留 `code`。
@@ -145,19 +145,104 @@ dsh --profile pi-tui --continue            # 继续当前 Host Workspace 中最�
   dsh --profile pi-tui daemon uninstall
   ```
 
-**基础 Daemon 就是独立本地进程**：没有为本 Profile 显式安装 systemd unit 时，公开的 daemon 冷启动直接启动独立 Host，不查询 user manager，也不需要 systemd。Linux 上 `daemon install` 才是显式的服务安装：它只为当前 Profile 创建/验证 systemd `--user` unit，不 start、不 enable、不重启现有 Host；`daemon uninstall` 只移除本 Profile 的 unit，不停止独立 Host。macOS **没有 launchd supervisor**：`status/start/stop/restart/logs` 管理同一个独立 Host 进程，`install`/`uninstall` 明确以 `UNSUPPORTED_PLATFORM`（exit 3）拒绝且不创建 plist；macOS 的 `user-manager` 始终为 `not-checked`，`unit` 始终为 `none`。unit 的 `ExecStart`、`Environment`、`Restart`、`ExecStartPre`、symlink 源与 drop-in 归用户和 systemd 所有，产品不会改写用户内容。`status` 是纯只读：没有 unit 时不调用 systemctl，也不会创建 Host/unit；`ActiveState=active` 与 `MainPID` 都不等于 Ready，Ready 仍以认证 Cookie、Host 身份回显和新鲜内核身份（Linux starttime / macOS schema 2）为准。`daemon logs` 在当前被证实的归属下读取 unit journal 或该 Profile 的 `host.log`；macOS 只读 `host.log`。管理命令不会自动重启、停止或“抢救”Host，也不会改写或删除用户 unit 内容。`stop`/`restart` 会中断当前 Session/Turn 的进行中工作，未结算写入不会自动重放；`install` 不会产生该中断。
+**基础 Daemon 就是独立本地进程**：没有为本 Profile 显式安装服务定义时，公开的 daemon 冷启动直接启动独立 Host，不查询 user manager。Linux 上 `daemon install` 只为当前 Profile 创建/验证 systemd `--user` unit；macOS 上它只在 `~/Library/LaunchAgents` 创建/验证本 Profile 的用户级 LaunchAgent plist（`gui/<uid>` 域）。两者都不 start、不 enable、不重启现有 Host。macOS 的 LaunchAgent 默认 `RunAtLoad=false`、`KeepAlive=false`：显式安装不等于登录自启或崩溃自动重启；需要托管时用 `daemon start` 或一次显式 daemon 冷启动，停止走 `daemon stop`。`daemon uninstall` 只移除本 Profile 的服务定义；macOS 仅在 job 由该 plist 加载且进程身份由已认证 Host record 证明时 `bootout` 该 job，不停止独立 Host；没有该证明时运行中/启动中的 job 不会被 stop/restart/uninstall 猜测处理，只有 not-running 且无 PID 的定义可安全卸载。服务定义中的启动命令、环境与运行指令归用户和对应 manager 所有，产品不会改写用户内容；`daemon start` 只校验固定启动定义与已知触发项：程序/参数/工作目录/日志/环境/umask/`RunAtLoad`/`KeepAlive`/触发项被改动时拒绝启动并提示通过 launchctl 处理，注释与无害运行时键保留在磁盘上，绝不执行未知程序。`status` 是纯只读：无服务定义时不调用 manager；`systemd ActiveState=active` 或 `launchd state=running` 都不等于 Ready，Ready 仍以认证 Cookie、Host 身份回显和新鲜内核身份（Linux starttime / macOS schema 2）为准。`daemon logs` 在当前被证实的归属下读取 systemd journal、macOS 的两份 `launchd.stdout.log`/`launchd.stderr.log`（分别标明来源）或该 Profile 的 `host.log`；launchd job 卸载后（包括 plist 已移除但保留 launchd 日志时）没有可证明的当前来源，`daemon logs` 返回 `LOG_SOURCE_UNAVAILABLE`，不猜测保留的 launchd 日志或旧 `host.log`；只有这些 launchd 日志也不存在时才回退 `host.log`，需要时请直接读取保留文件。管理命令不会自动重启、停止或“抢救”Host。`stop`/`restart` 会中断当前 Session/Turn 的进行中工作，未结算写入不会自动重放；`install` 不会产生该中断。
 
-**不同 install build 的显式升级（仅 Linux systemd；同一 DSH 运行时、同一 Profile）**：
+**不同 install build 的显式升级（Linux systemd / macOS launchd；同一 DSH 运行时、同一 Profile）**：
 
 1. 结束所有进行中的 Turn，退出除管理命令外的 TUI Client，并备份 `DSH_HOME` 与 Profile（回滚与数据安全由用户负责）。
-2. `dsh --profile pi-tui daemon stop`，确认 `status` 为 `host=stopped` 且旧 Host 的 PID/starttime 已消失；不要跳过此步。
-3. **换包前**，用当前（拥有该 build 的）安装显式移除旧 unit：`dsh --profile pi-tui daemon uninstall`。它只移除该 Profile 的 unit 路径，保留 symlink 源文件、drop-in、Profile 与数据；换包后新 build 不能移除旧 build 的 unit（会以 exit 3 按冲突拒绝）。
+2. `dsh --profile pi-tui daemon stop`，确认 `status` 为 `host=stopped` 且旧 Host 的 PID/内核身份已消失；不要跳过此步。
+3. **换包前**，用当前（拥有该 build 的）安装显式移除旧服务定义：`dsh --profile pi-tui daemon uninstall`。它只移除该 Profile 的 unit/plist，保留 symlink 源文件、drop-in、Profile 与数据；换包后新 build 不能移除旧 build 的服务定义（会以 exit 3 按冲突拒绝）。
 4. 用官方 Profile 命令换包，不要在 Host 运行中覆写安装：`dsh plugin --profile pi-tui -- add <新包路径或版本>`。
-5. 需要服务托管时先 `dsh --profile pi-tui daemon install` 安装新 build 的 unit，再 `dsh --profile pi-tui daemon start`，等待新的认证 Ready Host 与新的 `instance`/PID；`status` 的 `compatibility` 应为 `compatible`。
+5. 需要服务托管时先 `dsh --profile pi-tui daemon install` 安装新 build 的服务定义，再 `dsh --profile pi-tui daemon start`，等待新的认证 Ready Host 与新的 `instance`/PID；`status` 的 `compatibility` 应为 `compatible`。
 
-**回滚**（同一 DSH 运行时、同一 Profile）：① 保留新包/旧包与校验和，结束新 Host 上的 Turn；② `daemon stop` 并确认新 Host 已退出；③ **恢复旧包前**，用当前新安装显式 `daemon uninstall` 移除新 build 的 unit（旧 build 同样不能删除新 build 的 unit）；④ 用官方 Profile 命令恢复可信旧包；⑤ 需要服务托管时用旧 build `daemon install`，再 `daemon start`；确认旧 build 的 Ready Host 与 Session/凭据仍可读。回滚只承诺同一 DSH 运行时的包级恢复，不承诺跨 DSH 数据 schema 的原地降级；跨版本请使用独立备份目录并自行确认配对。
+**回滚**（同一 DSH 运行时、同一 Profile）：① 保留新包/旧包与校验和，结束新 Host 上的 Turn；② `daemon stop` 并确认新 Host 已退出；③ **恢复旧包前**，用当前新安装显式 `daemon uninstall` 移除新 build 的服务定义（旧 build 同样不能删除新 build 的服务定义）；④ 用官方 Profile 命令恢复可信旧包；⑤ 需要服务托管时用旧 build `daemon install`，再 `daemon start`；确认旧 build 的 Ready Host 与 Session/凭据仍可读。回滚只承诺同一 DSH 运行时的包级恢复，不承诺跨 DSH 数据 schema 的原地降级；跨版本请使用独立备份目录并自行确认配对。
 
-自己编辑过 unit/symlink/drop-in 的用户：产品只保留这些字节，不会自动改写成新 build 的默认配置；如果旧 `ExecStart` 或 drop-in 让新 Host 无法认证，命令会如实失败，请按正常 systemd 操作自行修改。不要把本流程理解为零中断、自动回滚或任意数据原地降级。
+自己编辑过 unit/symlink/drop-in（或 launchd plist）的用户：产品只保留这些字节，不会自动改写成新 build 的默认配置；如果旧启动命令、环境或 drop-in 让新 Host 无法认证，命令会如实失败，请按正常 systemd/launchd 操作自行修改。不要把本流程理解为零中断、自动回滚或任意数据原地降级。
+
+### 本地 ACP 客户端接入（Linux / macOS）
+
+ACP v1 是可选的 **Host-owned Unix socket** 入口，仅供同一操作系统用户的本机客户端连接；不提供 TCP/HTTP 监听或第二个 Host。此能力自 **0.5.7** 版本起支持。
+
+**在 TUI 设置中开启。** 打开 `/settings → General → Start ACP automatically`，开启并保存后，ACP 将在**下一次 Host 冷启动**时自动启用；需要立即启用当前 Host 的 ACP Listener，则进入 `/settings → Tools → ACP Server` 开启。两项设置相互独立：保存自动启动偏好不会立即改变运行时状态，运行时开启也不会更改下次启动的偏好。ACP 默认关闭。
+
+在 Split Client 中也可以直接输入 `/acp` 查看当前 Listener 的实时状态并立即启用/停用：它不需要已有 Session，也不会创建 Session、修改下次启动偏好或打开浏览器。Direct 后端没有该运行时控制（会明确拒绝）；Headless 端点发现使用下文的 `daemon status`。
+
+**Headless（无需 TUI）。** 在已安装 `pi-tui` Profile 的**用户** `cordis.patch.yml`（通常为 `<DSH_HOME>/profiles/pi-tui/cordis.patch.yml`）中添加以下条目，若已存在相同 `id` 则只修改其值。保留文件的其他内容，不要修改包内 patch：
+
+```yaml
+- id: pi-tui-acp-preferences
+  config:
+    autoStart: true
+```
+
+保存上述配置后，在 Headless 主机上使用公开管理命令启动 Host，或重启已有 Host 使配置生效：
+
+```sh
+dsh --profile pi-tui daemon start      # Host 尚未运行时
+dsh --profile pi-tui daemon restart    # Host 已运行且配置已变更时
+```
+
+基础 Daemon 无需先 `daemon install`；`restart` 会中断进行中的 Turn/Job。`daemon status` 会以 `acp=enabled|disabled|unavailable` 报告已认证 Host 的 Listener 状态，且仅当 `acp=enabled` 时输出 `acp-socket` 端点；`host=ready` 本身**不等于 ACP 已监听**，`acp=unavailable` 表示无法证明（例如 Host 未运行、转换中或读取失败），不能当作已关闭。仍应以实际 Socket 连接和成功的 ACP `initialize` 确认，失败时检查 `dsh --profile pi-tui daemon logs --lines 200`。
+
+**端点发现。** `scopeId` 是以 `dsh-pi-tui/local-scope/1`、十进制 UID、Profile `realpath` 组成、由 NUL 分隔后计算的 SHA256。Linux 为 `<DSH_HOME>/run/dsh-pi-tui/<scopeId>/acp.sock`；macOS 为 `/private/tmp/dpt-<uid>-<scopeId 前 40 位十六进制字符>/acp.sock`。Socket 权限为 `0600`，产品新建的私有目录为 `0700`。
+
+以下官方 SDK 示例假设默认的 `~/.dsh/profiles/pi-tui` 布局。自定义位置时将 `DSH_HOME` 或**仅供此示例使用**的 `ACP_PROFILE_DIR` 设为 DSH 实际解析的目录。在独立的 Node.js（>=24.9.0）客户端项目中先安装 `@agentclientprotocol/sdk@1.4.0`，再保存为 `acp-client.mjs` 并运行 `node acp-client.mjs`；Host 须已有可用的模型/凭据配置：
+
+```js
+// acp-client.mjs — run from an independent Node.js client project
+import { createHash } from 'node:crypto'
+import { realpathSync } from 'node:fs'
+import { connect } from 'node:net'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
+import { Readable, Writable } from 'node:stream'
+import * as acp from '@agentclientprotocol/sdk'
+
+const home = realpathSync(process.env.DSH_HOME ?? join(homedir(), '.dsh'))
+const profile = realpathSync(process.env.ACP_PROFILE_DIR ?? join(home, 'profiles', 'pi-tui'))
+const uid = process.getuid()
+const id = createHash('sha256')
+  .update(['dsh-pi-tui/local-scope/1', String(uid), profile].join('\0'))
+  .digest('hex')
+const path = process.platform === 'darwin'
+  ? join('/private/tmp', 'dpt-' + uid + '-' + id.slice(0, 40), 'acp.sock')
+  : join(home, 'run', 'dsh-pi-tui', id, 'acp.sock')
+
+const socket = connect(path)
+await new Promise((resolve, reject) => {
+  socket.once('connect', resolve)
+  socket.once('error', reject)
+})
+const app = acp.client({ name: 'local-acp-example' })
+  .onNotification(acp.methods.client.session.update, ({ params }) => {
+    console.log(JSON.stringify(params.update))
+  })
+const connection = app.connect(acp.ndJsonStream(Writable.toWeb(socket), Readable.toWeb(socket)))
+try {
+  await connection.agent.request(acp.methods.agent.initialize, {
+    protocolVersion: acp.PROTOCOL_VERSION, clientCapabilities: {},
+  })
+  const { sessionId } = await connection.agent.request(acp.methods.agent.session.new, {
+    cwd: process.cwd(), mcpServers: [],
+  })
+  try {
+    const result = await connection.agent.request(acp.methods.agent.session.prompt, {
+      sessionId, prompt: [{ type: 'text', text: 'Hello' }],
+    })
+    console.log('stopReason:', result.stopReason)
+  } finally {
+    await connection.agent.request(acp.methods.agent.session.close, { sessionId })
+  }
+} finally {
+  connection.close()
+  socket.destroy()
+}
+```
+
+已有 Session 可将 `session.new` 换成 `acp.methods.agent.session.resume`，参数为 `{ sessionId, cwd }`。每个 ACP 连接至多持有一个 Session View，同一 Session 同时至多一个 ACP View，TUI 不受此限制；`session/close` **仅 detach**，不删除 Session 或 dispose 共享 Agent。关闭 Host 会清理 Listener，自有 stale Socket 可在下一次启动时安全回收。
+
+连接数默认上限 **4**，Host 启动环境可设置 `DSH_PI_TUI_ACP_MAX_CONNECTIONS=1..16`。提供 `initialize`、`session/new|resume|prompt|cancel|close`、标准文本、`resource_link`、能力协商后的图片输入以及已提交的 Assistant/Tool 内容。不支持 `session/list`、`session/load`、`session/set_config_option`、ACP 端的 MCP Server 注册或专用文件/产物传输；`resource_link` 不代表 Host 会抓取 URI。协议错误可检查 JSON-RPC `data.code` 中的 `LOCAL_ACP_*` 分类。详细语义参见 [Host/Client 合同](docs/architecture/host-client.md)。
+
 
 ## 功能
 

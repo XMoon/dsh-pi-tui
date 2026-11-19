@@ -109,6 +109,7 @@ import { registerQueueCommand } from './tui/commands/queue.ts'
 import { createModelCommands } from './tui/commands/models.ts'
 import type { ModelPresentation } from './app/command/model-presentation.ts'
 import type { WebAccessPresentation } from './app/command/web-access-presentation.ts'
+import type { AcpAccessPresentation } from './app/command/acp-access-presentation.ts'
 import type { PresetPresentation } from './app/command/preset-presentation.ts'
 import type { SessionBrowserPresentation } from './app/command/session-browser-presentation.ts'
 import { registerReloadCommand, registerSkillCommand, type SkillsCommandDeps } from './tui/commands/skills.ts'
@@ -116,6 +117,7 @@ import { createArtifactsCommands } from './tui/commands/artifacts.ts'
 import { createAuthCommands } from './tui/commands/auth.ts'
 import { createSettingsCommands } from './tui/commands/settings.ts'
 import { createWebAccessCommands } from './tui/commands/web-access.ts'
+import { createAcpAccessCommands } from './tui/commands/acp-access.ts'
 import { createSessionCommands } from './tui/commands/sessions.ts'
 
 
@@ -1094,6 +1096,8 @@ export function registerTuiCommands(
   /** M5-W PR-C: the mounted native `/web` presenter, if any (the SAME optional
    *  parameter shape as the Model/Preset ones). */
   webPresentation?: WebAccessPresentation,
+  /** PO-5E: the mounted native `/acp` presenter, if any (same optional shape). */
+  acpPresentation?: AcpAccessPresentation,
 ): {
   /** Per-name registration failures (a Host-claimed name degraded loudly;
    *  later registrations still installed). */
@@ -1995,6 +1999,17 @@ export function registerTuiCommands(
     registerOne,
     ...(webPresentation === undefined ? {} : { webPresentation }),
   }).registerWeb()
+
+  // PO-5E: the ONE Split-Client ACP listener quick control, immediately after
+  // `/web`. It is sessionless/local (see domain/command/policy.ts), takes ONE
+  // optional native TSP presenter, and every read/write stays here.
+  createAcpAccessCommands({
+    runner,
+    app: app as TuiApp | undefined,
+    notify,
+    registerOne,
+    ...(acpPresentation === undefined ? {} : { acpPresentation }),
+  }).registerAcp()
 
   settingsCommands.registerFooter()
   settingsCommands.registerDisplay()

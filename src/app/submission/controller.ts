@@ -281,6 +281,8 @@ export interface SubmissionControllerDeps<ExactAgent extends SubmissionAgentLike
   readonly supportsModelPickerUi?: () => boolean
   /** The installed native Preset presenter, including its terminal capability. */
   readonly supportsPresetPickerUi?: () => boolean
+  /** PO-5E: the installed native ACP listener presenter (Split Client only). */
+  readonly supportsAcpPickerUi?: () => boolean
   /** The installed native Session Browser presenter, including its capabilities. */
   readonly supportsSessionBrowserUi?: () => boolean
   /**
@@ -2608,6 +2610,7 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
       const availability = tspBuiltinAvailability(classification, parsed.name, {
         modelPicker: deps.supportsModelPickerUi?.() === true,
         presetPicker: deps.supportsPresetPickerUi?.() === true,
+        acpPicker: deps.supportsAcpPickerUi?.() === true,
         sessionBrowser: deps.supportsSessionBrowserUi?.() === true,
         taskCenter: deps.supportsTaskCenterUi?.() === true,
       }, parsed.rawInput)

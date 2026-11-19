@@ -125,6 +125,7 @@ import {
 } from './pasted-image-intake.ts'
 import type { ModelPresentation } from '../command/model-presentation.ts'
 import type { WebAccessPresentation } from '../command/web-access-presentation.ts'
+import type { AcpAccessPresentation } from '../command/acp-access-presentation.ts'
 import type { PresetPresentation } from '../command/preset-presentation.ts'
 import type { SessionBrowserPresentation } from '../command/session-browser-presentation.ts'
 import { pituiSurfaceInteractionPresenter, type SurfaceInteractionPresenter } from './interaction-presenter.ts'
@@ -713,6 +714,8 @@ export interface SurfaceRendererMount {
     readonly presetPresentation?: PresetPresentation | undefined
     /** M5-W PR-C: the native `/web` presenter, beside the other two. */
     readonly webPresentation?: WebAccessPresentation | undefined
+    /** PO-5E: the native `/acp` presenter, beside `/web`. */
+    readonly acpPresentation?: AcpAccessPresentation | undefined
     /** Internal read-only Session Browser presenter; no production command opens it in B1-A. */
     readonly sessionBrowserPresentation?: SessionBrowserPresentation | undefined
     /** PR-Q: the native Queue manager sheet presentation. OPTIONAL: a pane
@@ -1101,6 +1104,8 @@ export interface SurfaceRuntime<Event extends RoutedSessionEvent> {
   readonly presetPresentation?: PresetPresentation | undefined
   /** M5-W PR-C: native /web presentation, absent on PiTui and unsupported TSP panes. */
   readonly webPresentation?: WebAccessPresentation | undefined
+  /** PO-5E: native /acp presentation, absent on PiTui and unsupported TSP panes. */
+  readonly acpPresentation?: AcpAccessPresentation | undefined
   /** Internal read-only Session Browser seam; absent on PiTui and unsupported TSP panes. */
   readonly sessionBrowserPresentation?: SessionBrowserPresentation | undefined
   /**
@@ -1558,6 +1563,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
   let modelPresentation: ModelPresentation | undefined
   let presetPresentation: PresetPresentation | undefined
   let webPresentation: WebAccessPresentation | undefined
+  let acpPresentation: AcpAccessPresentation | undefined
   let sessionBrowserPresentation: SessionBrowserPresentation | undefined
   /** PR-Q: the application-level Queue manager and the CURRENT mount's
    *  presentation. The controller is installed before the mount; the
@@ -3452,6 +3458,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     get modelPresentation() { return modelPresentation },
     get presetPresentation() { return presetPresentation },
     get webPresentation() { return webPresentation },
+    get acpPresentation() { return acpPresentation },
     get sessionBrowserPresentation() { return sessionBrowserPresentation },
     get display(): SurfaceDisplaySeam {
       return displaySeam()
@@ -3774,6 +3781,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
         modelPresentation = mounted.modelPresentation
         presetPresentation = mounted.presetPresentation
         webPresentation = mounted.webPresentation
+        acpPresentation = mounted.acpPresentation
         sessionBrowserPresentation = mounted.sessionBrowserPresentation
         interactionPresenter = mounted.interaction
         attachQueuePresentation(mounted.queuePresentation)
@@ -3995,6 +4003,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
       modelPresentation = undefined
       presetPresentation = undefined
       webPresentation = undefined
+      acpPresentation = undefined
       sessionBrowserPresentation = undefined
       if (queueManager !== undefined && queuePresentation !== undefined) {
         queueManager.detach(queuePresentation)

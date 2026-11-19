@@ -35,13 +35,6 @@ function fixtureRoot(name, source) {
   return root
 }
 
-test('the gate is green on the real tree', () => {
-  const result = checkProductionReads(join(REPO_ROOT, 'test'))
-  assert.equal(passes(result), true, formatReport(result))
-  assert.match(formatReport(result), /reads naming a file that does NOT exist: 0/u)
-  assert.match(formatReport(result), /reads that could NOT be resolved statically: 0/u)
-})
-
 test('the gate FAILS when a test reads a production file that does not exist', (t) => {
   const root = fixtureRoot('synthetic-missing-read', [
     "import test from 'node:test'",

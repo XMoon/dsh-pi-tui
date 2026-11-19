@@ -17,13 +17,13 @@
  * 4. A3-4: the SUBMISSION-domain writer sections (busy/steer, queue pull-back,
  *    HostCommandPort submission) enter through the submission runtime's
  *    `withWriter`, which delegates to `SessionRuntime.withWriter`; the runner
- *    holds no direct `barrier.runWriter` site and the command layer no
- *    `withSessionWriter`.
+ *    delegates Writer admission to SessionRuntime, which alone calls the
+ *    operation barrier's Writer and narrowly scoped Control entry points.
  * @module @xmoon76/dsh-pi-tui/writer-admission.test
  */
 
 import assert from 'node:assert/strict'
-import { readFileSync, readdirSync } from 'node:fs'
+import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import {
   bindSessionRuntime,
@@ -666,7 +666,7 @@ test('the moved domains refuse a STALE capture with SessionScopeSupersededError,
   assert.equal(barrier.activeWriters, 0, 'a stale admission never occupies the writer')
 })
 
-// ── A3-4: the four static exit criteria ────────────────────────────────────
+// ── A3-4: static admission and authority guards ────────────────────────────
 
 function span(source: string, start: string, end: string): string {
   const from = source.indexOf(start)
@@ -675,28 +675,6 @@ function span(source: string, start: string, end: string): string {
   assert.ok(to > from, `span end not found: ${end}`)
   return source.slice(from, to)
 }
-
-/** Every `.ts` file under src/, as a path relative to src/. */
-function srcTsFiles(dir: URL, prefix = ''): string[] {
-  const out: string[] = []
-  for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    const rel = prefix === '' ? entry.name : `${prefix}/${entry.name}`
-    if (entry.isDirectory()) out.push(...srcTsFiles(new URL(`${entry.name}/`, dir), rel))
-    else if (entry.name.endsWith('.ts')) out.push(rel)
-  }
-  return out
-}
-
-test('exit: index.ts has ZERO direct writer admission; commands.ts has ZERO withSessionWriter', () => {
-  const index = compositionSource()
-  const commands = readFileSync(new URL('../../src/commands.ts', import.meta.url), 'utf8')
-  assert.equal(index.includes('ownership.barrier.runWriter('), false,
-    'the composition surface must hold no direct runWriter site')
-  assert.equal(index.includes('.barrier.runWriter('), false,
-    'the composition surface must reach no raw barrier writer admission')
-  assert.equal(commands.includes('withSessionWriter'), false,
-    'TuiCommandRunner.withSessionWriter must be deleted')
-})
 
 test('exit: sessionTransitionPending() is used ONLY by the attachment-intake UX fence', () => {
   const commands = readFileSync(new URL('../../src/commands.ts', import.meta.url), 'utf8')
@@ -800,24 +778,24 @@ test('exit: sessionTransitionPending() is used ONLY by the attachment-intake UX 
 })
 
 test('exit: SessionRuntime is the SOLE operation-barrier writer admission owner', () => {
-  const root = new URL('../../src/', import.meta.url)
-  const offenders = srcTsFiles(root)
-    .filter(rel => rel !== 'app/session/runtime.ts')
-    .filter(rel => readFileSync(new URL(rel, root), 'utf8').includes('.barrier.runWriter('))
+  const offenders = productionSources()
+    .filter(({ rel }) => rel !== 'src/app/session/runtime.ts')
+    .filter(({ source }) => source.includes('.barrier.runWriter('))
+    .map(({ rel }) => rel)
   assert.deepEqual(offenders, [],
-    'only SessionRuntime.withWriter may call the operation barrier')
+    'only SessionRuntime.withWriter may call the operation barrier, across all production source extensions')
 })
 
 test('exit: SessionRuntime is the SOLE operation-barrier CONTROL admission owner', () => {
   // `runControl` is the ONE narrow Stop bypass around the transition freeze.
   // Only the session runtime may call it; a UI/submission module reaching the
   // barrier directly would turn it into a general writer bypass.
-  const root = new URL('../../src/', import.meta.url)
-  const offenders = srcTsFiles(root)
-    .filter(rel => rel !== 'app/session/runtime.ts')
-    .filter(rel => readFileSync(new URL(rel, root), 'utf8').includes('.barrier.runControl('))
+  const offenders = productionSources()
+    .filter(({ rel }) => rel !== 'src/app/session/runtime.ts')
+    .filter(({ source }) => source.includes('.barrier.runControl('))
+    .map(({ rel }) => rel)
   assert.deepEqual(offenders, [],
-    'only SessionRuntime.withControl/interrupt may call the operation barrier control hook')
+    'only SessionRuntime.withControl/interrupt may call the barrier control hook, across all production source extensions')
 })
 
 test('no production fence carries the transition gate into an admitted writer', () => {

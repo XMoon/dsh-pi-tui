@@ -34,12 +34,12 @@ dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.5.6
 dsh --profile pi-tui
 ```
 
-### Candidate preview (0.5.7 × 0.2.2-rc.3, unpublished)
+### Candidate preview (0.5.7 × 0.2.2-rc.5, unpublished)
 
-This checkout carries the unpublished `0.5.7` candidate, validated against DSH `0.2.2-rc.3`: the runtime minimum and the exact validation target are both `>=0.2.2-rc.3` (incompatible with `0.2.2-rc.2` and earlier), and Node.js `>=24.9.0` is required. `0.5.7` is not published to npm yet, so no install-form `dsh plugin add ...@0.5.7` command is offered; build this checkout and validate that preview pairing with `pnpm compat:dsh:npm`. Finish Agent turns and exit the old TUI/Host normally before installing or upgrading DSH; hot upgrade is not supported.
+This checkout carries the unpublished `0.5.7` candidate, validated against DSH `0.2.2-rc.5`: the runtime minimum is `>=0.2.2-rc.3` and the exact validation target is `0.2.2-rc.5` (incompatible with `0.2.2-rc.2` and earlier; on Hosts older than rc.5 the automatic web-search routing decision may differ), and Node.js `>=24.9.0` is required. `0.5.7` is not published to npm yet, so no install-form `dsh plugin add ...@0.5.7` command is offered; build this checkout and validate that preview pairing with `pnpm compat:dsh:npm`. Finish Agent turns and exit the old TUI/Host normally before installing or upgrading DSH; hot upgrade is not supported.
 
 ```sh
-npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty @deepseek-ai/dsh@0.2.2-rc.3
+npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty @deepseek-ai/dsh@0.2.2-rc.5
 pnpm compat:dsh:npm
 ```
 
@@ -76,7 +76,7 @@ next compatibility range, and fallback paths.
 | TUI package line | Official DSH tags for the pairing | Notes |
 |---|---|---|
 | `0.5.6` (stable / `@latest`) | `dsh-v0.2.2-rc.1` | Published stable release; minimum and exact validation target DSH is `0.2.2-rc.1`, Node.js `>=24.9.0`; incompatible with `0.2.1-rc.*` |
-| `0.5.7` (candidate preview, unpublished) | `dsh-v0.2.2-rc.3` | This checkout's candidate; minimum and exact validation target DSH is `0.2.2-rc.3`, Node.js `>=24.9.0`; incompatible with `0.2.2-rc.2` and earlier |
+| `0.5.7` (candidate preview, unpublished) | `dsh-v0.2.2-rc.5` (from `0.2.2-rc.3`) | This checkout's candidate; minimum DSH is `0.2.2-rc.3`, exact validation target `0.2.2-rc.5`, Node.js `>=24.9.0`; incompatible with `0.2.2-rc.2` and earlier |
 | `0.5.5` (previous stable) | `dsh-v0.2.1-rc.2`, `dsh-v0.2.1-rc.3`, `dsh-v0.2.1-rc.4`, `dsh-v0.2.1-rc.5` | Previous stable release; minimum DSH version `0.2.1-rc.2` |
 | `0.5.4` (stable, previous) | `dsh-v0.2.1-rc.2`, `dsh-v0.2.1-rc.3`, `dsh-v0.2.1-rc.4` | Previous stable line; the minimum DSH version is 0.2.1-rc.2, and it passes the official preset assembly on all three DSH versions |
 | `0.5.3` (stable, previous) | `dsh-v0.2.1-rc.2`, `dsh-v0.2.1-rc.3`, `dsh-v0.2.1-rc.4` | Previous stable line; the minimum DSH version is 0.2.1-rc.2, and it passes the official preset assembly on all three DSH versions |
@@ -90,7 +90,7 @@ next compatibility range, and fallback paths.
 | `0.4.6` (stable, previous) | `dsh-v0.1.5-rc.1`, `dsh-v0.1.5-rc.2` | Previous stable; the compatible TUI for a 0.1.5 runtime |
 | `0.4.7-alpha.2` (next, previous) | `dsh-v0.1.6-alpha.2` | Previous next line; the compatible TUI for a 0.1.6-alpha.2 runtime |
 
-Do not mix the stable and `@next` prerelease lines. `0.5.6` is the published stable release (`@latest`): it requires DSH `>=0.2.2-rc.1` and is not compatible with `0.2.1-rc.*`; `0.5.7` is the unpublished candidate targeting DSH `0.2.2-rc.3`. Before upgrading, let turns and background work finish, exit the old TUI/Host normally, and back up the Profile/patch, raw Session logs, Workspace and necessary Host resources or credential references. Hot upgrade is not supported. Data written under 0.2.2 semantics is not guaranteed readable by rc5 in place; restore a backup to a separate directory and use the matching old DSH/TUI pair to roll back. Historical pairings are in the table above. See the [compatibility guide](docs/guides/dsh-compatibility.md) for matching and diagnosis, and the [next branch README](https://github.com/XMoon/dsh-pi-tui/blob/next/README.md) for its integration status.
+Do not mix the stable and `@next` prerelease lines. `0.5.6` is the published stable release (`@latest`): it requires DSH `>=0.2.2-rc.1` and is not compatible with `0.2.1-rc.*`; `0.5.7` is the unpublished candidate with a minimum DSH of `0.2.2-rc.3` and an exact validation target of `0.2.2-rc.5`. Before upgrading, let turns and background work finish, exit the old TUI/Host normally, and back up the Profile/patch, raw Session logs, Workspace and necessary Host resources or credential references. Hot upgrade is not supported. Data written under 0.2.2 semantics is not guaranteed readable by rc5 in place; restore a backup to a separate directory and use the matching old DSH/TUI pair to roll back. Historical pairings are in the table above. See the [compatibility guide](docs/guides/dsh-compatibility.md) for matching and diagnosis, and the [next branch README](https://github.com/XMoon/dsh-pi-tui/blob/next/README.md) for its integration status.
 
 New agent sessions use the official roster's selected preset id. A custom DSH
 preset literally named `code` is valid and remains `code` when it exists in the
@@ -148,19 +148,104 @@ The candidate release offers a local Linux and macOS daemon backend. **Direct (t
   dsh --profile pi-tui daemon uninstall
   ```
 
-**The basic daemon is an independent local process.** When no systemd unit is explicitly installed for this Profile, a public daemon cold start launches the independent Host directly, queries no user manager and needs no systemd. On Linux, `daemon install` is the explicit service installation: it only creates/verifies the current Profile's systemd `--user` unit and never starts, enables or restarts a running Host; `daemon uninstall` removes only this Profile's unit and never stops an independent Host. macOS has **no launchd supervisor**: `status/start/stop/restart/logs` manage the same independent Host process, while `install`/`uninstall` explicitly refuse with `UNSUPPORTED_PLATFORM` (exit 3) and create no plist; the macOS `user-manager` is always `not-checked` and `unit` is always `none`. The unit's `ExecStart`, `Environment`, `Restart`, `ExecStartPre`, symlink source and drop-ins belong to the user and systemd; the product never rewrites user content. `status` is a pure read: with no installed unit it calls no systemctl and creates no Host or unit; neither `ActiveState=active` nor `MainPID` means Ready — readiness remains the authenticated Cookie, Host identity echo and a fresh kernel identity (Linux starttime / macOS schema 2). `daemon logs` reads the unit journal or this Profile's `host.log` under the currently verified ownership; macOS reads only `host.log`. A management command never automatically restarts, stops or rescues a Host, and never rewrites or deletes user unit content. `stop`/`restart` interrupt in-flight work of the current Session/Turn; unsettled writes are not replayed automatically, while `install` never causes that interruption.
+**The basic daemon is an independent local process.** When no service definition is explicitly installed for this Profile, a public daemon cold start launches the independent Host directly and queries no user manager. On Linux, `daemon install` only creates/verifies the current Profile's systemd `--user` unit; on macOS it only creates/verifies this Profile's user-level LaunchAgent plist in `~/Library/LaunchAgents` (the `gui/<uid>` domain). Neither starts, enables or restarts a running Host. The macOS LaunchAgent defaults to `RunAtLoad=false` and `KeepAlive=false`: explicit installation is neither login startup nor crash auto-restart; use `daemon start` (or one explicit daemon cold start) for supervision and `daemon stop` to stop it. `daemon uninstall` removes only this Profile's service definition; on macOS it boots out the job only when that exact plist loaded it AND the authenticated Host record proves the process identity, and it never stops an independent Host; without that proof a running/starting job is not guessed at by stop/restart/uninstall, and only a not-running, PID-less definition is safe to remove. The launch command, environment and runtime directives in a service definition belong to the user and the owning manager; the product never rewrites user content. `daemon start` validates only the fixed launch definition and known execution triggers: changes to the program, arguments, working directory, log sinks, environment, umask, `RunAtLoad`, `KeepAlive` or a trigger are refused with directions to normal launchctl operations, while comments and harmless runtime keys are preserved on disk; it never executes an unknown program. `status` is a pure read: with no service definition it calls no manager; neither systemd `ActiveState=active` nor launchd `state=running` means Ready — readiness remains the authenticated Cookie, Host identity echo and a fresh kernel identity (Linux starttime / macOS schema 2). `daemon logs` reads the systemd journal, macOS's two separately labelled `launchd.stdout.log`/`launchd.stderr.log`, or this Profile's `host.log` under the currently verified ownership; after the launchd job is unloaded — including when the plist was removed but launchd streams are retained — there is no provable current source, so `daemon logs` returns `LOG_SOURCE_UNAVAILABLE` instead of guessing between the retained launchd streams and an older `host.log`; only when those launchd streams are also absent does it fall back to `host.log`; read retained files directly if needed. A management command never automatically restarts, stops or rescues a Host. `stop`/`restart` interrupt in-flight work of the current Session/Turn; unsettled writes are not replayed automatically, while `install` never causes that interruption.
 
-**Explicit upgrade across install builds (Linux systemd only; same DSH runtime, same Profile):**
+**Explicit upgrade across install builds (Linux systemd / macOS launchd; same DSH runtime, same Profile):**
 
 1. Finish every in-flight Turn, exit TUI Clients other than the management command, and back up `DSH_HOME` and the Profile (rollback and data safety stay the user's responsibility).
-2. Run `dsh --profile pi-tui daemon stop` and confirm `status` reports `host=stopped` with the old Host PID/starttime gone; do not skip this step.
-3. **Before swapping the package**, remove the old unit with the installation that OWNS that build: `dsh --profile pi-tui daemon uninstall`. It removes only this Profile's unit path and keeps symlink sources, drop-ins, the Profile and its data; a new build cannot remove an old-build unit (it refuses with exit 3 as a conflict).
+2. Run `dsh --profile pi-tui daemon stop` and confirm `status` reports `host=stopped` with the old Host PID/kernel identity gone; do not skip this step.
+3. **Before swapping the package**, remove the old service definition with the installation that OWNS that build: `dsh --profile pi-tui daemon uninstall`. It removes only this Profile's unit/plist and keeps symlink sources, drop-ins, the Profile and its data; a new build cannot remove an old-build service definition (it refuses with exit 3 as a conflict).
 4. Replace the package with the official Profile command — never overwrite an installation while the Host runs: `dsh plugin --profile pi-tui -- add <new package path or version>`.
-5. For service supervision, run `dsh --profile pi-tui daemon install` for the new build's unit, then `dsh --profile pi-tui daemon start` and wait for the new authenticated Ready Host and its new `instance`/PID; `status` should report `compatibility=compatible`.
+5. For service supervision, run `dsh --profile pi-tui daemon install` for the new build's service definition, then `dsh --profile pi-tui daemon start` and wait for the new authenticated Ready Host and its new `instance`/PID; `status` should report `compatibility=compatible`.
 
-**Rollback** (same DSH runtime, same Profile): ① keep both packages and their checksums and finish Turns on the new Host; ② `daemon stop` and confirm the new Host exited; ③ **before restoring the old package**, remove the new-build unit with the current new installation (`daemon uninstall`) — the old build cannot remove a new-build unit either; ④ restore the trusted old package with the official Profile command; ⑤ for service supervision run the old build's `daemon install`, then `daemon start`; confirm the old build's Ready Host and that its Sessions/credentials still read back. Rollback promises only package-level recovery within the same DSH runtime, never an in-place downgrade across DSH data schemas; use a separate backup directory across versions and verify the pairing yourself.
+**Rollback** (same DSH runtime, same Profile): ① keep both packages and their checksums and finish Turns on the new Host; ② `daemon stop` and confirm the new Host exited; ③ **before restoring the old package**, remove the new-build service definition with the current new installation (`daemon uninstall`) — the old build cannot remove a new-build service definition either; ④ restore the trusted old package with the official Profile command; ⑤ for service supervision run the old build's `daemon install`, then `daemon start`; confirm the old build's Ready Host and that its Sessions/credentials still read back. Rollback promises only package-level recovery within the same DSH runtime, never an in-place downgrade across DSH data schemas; use a separate backup directory across versions and verify the pairing yourself.
 
-If you edited the unit/symlink/drop-in yourself: the product preserves those bytes and never rewrites them into a new build's defaults; if an old `ExecStart` or drop-in prevents the new Host from authenticating, the command reports the real failure, and you adjust it through normal systemd operations. Do not read this flow as zero-downtime, automatic rollback or arbitrary in-place data downgrade.
+If you edited the unit/plist/symlink/drop-in yourself: the product preserves those bytes and never rewrites them into a new build's defaults; if an old launch command, environment or drop-in prevents the new Host from authenticating, the command reports the real failure, and you adjust it through normal systemd/launchd operations. Do not read this flow as zero-downtime, automatic rollback or arbitrary in-place data downgrade.
+
+### Integrating a local ACP client (Linux / macOS)
+
+ACP v1 is an optional **Host-owned Unix socket** endpoint for local clients running as the same OS user; it is not TCP/HTTP or a second Host. This capability is supported starting with **0.5.7**.
+
+**Enable in TUI Settings.** Open `/settings → General → Start ACP automatically` and save the enabled preference to start ACP automatically on the **next Host cold boot**. To enable the ACP listener on the **currently running Host**, open `/settings → Tools → ACP Server` and switch it on. These controls are independent: saving the startup preference does not toggle the running listener, and a runtime toggle does not change the next-start preference. ACP is off by default.
+
+In a Split Client you can also type `/acp` to see the live listener state and enable or disable it immediately: it needs no existing Session and creates none, never changes the next-start preference and opens no browser. The Direct backend has no such runtime control (it answers an explicit refusal); headless endpoint discovery uses `daemon status` below.
+
+**Headless (no TUI required).** In the installed `pi-tui` Profile's **user** `cordis.patch.yml` (normally `<DSH_HOME>/profiles/pi-tui/cordis.patch.yml`), add this row or update the existing row with the same `id`. Keep other entries intact and do not edit the patch bundled inside the npm package:
+
+```yaml
+- id: pi-tui-acp-preferences
+  config:
+    autoStart: true
+```
+
+After saving the configuration above, use the public management commands to start the Host on a headless machine or restart an existing Host to apply the preference:
+
+```sh
+dsh --profile pi-tui daemon start      # if no Host is running
+dsh --profile pi-tui daemon restart    # if the Host runs and the preference changed
+```
+
+The basic daemon does not need `daemon install`; `restart` interrupts in-flight Turns/Jobs. `daemon status` reports the authenticated Host's listener as `acp=enabled|disabled|unavailable`, and prints `acp-socket` only when `acp=enabled`. `host=ready` **does not by itself prove ACP is listening**, and `acp=unavailable` means the state could not be proven (for example, no Host, a transition in flight or a failed read) — never treat it as disabled. Still verify a real socket connection and successful ACP `initialize`; inspect `dsh --profile pi-tui daemon logs --lines 200` on failure.
+
+**Endpoint discovery.** `scopeId` is SHA256 of `dsh-pi-tui/local-scope/1`, decimal UID and Profile `realpath`, separated by NUL bytes. Linux uses `<DSH_HOME>/run/dsh-pi-tui/<scopeId>/acp.sock`; macOS uses `/private/tmp/dpt-<uid>-<first 40 hex characters of scopeId>/acp.sock`. The socket has mode `0600` and newly created private directories are `0700`.
+
+The following official SDK example assumes the default `~/.dsh/profiles/pi-tui` layout. For custom locations, set `DSH_HOME` or the **example-only** `ACP_PROFILE_DIR` to the directories actually resolved by DSH. Install `@agentclientprotocol/sdk@1.4.0` in a separate Node.js (>=24.9.0) client project, save the code as `acp-client.mjs` and run `node acp-client.mjs`; the Host also needs a working model/provider configuration:
+
+```js
+// acp-client.mjs — run from an independent Node.js client project
+import { createHash } from 'node:crypto'
+import { realpathSync } from 'node:fs'
+import { connect } from 'node:net'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
+import { Readable, Writable } from 'node:stream'
+import * as acp from '@agentclientprotocol/sdk'
+
+const home = realpathSync(process.env.DSH_HOME ?? join(homedir(), '.dsh'))
+const profile = realpathSync(process.env.ACP_PROFILE_DIR ?? join(home, 'profiles', 'pi-tui'))
+const uid = process.getuid()
+const id = createHash('sha256')
+  .update(['dsh-pi-tui/local-scope/1', String(uid), profile].join('\0'))
+  .digest('hex')
+const path = process.platform === 'darwin'
+  ? join('/private/tmp', 'dpt-' + uid + '-' + id.slice(0, 40), 'acp.sock')
+  : join(home, 'run', 'dsh-pi-tui', id, 'acp.sock')
+
+const socket = connect(path)
+await new Promise((resolve, reject) => {
+  socket.once('connect', resolve)
+  socket.once('error', reject)
+})
+const app = acp.client({ name: 'local-acp-example' })
+  .onNotification(acp.methods.client.session.update, ({ params }) => {
+    console.log(JSON.stringify(params.update))
+  })
+const connection = app.connect(acp.ndJsonStream(Writable.toWeb(socket), Readable.toWeb(socket)))
+try {
+  await connection.agent.request(acp.methods.agent.initialize, {
+    protocolVersion: acp.PROTOCOL_VERSION, clientCapabilities: {},
+  })
+  const { sessionId } = await connection.agent.request(acp.methods.agent.session.new, {
+    cwd: process.cwd(), mcpServers: [],
+  })
+  try {
+    const result = await connection.agent.request(acp.methods.agent.session.prompt, {
+      sessionId, prompt: [{ type: 'text', text: 'Hello' }],
+    })
+    console.log('stopReason:', result.stopReason)
+  } finally {
+    await connection.agent.request(acp.methods.agent.session.close, { sessionId })
+  }
+} finally {
+  connection.close()
+  socket.destroy()
+}
+```
+
+For an existing Session, replace `session.new` with `acp.methods.agent.session.resume`, passing `{ sessionId, cwd }`. Each ACP connection owns at most one Session View, and a Session allows at most one ACP View at a time; TUI clients are unaffected. `session/close` **only detaches** the View; it neither deletes the Session nor disposes the shared Agent. Host shutdown retires the listener, and an owned stale socket is safely reclaimed on the next start.
+
+The default maximum is **4** connections, configurable in the Host startup environment with `DSH_PI_TUI_ACP_MAX_CONNECTIONS=1..16`. Available operations include `initialize`, `session/new|resume|prompt|cancel|close`, standard text, `resource_link`, capability-negotiated prompt images and committed Assistant/Tool content. `session/list`, `session/load`, `session/set_config_option`, ACP-side MCP Server registration and dedicated file/artifact transfer are unsupported; `resource_link` never causes the Host to fetch a URI. For protocol errors inspect JSON-RPC `data.code` for `LOCAL_ACP_*`. See the [Host/Client contract](docs/architecture/host-client.md) for details.
+
 
 ## Features
 

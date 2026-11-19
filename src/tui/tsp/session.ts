@@ -94,6 +94,7 @@ import { TspModelQuickMenu } from './model-quick-menu.ts'
 import type { QuickMenuIntent } from './model-quick-menu.ts'
 import { TspPresetPicker } from './preset-picker.ts'
 import { TspWebAccessPicker } from './web-access-picker.ts'
+import { TspAcpAccessPicker } from './acp-access-picker.ts'
 import { TspSessionBrowser } from './session-browser.ts'
 import { nativeStatuslineRows, compileNativeFooterPresentation, TSP_FOOTER_TASKS_ACTION, type NativeFooterPresentation } from './statusline-view.ts'
 import { quietComposerView, QUIET_COMPOSER_SHEET, QUIET_COMPOSER_STYLES, QUIET_COMPOSER_ROLES, type QuietComposerPermissionOption } from './quiet-composer-view.ts'
@@ -113,6 +114,7 @@ import {
 import type { ModelPresentation } from '../../app/command/model-presentation.ts'
 import type { PresetPresentation } from '../../app/command/preset-presentation.ts'
 import type { WebAccessPresentation } from '../../app/command/web-access-presentation.ts'
+import type { AcpAccessPresentation } from '../../app/command/acp-access-presentation.ts'
 import type { SessionBrowserPresentation } from '../../app/command/session-browser-presentation.ts'
 import type { TaskCenterPresentationPort } from '../../app/surface/task-presentation-port.ts'
 import { runSyncDisposalSteps } from '../../runtime/process/disposal.ts'
@@ -495,6 +497,11 @@ export interface TspRenderer extends TspInputBinding {
    * advertise the official kinds/features it renders.
    */
   readonly webPresentation: WebAccessPresentation | undefined
+  /**
+   * PO-5E: the native `/acp` picker. Absent when the pane does not advertise
+   * the official kinds/features it renders.
+   */
+  readonly acpPresentation: AcpAccessPresentation | undefined
   /** Internal read-only Session Browser seam; absent unless all required kinds are negotiated. */
   readonly sessionBrowserPresentation: SessionBrowserPresentation | undefined
   /** PR-Q: the native Queue manager sheet; undefined until the composition
@@ -850,6 +857,8 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
   let presetPicker: TspPresetPicker | undefined
   /** M5-W PR-C: the ONE native `/web` menu (same layer, one page + Details). */
   let webPicker: TspWebAccessPicker | undefined
+  /** PO-5E: the ONE native `/acp` menu (same layer, one page + Details). */
+  let acpPicker: TspAcpAccessPicker | undefined
   let sessionBrowser: TspSessionBrowser | undefined
   /** B3-A1: the internal native Work Hub presenter (same ONE layer). */
   let workHub: TspWorkHub | undefined
@@ -1198,6 +1207,14 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // a wire id of the frame the presenter itself built.
     nativeScroll: (id, to) => { surface.scroll(id, to) },
   })
+  acpPicker = new TspAcpAccessPicker({
+    render: () => render(),
+    // The SAME single seat admission: the ACP menu is a sibling non-blocking
+    // presenter, never a second input owner.
+    canInteract: () => !disposed && !hydrating && inputBound && !seat.hasModalSeat(),
+    notify: (text, kind) => display.notify(text, kind),
+    nativeScroll: (id, to) => { surface.scroll(id, to) },
+  })
   modelPicker.resize(session.caps.cols, session.caps.cell.w)
   modelQuick = new TspModelQuickMenu({
     render: () => render(),
@@ -1273,7 +1290,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     return open()
   }
   /** The sibling retirement steps, in the fixed order. */
-  const siblingRetirements = (...excluded: readonly ('model' | 'preset' | 'browser' | 'hub' | 'web')[]): Array<() => void> => {
+  const siblingRetirements = (...excluded: readonly ('model' | 'preset' | 'browser' | 'hub' | 'web' | 'acp')[]): Array<() => void> => {
     const steps: Array<() => void> = []
     // TSP I-E: a non-blocking Presenter NEVER coexists with the History card. It
     // is retired SYNCHRONOUSLY as the first step of every presenter open —
@@ -1289,6 +1306,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     if (!excluded.includes('preset')) steps.push(() => presetPicker?.retire())
     if (!excluded.includes('browser')) steps.push(() => sessionBrowser?.retire())
     if (!excluded.includes('web')) steps.push(() => webPicker?.retire())
+    if (!excluded.includes('acp')) steps.push(() => acpPicker?.retire())
     if (!excluded.includes('hub')) steps.push(() => { retireHubWithDetails('hub-replaced') })
     return steps
   }
@@ -1373,6 +1391,22 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       { isDisposed: () => true, setLoading: () => {}, setPending: () => {}, setStatus: () => {}, close: () => {} },
     ),
     notify: (message, kind) => webPicker!.presentation.notify(message, kind),
+  }
+  /**
+   * PO-5E: the ONE application-level AcpAccessPresentation on this renderer. It
+   * takes the SAME seat as every sibling presenter (the sweep retires the
+   * model/preset/browser/hub/web panels, and THIS picker retires when a sibling
+   * opens), so at most one non-blocking presenter is operable.
+   */
+  const acpPresentation: AcpAccessPresentation = {
+    open: (request) => openExclusively(
+      siblingRetirements('acp'),
+      () => acpPicker!.presentation.open(request),
+      // A superseded open never minted a panel; the command's own read owner
+      // checks `isDisposed()` before every read.
+      { isDisposed: () => true, setLoading: () => {}, setPending: () => {}, setStatus: () => {}, close: () => {} },
+    ),
+    notify: (message, kind) => acpPicker!.presentation.notify(message, kind),
   }
   /**
    * The Task Center presentation sink the surface installs is a SEAT WRAPPER,
@@ -1698,6 +1732,8 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
           ? sessionBrowser.desiredFocusId() ?? null
           : webPicker?.isOpen() === true
             ? webPicker.desiredFocusId() ?? null
+            : acpPicker?.isOpen() === true
+              ? acpPicker.desiredFocusId() ?? null
             : presetPicker?.isOpen() === true
               ? presetPicker.desiredFocusId() ?? null
               : modelPicker?.isOpen() === true
@@ -2078,6 +2114,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     if (seat.hasModalSeat()) {
       sessionBrowser?.suspend()
       webPicker?.suspend()
+      acpPicker?.suspend()
       modelPicker?.suspend()
       queueManagerPresenter?.suspend()
       presetPicker?.suspend()
@@ -2183,6 +2220,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
           : workHub?.renderLayer()
             ?? sessionBrowser?.renderLayer()
             ?? webPicker?.renderLayer()
+            ?? acpPicker?.renderLayer()
             ?? presetPicker?.renderLayer()
             ?? modelPicker?.renderLayer()
             ?? queueManagerPresenter?.renderLayer()
@@ -4216,6 +4254,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       retireWorkDetails('session-change')
       sessionBrowser?.retire()
       webPicker?.retire()
+      acpPicker?.retire()
       modelPicker?.retire()
       presetPicker?.retire()
       // B3-A1: the Work Hub belongs to the outgoing subject — a newly
@@ -4451,6 +4490,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
 
   const transcriptCopyAdmitted = (): boolean => visualActionsAdmitted()
     && webPicker?.isOpen() !== true
+    && acpPicker?.isOpen() !== true
     && modelQuick?.isOpen() !== true
     && historySearch?.isOpen() !== true
     && !historyHoldsComposerSeat()
@@ -5457,6 +5497,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     if (workHub?.handleKey(key)) return false
     if (sessionBrowser?.handleKey(key)) return false
     if (webPicker?.handleKey(key)) return false
+    if (acpPicker?.handleKey(key)) return false
     if (presetPicker?.handleKey(key)) return false
     if (modelPicker?.handleKey(key)) return false
     // PR-Q: the renderer-local `/queue` entry uses the LIVE effective
@@ -5722,7 +5763,8 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
         && !seat.hasModalSeat()
         && detailsSlot === undefined && !openingDetails
         && workHub?.isOpen() !== true && sessionBrowser?.isOpen() !== true
-        && webPicker?.isOpen() !== true && presetPicker?.isOpen() !== true
+        && webPicker?.isOpen() !== true && acpPicker?.isOpen() !== true
+        && presetPicker?.isOpen() !== true
         && modelPicker?.isOpen() !== true && modelQuick?.isOpen() !== true
         && queueManagerPresenter?.isOpen() !== true
         && historySearch?.isOpen() !== true
@@ -5906,6 +5948,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
         if (workHub?.handleEvent(input.event)) return false
         if (sessionBrowser?.handleEvent(input.event)) return false
         if (webPicker?.handleEvent(input.event)) return false
+        if (acpPicker?.handleEvent(input.event)) return false
         if (presetPicker?.handleEvent(input.event)) return false
         if (modelPicker?.handleEvent(input.event)) return false
         if (queueManagerPresenter?.handleEvent(input.event)) return false
@@ -6140,6 +6183,15 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
         ? webPresentation
         : undefined
     },
+    get acpPresentation() {
+      // The SAME single-picker + one-overlay shape; a pane without the
+      // negotiated kinds/scroll is refused BEFORE the command opens it.
+      const kinds = ['picker', 'row', 'overlay', 'text']
+      return kinds.every(kind => session.caps.kinds.includes(kind))
+        && session.caps.features.includes('scroll')
+        ? acpPresentation
+        : undefined
+    },
     composer: composerPort,
     // PR3-B B3 (§3.5.1): the REAL interaction presenter (the seat) replaces
     // the B0 inert one. It is installed with the mount, but the surface only
@@ -6355,7 +6407,8 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
           && !seat.hasModalSeat()
           && detailsSlot === undefined && !openingDetails
           && workHub?.isOpen() !== true && sessionBrowser?.isOpen() !== true
-          && webPicker?.isOpen() !== true && presetPicker?.isOpen() !== true
+          && webPicker?.isOpen() !== true && acpPicker?.isOpen() !== true
+          && presetPicker?.isOpen() !== true
           && modelPicker?.isOpen() !== true && modelQuick?.isOpen() !== true
           && historySearch?.isOpen() !== true,
         queueOpenKeys: () => options.queueOpenKeys?.() ?? [],
@@ -6459,6 +6512,8 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
           // M5-W PR-C: the Web menu dies with the renderer; a late read/action
           // settlement of a disposed mount owns no frame and no write.
           () => { webPicker?.retire() },
+          // PO-5E: the ACP menu dies with the renderer the same way.
+          () => { acpPicker?.retire() },
           () => { modelPicker?.retire() },
           // TSP-7 PR-G: the composer quick menu dies with the renderer; a late
           // read or write settlement of a disposed mount owns no frame.

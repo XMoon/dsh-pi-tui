@@ -1255,6 +1255,15 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
     scheduleInitialMeasurement: scheduleInitialContextMeasure,
     cancelDeferred,
     setGoal,
-    applyGoalChange: (event) => { goalText = foldGoal([event]) },
+    // Fold the newest durable `goal/change` and publish it through the ONE
+    // status refresh: the live legacy `goal` slot carries the folded text, and
+    // the cheap refresh is what repaints the dock's goal line. Without it a
+    // committed clear/completion kept the previous badge painted until an
+    // unrelated status event happened to refresh (the fold alone mutates no
+    // surface fact).
+    applyGoalChange: (event) => {
+      goalText = foldGoal([event])
+      refreshStatusCheap()
+    },
   }
 }

@@ -57,6 +57,7 @@ import type { CommandRuntime } from './runtime.ts'
 import type { ModelSelectionOwner, SelectionRef } from './model-selection.ts'
 import type { ModelPresentation } from './model-presentation.ts'
 import type { WebAccessPresentation } from './web-access-presentation.ts'
+import type { AcpAccessPresentation } from './acp-access-presentation.ts'
 import type { PresetPresentation } from './preset-presentation.ts'
 import type { SessionBrowserPresentation } from './session-browser-presentation.ts'
 import type { NotificationMethod, NotificationMode } from '../../domain/notification/settings.ts'
@@ -141,6 +142,8 @@ export interface CommandSurfaceDeps<Selection extends ModelSelectionValue, Exact
   readonly presetPresentation?: () => PresetPresentation | undefined
   /** M5-W PR-C: only the native `/web` presenter; never an alternate executor. */
   readonly webPresentation?: () => WebAccessPresentation | undefined
+  /** PO-5E: only the native `/acp` presenter; never an alternate executor. */
+  readonly acpPresentation?: () => AcpAccessPresentation | undefined
   /** Native Session Browser presenter, read live; absent on unsupported renderers. */
   readonly sessionBrowserPresentation?: () => SessionBrowserPresentation | undefined
   /** PR3-A: the renderer-neutral notice sink (registration/refresh failures
@@ -1196,6 +1199,8 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
         // M5-W PR-C: the native `/web` presenter, read LIVE like the Model and
         // Preset ones (never a cached mount).
         deps.webPresentation?.(),
+        // PO-5E: the same live read for the native `/acp` presenter.
+        deps.acpPresentation?.(),
       )
       // Per-name degradation notice (M3-4 PR2): a Host-claimed name (the
       // Remote Host composition mounts `/export` itself) fails only ITS own

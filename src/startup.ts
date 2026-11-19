@@ -565,11 +565,11 @@ function tuiCommand(ctx: Context): Command {
   addControlVerb('start', 'start the profile Host and wait until it is authenticated')
   addControlVerb('stop', 'stop this profile Host through its verified supervision owner')
   addControlVerb('restart', 'stop the profile Host, confirm its exit, then start a new instance')
-  addControlVerb('logs', 'show the current Host log source journal or the scope host.log', command => {
+  addControlVerb('logs', 'show the current Host log source (systemd journal, launchd logs or the scope host.log)', command => {
     command.option('--lines <count>', 'number of log lines to show (1-1000, default 100)')
   })
-  addControlVerb('install', 'install this profile systemd user unit without starting it')
-  addControlVerb('uninstall', 'remove only this profile managed unit')
+  addControlVerb('install', 'install this profile service definition (systemd unit or launchd plist) without starting it')
+  addControlVerb('uninstall', 'remove only this profile managed service definition')
   daemon.addHelpText('after', `
 Examples:
   dsh --profile pi-tui daemon status
