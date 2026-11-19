@@ -737,6 +737,12 @@ interface PaintedBarLine {
 const BAR_ESCAPE_ID = 'escape'
 /** The id the painted rail OPEN hint carries: it replays the Enter ladder. */
 const BAR_OPEN_ID = 'open'
+/** The ActionBar's OWN target kinds. EVERY gate that treats the physical last
+ *  row as one bar gesture must use this predicate: the wheel-cancel rule and
+ *  the root-owned release branch previously listed the kinds by hand, so a new
+ *  bar kind could be half-wired (press armed, wheel cancel and release blind). */
+const isActionBarTargetKind = (kind: HitTarget['kind']): boolean =>
+  kind === 'bar-escape' || kind === 'bar-open' || kind === 'bar-span'
 /** The painted hint labels that mean "open/focus the selected rail entry". */
 const BAR_OPEN_HINTS: readonly string[] = ['Right open', 'Enter open', 'Enter/Right focus']
 
@@ -5388,7 +5394,7 @@ export class SettingsWorkspacePanel implements Component {
     // complete on release. Rail/content presses keep their own RFL-012 rule
     // (an immaterial wheel does not cancel them).
     if (event.type === 'wheel' && (event.wheelDelta ?? 0) !== 0) {
-      if (this.pressedGesture?.target.kind === 'bar-escape' || this.pressedGesture?.target.kind === 'bar-span') {
+      if (this.pressedGesture !== undefined && isActionBarTargetKind(this.pressedGesture.target.kind)) {
         this.pressedGesture = undefined
       }
       // A hosted page's BODY press is revoked too: the child only receives
@@ -5731,8 +5737,7 @@ export class SettingsWorkspacePanel implements Component {
     }
     // A recorded last-row Esc gesture resolves against the ROOT's painted hit
     // map only (the child content owner is never consulted for it).
-    if (this.pressedGesture?.target.kind === 'bar-escape'
-      || this.pressedGesture?.target.kind === 'bar-span') {
+    if (this.pressedGesture !== undefined && isActionBarTargetKind(this.pressedGesture.target.kind)) {
       const target = this.takeGesture(x, y)
       if (target !== undefined) this.activate(target)
       return
@@ -6042,7 +6047,7 @@ export class SettingsWorkspacePanel implements Component {
    *  DELEGATED Action-Bar span (both live on the Root's physical row). */
   private barTargetAt(x: number, y: number): HitTarget | undefined {
     return this.paintedTargets.find(target =>
-      (target.kind === 'bar-escape' || target.kind === 'bar-open' || target.kind === 'bar-span')
+      isActionBarTargetKind(target.kind)
       && target.row === y && x >= target.startCol && x < target.endCol)
   }
 

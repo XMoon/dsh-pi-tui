@@ -3742,3 +3742,53 @@ test('a pointer click on the Computer Use row opens the page on the single-pane 
     'the click on the Computer Use row must open the embedded page, not only select the row')
   h.panel.handleInput('\x1b')
 })
+
+test('any non-zero wheel on the bar revokes a painted open press (positive and cancel contrast)', () => {
+  // RFL-024: the NEW bar kind must obey the SAME ActionBar gesture class as the
+  // Esc affordance / child spans — a wheel anywhere on the bar revokes the
+  // press, even when it is immaterial for scrolling.
+  const withComputerUse = (): SettingsWorkspaceSnapshot => ({
+    ...SNAPSHOT,
+    rows: [...SNAPSHOT.rows, {
+      id: 'computer-use',
+      category: 'tools' as const,
+      label: 'Computer Use',
+      summary: 'Permissions · applications · PTC',
+      scope: 'DSH Host · official Computer Use provider',
+      freshness: 'runtime' as const,
+      description: 'the official Computer Use provider page',
+      specialist: 'computer-use' as const,
+    }],
+  })
+  const openCell = (h: Harness): { x: number, y: number } => {
+    const frame = plain(h, 44).split('\n')
+    const y = frame.findIndex(line => line.includes('Enter open'))
+    assert.ok(y >= 0, `the open hint is painted:\n${frame.join('\n')}`)
+    return { x: (frame[y] ?? '').indexOf('Enter open') + 1, y }
+  }
+  // POSITIVE: a press + release with no wheel opens the Tools rows.
+  const positive = setup({ columns: 44, rows: 24, specialistPage: true, snapshot: withComputerUse })
+  positive.panel.handleInput('\x1b')
+  walkTo(positive, 'tools')
+  const cell = openCell(positive)
+  positive.panel.onCellPress(cell.x, cell.y)
+  positive.panel.onCellClick(cell.x, cell.y)
+  assert.match(plain(positive, 44), /Computer Use/u, 'the un-interrupted press+release opens the rows')
+  positive.panel.handleInput('\x1b')
+
+  // CANCEL: an IMMATERIAL wheel (delta 1) on the same bar cell revokes it.
+  const cancelled = setup({ columns: 44, rows: 24, specialistPage: true, snapshot: withComputerUse })
+  cancelled.panel.handleInput('\x1b')
+  walkTo(cancelled, 'tools')
+  const cancelCell = openCell(cancelled)
+  cancelled.panel.onCellPress(cancelCell.x, cancelCell.y)
+  cancelled.panel.handleMouse({
+    type: 'wheel', button: 'none', x: cancelCell.x, y: cancelCell.y,
+    screenX: cancelCell.x, screenY: cancelCell.y, width: 44, height: 24,
+    shift: false, alt: false, ctrl: false, wheelDelta: 1,
+  })
+  cancelled.panel.onCellClick(cancelCell.x, cancelCell.y)
+  const afterCancel = plain(cancelled, 44)
+  assert.doesNotMatch(afterCancel, /Computer Use ·|Computer Use\s+Permissions/u,
+    `an immaterial wheel on the bar must revoke the open press:\n${afterCancel}`)
+})
