@@ -1652,9 +1652,22 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
   const activateDispatch = liveInputDispatches().find(dispatch => dispatchMethod(dispatch) === 'activate')
   const typeDispatch = liveInputDispatches().find(dispatch => dispatchMethod(dispatch) === 'typeText')
   const inputSequence = liveInputDispatches().map(dispatchMethod)
-  assert(JSON.stringify(inputSequence)
-    === JSON.stringify(['getApp', 'listWindows', 'show', 'activate', 'typeText', 'getState']),
-  `MAC09-08: the controlled root dispatched an unexpected cua method sequence: ${JSON.stringify(inputSequence)}`)
+  // The CLAIM is one bounded input observed by the same call: getApp ->
+  // listWindows -> typeText -> getState on ONE root call. The window pre-steps
+  // (`show` / `activate`) are OPTIONAL: the provider's declared keyboard scope
+  // is app-level (keyboard: ["app"]) and the DSH 0.2.2-rc.5 pairing does not need
+  // them before an app-scoped typeText, so a model that skips them still proves
+  // the claim. If they ARE dispatched they must be validated (below).
+  const INPUT_SEQUENCE = ['getApp', 'listWindows', 'typeText', 'getState']
+  const INPUT_OPTIONAL = ['show', 'activate']
+  const sequenceShaped = inputSequence[0] === INPUT_SEQUENCE[0]
+    && inputSequence[1] === INPUT_SEQUENCE[1]
+    && inputSequence.at(-1) === 'getState'
+    && inputSequence.indexOf('typeText') > 1
+    && inputSequence.every(method => INPUT_SEQUENCE.includes(method) || INPUT_OPTIONAL.includes(method))
+    && new Set(inputSequence).size === inputSequence.length
+  assert(sequenceShaped,
+    `MAC09-08: the controlled root dispatched an unexpected cua method sequence: ${JSON.stringify(inputSequence)}`)
   assert(getAppDispatch !== undefined && dispatchParams(getAppDispatch)?.selector === String(textEditPid),
     'MAC09-08: the official getApp did not select this run\'s exact TextEdit PID')
   const inputEventsNow = eventsOf(dshHome, input.sessionId)
@@ -1678,18 +1691,22 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
   // are rejected with INVALID_ARGUMENT. The chain stays: show/activate bind
   // the controlled window, typeText/getState use the app object returned by
   // the approved getApp.
-  assert(typeof typeParams?.appHandle === 'string' && typeParams.appHandle === controlledHandle
-    && stateParams?.appHandle === controlledHandle
-    && showParams?.appHandle === controlledHandle
-    && activateParams?.appHandle === controlledHandle
-    && dispatchParams(listWindowsDispatch)?.appHandle === controlledHandle,
-    'MAC09-08: listWindows/show/typeText/getState do not use the exact approved getApp handle')
-  const controlledInputWindow = Array.isArray(controlledWindows)
-    ? controlledWindows.find(window => window?.windowId === showParams?.windowId
-      && String(window?.title ?? '').includes('cua-blank'))
-    : undefined
-  assert(controlledInputWindow !== undefined,
-    'MAC09-08: show windowId is not this run\'s controlled cua-blank listWindows result')
+  const handleBound = (params) => params?.appHandle === controlledHandle
+  assert(typeof typeParams?.appHandle === 'string' && handleBound(typeParams)
+    && handleBound(stateParams)
+    && handleBound(dispatchParams(listWindowsDispatch))
+    // The optional pre-steps, when dispatched, must use the SAME approved handle.
+    && (showParams === undefined || handleBound(showParams))
+    && (activateParams === undefined || handleBound(activateParams)),
+    'MAC09-08: listWindows/typeText/getState (or a dispatched pre-step) do not use the exact approved getApp handle')
+  if (showParams !== undefined) {
+    const controlledInputWindow = Array.isArray(controlledWindows)
+      ? controlledWindows.find(window => window?.windowId === showParams?.windowId
+        && String(window?.title ?? '').includes('cua-blank'))
+      : undefined
+    assert(controlledInputWindow !== undefined,
+      'MAC09-08: show windowId is not this run\'s controlled cua-blank listWindows result')
+  }
   const markerResult = await waitFor(() => cuaResults(eventsOf(dshHome, input.sessionId), 0)
     .find(result => result.rootCallId === input.dispatch.rootCallId
       && dispatchMethod(result) === 'getState'
@@ -1699,6 +1716,8 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
     sessionId: sha16(input.sessionId),
     rootCallId: sha16(input.dispatch.rootCallId),
     method: 'typeText',
+    sequence: inputSequence,
+    windowPreSteps: showDispatch !== undefined || activateDispatch !== undefined,
     markerDigest: sha16(marker),
     attempts: attempts + 1,
     windowId: typeParams.windowId,
