@@ -322,11 +322,16 @@ manifest that has to be kept in sync with the tree.
 artifact path: the artifact must never depend on the developer git/CI
 environment.
 
-`pnpm smoke:split-process` is a Linux-only real two-process distribution
-proof, not part of `verify:release`. GitHub CI runs it automatically only on
-an npm release tag; an ordinary PR's `skipped` status is not the proof. Any
-npm-mode remote `refs/heads/...` branch can run the same full, candidate-backed
-proof explicitly: use GitHub Actions **Run workflow** on that branch and enable
+`pnpm smoke:split-process` is a real two-process distribution proof, not part
+of `verify:release`. The no-selector DEFAULT form (the complete qualification
+lane) is Linux-only: on any other OS it is refused
+(`INPUT_PLATFORM_FULL_UNSUPPORTED`) before the candidate is inspected. The
+`--list` / `--case` / `--suite` selector forms run on Linux and macOS, where
+macOS executes the SAME registry cases through its own real tmux PTY driver.
+GitHub CI runs the Linux full lane automatically only on an npm release tag;
+an ordinary PR's `skipped` status is not the proof. Any npm-mode remote
+`refs/heads/...` branch can run the same full, candidate-backed proof
+explicitly: use GitHub Actions **Run workflow** on that branch and enable
 `Run full Host/Client Split qualification on the selected npm-mode branch`
 (`run_split_process=true`). The verdict then requires the Split job to succeed
 on that run. The manual input stays opt-in, and Source Mode is rejected rather
@@ -356,28 +361,45 @@ on hosts with no isolated test environment. Run those cases explicitly with
 `--case` / `--suite`:
 
 ```sh
-pnpm smoke:split-process -- <candidate.tgz>               # complete lane
-pnpm smoke:split-process -- --list                        # the selectable registry
+pnpm smoke:split-process -- <candidate.tgz>               # complete lane (Linux only)
+pnpm smoke:split-process -- --list                        # the selectable registry (Linux + macOS)
 pnpm smoke:split-process -- <candidate.tgz> --suite <suite>
 pnpm smoke:split-process -- <candidate.tgz> --case <id>
+pnpm smoke:macos-split -- --list                          # macOS: the SAME registry, no legacy scene
+pnpm smoke:macos-split -- <candidate.tgz> --case <id>     # macOS: the shared selected runner
+pnpm smoke:macos-split -- <candidate.tgz> --suite <suite>
+pnpm smoke:macos-split -- <candidate.tgz>                 # macOS: the legacy A/P/M/L parity scene (no selector)
 pnpm smoke:split-upgrade -- --old <old.tgz> --new <new.tgz> [--evidence <file>]
 ```
 
 `--list` prints the full selectable registry — including the selectable-only
-native cases — (`SPLIT_PROCESS_SELECTABLE_CASES scope=SELECTABLE_ONLY`) and exits
-without resolving a candidate, creating a work root or installing anything. `--suite` and `--case` run only the
-registered cases of that suite/id through their own isolated installation and
-print one `SPLIT_PROCESS_SELECTED_PASS id=… scope=SELECTABLE_ONLY` per case;
-that output names the selectable subset only — it never claims the complete
-inventory, a `T60` result or a Browser/Web product qualification. A selector
-accepts at most one candidate and exactly one `--case` or `--suite` (never
-both, never repeated); `--list` takes neither. Unknown options, a missing or
-repeated selector, an extra positional, and a required Browser qualification
-flag (`SPLIT_PROCESS_REQUIRE_WEB_BROWSER` / `SPLIT_PROCESS_REQUIRE_WEB_PRODUCT`)
-combined with any selection other than `--suite web` all fail closed as
-`INPUT_UNQUALIFIED` / `INPUT_SMOKE_SELECTION_INVALID` before any scene exists.
-The full-only whole-lane mutation control (`SPLIT_PROCESS_SMOKE_MUTATION`) is
-refused in selector modes instead of being silently applied.
+native cases — (`SPLIT_PROCESS_SELECTABLE_CASES scope=SELECTABLE_ONLY`) with a
+trailing `platforms=` fact per row (the registry's executable support range),
+and exits without resolving a candidate, creating a work root or installing
+anything. `--suite` and `--case` run only the registered cases of that
+suite/id through their own isolated installation and print one
+`SPLIT_PROCESS_SELECTED_PASS id=… scope=SELECTABLE_ONLY` per case; that output
+names the selectable subset only — it never claims the complete inventory, a
+`T60` result or a Browser/Web product qualification. Platform eligibility is a
+registry fact, not a user API: every selected case — and a whole `--suite`,
+refused as a unit, never silently filtered — must support the current OS, and
+an unsupported selection fails closed as
+`INPUT_UNQUALIFIED` / `INPUT_PLATFORM_CASE_UNSUPPORTED` before the candidate is
+inspected, a work root exists or anything is installed. Eight audited shared
+cases are qualified on both Linux and macOS; every other case stays
+Linux-only until real native evidence exists. On macOS the no-selector form of
+`smoke:macos-split` is the legacy A/P/M/L parity scene, unchanged; a
+`--list`/`--case`/`--suite` selector on either entry point dispatches the ONE
+shared registry and the same selected runner, never a macOS copy of the cases
+or the legacy scene. A selector accepts at most one candidate and exactly one
+`--case` or `--suite` (never both, never repeated); `--list` takes neither.
+Unknown options, a missing or repeated selector, an extra positional, and a
+required Browser qualification flag (`SPLIT_PROCESS_REQUIRE_WEB_BROWSER` /
+`SPLIT_PROCESS_REQUIRE_WEB_PRODUCT`) combined with any selection other than
+`--suite web` all fail closed as `INPUT_UNQUALIFIED` /
+`INPUT_SMOKE_SELECTION_INVALID` before any scene exists. The full-only
+whole-lane mutation control (`SPLIT_PROCESS_SMOKE_MUTATION`) is refused in
+selector modes instead of being silently applied.
 
 A selected Web case owns its own Browser requirement: `web.official-composition`
 and `web.runtime-toggle` require the real pinned Playwright Chromium, and

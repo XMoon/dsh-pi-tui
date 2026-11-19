@@ -76,7 +76,7 @@ import { fileURLToPath } from 'node:url'
 
 import { inspectSplitCandidate, createSplitSmokeProfile } from '../lib/split-smoke-profile.mjs'
 import { cleanupTrackedLaunchdResource } from '../lib/launchd-smoke-cleanup.mjs'
-import { SplitSmokeAssertionError } from '../lib/split-smoke-diagnostics.mjs'
+import { SplitSmokeAssertionError, SplitSmokeInputError, emitInputFailure } from '../lib/split-smoke-diagnostics.mjs'
 import { hostSessionEvents, hostSessionLogCount, hostSessionHeader, waitForHostSessionHeader } from '../lib/split-smoke-sessions.mjs'
 
 const KEEP = process.env.SPLIT_PROCESS_SMOKE_KEEP === '1'
@@ -2880,6 +2880,40 @@ async function cleanup({ workRoot, report }) {
 
 // ── main ───────────────────────────────────────────────────────────────────
 
+/**
+ * The selector dispatch: `--list`, `--case <id>` or `--suite <name>` delegate
+ * to the ONE shared split-process selected runner in THIS process — the same
+ * registry, the same parser and the same business case functions Linux runs.
+ * A Mac selector never triggers the legacy A/P/M/L scene, and a candidate with
+ * no selector keeps the original complete scene below. Importing the lane
+ * module performs no I/O and starts no process.
+ */
+async function runSelectorLane(argv) {
+  const [{ parseSelectionArgs, resolveSelection }, lane] = await Promise.all([
+    import('../lib/split-smoke-selection.mjs'),
+    import('../split-process-smoke.mjs'),
+  ])
+  let selection
+  try {
+    selection = resolveSelection(parseSelectionArgs(argv))
+  } catch (error) {
+    emitInputFailure({
+      lane: 'macos-split',
+      heading: 'MACOS_SPLIT',
+      error,
+      evidencePath: process.env.SPLIT_PROCESS_FAILURE_EVIDENCE,
+    })
+    throw error
+  }
+  if (selection.mode === 'list') {
+    lane.printSelectableCases()
+    return
+  }
+  // The shared runner's selected entry drives THIS Mac CLI's own Darwin PTY
+  // driver through the platform seam; no second registry, no second runner.
+  await lane.runSelectedCases(selection)
+}
+
 async function main(explicitPath) {
   if (process.platform !== 'darwin') {
     throw new SplitSmokeAssertionError('smoke:macos-split is a macOS-only lane; this host is ' + process.platform)
@@ -2946,8 +2980,39 @@ async function main(explicitPath) {
 }
 
 try {
-  const explicit = process.argv[2]
-  await main(explicit)
+  const rawArgs = process.argv.slice(2)
+  // A selector dispatch must be detected on the RAW argv before any candidate
+  // resolution: `--list` never names a tarball and a selector never falls back
+  // to the legacy scene. `--` is the pnpm separator and may lead.
+  const selectorArgs = rawArgs[0] === '--' ? rawArgs.slice(1) : rawArgs
+  const hasSelector = selectorArgs.includes('--list')
+    || selectorArgs.includes('--case')
+    || selectorArgs.includes('--suite')
+  // A Mac CLI invocation that names ANY dash option this lane does not own is
+  // an unqualified input, refused before any candidate inspection: it can
+  // never silently fall back into the legacy A/P/M/L scene (the `--q2` shape
+  // the retired plan tried to introduce is exactly such an input).
+  if (!hasSelector && selectorArgs.some(argument => argument.startsWith('-') && argument !== '--')) {
+    const unknown = selectorArgs.find(argument => argument.startsWith('-') && argument !== '--')
+    const refusal = new SplitSmokeInputError(
+      'INPUT_SMOKE_SELECTION_INVALID',
+      `INPUT_UNQUALIFIED: INPUT_SMOKE_SELECTION_INVALID (invalid smoke selection, not a product regression): `
+        + `unknown option ${JSON.stringify(String(unknown))}; the macOS CLI accepts only <candidate.tgz>, --list, --case <id> or --suite <name>`,
+    )
+    emitInputFailure({
+      lane: 'macos-split',
+      heading: 'MACOS_SPLIT',
+      error: refusal,
+      evidencePath: process.env.SPLIT_PROCESS_FAILURE_EVIDENCE,
+    })
+    throw refusal
+  }
+  if (hasSelector) {
+    await runSelectorLane(selectorArgs)
+  } else {
+    const explicit = rawArgs[0] === '--' ? rawArgs[1] : rawArgs[0]
+    await main(explicit)
+  }
 } catch (error) {
   const message = error instanceof Error ? `${error.message}\n${error.stack ?? ''}` : String(error)
   process.stderr.write(`MACOS_SPLIT_PARITY: FAIL: ${message}\n`)

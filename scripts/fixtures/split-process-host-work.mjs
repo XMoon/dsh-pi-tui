@@ -1692,6 +1692,9 @@ export async function apply(ctx) {
       const fileBlockOf = content => Array.isArray(content)
         ? content.find(block => block?.type === 'file' && block.attachment?.attachmentId !== undefined)
         : undefined
+      const imageBlockOf = content => Array.isArray(content)
+        ? content.find(block => block?.type === 'image' && block.attachment?.attachmentId !== undefined)
+        : undefined
       const textOfContent = content => Array.isArray(content)
         ? content.map(block => block?.type === 'text' && typeof block.text === 'string' ? block.text : '').join('')
         : ''
@@ -1713,17 +1716,43 @@ export async function apply(ctx) {
         }
         const event = agent.session.snapshotEvents().find(candidate => candidate.type === 'user/message'
           && textOfContent(candidate.data?.content).includes(marker)
-          && fileBlockOf(candidate.data?.content) !== undefined)
-        const ref = event === undefined ? undefined : fileBlockOf(event.data.content)?.attachment
-        if (ref === undefined) {
+          && (fileBlockOf(candidate.data?.content) !== undefined || imageBlockOf(candidate.data?.content) !== undefined))
+        const fileRef = event === undefined ? undefined : fileBlockOf(event.data.content)?.attachment
+        const imageRef = event === undefined ? undefined : imageBlockOf(event.data.content)?.attachment
+        if (event === undefined || (fileRef === undefined && imageRef === undefined)) {
           record('f4-file-probe', { marker, sessionId: requestedSession, error: 'no-durable-file-message' })
           return
         }
         const attachments = ctx.get('attachments')
+        if (imageRef !== undefined) {
+          // The ONE official Host image authority: `readImage` verifies the
+          // stored bytes against their durable reference. PNG signature and
+          // pixel facts come from the Store's own stored facts, never from
+          // the Client source.
+          const stored = await attachments.readImage(imageRef)
+          const digest = createHash('sha256').update(stored.data).digest('hex')
+          record('f4-file-probe', {
+            marker,
+            sessionId: requestedSession,
+            attachmentId: stored.ref.attachmentId,
+            mediaType: stored.ref.mediaType,
+            refBytes: stored.ref.bytes,
+            bytes: stored.data.byteLength,
+            width: stored.ref.width,
+            height: stored.ref.height,
+            sha256: digest,
+            pngSignature: stored.data.length >= 8
+              && stored.data[0] === 0x89 && stored.data[1] === 0x50 && stored.data[2] === 0x4e
+              && stored.data[3] === 0x47 && stored.data[4] === 0x0d && stored.data[5] === 0x0a
+              && stored.data[6] === 0x1a && stored.data[7] === 0x0a,
+            chunks: 1,
+          })
+          return
+        }
         const digest = createHash('sha256')
         let bytes = 0
         let chunks = 0
-        for await (const chunk of attachments.readFileStream(ref)) {
+        for await (const chunk of attachments.readFileStream(fileRef)) {
           bytes += chunk.byteLength
           chunks += 1
           digest.update(chunk)
@@ -1731,9 +1760,9 @@ export async function apply(ctx) {
         record('f4-file-probe', {
           marker,
           sessionId: requestedSession,
-          attachmentId: ref.attachmentId,
-          name: ref.name,
-          refBytes: ref.bytes,
+          attachmentId: fileRef.attachmentId,
+          name: fileRef.name,
+          refBytes: fileRef.bytes,
           bytes,
           chunks,
           sha256: digest.digest('hex'),

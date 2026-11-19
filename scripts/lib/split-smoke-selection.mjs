@@ -96,6 +96,16 @@ import { SplitSmokeInputError } from './split-smoke-diagnostics.mjs'
 const SELECTABLE_SCOPE = 'SELECTABLE_ONLY'
 
 /**
+ * The platform eligibility fact of one registry entry. It names the OS
+ * platforms where a REAL selected run of this case has actually been qualified
+ * to execute (the shared Darwin driver plus the eight business cases are the
+ * current Mac scope); every entry without proven native support stays
+ * `['linux']`. This is an executable support range, never a user product API.
+ */
+const LINUX_ONLY = Object.freeze(['linux'])
+const LINUX_DARWIN = Object.freeze(['linux', 'darwin'])
+
+/**
  * The frozen selectable cases, in registration order.
  *
  * The order IS the fact: a suite runs these entries in exactly this sequence and
@@ -152,6 +162,7 @@ const CASE_REGISTRY = Object.freeze([
     suite: 'surface',
     id: 'surface.generic-file-upload-f4',
     title: 'a real Client /attach uploads its own file bytes through the official Host receipt into the exact Session',
+    platforms: LINUX_DARWIN,
     run: runGenericFileUploadF4,
   }),
   Object.freeze({
@@ -170,6 +181,7 @@ const CASE_REGISTRY = Object.freeze([
     suite: 'surface',
     id: 'surface.sessionless-host-file-f5b',
     title: 'two real sessionless TUIs list their own Host Workspace @file markers, an explicit `@../`/absolute query reaches OUTSIDE the registered root by Host path while a bare query stays inside, and a different mount view and an unproved launch cwd adopt nothing',
+    platforms: LINUX_DARWIN,
     run: runSessionlessHostFileF5B,
   }),
   Object.freeze({
@@ -182,6 +194,7 @@ const CASE_REGISTRY = Object.freeze([
     suite: 'multi-client',
     id: 'multi-client.shared-session-interactions',
     title: 'two real Clients retain one Session and settle one Host Question or Approval exactly once',
+    platforms: LINUX_DARWIN,
     run: runSharedSessionInteractions,
   }),
   Object.freeze({
@@ -308,12 +321,14 @@ const CASE_REGISTRY = Object.freeze([
     suite: 'mcp',
     id: 'mcp.servers-fr3',
     title: 'ONE real Split Host and Client mount the single official MCP manager, classify the configured source, probe and restart the real test server once, and keep the same manager fiber across /web off->on->off',
+    platforms: LINUX_DARWIN,
     run: runMcpServersFr3,
   }),
   Object.freeze({
     suite: 'mcp',
     id: 'mcp.servers-fr4',
     title: 'real Split Host and Clients edit the official mcp-manager configuration through the Settings CAS: inherited classification, Add/Edit/Disable/Enable/Delete/Reset, a dirty-discard with zero writes, a plugin-owned refusal and a two-client revision conflict',
+    platforms: LINUX_DARWIN,
     run: runMcpServersFr4,
   }),
   Object.freeze({
@@ -350,18 +365,21 @@ const CASE_REGISTRY = Object.freeze([
     suite: 'skills',
     id: 'skills.sessionless-hot',
     title: 'two real Sessionless TUIs read their own Host Workspace skills and hot-update them on Host file add/edit/delete without creating a Session',
+    platforms: LINUX_DARWIN,
     run: runSessionlessSkillsHot,
   }),
   Object.freeze({
     suite: 'skills',
     id: 'skills.live-hot',
     title: 'two real TUIs on ONE Live Session follow Host skill add/edit/delete through the official catalog without replacing the Session',
+    platforms: LINUX_DARWIN,
     run: runLiveSkillsHot,
   }),
   Object.freeze({
     suite: 'skills',
     id: 'skills.recovery',
     title: 'a SIGKILLed Sessionless Client is replaced by a new process that re-establishes Host skill observation on the same Host',
+    platforms: LINUX_DARWIN,
     run: runSkillsRecovery,
   }),
   Object.freeze({
@@ -611,14 +629,35 @@ export function parseSelectionArgs(argv) {
  * Resolve an already-parsed selection against the registry. An unknown
  * id/suite fails closed, and an empty selection can never pass: every selected
  * run executes at least one registered case.
+ *
+ * `platform` is the CURRENT process platform: every selected case (and every
+ * suite, as a whole) must be eligible there BEFORE any candidate inspection,
+ * work root or installation exists. An unsupported selection is the fixed
+ * `INPUT_PLATFORM_CASE_UNSUPPORTED` input refusal, never a case run.
  */
-export function resolveSelection(selection) {
+export function resolveSelection(selection, platform = process.platform) {
   if (selection.mode === 'full' || selection.mode === 'list') return selection
   const cases = CASE_REGISTRY.filter(entry => selection.mode === 'case'
     ? entry.id === selection.id
     : entry.suite === selection.suite)
   if (cases.length === 0) fail(`unknown ${selection.mode}`)
+  const unsupported = cases.filter(entry => !(entry.platforms ?? LINUX_ONLY).includes(platform))
+  if (unsupported.length > 0) {
+    // A suite is refused as a WHOLE (never silently filtered): the names of
+    // every unsupported member travel with the refusal.
+    throw new SplitSmokeInputError(
+      'INPUT_PLATFORM_CASE_UNSUPPORTED',
+      `INPUT_UNQUALIFIED: INPUT_PLATFORM_CASE_UNSUPPORTED (invalid smoke selection, not a product regression): `
+        + `the ${selection.mode} ${selection.mode === 'case' ? selection.id : selection.suite} is not supported on `
+        + `platform=${platform}; unsupported case(s): ${unsupported.map(entry => entry.id).join(', ')}`,
+    )
+  }
   return { ...selection, cases }
+}
+
+/** The registry-derived platform support one `--list` row appends. */
+export function casePlatformsOf(entry) {
+  return (entry.platforms ?? LINUX_ONLY).join(',')
 }
 
 /** The ONE selected result line; it names the selectable scope, never full. */

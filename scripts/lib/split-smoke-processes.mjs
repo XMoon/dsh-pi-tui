@@ -24,6 +24,7 @@ import xterm from '@xterm/headless'
 
 import { SplitSmokeAssertionError, SplitSmokeWaitError } from './split-smoke-diagnostics.mjs'
 import { currentPtyScriptArgv } from './pty-script.mjs'
+import { createDarwinSurfacePtyScope, darwinKeyTokensOf, darwinHostSeatFileFree } from './split-smoke-darwin-pty.mjs'
 
 function assert(condition, message) {
   if (!condition) throw new SplitSmokeAssertionError(message)
@@ -79,6 +80,12 @@ export function alive(pid) {
 export function createSplitProcessScope() {
   let sequence = 0
   const activeProcesses = new Set()
+  /**
+   * The Darwin surface PTY scope: the ONE private tmux server this lane run
+   * owns. It is created lazily (no tmux server exists until the first Darwin
+   * surface pane) and `stopDarwinSurfaceServer()` is the scoped teardown.
+   */
+  const darwinScope = createDarwinSurfacePtyScope()
 
   /** One OS entry process with parsed JSON records. Bound to this scope's active set and path sequence. */
   class EntryProcess {
@@ -202,14 +209,18 @@ export function createSplitProcessScope() {
   }
 
   /**
-   * One REAL PiTui surface Client driven through the system `script(1)` pseudo-TTY.
+   * One REAL PiTui surface Client.
    *
-   * Structured telemetry reads the private `0600` JSONL file the entry owns (never
-   * the terminal); the terminal bytes stay on the pty and are parsed with the
-   * repository's headless xterm parser, so "the frame shows …" is an escape-aware
-   * fact rather than a substring of raw ANSI. The process tree is `script ->
-   * node dist/local-client.mjs`; the business PID is the one in the `ready`
-   * record, and signals for the surface Client are sent to THAT pid.
+   * Linux drives the system `script(1)` pseudo-TTY (unchanged); Darwin drives
+   * ONE real private-tmux pane (`split-smoke-darwin-pty.mjs`) because BSD
+   * `script(1)` cannot take a live keystroke stream from a Node pipe parent.
+   * Both drivers expose the SAME surface: structured telemetry reads the
+   * private `0600` JSONL record file the entry owns (never the terminal);
+   * "the frame shows …" is an escape-aware fact from the REAL painted terminal
+   * (the headless xterm parser on Linux, the pane capture on Darwin); the
+   * process tree on Linux is `script -> node dist/local-client.mjs` and on
+   * Darwin the pane's process tree; the business PID is the one in the `ready`
+   * record, and signals for the surface Client go to THAT pid.
    */
   class SurfaceEntryProcess {
     constructor(entry, options) {
@@ -221,6 +232,61 @@ export function createSplitProcessScope() {
       this.exitResult = undefined
       this.recordError = undefined
       this.recordPath = join(options.workDir, `surface-client-${String(++sequence)}.jsonl`)
+      this.platform = process.platform
+      if (this.platform === 'darwin') {
+        // The scope owns the ONE private tmux server: its panes are created
+        // through the scope binding, never a per-call option (every direct
+        // constructor caller gets the same driver for free).
+        const exitPath = join(options.workDir, `surface-client-exit-${String(sequence)}.txt`)
+        this.darwin = darwinScope.createPane({
+          entry,
+          cwd: options.cwd,
+          env: {
+            ...options.env,
+            SPLIT_PROCESS_DSH_ANCHOR: options.anchor,
+            SPLIT_PROCESS_PROFILE: options.profile,
+            SPLIT_PROCESS_SCRATCH: options.effectiveScratch ?? join(options.scratch, `surface-${String(sequence)}`),
+            SPLIT_PROCESS_CLIENT_MODE: 'surface',
+            SPLIT_PROCESS_CLIENT_RECORD_FILE: this.recordPath,
+            COLUMNS: String(options.columns ?? 100),
+            LINES: String(options.rows ?? 30),
+          },
+          columns: options.columns ?? 100,
+          rows: options.rows ?? 30,
+          recordPath: this.recordPath,
+          exitPath,
+          role: `surface-${String(sequence)}`,
+        })
+        // The REAL wrapper pid of the pane: a process distinct from the
+        // business Client, tracked for identity/wrapper assertions only. The
+        // Darwin teardown never signals through it (the pane owns the tree).
+        this.child = { pid: this.darwin.panePid }
+        this.term = undefined
+        this.columns = options.columns ?? 100
+        this.rows = options.rows ?? 30
+        this.exit = new Promise(resolveExit => { this.resolveExit = resolveExit })
+        this.recordTimer = setInterval(() => {
+          try {
+            this.readRecords()
+          } catch (error) {
+            this.recordError = error
+          }
+        }, 25)
+        this.panePollTimer = setInterval(() => {
+          if (this.exited) return
+          const facts = this.darwin.deadFacts()
+          if (!facts.dead) return
+          // The REAL business Client exited; capture its shell-reported status.
+          this.exited = true
+          this.exitResult = { code: facts.status, signal: null }
+          activeProcesses.delete(this)
+          clearInterval(this.recordTimer)
+          clearInterval(this.panePollTimer)
+          this.resolveExit(this.exitResult)
+        }, 50)
+        activeProcesses.add(this)
+        return
+      }
       this.term = new xterm.Terminal({
         cols: options.columns ?? 100,
         rows: options.rows ?? 30,
@@ -346,6 +412,11 @@ export function createSplitProcessScope() {
 
     /** Flush the headless terminal and return its visible viewport. */
     async viewport() {
+      if (this.platform === 'darwin') {
+        // The tmux pane capture IS the painted frame; pad/clip to the pane
+        // size so the viewport height matches the Linux xterm viewport.
+        return this.darwin.captureLines()
+      }
       await new Promise(resolveFlush => this.term.write('', resolveFlush))
       const lines = []
       const buffer = this.term.buffer.active
@@ -534,14 +605,27 @@ export function createSplitProcessScope() {
 
     /** Send terminal input to the Client through the pty master. */
     send(data) {
+      if (this.platform === 'darwin') {
+        // REAL keystrokes: named tmux keys for the control/CSI classes, literal
+        // text otherwise. An unmapped byte throws; nothing is dropped.
+        this.darwin.sendTokens(darwinKeyTokensOf(data))
+        return
+      }
       this.child.stdin.write(data)
     }
 
-    /** Signal the business Client process (never the `script` wrapper). */
+    /** Signal the business Client process (never the `script` wrapper / tmux). */
     signalBusiness(signal) {
       const pid = this.records.find(record => record.m4a0 === 'ready')?.pid
         ?? this.records.find(record => record.m4a0 === 'client-started')?.pid
       assert(Number.isInteger(pid), `${this.role}: no business PID is known yet`)
+      if (this.platform === 'darwin') {
+        // A bare POSIX signal to the exact published business pid, never a
+        // process-group or /proc-based guess: the pane wrapper (tmux server)
+        // is never addressed.
+        process.kill(pid, signal)
+        return
+      }
       process.kill(pid, signal)
     }
 
@@ -564,11 +648,24 @@ export function createSplitProcessScope() {
 
     async dispose() {
       clearInterval(this.recordTimer)
+      if (this.platform === 'darwin') {
+        clearInterval(this.panePollTimer)
+        // Only this scope's own pane is torn down; if the business Client is
+        // still alive, the pane death is awaited through the same poller the
+        // exit promise uses. A pane that survives is reported by the scope's
+        // stopServer, never killed by bare pid.
+        if (!this.exited) {
+          try { await this.waitForExit(15_000) } catch { /* reported by the scope */ }
+        }
+        await this.darwin.dispose()
+        activeProcesses.delete(this)
+        return
+      }
       try { process.kill(-this.child.pid, 'SIGKILL') } catch { /* already gone */ }
       try { await this.waitForExit(15_000) } catch { /* best effort */ }
     }
   }
-  return { EntryProcess, SurfaceEntryProcess, activeProcesses }
+  return { EntryProcess, SurfaceEntryProcess, activeProcesses, darwinScope, darwinHostSeatFileFree }
 }
 
 /** The last `surface-status` record of a surface Client (no stdin channel). */

@@ -119,7 +119,15 @@ function runLane(script, args, tmpRoot) {
   const result = spawnSync(process.execPath, [script, ...args], {
     encoding: 'utf8',
     timeout: 5_000,
-    env: { ...process.env, TMPDIR: tmpRoot },
+    env: {
+      ...process.env,
+      TMPDIR: tmpRoot,
+      // These tests exercise the CANDIDATE input boundary of the full lane,
+      // not its platform guard. Off Linux the full form is refused by
+      // platform BEFORE the candidate preflight, so the child is pinned to
+      // the lane's Linux form through the one documented test override.
+      ...(process.platform === 'linux' ? {} : { SPLIT_PROCESS_TEST_PLATFORM: 'linux' }),
+    },
   })
   return { elapsedMs: Date.now() - started, ...result }
 }
@@ -759,7 +767,8 @@ test('a real process wait failure reports no terminal or record payload', (t) =>
   writeFileSync(entry, 'process.exit(0)\n')
   const probe = `
     const { createSplitProcessScope } = await import(${JSON.stringify(pathToFileURL(PROCESSES_LIB).href)})
-    const { EntryProcess, SurfaceEntryProcess } = createSplitProcessScope()
+    const scope = createSplitProcessScope()
+    const { EntryProcess, SurfaceEntryProcess } = scope
     const options = {
       cwd: ${JSON.stringify(dir)},
       env: { ...process.env },
@@ -767,6 +776,7 @@ test('a real process wait failure reports no terminal or record payload', (t) =>
       profile: 'pi-tui',
       scratch: ${JSON.stringify(dir)},
       workDir: ${JSON.stringify(dir)},
+      ...(process.platform === 'darwin' ? { darwinScope: scope.darwinScope } : {}),
     }
     const failures = []
     const plain = new EntryProcess('probe-host', ${JSON.stringify(entry)}, options)
@@ -775,6 +785,8 @@ test('a real process wait failure reports no terminal or record payload', (t) =>
     const surface = new SurfaceEntryProcess(${JSON.stringify(entry)}, options)
     try { await surface.waitForScreen('never painted', 'probe notice', 10_000) }
     catch (error) { failures.push({ category: error.category, code: error.code, message: error.message }) }
+    await surface.dispose()
+    if (process.platform === 'darwin') await scope.darwinScope.stopServer()
     process.stdout.write(JSON.stringify(failures))
   `
   const result = spawnSync(process.execPath, ['--input-type=module', '-e', probe], {
@@ -1457,12 +1469,14 @@ test('a setup failure is reported and leaves no half-created scene behind', (t) 
   let selected
   try {
     result = spawnSync(process.execPath, [PROCESS_SCRIPT, candidate], {
-      encoding: 'utf8', timeout: 10_000, env: { ...process.env, TMPDIR: locked },
+      encoding: 'utf8', timeout: 10_000,
+      env: { ...process.env, TMPDIR: locked, ...(process.platform === 'linux' ? {} : { SPLIT_PROCESS_TEST_PLATFORM: 'linux' }) },
     })
     // The selected entry reaches the same setup boundary (after its own
     // qualified preflight) and must clean up exactly the same way.
     selected = spawnSync(process.execPath, [PROCESS_SCRIPT, candidate, '--case', 'bootstrap.host-runtime-disabled'], {
-      encoding: 'utf8', timeout: 10_000, env: { ...process.env, TMPDIR: locked },
+      encoding: 'utf8', timeout: 10_000,
+      env: { ...process.env, TMPDIR: locked, ...(process.platform === 'linux' ? {} : { SPLIT_PROCESS_TEST_PLATFORM: 'linux' }) },
     })
   } finally {
     chmodSync(locked, 0o700)

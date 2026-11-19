@@ -104,6 +104,7 @@ import {
   waitForCondition,
 } from './lib/split-smoke-processes.mjs'
 import {
+  casePlatformsOf,
   listDefaultLaneCases,
   listSelectableCases,
   parseSelectionArgs,
@@ -114,6 +115,14 @@ import { ENTRY_ADMISSION_MUTATIONS } from './smoke/split-process/entry-admission
 
 // Re-exported for the tooling guards that drive the bounded condition wait.
 export { waitForCondition }
+
+// The ONE selected-runner surface the macOS CLI dispatch reuses in-process:
+// the same registry listing and the same selected execution. Nothing here
+// copies the selector grammar.
+export {
+  printSelectableCases,
+  runSelectedCases,
+}
 
 
 const TRACE_PATH = process.env.SPLIT_PROCESS_TRACE
@@ -142,7 +151,7 @@ let diagnostics
 // The lane's ONE process scope: module-level qualification helpers and the
 // full/selected dispatchers resolve the same constructors. A CLI run takes
 // exactly one of those paths, so this active set never spans two runs.
-const { EntryProcess, SurfaceEntryProcess, activeProcesses } = createSplitProcessScope()
+const { EntryProcess, SurfaceEntryProcess, activeProcesses, darwinScope, darwinHostSeatFileFree } = createSplitProcessScope()
 /** Detached processes this round owns: PID -> its kernel starttime (if known). */
 const trackedProcesses = new Map()
 
@@ -183,6 +192,32 @@ export async function runSelectedCase(diagnostics, selectedCase, context) {
 
 function sleep(ms) {
   return new Promise(resolveSleep => setTimeout(resolveSleep, ms))
+}
+
+/**
+ * The scoped Darwin surface teardown: the private tmux server of THIS run is
+ * stopped only after every pane it created is dead. On Linux this is a no-op
+ * (no pane was ever created; the scope never started a tmux server).
+ */
+async function stopDarwinSurfaceServer() {
+  if (process.platform !== 'darwin') return
+  await darwinScope.stopServer()
+}
+
+/**
+ * Install the Darwin surface driver into the platform seam the
+ * `SurfaceEntryProcess` constructor reads. The Linux constructor path reads
+ * `currentPtyScriptArgv` directly, so the seam only matters on Darwin; a
+ * Linux caller of the shared runner must NOT start a tmux server.
+ */
+function installDarwinSurfaceDriver() {
+  if (process.platform !== 'darwin') {
+    throw new SplitSmokeInputError(
+      'INPUT_PLATFORM_FULL_UNSUPPORTED',
+      `INPUT_UNQUALIFIED: INPUT_PLATFORM_FULL_UNSUPPORTED (invalid smoke selection, not a product regression): `
+        + `the Darwin surface driver cannot be installed on platform=${process.platform}`,
+    )
+  }
 }
 
 function failpoint(name) {
@@ -265,6 +300,9 @@ async function main(explicitPath) {
       installation,
       EntryProcess,
       SurfaceEntryProcess,
+      darwinSurface: {
+        hostSeatFileFree: darwinHostSeatFileFree,
+      },
       entries,
       base,
       workDir,
@@ -407,8 +445,11 @@ async function main(explicitPath) {
     throw error
   } finally {
     // A failed assertion must not leave a live Host/Client probe behind; each
-    // entry is its own process group leader (`detached: true`).
+    // entry is its own process group leader (`detached: true`). A Darwin
+    // surface has NO child process group: its pane is torn down by its own
+    // `dispose`, so only Linux entries enter this kill channel.
     for (const run of [...activeProcesses]) {
+      if (run.platform === 'darwin') continue
       try { process.kill(-run.child.pid, 'SIGKILL') } catch { /* already gone */ }
     }
     for (const [pid, starttime] of trackedProcesses) killTracked(pid, starttime, 'SIGKILL')
@@ -422,6 +463,7 @@ async function main(explicitPath) {
       closeSync(traceFd)
       traceFd = undefined
     }
+    await stopDarwinSurfaceServer()
     if (workDir === undefined) {
       // Nothing was created: setup failed before the work root existed.
     } else if (!KEEP) rmSync(workDir, { recursive: true, force: true })
@@ -478,12 +520,13 @@ async function proveFailpointCleanup(dshHome) {
  *
  * The registry order IS the execution order a suite or the full lane follows,
  * so the listing prints it verbatim: sorting here would show a bootstrap order
- * that no real run performs.
+ * that no real run performs. Each row ends with the registry-derived platform
+ * support of that case: the fact a selector pre-check refuses on.
  */
 function printSelectableCases() {
   process.stdout.write('SPLIT_PROCESS_SELECTABLE_CASES scope=SELECTABLE_ONLY\n')
   for (const entry of listSelectableCases()) {
-    process.stdout.write(`suite=${entry.suite} case=${entry.id} title=${entry.title}\n`)
+    process.stdout.write(`suite=${entry.suite} case=${entry.id} title=${entry.title} platforms=${casePlatformsOf(entry)}\n`)
   }
 }
 
@@ -918,6 +961,9 @@ async function runSelectedCases(selection) {
       installation,
       EntryProcess,
       SurfaceEntryProcess,
+      darwinSurface: {
+        hostSeatFileFree: darwinHostSeatFileFree,
+      },
       entries: installation.entries,
       base: installation.base,
       workDir,
@@ -967,6 +1013,7 @@ async function runSelectedCases(selection) {
     throw error
   } finally {
     for (const run of [...activeProcesses]) {
+      if (run.platform === 'darwin') continue
       try { process.kill(-run.child.pid, 'SIGKILL') } catch { /* already gone */ }
     }
     // The backstop for detached processes a case created and registered: the
@@ -978,6 +1025,7 @@ async function runSelectedCases(selection) {
       // setup failure before the root existed) there is nothing to prove.
       await proveFailpointCleanup(dshHome)
     }
+    await stopDarwinSurfaceServer()
     if (workDir === undefined) {
       // Nothing was created: setup failed before the work root existed.
     } else if (!KEEP) rmSync(workDir, { recursive: true, force: true })
@@ -985,11 +1033,19 @@ async function runSelectedCases(selection) {
   }
 }
 
+/**
+ * The effective platform this lane dispatches on. Production reads the real
+ * `process.platform`; the diagnostics input-boundary tests pin `linux` through
+ * this one documented override so they can drive the full lane's CANDIDATE
+ * preflight from a non-Linux host. Nothing else reads it.
+ */
+const LANE_PLATFORM = process.env.SPLIT_PROCESS_TEST_PLATFORM === 'linux' ? 'linux' : process.platform
+
 /** Strict CLI dispatch: `--list`, the old full run, or one selected case set. */
 async function runLane() {
   let selection
   try {
-    selection = resolveSelection(parseSelectionArgs(process.argv.slice(2)))
+    selection = resolveSelection(parseSelectionArgs(process.argv.slice(2)), LANE_PLATFORM)
   } catch (error) {
     // A selector error exists before any reporter: it leaves the ONE fixed
     // input projection and never a work root, an install or a process.
@@ -1006,6 +1062,24 @@ async function runLane() {
     return
   }
   if (selection.mode === 'full') {
+    // The no-selector whole lane is the Linux full qualification: its
+    // `/proc` helpers and `script(1)` PTYs have no Darwin driver in scope, so
+    // a Mac caller is refused before the candidate is even inspected instead
+    // of pretending the Linux lane was ported.
+    if (LANE_PLATFORM !== 'linux') {
+      const refusal = new SplitSmokeInputError(
+        'INPUT_PLATFORM_FULL_UNSUPPORTED',
+        `INPUT_UNQUALIFIED: INPUT_PLATFORM_FULL_UNSUPPORTED (invalid smoke selection, not a product regression): `
+          + `the no-selector full lane is Linux-only; platform=${LANE_PLATFORM} runs only --list, --case or --suite`,
+      )
+      emitInputFailure({
+        lane: 'split-process',
+        heading: 'SPLIT_PROCESS_SMOKE',
+        error: refusal,
+        evidencePath: process.env.SPLIT_PROCESS_FAILURE_EVIDENCE,
+      })
+      throw refusal
+    }
     await main(selection.candidate)
     return
   }
