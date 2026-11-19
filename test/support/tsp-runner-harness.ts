@@ -88,6 +88,10 @@ export async function ownTspBoot(options: {
   readonly beforeMount?: (pane: TspPane) => void
   readonly modelPicker?: boolean
   readonly presetPicker?: boolean
+  /** PO-5E: advertise the native `/acp` (and `/web`) picker kinds/scroll the
+   *  two sessionless Split-Client quick controls render (their pane capability
+   *  gate is the real handshake). */
+  readonly webPicker?: boolean
   /** TSP-7 PR-G: advertise the native `input` kind the composer quick menu
    *  searches through (its pane capability gate is the real handshake). */
   readonly modelQuick?: boolean
@@ -101,6 +105,7 @@ export async function ownTspBoot(options: {
   const pane = installTspPane({
     modelPicker: options.modelPicker,
     presetPicker: options.presetPicker,
+    webPicker: options.webPicker,
     composerActions: options.composerActions,
     modelQuick: options.modelQuick,
   })

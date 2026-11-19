@@ -27,7 +27,8 @@ import type {
 } from '../../src/app/command/acp-access-presentation.ts'
 import type { AcpAccessStatus } from '../../src/runtime/acp-access-port.ts'
 import { installTspPane, type TspPane } from '../support/tsp-terminal-fixture.ts'
-import { settle, waitUntil } from '../support/tsp-runner-harness.ts'
+import { ownTspBoot, settle, waitUntil } from '../support/tsp-runner-harness.ts'
+import { testLifecycle } from '../support/temp-lifecycle.ts'
 import {
   clickLayerNode,
   layerNodes,
@@ -301,8 +302,7 @@ test('a revoked request closes the layer and refuses further events', async t =>
   assert.deepEqual(h.actions, [], 'a superseded request never reaches a writer')
 })
 
-test('a settled action result is painted INSIDE the native picker', async t => {
-  const h = await mounted(t)
+test('a settled action result is painted INSIDE the native picker', async t => {  const h = await mounted(t)
   const handle = h.open({ state: 'disabled' })
   await h.ready(handle, { state: 'disabled' }, { message: 'ACP listener enabled', kind: 'info' })
   const rows = items(h.pane)
@@ -357,4 +357,52 @@ test('/acp and /web are exclusive siblings: each open retires the other picker',
   await settle()
   assert.deepEqual(acpActions, [], 'the retired /acp picker never writes')
   assert.deepEqual(webActions, [], 'the retired /acp picker cannot drive /web either')
+})
+
+/* -------------------------------------- production typed-command admission */
+
+test('production admission: a pane with the native presenter reaches the REAL /acp handler', async t => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-tsp-acp-admission-')
+  const boot = await ownTspBoot({ life, home, logFile: `${home}/diag.log`, webPicker: true })
+  try {
+    await waitUntil('renderer ready', () => boot.pane.output.text().includes('dock.composer'))
+    boot.pane.key('/acp\r')
+    // The post-classification TSP gate admitted `/acp` because the native
+    // presenter is available, and the REAL registered handler ran. On this
+    // Direct-backed boot the handler emits its OWN explicit Split-Client
+    // refusal — never the generic "UI is not available in TSP" refusal.
+    await waitUntil('the registered /acp handler was reached', () =>
+      boot.pane.output.text().includes('ACP server controls are available only in a Split Client.'))
+    assert.equal(
+      boot.pane.output.text().includes("This command's UI is not available in TSP yet"), false,
+      'the capability gate must not refuse a mounted native /acp presenter',
+    )
+    assert.equal(boot.harness.createdSessions.length, 0, '/acp never creates a Session')
+  } finally {
+    // reason: OWNED TEARDOWN boundary; every assertion above already read its
+    // authoritative observation sink, so this wait is not evidence.
+    await boot.settle()
+  }
+})
+
+test('production admission: an unnegotiated pane refuses /acp before the handler', async t => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-tsp-acp-admission-none-')
+  const boot = await ownTspBoot({ life, home, logFile: `${home}/diag.log` })
+  try {
+    await waitUntil('renderer ready', () => boot.pane.output.text().includes('dock.composer'))
+    boot.pane.key('/acp\r')
+    await waitUntil('capability refusal', () =>
+      boot.pane.output.text().includes("This command's UI is not available in TSP yet"))
+    assert.equal(
+      boot.pane.output.text().includes('ACP server controls are available only in a Split Client.'), false,
+      'the handler must never run on a pane without the native presenter',
+    )
+    assert.equal(boot.harness.createdSessions.length, 0)
+  } finally {
+    // reason: OWNED TEARDOWN boundary; the refusal read above is the
+    // authoritative observation sink, so this wait is not evidence.
+    await boot.settle()
+  }
 })

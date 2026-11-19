@@ -2548,6 +2548,7 @@ export function applyRunnerWithRuntime(
         tspCommandPickerCapabilities: () => ({
           modelPicker: surface.modelPresentation !== undefined,
           presetPicker: surface.presetPresentation !== undefined,
+          acpPicker: surface.acpPresentation !== undefined,
           sessionBrowser: surface.sessionBrowserPresentation !== undefined,
           queueManager: surface.queuePresentationAvailable(),
           taskCenter: surface.display.supportsTaskCenter,
@@ -3397,6 +3398,10 @@ export function applyRunnerWithRuntime(
       get supportsTuiBuiltinUi() { return !tspRendererActive },
       supportsModelPickerUi: () => surface.modelPresentation !== undefined,
       supportsPresetPickerUi: () => surface.presetPresentation !== undefined,
+      // PO-5E: the native `/acp` presenter (Split Client only). A Direct mount
+      // never installs it, so `/acp` keeps its own explicit Direct refusal from
+      // the handler; an unnegotiated TSP pane refuses before the handler.
+      supportsAcpPickerUi: () => surface.acpPresentation !== undefined,
        supportsSessionBrowserUi: () => surface.sessionBrowserPresentation !== undefined,
       // B3-A3: the ONE Task Center capability of the CURRENTLY mounted display
       // seam (PiTui = true, TSP = its negotiated kinds). Read live at the
