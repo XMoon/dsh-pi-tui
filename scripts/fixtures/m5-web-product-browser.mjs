@@ -1937,9 +1937,18 @@ const cases = {
     const secondMarker = `w5-changes2-${changesNonce}`
     await sendPrompt(page, secondMarker)
     await waitConversation(page, secondMarker, ['w5-editing2'], 240_000, 'the post-re-enable changed-files answer')
-    const cardsAfterReenable = await changedCards(page)
-    if (!cardsAfterReenable.some(card => card.text.includes('changed2.txt'))) {
-      throw new Error(`the post-re-enable Turn painted no changed2.txt card: ${JSON.stringify(cardsAfterReenable)}`)
+    // The changed-files card is painted from its own event, which can be
+    // applied just AFTER the answer row the conversation wait returned on.
+    // Wait for THIS turn's card instead of sampling the DOM once: the fact
+    // required is the card, and a single read is a race against its render.
+    const cardDeadline = Date.now() + 60_000
+    let cardsAfterReenable = await changedCards(page)
+    while (!cardsAfterReenable.some(card => card.text.includes('changed2.txt'))) {
+      if (Date.now() > cardDeadline) {
+        throw new Error(`the post-re-enable Turn painted no changed2.txt card: ${JSON.stringify(cardsAfterReenable)}`)
+      }
+      await page.waitForTimeout(250)
+      cardsAfterReenable = await changedCards(page)
     }
     await screenshot(page, 'post-reenable-change')
     driverFact('toggle-second-change', { cards: cardsAfterReenable.length, text: cardsAfterReenable.map(card => card.text) })
