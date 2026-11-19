@@ -1343,10 +1343,14 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
       }
     }
   }
+  // MAC09-02's enabled non-PTC negative created and left Sessions of its own, so
+  // the CURRENT composer Session is the restored PTC one. Bind the TCC check to
+  // THAT durable Session (resolved from the message it really produced) instead
+  // of assuming the earlier capabilities Session is still on screen.
   const verified = await promptAndWaitCua({
     tui,
     dshHome,
-    sessionId: capabilities.sessionId,
+    sessionId: undefined,
     prompt: "Run exactly this in run_code and return only the JSON: return await tools.cua({ method: 'getCapabilities', params: {} })",
     label: 'MAC09-03 TCC capability check',
     method: 'getCapabilities',
