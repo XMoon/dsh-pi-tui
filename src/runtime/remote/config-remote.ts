@@ -298,8 +298,7 @@ export type RemoteConfigReadiness = 'ready' | 'stale' | 'unavailable'
  * Adapter-owned Host schema knowledge (never crosses the port).
  * ------------------------------------------------------------------------- */
 
-const TUI_SETTINGS_NS = 'tui-app'
-const HOST_RUNTIME_TUI_SETTINGS_NS = 'split-host-pi-tui-runtime'
+const TUI_SETTINGS_NS = 'pi-tui-preferences'
 const PROVIDER_SETTINGS_NS = 'llm-pi-ai'
 const PERMISSION_SETTINGS_NS = 'permission'
 const PRESET_REGISTRY_NS = 'agent-preset-registry'
@@ -867,13 +866,13 @@ class RemoteConfigMirror {
 }
 
 /* ------------------------------------------------------------------------- *
- * `tuiSettings` (the `tui-app` namespace).
+ * `tuiSettings` (the canonical `pi-tui-preferences` namespace).
  * ------------------------------------------------------------------------- */
 
-/** The tui-app Config defaults (app/config/schema.ts): the SAME fallbacks the
- *  Direct adapter's live Cordis Config supplies for an absent field. Raw
- *  pass-through fields (footerLayout/footerCustomItems/footerCommand/
- *  keybindings) have no default and stay verbatim. */
+/** The canonical preferences defaults (app/config/schema.ts): the SAME
+ *  fallbacks the Direct adapter's live Cordis Config supplies for an absent
+ *  field. Raw pass-through fields (footerLayout/footerCustomItems/
+ *  footerCommand/keybindings) have no default and stay verbatim. */
 const TUI_SETTINGS_DEFAULTS: {
   readonly theme: string
   readonly iconStyle: string
@@ -1041,10 +1040,12 @@ class RemoteTuiSettingsConfig implements TuiSettingsConfig {
     this.mutationQueueKey = mirror
   }
 
+  /** The canonical namespace only: the retired `tui-app` /
+   * `split-host-pi-tui-runtime` descriptors are never a fallback. A Host that
+   * does not project `pi-tui-preferences` is truthfully unavailable, so no
+   * schema default can masquerade as a saved user value. */
   private settingsNamespace(): string | undefined {
-    if (this.mirror.namespace(TUI_SETTINGS_NS) !== undefined) return TUI_SETTINGS_NS
-    if (this.mirror.namespace(HOST_RUNTIME_TUI_SETTINGS_NS) !== undefined) return HOST_RUNTIME_TUI_SETTINGS_NS
-    return undefined
+    return this.mirror.namespace(TUI_SETTINGS_NS) === undefined ? undefined : TUI_SETTINGS_NS
   }
 
   hasNamespace(): boolean {
@@ -1128,7 +1129,6 @@ class RemoteFooterCustomItems implements FooterCustomItemsConfig {
    *  descriptor/user section that cannot be read safely. */
   private readUserRaw(): { readonly value: unknown; readonly failed: boolean } {
     const descriptor = this.mirror.namespace(TUI_SETTINGS_NS)
-      ?? this.mirror.namespace(HOST_RUNTIME_TUI_SETTINGS_NS)
     if (descriptor === undefined) return { value: undefined, failed: true }
     const user = descriptor.user
     if (user === undefined) return { value: undefined, failed: false }

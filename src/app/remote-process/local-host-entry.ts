@@ -48,6 +48,8 @@ import {
   type ProcessSeat,
 } from './local-scope.ts'
 import { runDetached } from '../../runtime/process/tasks.ts'
+import type { ProfileConfigEditorLike } from '../bootstrap/profile-preferences-migration.ts'
+import type { SettingsFormsLike } from '../../runtime/direct/tui-settings-direct.ts'
 import {
   PI_TUI_WEB_ACCESS_NAMESPACE,
   type PiTuiWebAccessStatus,
@@ -140,8 +142,9 @@ export const HOST_ONLY_PATCH = `# M4-B1 Host-only profile overlay: production Ho
 # default); this overlay only ENABLES it. Keeping the declaration — and its
 # config — out of this command-line overlay is required: the official
 # ConfigEditor refuses to persist an entry whose config a home patch or
-# command-line overlay overrides, and this row is the Split Host's ONE live TUI
-# settings authority.
+# command-line overlay overrides. The row owns the Split Host's private
+# business services; the profile-owned TUI preferences it reads live in the
+# canonical 'pi-tui-preferences' row.
 - id: split-host-pi-tui-runtime
   disabled: false
 
@@ -238,8 +241,9 @@ export const HOST_ONLY_PATCH = `# M4-B1 Host-only profile overlay: production Ho
     # The row itself is DECLARED by the bundle patch (disabled by default), so
     # its config stays USER-profile owned. This overlay only ENABLES it: the
     # official ConfigEditor refuses to persist an entry whose config a home
-    # patch or command-line overlay overrides, and this row is the Split Host's
-    # ONE live TUI settings authority.
+    # patch or command-line overlay overrides. Its legacy TUI preference fields
+    # are a migration source only; runtime behavior reads the canonical
+    # 'piTuiPreferences' service.
 
 # ── Official Web composition (M5-W PR-A/PR-B/PR-C, PR-A profile-writable) ──
 # The complete Browser Web roster is declared in the BUNDLE
@@ -1304,6 +1308,42 @@ async function runLocalHostEntryOwned(options: LocalHostEntryOptions, scratchOwn
       })
       const { settleHostEntries, collectHostEntryStatus } = await import('./host-bootstrap.ts')
       await settleHostEntries(handle.ctx)
+      // M6 PR-A: the HOST-OWNED canonical TUI preference migration. It runs
+      // after the profile settled (the canonical row and ConfigEditor exist)
+      // and BEFORE the Web/ACP startup preferences or Ready publication, so no
+      // Host business can read an unmigrated preference and a failed migration
+      // never publishes Ready. A Split Client never runs this barrier.
+      const settled = handle
+      if (settled === undefined) throw new Error('local host entry: the profile handle disappeared before migration')
+      const profileContext = settled.ctx.get('profileContext') as {
+        readonly home: string
+        readonly patchPath: string
+      } | undefined
+      if (profileContext === undefined) {
+        throw new Error('local host entry: the Host profile context is missing')
+      }
+      // Loaded LAZILY: this entry is a standalone Node program whose static
+      // graph must not import the Schemastery-backed preference schema before
+      // the launcher installed the official package resolution. The same
+      // reason `host-bootstrap.ts` is a dynamic import above.
+      const { migrateProfileTuiPreferences } = await import('../bootstrap/profile-preferences-migration.ts')
+      await migrateProfileTuiPreferences({
+        patchPath: profileContext.patchPath,
+        configEditor: settled.ctx.get('configEditor') as ProfileConfigEditorLike | undefined,
+        forms: settled.ctx.get('settings') as SettingsFormsLike | undefined,
+        home: profileContext.home,
+        resolvePreset: async (id) => {
+          const presets = settled.ctx.get('agentPresets') as {
+            resolve(id?: string): Promise<{ broken?: string }>
+          } | undefined
+          if (presets === undefined) throw new Error('agent presets unavailable in this deployment')
+          const resolved = await presets.resolve(id)
+          if (resolved.broken !== undefined) {
+            throw Object.assign(new Error(resolved.broken), { code: 'agent-preset/invalid' })
+          }
+        },
+        diag: createEntryDiag('host'),
+      })
       // M5-W PR-C: the profile-owned Web startup preference is consumed HERE —
       // after the profile settled, before the readiness audit and Ready.
       await applyWebStartupPreference(handle.ctx)

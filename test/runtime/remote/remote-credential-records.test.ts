@@ -86,7 +86,7 @@ function startHarness(options: { readonly records?: RecordsFake | null; readonly
       settings: {
         describe: async () => ({
           ok: true as const,
-          value: { writable: true, hasDocument: true, namespaces: [namespaceView('tui-app', 1)] },
+          value: { writable: true, hasDocument: true, namespaces: [namespaceView('pi-tui-preferences', 1)] },
         }),
         update: async () => ({ ok: true as const, value: namespaceView('x', 1) }),
         replace: async () => ({ ok: true as const, value: namespaceView('x', 1) }),

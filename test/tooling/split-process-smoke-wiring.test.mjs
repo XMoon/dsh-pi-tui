@@ -455,6 +455,10 @@ test('every registry entry declares a conservative platform list and the nine sh
     // platform seam (Linux /proc, Darwin lsof+ps) and drives the Browser from
     // the pinned Playwright install, so it is qualified on both platforms.
     'web.product-browser-tui',
+    // The canonical preference case drives only the official settings wire,
+    // the profile file and cold Host boots; there is no platform-specific
+    // process/seat primitive beyond the shared Split harness.
+    'profile.preferences',
   ]
   const cases = listSelectableCases()
   for (const entry of cases) {

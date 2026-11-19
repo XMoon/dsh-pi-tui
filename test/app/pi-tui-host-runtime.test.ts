@@ -15,6 +15,7 @@ import test from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import TypertRegistry from '@deepseek-ai/dsh-typert-registry'
 import * as piTuiHostRuntime from '../../src/app/host/pi-tui-host-runtime.ts'
+import { PreferencesConfig as CanonicalPreferencesConfig } from '../../src/app/config/schema.ts'
 import {
   PI_TUI_FILE_REFERENCES_NAMESPACE,
 } from '../../src/runtime/remote/pi-tui-file-reference-contract.ts'
@@ -45,11 +46,17 @@ interface HostContextOptions {
   readonly skills?: boolean
   readonly agentPresets?: boolean
   readonly loader?: boolean
+  readonly piTuiPreferences?: boolean
+  readonly localShellSandbox?: 'bypass' | 'sandbox'
 }
 
 /** Build the minimal real Host prerequisite graph the runtime injects. */
 async function hostContext(options: HostContextOptions = {}): Promise<Context> {
   const ctx = new Context()
+  // The canonical profile preference authority the Host Runtime injects.
+  if (options.piTuiPreferences !== false) {
+    ctx.provide('piTuiPreferences', CanonicalPreferencesConfig({ localShellSandbox: options.localShellSandbox ?? 'bypass' } as never))
+  }
   if (options.typert !== false) await ctx.plugin(TypertRegistry)
   if (options.agents !== false) ctx.provide('agents', { get: () => undefined })
   if (options.fileReferences !== false) ctx.provide('fileReferences', { list: async () => [] })
@@ -212,7 +219,7 @@ test('a Host without the optional sandbox services still becomes Ready (M6-1 F8 
 })
 
 test('every required Host inject keeps the fiber from completing when missing', async () => {
-  for (const missing of ['typert', 'agents', 'fileReferences', 'workingDirectory', 'sessions', 'subprocess', 'workspaceRegistry', 'skills', 'agentPresets'] as const) {
+  for (const missing of ['piTuiPreferences', 'typert', 'agents', 'fileReferences', 'workingDirectory', 'sessions', 'subprocess', 'workspaceRegistry', 'skills', 'agentPresets'] as const) {
     const ctx = await hostContext({ [missing]: false })
     const fiber = ctx.plugin(piTuiHostRuntime, { sessionId: '' } as never)
     await new Promise<void>(resolve => setImmediate(resolve))

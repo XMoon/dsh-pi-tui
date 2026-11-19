@@ -87,7 +87,7 @@ interface FakeState {
 
 type EventListener = (...args: unknown[]) => void
 
-const TUI_NS = 'tui-app'
+const TUI_NS = 'pi-tui-preferences'
 const WEB_NS = 'web'
 const WEB_API_NS = 'web-deepseek-api'
 const WEB_DEFAULTS = {
@@ -1002,8 +1002,8 @@ test('footerCustomItems reads the USER layer for both the runtime view and persi
   assert.deepEqual(port.footerCustomItems.rawForPersistence(), { kind: 'available', value: items })
 })
 
-test('Host-only Split settings preserve raw USER footer definitions during an unrelated preference save', async () => {
-  const namespace = 'split-host-pi-tui-runtime'
+test('the canonical settings preserve raw USER footer definitions during an unrelated preference save', async () => {
+  const namespace = TUI_NS
   const userItems = [{ schemaVersion: 9, id: 'user:future', opaque: { keep: ['bytes', 'unchanged'] } }]
   const projectItems = [{ schemaVersion: 1, id: 'user:project', kind: 'text', text: 'project only' }]
   const { port, state } = createBackend(current => {
@@ -1033,27 +1033,37 @@ test('Host-only Split settings preserve raw USER footer definitions during an un
     'mutating the detached read cannot change the mirrored raw USER layer')
 })
 
-test('Host-only footer custom items keep namespace precedence and unreadable USER layers fail closed', async () => {
-  const namespace = 'split-host-pi-tui-runtime'
+test('footer custom items read the canonical USER layer only; the retired Host namespace is never a fallback', async () => {
+  const legacyNamespace = 'split-host-pi-tui-runtime'
   const item = { schemaVersion: 1, id: 'user:clock', kind: 'text', text: 'hi' }
   const host = createBackend(current => {
-    current.namespaces.set(namespace, { ns: namespace, value: {}, user: { footerCustomItems: [item] }, revision: 1 })
+    current.namespaces.set(legacyNamespace, { ns: legacyNamespace, value: {}, user: { footerCustomItems: [item] }, revision: 1 })
   })
   await host.port.describe()
+  assert.equal(host.port.tuiSettings, undefined,
+    'the retired Split namespace must not expose a TUI settings facade')
+  assert.deepEqual(host.port.footerCustomItems.get(), { items: [], invalidCount: 1 },
+    'with no canonical descriptor the trust read fails closed, never falls back')
+
+  // The canonical descriptor is the ONLY source the read consults, even when
+  // the legacy namespace still carries a definition.
+  host.state.namespaces.set(TUI_NS, { ns: TUI_NS, value: { footerCustomItems: [item] }, user: { footerCustomItems: [item] }, revision: 2 })
+  await host.port.describe()
   assert.deepEqual(host.port.footerCustomItems.get(), { items: [item], invalidCount: 0 })
-  host.state.namespaces.set(TUI_NS, { ns: TUI_NS, value: {}, revision: 2 })
-  await host.port.describe()
-  assert.deepEqual(host.port.footerCustomItems.rawForPersistence(), { kind: 'available', value: undefined },
-    'the primary TUI descriptor wins even when only the Host descriptor has definitions')
+  assert.deepEqual(host.port.footerCustomItems.rawForPersistence(), { kind: 'available', value: [item] },
+    'only the canonical USER layer is a persistence source')
+
+  // A project-only canonical definition is not promoted into the USER layer.
   host.state.namespaces.delete(TUI_NS)
-  host.state.namespaces.get(namespace)!.user = [] as unknown as Record<string, unknown>
-  await host.port.describe()
-  assert.deepEqual(host.port.footerCustomItems.rawForPersistence(), { kind: 'unavailable' })
-  host.state.namespaces.get(namespace)!.user = undefined
-  host.state.namespaces.get(namespace)!.value = { footerCustomItems: [item] }
+  host.state.namespaces.set(TUI_NS, { ns: TUI_NS, value: { footerCustomItems: [item] }, revision: 3 })
   await host.port.describe()
   assert.deepEqual(host.port.footerCustomItems.rawForPersistence(), { kind: 'available', value: undefined },
     'a project-only definition is not promoted into the absent USER layer')
+
+  // An unreadable canonical USER layer fails closed.
+  host.state.namespaces.get(TUI_NS)!.user = [] as unknown as Record<string, unknown>
+  await host.port.describe()
+  assert.deepEqual(host.port.footerCustomItems.rawForPersistence(), { kind: 'unavailable' })
   host.state.namespaces.clear()
   await host.port.describe()
   assert.deepEqual(host.port.footerCustomItems.rawForPersistence(), { kind: 'unavailable' })
@@ -1424,7 +1434,7 @@ test('every terminalProgress mode round-trips through the Remote authority with 
     'restating the inherited value unsets the USER override instead of pinning it')
 })
 
-test('tuiSettings is undefined until the tui-app namespace is present', async () => {
+test('tuiSettings is undefined until the canonical preferences namespace is present', async () => {
   const { port } = createBackend()
   await port.describe()
   assert.equal(port.tuiSettings, undefined)
@@ -1558,7 +1568,7 @@ test('a committed write whose post-settlement refresh fails is not a refusal —
   state.mutateFailure = { code: 'settings/rejected', message: 'refused' }
   await assert.rejects(
     async () => { await port.tuiSettings!.replace({ ...port.tuiSettings!.get(), theme: 'light' }) },
-    /settings\.mutate\(tui-app\) failed: refused/u,
+    /settings\.mutate\(pi-tui-preferences\) failed: refused/u,
   )
   assert.equal(port.configReadiness(), 'ready', 'a refused mutate leaves the mirror current')
   assert.equal(port.tuiSettings!.get().theme, 'dark', 'and its authoritative value intact')
@@ -1587,7 +1597,7 @@ test('a committed write whose post-settlement refresh fails is not a refusal —
   state.mutateFailure = { code: 'settings/conflict', message: 'the revision moved' }
   await assert.rejects(
     async () => { await port.tuiSettings!.replace({ ...port.tuiSettings!.get(), theme: external }) },
-    /settings\.mutate\(tui-app\) failed/u,
+    /settings\.mutate\(pi-tui-preferences\) failed/u,
   )
   assert.equal(port.configReadiness(), 'ready', 'the forced re-read committed a current snapshot')
   assert.equal(port.tuiSettings!.get().theme, external, 'which already carries the requested value')

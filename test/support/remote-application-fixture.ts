@@ -88,6 +88,7 @@ import LocalJobRegistry from '@deepseek-ai/dsh-jobs-local'
 import * as toolJobs from '@deepseek-ai/dsh-tool-jobs'
 import { LlmAdapter } from '@deepseek-ai/dsh-llm'
 import * as piTuiHostRuntime from '../../src/app/host/pi-tui-host-runtime.ts'
+import { PreferencesConfig as CanonicalPreferencesConfig } from '../../src/app/config/schema.ts'
 import * as performanceHost from '../../src/app/host/performance-host.ts'
 import type { RemotePromptSerializer } from '../../src/runtime/remote/session-writer-remote.ts'
 import { testLifecycle, type TestLifecycle } from './temp-lifecycle.ts'
@@ -480,6 +481,10 @@ export async function createRemoteApplicationHostFixture(
     await ctx.plugin(SkillRegistry)
     // M6-1 F1: the same Host Runtime row owns one-shot shell and completion;
     // M6-1 F6 adds the private Skills standing read and invalidation stream.
+    // The canonical preference authority the Host Runtime injects. These
+    // historical in-process fixtures mount the row directly, so they publish
+    // the same canonical references a real Host profile would.
+    ctx.provide('piTuiPreferences', CanonicalPreferencesConfig({} as never))
     await ctx.plugin(piTuiHostRuntime, { sessionId: '' } as never)
     await ctx.plugin(performanceHost)
     // The official `workspace` Remote owner (the `workspace-controller` Host

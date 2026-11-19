@@ -84,6 +84,7 @@ import * as toolTodo from '@deepseek-ai/dsh-tool-todo'
 import { RemoteAccessService } from '@deepseek-ai/dsh-api-remote-access'
 import WorkingDirectory from '@deepseek-ai/dsh-working-directory'
 import * as piTuiHostRuntime from '../../src/app/host/pi-tui-host-runtime.ts'
+import { PreferencesConfig as CanonicalPreferencesConfig } from '../../src/app/config/schema.ts'
 import * as performanceHost from '../../src/app/host/performance-host.ts'
 import { createExperimentalRemoteRuntime } from '../support/m3-inprocess/runtime.ts'
 import { createRemoteClientRuntime } from '../support/m3-inprocess/client-runtime.ts'
@@ -195,7 +196,7 @@ async function createHostFixture(
      * negative forms omit exactly one required settings namespace. */
     readonly webProviderPlane?: boolean | 'missing-web' | 'missing-api'
     /** Expose the mounted `tui-app` row plugin's RESOLVED Config (its live
-     *  volatile references) on `globalThis.__m3aTuiRowConfig`, so a suite can build
+     *  volatile references) on `globalThis.__m3aPreferencesConfig`, so a suite can build
      *  the REAL production `DirectTuiSettings` over the real Host settings plane. */
     readonly captureTuiRowConfig?: boolean
     /** Replace the inert stub model only for a suite that needs a real scripted
@@ -310,6 +311,20 @@ async function createHostFixture(
           : 'export function apply() {}',
         '',
       ].join('\n'))
+      // The canonical preference row: production schema + apply (so it
+      // publishes the real `piTuiPreferences` service), with the resolved
+      // references captured for the Direct-adapter evidence.
+      const preferencesModulePath = join(workRoot, 'm3b-preferences-row.mjs')
+      writeFileSync(preferencesModulePath, [
+        `import { Config, apply as productionApply } from ${JSON.stringify(pathToFileURL(join(process.cwd(), 'src/app/config/preferences.ts')).href)}`,
+        "export { Config }",
+        "export const name = 'pi-tui-preferences'",
+        'export function apply(ctx, config) {',
+        '  globalThis.__m3aPreferencesConfig = config',
+        '  productionApply(ctx, config)',
+        '}',
+        '',
+      ].join('\n'))
       // The production LAYOUT: a bundle declares the row and its base config,
       // while the profile patch carries only the user's own change. Both halves
       // matter — the official editor compares the effective (layer + document)
@@ -329,6 +344,8 @@ async function createHostFixture(
         '- insert:',
         '    - id: tui-app',
         `      name: ${JSON.stringify(rowModulePath)}`,
+        '    - id: pi-tui-preferences',
+        `      name: ${JSON.stringify(preferencesModulePath)}`,
         '      config:',
         "        sessionId: ''",
         ...options.webProviderPlane === true ? [
@@ -452,6 +469,12 @@ async function createHostFixture(
     await ctx.plugin(LocalSubprocessRuntime)
     // M6-1 F1: the built-in Host Runtime owns user-shell execution, sandbox
     // enforcement and the private file/completion services exactly once.
+    // Compositions WITHOUT the real config plane (no profile bundle) publish
+    // the canonical references directly; a config-plane composition mounts the
+    // production row, which provides the SAME service itself.
+    if (options.configPlane !== true) {
+      ctx.provide('piTuiPreferences', CanonicalPreferencesConfig({} as never))
+    }
     await ctx.plugin(piTuiHostRuntime, { sessionId: '' } as never)
     await ctx.plugin(performanceHost)
     await ctx.plugin(Storage)
@@ -1270,15 +1293,15 @@ test('the assembled M3-3B Remote backend serves config + archive over the real H
         mutate(ns: string, ops: readonly { op: string; path: readonly string[]; value?: unknown }[], revision?: number): Promise<unknown>
       }
     }).settings
-    const anchored = hostSettings.describe().find(entry => entry.ns === 'tui-app')
-    assert.ok(anchored !== undefined, 'the tui-app namespace is served by the real settings plane')
+    const anchored = hostSettings.describe().find(entry => entry.ns === 'pi-tui-preferences')
+    assert.ok(anchored !== undefined, 'the canonical preferences namespace is served by the real settings plane')
     assert.notEqual(anchored.revision, undefined, 'and the real descriptor carries a revision')
     const staleRevision = anchored.revision
     const externalTheme = anchored.value?.theme === 'dark' ? 'light' : 'dark'
-    await hostSettings.mutate('tui-app', [{ op: 'set', path: ['theme'], value: externalTheme }], undefined)
+    await hostSettings.mutate('pi-tui-preferences', [{ op: 'set', path: ['theme'], value: externalTheme }], undefined)
     await assert.rejects(
       async () => {
-        await hostSettings.mutate('tui-app', [{ op: 'set', path: ['theme'], value: 'stale-write' }], staleRevision)
+        await hostSettings.mutate('pi-tui-preferences', [{ op: 'set', path: ['theme'], value: 'stale-write' }], staleRevision)
       },
       (error: unknown) => {
         assert.match(
@@ -1289,7 +1312,7 @@ test('the assembled M3-3B Remote backend serves config + archive over the real H
         return true
       },
     )
-    const settled = hostSettings.describe().find(entry => entry.ns === 'tui-app')
+    const settled = hostSettings.describe().find(entry => entry.ns === 'pi-tui-preferences')
     assert.equal(settled?.value?.theme, externalTheme, 'the stale write never reached the document')
 
     // 3. Archive over the REAL Host route: the composition carrier fetch reaches
@@ -1558,14 +1581,14 @@ test('the REAL /settings workspace commits through the Remote adapter over the w
     const hostDescriptor = (): { readonly ns: string; readonly value?: Record<string, unknown>; readonly user?: unknown } | undefined =>
       (host.ctx as unknown as {
         settings: { describe(): readonly { ns: string; value?: Record<string, unknown>; user?: unknown }[] }
-      }).settings.describe().find(entry => entry.ns === 'tui-app')
+      }).settings.describe().find(entry => entry.ns === 'pi-tui-preferences')
     /** The same read through the SAVED UNBOUND original, for a case that has an
      *  injected read failure armed on the live service. */
     const hostDescriptorUnpatched = (): Record<string, unknown> | undefined => {
       const descriptor = (originalDescribe.call(forms) as readonly {
         readonly ns: string
         readonly value?: Record<string, unknown>
-      }[]).find(entry => entry.ns === 'tui-app')
+      }[]).find(entry => entry.ns === 'pi-tui-preferences')
       return descriptor?.value
     }
     const descriptor = hostDescriptor()
@@ -1625,11 +1648,16 @@ test('the REAL /settings workspace commits through the Remote adapter over the w
       failMutate = true
       await chooseNextPreset(/Status\s+Not saved/, 'the refused display-preset write')
       const refusedFrame = fixture.view().replace(/\s+/gu, ' ')
-      assert.match(
-        refusedFrame,
-        /Not saved · the display preset is.*?applied locally, but storing it failed:.*?settings\.mutate\(tui-app\) failed:.*?settings write refused \(injected\)/,
-        `a refused write is reported:\n${fixture.view()}`,
-      )
+      // The details column interleaves its own labels between the sentence
+      // fragments, so assert the three facts independently instead of one
+      // column-layout-dependent sentence.
+      for (const fragment of [
+        'Not saved · the display preset is',
+        'settings.mutate(pi-tui-preferences)',
+        'settings write refused',
+      ]) {
+        assert.ok(refusedFrame.includes(fragment), `a refused write must report "${fragment}":\n${fixture.view()}`)
+      }
       assert.equal(hostDescriptor()?.value?.displayPreset, 'compact', 'the refused write never reached the Host')
 
       // A rejected write whose authoritative readback cannot complete must never be
@@ -1667,8 +1695,8 @@ test('the REAL /settings workspace commits through the Remote adapter over the w
     // directions. The production Direct adapter observes the Remote UI commit,
     // writes that field back through SettingsForms, and the production Remote
     // adapter refreshes the authoritative result over the generated Client.
-    const rowConfig = (globalThis as { __m3aTuiRowConfig?: unknown }).__m3aTuiRowConfig
-    assert.ok(rowConfig !== undefined, 'the mounted tui-app row exposed its resolved Config references')
+    const rowConfig = (globalThis as { __m3aPreferencesConfig?: unknown }).__m3aPreferencesConfig
+    assert.ok(rowConfig !== undefined, 'the mounted canonical preferences row exposed its resolved Config references')
     const directForms = host.ctx.get('settings') as SettingsFormsLike | undefined
     assert.ok(directForms !== undefined, 'the official Host settings service is mounted')
     const directSettings = new DirectTuiSettings(rowConfig as TuiConfigRefs, directForms)
@@ -1712,8 +1740,8 @@ test('the REAL Host-owned Direct settings authority drives the /settings workspa
   // profile-backed document, and the UI verifies against that authority.
   const life = testLifecycle(t)
   const host = await createHostFixture(life, { configPlane: true, captureTuiRowConfig: true })
-  const rowConfig = (globalThis as { __m3aTuiRowConfig?: unknown }).__m3aTuiRowConfig
-  assert.ok(rowConfig !== undefined, 'the mounted tui-app row exposed its resolved Config references')
+  const rowConfig = (globalThis as { __m3aPreferencesConfig?: unknown }).__m3aPreferencesConfig
+  assert.ok(rowConfig !== undefined, 'the mounted canonical preferences row exposed its resolved Config references')
   const forms = host.ctx.get('settings') as SettingsFormsLike | undefined
   assert.ok(forms !== undefined, 'the official Host settings service is mounted')
   const settings = new DirectTuiSettings(rowConfig as TuiConfigRefs, forms)
@@ -1722,7 +1750,7 @@ test('the REAL Host-owned Direct settings authority drives the /settings workspa
   const hostDescriptor = (): { readonly ns: string; readonly value?: Record<string, unknown>; readonly user?: unknown } | undefined =>
     (host.ctx as unknown as {
       settings: { describe(): readonly { ns: string; value?: Record<string, unknown>; user?: unknown }[] }
-    }).settings.describe().find(entry => entry.ns === 'tui-app')
+    }).settings.describe().find(entry => entry.ns === 'pi-tui-preferences')
   try {
     assert.equal(port.configReadiness(), 'ready', 'Direct reads hit the in-process Host authority')
     assert.equal(settings.get().theme, 'auto', 'the profile schema default is the live reference value')

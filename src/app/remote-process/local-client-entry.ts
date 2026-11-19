@@ -1782,6 +1782,99 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
             })
             return false
           }
+          if (request.op === 'qualification-tui-preferences') {
+            // Qualification-only: read/write the canonical TUI preference row
+            // through the SAME official generated `settings` wire the Remote
+            // ConfigPort consumes. It never edits a profile file directly and
+            // never touches a legacy namespace.
+            const settings = remoteService?.settings
+            if (settings === undefined) throw new Error('local client entry: the qualification Peer has no settings namespace')
+            const preferenceOf = (value: unknown): {
+              readonly revision: number
+              readonly value: Record<string, unknown>
+              readonly user: Record<string, unknown>
+            } | undefined => {
+              const namespaces = (value as { readonly namespaces?: readonly {
+                readonly ns?: unknown
+                readonly value?: unknown
+                readonly user?: unknown
+                readonly revision?: unknown
+              }[] } | undefined)?.namespaces
+              const entry = namespaces?.find(candidate => candidate.ns === 'pi-tui-preferences')
+              if (entry === undefined || typeof entry.revision !== 'number') return undefined
+              const plain = (input: unknown): Record<string, unknown> =>
+                input !== null && typeof input === 'object' && !Array.isArray(input)
+                  ? input as Record<string, unknown>
+                  : {}
+              return { revision: entry.revision, value: plain(entry.value), user: plain(entry.user) }
+            }
+            const before = await settings.describe()
+            const current = before.ok ? preferenceOf(before.value) : undefined
+            if (current === undefined) {
+              emit({
+                m4a0: 'qualification',
+                op: 'tui-preferences',
+                processRole: 'client',
+                pid: process.pid,
+                ok: false,
+                errorCode: 'preferences/unavailable',
+                ...(request.requestId === undefined ? {} : { requestId: request.requestId }),
+              })
+              return false
+            }
+            if (request.tuiPreferencesField === undefined) {
+              emit({
+                m4a0: 'qualification',
+                op: 'tui-preferences',
+                processRole: 'client',
+                pid: process.pid,
+                action: 'read',
+                ok: true,
+                ns: 'pi-tui-preferences',
+                revision: current.revision,
+                valueText: JSON.stringify(current.value),
+                userText: JSON.stringify(current.user),
+                ...(request.requestId === undefined ? {} : { requestId: request.requestId }),
+              })
+              return false
+            }
+            if (typeof request.tuiPreferencesField !== 'string' || typeof request.tuiPreferencesValue !== 'string') {
+              throw new Error('local client entry: qualification-tui-preferences requires a string field/value')
+            }
+            const write = await settings.mutate(
+              'pi-tui-preferences',
+              [{ op: 'set', path: [request.tuiPreferencesField], value: request.tuiPreferencesValue }],
+              request.tuiPreferencesRevision as number | undefined,
+            )
+            const after = await settings.describe()
+            const settled = after.ok ? preferenceOf(after.value) : undefined
+            emit({
+              m4a0: 'qualification',
+              op: 'tui-preferences',
+              processRole: 'client',
+              pid: process.pid,
+              action: 'write',
+              field: request.tuiPreferencesField,
+              requested: request.tuiPreferencesValue,
+              ok: write.ok === true && settled !== undefined,
+              ...(settled === undefined
+                ? {}
+                : {
+                    revision: settled.revision,
+                    valueText: JSON.stringify(settled.value),
+                    userText: JSON.stringify(settled.user),
+                    readBack: settled.value[request.tuiPreferencesField] === request.tuiPreferencesValue,
+                  }),
+              ...(write.ok
+                ? {}
+                : {
+                    errorCode: write.error?.code,
+                    ...(write.error?.message === undefined ? {} : { error: write.error.message.slice(0, 300) }),
+                  }),
+              ...(request.requestId === undefined ? {} : { requestId: request.requestId }),
+            })
+            return false
+          }
           if (request.op === 'qualification-acp-access') {
             // PO-1B qualification-only: the SAME authenticated non-TUI Peer drives
             // the Host's private local ACP listener control through the real v2

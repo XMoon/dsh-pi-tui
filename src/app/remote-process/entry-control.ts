@@ -74,6 +74,16 @@ export interface EntryControlRequest {
    */
   readonly webAutoStart?: unknown
   /**
+   * Qualification-only fields of the `qualification-tui-preferences` op: absent
+   * asks for the canonical `pi-tui-preferences` row, otherwise the string field
+   * and value are written through the official generated `settings.mutate` with
+   * `tuiPreferencesRevision` as the expected revision. Internal control channel
+   * only — never a published CLI, Surface or HTTP surface.
+   */
+  readonly tuiPreferencesField?: unknown
+  readonly tuiPreferencesValue?: unknown
+  readonly tuiPreferencesRevision?: unknown
+  /**
    * Qualification-only target of the `qualification-acp-access` op (PO-1B):
    * absent asks for the local ACP listener status, otherwise the value is passed
    * to the Host's private `piTuiAcpAccess.setEnabled` UNVALIDATED so the v2
