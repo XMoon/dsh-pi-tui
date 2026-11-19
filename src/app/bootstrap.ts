@@ -3273,12 +3273,11 @@ export function applyRunnerWithRuntime(
       diag,
       // The live facts are their own testable composition seam: the full
       // Session scope (sessionless generation included), the Remote transport
-      // identity captured on EVERY path, the transition/admission/shell facts
-      // and the official running status. Nothing is cached between calls.
+      // identity captured on EVERY path, the admission/shell facts and the
+      // official running status. Nothing is cached between calls.
       facts: createExitIntentFacts({
         backend: () => selectedRuntime.kind === 'direct' ? 'direct' : 'daemon',
         scopes: sessionScope,
-        transitionPending: () => ownership.gate.pending || ownership.barrier.inTransition,
         admissionPending: () => submission.composerHoldActive(),
         shellRunning: () => localShell.isRunning(),
         ...(selectedRuntime.kind === 'remote'

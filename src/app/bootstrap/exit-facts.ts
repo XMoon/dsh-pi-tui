@@ -43,8 +43,6 @@ export interface ExitIntentFactSources {
   backend(): ExitBackendKind
   /** The ONE session scope authority (capture + currentness). */
   scopes: Pick<SessionScopeAuthority, 'capture' | 'captureLive' | 'isCurrent'>
-  /** Whether a navigation transition owns the surface (gate pending or barrier). */
-  transitionPending(): boolean
   /** Whether a submission admission currently holds the composer. */
   admissionPending(): boolean
   /** Whether an independent user-shell run is in flight. */
@@ -85,15 +83,14 @@ export function createExitIntentFacts(sources: ExitIntentFactSources): ExitInten
       live,
       ...(remote ? { transportToken } : {}),
     }
-    // A pending navigation of a LIVE owner is not a provable idle state: the
-    // owner is about to be replaced, so the Exit must not silently detach as
-    // if nothing were happening. A SESSIONLESS surface keeps the existing
-    // `/exit` contract: there is no Session work to protect and the exit is
-    // never deferred behind a pending `/new` pre-gate Workspace resolution
-    // (test/app/runner-session-bootstrap.test.ts owns that contract).
-    if (live !== undefined && sources.transitionPending()) {
-      return { ...base, activity: 'unknown' as ExitSessionActivity }
-    }
+    // A pending navigation is NOT part of the current Session's activity. The
+    // repository owns the exit-vs-navigation order in two accepted contracts:
+    // `/exit` is never deferred behind a `/new` pre-gate Workspace resolution
+    // (test/app/runner-session-bootstrap.test.ts), and an interactive exit
+    // during a non-cooperative transition create pre-cancels the CURRENT owner
+    // exactly once (test/app/runner-session-retirement.test.ts). Treating the
+    // transition as `unknown` would replace those immediate exits with a
+    // choice and break the contract, so presence/activity stay authoritative.
     if (live === undefined) {
       return {
         ...base,

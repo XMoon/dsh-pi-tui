@@ -1320,7 +1320,6 @@ interface ExitFactsHarness {
     backend: ExitBackendKind
     sessionId: string | undefined
     current: boolean
-    transition: boolean
     admission: boolean
     shell: boolean
     running: boolean | undefined
@@ -1335,7 +1334,6 @@ function exitFactsHarness(): ExitFactsHarness {
     backend: 'daemon',
     sessionId: 'session-a',
     current: true,
-    transition: false,
     admission: false,
     shell: false,
     running: false,
@@ -1352,7 +1350,6 @@ function exitFactsHarness(): ExitFactsHarness {
         : ({ sessionId: state.sessionId } as unknown as LiveSessionScope),
       isCurrent: () => state.current,
     },
-    transitionPending: () => state.transition,
     admissionPending: () => state.admission,
     shellRunning: () => state.shell,
     remote: {
@@ -1399,27 +1396,6 @@ test('exit facts: the official Remote running bit and its absence decide working
   h.state.running = false
   h.state.tokenCurrent = false
   assert.equal(h.facts.capture().activity, 'unknown', 'a rolled transport is never idle')
-})
-
-test('exit facts: a pending navigation of a LIVE owner is unknown, never idle', () => {
-  // RFL-002: the transition authority is part of the LIVE idle proof.
-  const h = exitFactsHarness()
-  h.state.transition = true
-  assert.equal(h.facts.capture().activity, 'unknown')
-  h.state.transition = false
-  assert.equal(h.facts.capture().activity, 'idle')
-})
-
-test('exit facts: a sessionless surface is never deferred behind a pending create', () => {
-  // The repository contract (test/app/runner-session-bootstrap.test.ts):
-  // `/exit` during a `/new` pre-gate Workspace resolution exits immediately.
-  // There is no Session work to protect, so a pending create is NOT unknown.
-  const h = exitFactsHarness()
-  h.state.sessionId = undefined
-  h.state.transition = true
-  assert.equal(h.facts.capture().activity, 'idle')
-  h.state.admission = true
-  assert.equal(h.facts.capture().activity, 'working', 'a held submission is still protected')
 })
 
 test('exit facts: a sessionless capture is a real generation and its first Session invalidates it', () => {

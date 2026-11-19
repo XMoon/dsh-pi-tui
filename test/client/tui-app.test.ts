@@ -6613,7 +6613,6 @@ test('the live facts -> coordinator -> real PiTui seat -> ONE commit chain', asy
       captureLive: () => live,
       isCurrent: () => current,
     },
-    transitionPending: () => false,
     admissionPending: () => false,
     shellRunning: () => false,
     remote: {
