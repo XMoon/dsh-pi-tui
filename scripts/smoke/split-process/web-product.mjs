@@ -58,7 +58,6 @@ import {
 } from '../../lib/split-smoke-sessions.mjs'
 import {
   PR_A_WEB_ROWS,
-  PR_A_WELCOME_NOTICE_VERSION,
   browserDriverExitBounded,
   readHostWebIndex,
   assertWebIndexQualified,
@@ -226,6 +225,9 @@ function createProductEvidence() {
       state.features = matrix
       write('matrix/feature-surface.json', { schema: 1, case: 'WP-10', features: matrix })
     },
+    settingsPersistence(result) {
+      write('web-settings-persistence.json', result)
+    },
     wc(matrix) {
       state.wc = matrix
       write('matrix/wc-01-12.json', { schema: 1, wc: matrix })
@@ -356,9 +358,6 @@ export const runWebProductQualification = async context => {
   const productPatch = join(productRoot, 'pr-d-product.patch.yml')
   writeFileSync(productPatch, [
     readFileSync(c1Fixture.patchPath, 'utf8').trimEnd(),
-    '- id: ui-settings-general',
-    '  config:',
-    `    welcomeNoticeVersion: '${PR_A_WELCOME_NOTICE_VERSION}'`,
     '- id: workspace-controller',
     '  config:',
     `    documentsDirectory: '${documentsDirectory}'`,
@@ -367,7 +366,6 @@ export const runWebProductQualification = async context => {
   chmodSync(productPatch, 0o600)
   const timedRows = JSON.parse(readFileSync(c1Fixture.timedPatchPath, 'utf8'))
   timedRows.push(
-    { id: 'ui-settings-general', config: { welcomeNoticeVersion: PR_A_WELCOME_NOTICE_VERSION } },
     { id: 'workspace-controller', config: { documentsDirectory } },
   )
   const timedProductPatch = join(productRoot, 'pr-d-product-timed.patch.yml')
@@ -778,6 +776,42 @@ export const runWebProductQualification = async context => {
     const groupALaunch = launchOf(groupA.ready)
     const groupAIndex = await readHostWebIndex(groupA.ready.localHost.origin, groupALaunch, 'WP-01')
     assertWebIndexQualified(groupAIndex, 'WP-01', targetDshVersion)
+
+    // M6 PR-A (A1-W01/W02): the REAL first-run Welcome acknowledgement and the
+    // Appearance theme write must land in the official USER Profile and be read
+    // back after a reload. This is the profile-writable contract the generated
+    // bundle roster exists for; an overlay-supplied welcome version would mask
+    // it, so this case deliberately leaves `ui-settings-general` unwritten.
+    const settingsDriverPath = join(SCRIPT_DIR, 'fixtures', 'm6-web-settings-browser.mjs')
+    assert(existsSync(settingsDriverPath), 'PR-A the Web settings persistence driver is missing')
+    const settingsResultPath = join(browserRoot, `web-settings-${String(++browserRun)}.json`)
+    const settingsChild = spawn(process.execPath, [settingsDriverPath, settingsResultPath], {
+      cwd: workDir,
+      env: {
+        ...driverEnv,
+        M6_DSH_HOME: dshHome,
+        M6_PROFILE_PATCH: join(dshHome, 'profiles', base.profile, 'cordis.patch.yml'),
+        M6_PLAYWRIGHT_ROOT: playwrightRoot,
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+      detached: true,
+    })
+    let settingsOut = ''
+    let settingsErr = ''
+    settingsChild.stdout.setEncoding('utf8')
+    settingsChild.stdout.on('data', chunk => { settingsOut = `${settingsOut}${chunk}`.slice(-8_192) })
+    settingsChild.stderr.setEncoding('utf8')
+    settingsChild.stderr.on('data', chunk => { settingsErr = `${settingsErr}${chunk}`.slice(-8_192) })
+    const settingsExit = new Promise(resolveExit => settingsChild.on('close', (code, signal) => resolveExit({ code, signal })))
+    const settingsFinished = await browserDriverExitBounded(settingsExit, 300_000, 'PR_A_WEB_SETTINGS_TIMEOUT')
+    const settingsResult = existsSync(settingsResultPath) ? readJson(settingsResultPath) : {}
+    assert(settingsFinished.code === 0,
+      `PR-A the real Browser settings witness failed (exit ${JSON.stringify(settingsFinished.code)}/${String(settingsFinished.signal)}): ${redactWebQualificationText(`${settingsErr}${settingsOut}${String(settingsResult.error ?? '')}`)}`)
+    for (const fact of ['welcomeVisible', 'welcomePersisted', 'welcomeStayedHiddenAfterReload', 'themePersisted', 'themeStayedSelectedAfterReload']) {
+      assert(settingsResult[fact] === true, `PR-A the real Browser settings witness did not prove ${fact}`)
+    }
+    evidence.settingsPersistence(settingsResult)
+    trace('t75-web-product-settings-persistence', settingsResult)
 
     // WP-01: token -> Cookie -> index -> shell -> one real Session action.
     const wp01 = await browserCase('wp01-login', {

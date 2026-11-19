@@ -865,7 +865,8 @@ export function assertSelectedVerdict(caseId, result) {
       && result?.scope === 'REAL_SPLIT_PROCESS_L6'
       && result?.canonicalActive === true
       && result?.persistedAcrossColdHost === true
-      && result?.staleRevisionRefused === true,
+      && result?.staleRevisionRefused === true
+      && result?.twoClientConflictResolved === true,
     `selected ${caseId}: the canonical preferences verdict ended as ${String(result?.status ?? 'missing')}/${String(result?.scope ?? 'missing')}${result?.message === undefined ? '' : `: ${String(result.message)}`}`)
     return
   }

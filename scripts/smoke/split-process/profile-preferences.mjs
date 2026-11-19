@@ -118,6 +118,48 @@ export async function runProfilePreferencesQualification(context) {
     assert(parseJson(afterStale.valueText, 'PR-A after stale').theme === 'dark',
       'PR-A: the refused write left the committed theme untouched')
 
+    // ── 3b. TWO authenticated Clients race ONE revision: exactly one write
+    // is accepted and the other receives the official conflict; the Host's
+    // authoritative read-back is the single winner. ──────────────────────
+    const peerB = await startPeer('PR-A B')
+    const readA = await readPreferences(peer, 'PR-A two-client A read')
+    const readB = await readPreferences(peerB, 'PR-A two-client B read')
+    assert(readA.revision === readB.revision,
+      'PR-A: both Clients must start from the SAME authoritative revision')
+    const requestA = `pr-a-pref-${++requestSequence}`
+    const requestB = `pr-a-pref-${++requestSequence}`
+    peer.send({
+      op: 'qualification-tui-preferences',
+      requestId: requestA,
+      tuiPreferencesField: 'footer',
+      tuiPreferencesValue: 'compact',
+      tuiPreferencesRevision: readA.revision,
+    })
+    peerB.send({
+      op: 'qualification-tui-preferences',
+      requestId: requestB,
+      tuiPreferencesField: 'footer',
+      tuiPreferencesValue: 'custom',
+      tuiPreferencesRevision: readB.revision,
+    })
+    const [writeA, writeB] = await Promise.all([
+      peer.waitFor(entry => entry.op === 'tui-preferences' && entry.requestId === requestA, 'PR-A two-client A write', 120_000),
+      peerB.waitFor(entry => entry.op === 'tui-preferences' && entry.requestId === requestB, 'PR-A two-client B write', 120_000),
+    ])
+    const accepted = [writeA, writeB].filter(entry => entry.ok === true)
+    const refused = [writeA, writeB].filter(entry => entry.ok === false)
+    assert(accepted.length === 1 && refused.length === 1,
+      `PR-A: two Clients racing one revision must produce ONE accepted write; got ${JSON.stringify([writeA.ok, writeB.ok])}`)
+    assert(/conflict/iu.test(String(refused[0].errorCode ?? '')) || /conflict/iu.test(String(refused[0].error ?? '')),
+      `PR-A: the losing Client must receive the official conflict, got ${JSON.stringify(refused[0].errorCode)}`)
+    const winnerValue = accepted[0].requested
+    const finalRead = await readPreferences(peerB, 'PR-A two-client settled read')
+    const finalValue = parseJson(finalRead.valueText, 'PR-A two-client settled value')
+    const finalUser = parseJson(finalRead.userText, 'PR-A two-client settled user')
+    assert(finalValue.footer === winnerValue && finalUser.footer === winnerValue,
+      `PR-A: the Host authority must hold exactly the winning value ${JSON.stringify(winnerValue)}, got ${JSON.stringify(finalValue.footer)}`)
+    await peerB.shutdown()
+
     await peer.shutdown()
     await first.host.shutdown()
 
@@ -138,6 +180,7 @@ export async function runProfilePreferencesQualification(context) {
       canonicalActive: true,
       persistedAcrossColdHost: coldUser.theme === 'dark',
       staleRevisionRefused: true,
+      twoClientConflictResolved: true,
     }
   } catch (error) {
     verdict = {
