@@ -904,6 +904,40 @@ export const XML_ENVELOPE_RESULT_TOOLS: ReadonlySet<string> = new Set(['read', '
  */
 export const TERMINAL_RESULT_TOOLS: ReadonlySet<string> = new Set(['bash', 'pwsh', 'shell'])
 
+/**
+ * The result lines ONE legacy PTC sub-call body paints, in BLOCK ORDER.
+ *
+ * An image-bearing row renders its structured blocks in order, so a mixed
+ * text+image result keeps its readable text AND gets the TSP's frozen
+ * payload-free identity row (`[IMAGE] name · W×H · bytes`) for each image
+ * block. Image BYTES never render on this surface; the native image node stays
+ * the TSP pane's capability. A row without an image block keeps its exact
+ * previous projection (terminal stdout keeps whitelisted SGR, every other
+ * result is plain text).
+ */
+export function subCallResultLines(child: Extract<TranscriptMessage, { kind: 'tool' }>): string[] {
+  const images = new Map(toolRowImageBlocks(child).map(block => [block.index, block.attachment]))
+  if (images.size === 0) {
+    return TERMINAL_RESULT_TOOLS.has(child.name)
+      ? sanitizeDisplayLog(child.result).split('\n')
+      : sanitizeDisplayText(child.result).split('\n')
+  }
+  const lines: string[] = []
+  ;(child.resultBlocks ?? []).forEach((block, index) => {
+    const attachment = images.get(index)
+    if (attachment !== undefined) {
+      lines.push(imageIdentityText(attachment))
+      return
+    }
+    if (block?.type === 'text' && typeof block.text === 'string') {
+      lines.push(...sanitizeDisplayText(block.text).split('\n'))
+    }
+  })
+  // A row whose blocks carry only images still states WHAT it holds.
+  if (lines.length === 0) for (const attachment of images.values()) lines.push(imageIdentityText(attachment))
+  return lines
+}
+
 /** First lines of a multi-line text, joined for folded previews. */
 function preview(text: string, lines: number): string {
   const parts = text.split('\n')
@@ -22398,33 +22432,14 @@ export class TuiApp {
         const rendered = this.renderVisualChildBody(card, child, width, indent, bodyExpanded)
         regions.push({ sourceKey: transcriptSearchSourceKey({ kind: 'subcall-field', subCallIds: path, field: 'result' }), anchorRow: resultStart, rowStart: resultStart, rowEnd: resultStart + rendered, enumerable: false })
         rows += rendered
-      } else if (toolRowProjectsImages(child)) {
+      } else if (toolRowProjectsImages(child) || child.result !== '') {
         const resultStart = row + rows
-        // The TSP result-image contract, projected on the legacy surface: the
-        // frozen identity rows (`imageIdentityText` — payload-free name ·
-        // W×H · bytes + the read state) and NO bytes render here. The native
-        // image node stays the TSP pane's capability; this row keeps the
-        // attachment identity legible on every surface.
-        const identityLines = toolRowImageBlocks(child)
-          .map(block => imageIdentityText(block.attachment))
-        regions.push({ sourceKey: transcriptSearchSourceKey({ kind: 'subcall-field', subCallIds: path, field: 'result' }), anchorRow: resultStart, rowStart: resultStart, rowEnd: resultStart + identityLines.length, enumerable: false })
-        for (const line of identityLines) {
-          card.addChild(new Text(truncateToWidth(`${pad}  ${color.textDim(sanitizedPhysicalLine(line))}`, width, '…'), 0, 0))
-          rows += 1
-        }
-      } else if (child.result !== '') {
-        const resultStart = row + rows
-        // A captured terminal sub-call stdout keeps whitelisted SGR; every
-        // other external result is plain. The projected line count is the
-        // region height as well, so the display and the search geometry agree.
-        const resultLines = TERMINAL_RESULT_TOOLS.has(child.name)
-          ? sanitizeDisplayLog(child.result).split('\n')
-          : sanitizeDisplayText(child.result).split('\n')
+        const resultLines = subCallResultLines(child)
         // Result lines are truncated to the width: a dropped match would shift
         // every later raw ordinal. Anchor the body, never enumerate.
         regions.push({ sourceKey: transcriptSearchSourceKey({ kind: 'subcall-field', subCallIds: path, field: 'result' }), anchorRow: resultStart, rowStart: resultStart, rowEnd: resultStart + resultLines.length, enumerable: false })
         for (const line of resultLines) {
-          card.addChild(new Text(truncateToWidth(`${pad}  ${color.textDim(line)}`, width, '…'), 0, 0))
+          card.addChild(new Text(truncateToWidth(`${pad}  ${color.textDim(sanitizedPhysicalLine(line))}`, width, '…'), 0, 0))
           rows += 1
         }
       }

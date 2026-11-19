@@ -22,6 +22,7 @@ import {
   toolRowProjectsImages,
 } from '../../src/tui/tsp/transcript-view.ts'
 import { imageIdentityText } from '../../src/tui/tsp/transcript-view.ts'
+import { subCallResultLines } from '../../src/tui-app.ts'
 
 const T0 = 1_700_000_000_000
 const WINDOW = { mode: 'latest', hasNewer: false } as const
@@ -1317,4 +1318,48 @@ test('a PTC screenshot child paints the TSP image identity rows on the legacy su
   const blocks = toolRowImageBlocks(child)
   assert.equal(blocks.length, 1)
   assert.match(imageIdentityText(blocks[0]!.attachment), /\[IMAGE\] .*673×439/u)
+})
+
+test('the legacy PTC sub-call body keeps mixed text and image blocks in order', () => {
+  const rootCallId = 'root-mixed'
+  const subCallId = 'child-mixed'
+  const attachment = {
+    attachmentId: 'att-mixed',
+    mediaType: 'image/png',
+    bytes: 2048,
+    width: 320,
+    height: 200,
+    name: 'shot.png',
+  }
+  const messages = folder([
+    ev('turn/start', { turn: 1 }, 0), user(1, 'capture with notes'),
+    toolCall(2, rootCallId, 'run_code', '{}'),
+    ev('tool/ptc-dispatch-start', {
+      rootCallId: ToolCallId(rootCallId), parentCallId: ToolCallId(rootCallId), subCallId,
+      name: 'cua', arguments: { method: 'screenshot' },
+    }, 3),
+    toolResult(4, rootCallId, 'program complete'),
+    ev('tool/ptc-dispatch', {
+      rootCallId: ToolCallId(rootCallId), parentCallId: ToolCallId(rootCallId), subCallId,
+      name: 'cua', arguments: { method: 'screenshot' }, isError: false,
+      content: [
+        { type: 'text', text: '{"pixelWidth":320,"pixelHeight":200}' },
+        { type: 'image', attachment },
+        { type: 'text', text: 'captured window 7' },
+      ],
+    }, 5),
+    ev('turn/end', { turn: 1, reason: { kind: 'completed' } }, 6),
+  ]).messages()
+  const child = toolRows(messages)[0]!.subCalls?.[0]
+  assert.ok(child !== undefined)
+  const lines = subCallResultLines(child)
+  assert.equal(lines[0], '{"pixelWidth":320,"pixelHeight":200}',
+    'the leading text block is preserved in block order')
+  assert.match(lines[1] ?? '', /^\[IMAGE\] .*320×200/u, 'the image block paints its identity row in place')
+  assert.equal(lines[2], 'captured window 7', 'trailing text after the image is preserved')
+  assert.ok(!lines.some(line => line.includes('att-mixed')), 'no attachment payload leaks into the body')
+
+  // A text-only child keeps its previous flat projection.
+  const textOnly: typeof child = { ...child, resultBlocks: [{ type: 'text', text: 'plain' }], result: 'plain' }
+  assert.deepEqual(subCallResultLines(textOnly), ['plain'])
 })

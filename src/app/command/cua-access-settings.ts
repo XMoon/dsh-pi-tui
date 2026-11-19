@@ -394,6 +394,29 @@ export class CuaAccessSettingsController {
     receipt: Omit<CuaActionReceipt, 'state' | 'at'>,
     run: () => Promise<void>,
   ): Promise<void> {
+    return await this.admitAction(kind, receipt, run)
+  }
+
+  /**
+   * ADMIT one action against the CURRENT page generation, then dispatch it.
+   *
+   * The stale-basis branch must never carry a pre-refresh closure into the new
+   * provider generation: the closure was built from the old page's painted
+   * target (an application id, a permission row, a confirmation grant), so
+   * reusing it after the refresh is exactly the "old confirmation writes the
+   * new service" defect. Admission therefore RE-ENTERS this method after the
+   * refresh, and only a fresh `run` closure (built by the caller from the
+   * post-refresh snapshot) may be dispatched.
+   *
+   * @param kind - the action kind (receipt identity).
+   * @param receipt - the immediate user-facing receipt text.
+   * @param run - the dispatch for the CURRENT page generation.
+   */
+  private async admitAction(
+    kind: CuaActionKind,
+    receipt: Omit<CuaActionReceipt, 'state' | 'at'>,
+    run: () => Promise<void>,
+  ): Promise<void> {
     // ONE side effect per open/operation: a second buffered Enter/click is
     // refused before it can enter the serial queue. The page also disables its
     // actions while busy, but this admission is the authority.
@@ -407,22 +430,21 @@ export class CuaAccessSettingsController {
       // a provider that changes again during the read keeps the action
       // refused (the genuine fail-closed case).
       await this.invalidateObservation()
-      // A genuine provider replacement DURING the refresh still keeps the
-      // action refused (the fresh basis could not be attributed to the page
-      // the user acted on); only a settled refresh may re-admit the action.
-      if (!Object.is(this.deps.cuaAccess.observation.readSnapshot(), this.observedBasis)) {
-        this.patch({
-          action: {
-            ...receipt,
-            kind,
-            state: 'unknown',
-            text: 'The Host CUA provider changed again while refreshing; the action was NOT dispatched. Refresh before retrying.',
-            at: Date.now(),
-          },
-          busy: false,
-        })
-        return
-      }
+      // The refresh replaced the page snapshot: the closure built against the
+      // old generation is DISCARDED (its painted target/confirmation belongs to
+      // the old provider). Nothing is dispatched; the user acts again on the
+      // freshly painted page.
+      this.patch({
+        action: {
+          ...receipt,
+          kind,
+          state: 'unknown',
+          text: 'The Host CUA provider changed; the page was refreshed and the action was NOT dispatched. Review the new state and act again.',
+          at: Date.now(),
+        },
+        busy: false,
+      })
+      return
     }
     this.actionInFlight = true
     const epoch = this.epoch

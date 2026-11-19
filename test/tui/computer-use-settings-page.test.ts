@@ -342,13 +342,14 @@ test('keyboard PageDown reaches the Help appended after the last action', async 
   mounted.page.dispose()
 })
 
-test('a provider basis rollover refreshes first and still dispatches the fresh action', async () => {
+test('a provider basis rollover refreshes the page and DISCARDS the pre-refresh action', async () => {
   let basis = 1
   const mounted = mount({ cua: { observation: { readSnapshot: () => basis, subscribe: () => () => {} } } })
   await settle(mounted, 'Accessibility: Not allowed')
-  // The provider is replaced AFTER the page opened; the page has not observed
-  // the change yet. Its action must refresh to the new basis and dispatch,
-  // never refuse a perfectly fresh action against the old snapshot.
+  // The provider is replaced AFTER the page opened. The action closure the
+  // user armed belongs to the OLD page generation (its painted target and any
+  // confirmation), so it must never be dispatched to the new provider: the
+  // page refreshes and tells the user to act again.
   basis = 2
   let cursor = 0
   for (; cursor < 20; cursor += 1) {
@@ -358,9 +359,31 @@ test('a provider basis rollover refreshes first and still dispatches the fresh a
   assert.ok(cursor < 20, 'the Request Accessibility action is reachable by keyboard')
   mounted.page.handleInput('\r')
   await new Promise(resolve => setTimeout(resolve, 10))
-  assert.ok(mounted.calls.includes('request:accessibility:zh'),
-    'the action dispatches against the freshly refreshed basis')
-  assert.doesNotMatch(mounted.render().join('\n'), /NOT dispatched/u,
-    'the page does not paint a stale refusal for a fresh dispatch')
+  assert.deepEqual(mounted.calls.filter(call => call.startsWith('request:')), [],
+    'the pre-refresh action is never dispatched to the replaced provider')
+  assert.match(mounted.render().join('\n').replace(/\s+/gu, ' '), /the action was NOT dispatched/u,
+    'the page states the truth instead of silently dispatching')
+  mounted.page.dispose()
+})
+
+test('a stale-basis confirmation never revokes the replaced provider\'s application', async () => {
+  let basis = 1
+  const mounted = mount({ cua: { observation: { readSnapshot: () => basis, subscribe: () => () => {} } } })
+  mounted.page.setMaxRows(80)
+  const frame = await settle(mounted, 'TextEdit')
+  const revokeRow = frame.findIndex(line => line.includes('[Revoke access…]'))
+  assert.ok(revokeRow >= 0)
+  const labelCol = frame[revokeRow]!.indexOf('[')
+  const event = { type: 'press', x: labelCol, y: revokeRow, width: 96, height: 79 } as TuiMouseEvent
+  mounted.page.handleMouse(event)
+  mounted.page.handleMouse({ ...event, type: 'click' } as TuiMouseEvent)
+  assert.match(mounted.render().join('\n'), /\[y Revoke\]/u)
+  // The provider is replaced while the confirmation is armed: the confirmed
+  // target belonged to the OLD provider and must not be revoked on the new one.
+  basis = 2
+  mounted.page.handleInput('y')
+  await new Promise(resolve => setTimeout(resolve, 10))
+  assert.deepEqual(mounted.calls.filter(call => call.startsWith('revoke:')), [],
+    'no revoke may reach the replaced provider from a pre-refresh confirmation')
   mounted.page.dispose()
 })

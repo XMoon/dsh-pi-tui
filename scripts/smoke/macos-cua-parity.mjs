@@ -1253,12 +1253,37 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
     'MAC09-02 cua capabilities result', TIMEOUTS.consent)
   assert(capabilitiesResult.result.isError !== true,
     `MAC09-02: the official cua tool failed: ${dispatchErrorCode(capabilitiesResult.result) ?? 'unknown error'}`)
+  // MAC09-02 NEGATIVE (bundle ENABLED, non-PTC Session): after the positive PTC
+  // session proved the tool is mounted, a NEW Session on the shipped non-PTC
+  // preset must NOT be granted `cua`. This is the v1 required negative: the
+  // bundle being enabled on the Host says nothing about the standard preset's
+  // tool admission.
+  await sendKeys(tui, '/preset default standard', 'MAC09-02 standard preset')
+  await sendKeys(tui, '/new', 'MAC09-02 standard Session')
+  const enabledNegative = await promptAndRequireNoCua({
+    tui,
+    dshHome,
+    sessionId: undefined,
+    prompt: 'Without using any tools, answer in one short sentence: which tool would you use for macOS computer control?',
+    label: 'MAC09-02 enabled non-PTC negative',
+  })
+  const standardPresetAfter = dumpProfile(installation, 'MAC09-02 after the standard Session')
+  const standardEntries = standardPresetAfter.flatMap(entry => Array.isArray(entry?.config?.plugins) ? entry.config.plugins : [])
+  assert(standardEntries.every(plugin => plugin?.name !== '@deepseek-ai/dsh-tool-executor-ptc'),
+    'MAC09-02: the standard preset composed the PTC executor, so a non-PTC Session could reach cua')
+  // The rest of the lane runs PTC Sessions: restore the shipped default so the
+  // negative above cannot change later cases' admission.
+  await sendKeys(tui, '/preset default ptc', 'MAC09-02 restore PTC default')
+  await newSession(tui, 'MAC09-02 restore PTC Session')
   pushRow(report, 'MAC09-02', 'PASS', {
     sessionId: sha16(capabilities.sessionId),
     subCallId: sha16(capabilities.dispatch.subCallId),
     dispatchMethod: dispatchMethod(capabilities.dispatch),
     nonPtcSession: sha16(negative.sessionId),
     nonPtcCuaDispatches: 0,
+    enabledNonPtcSession: sha16(enabledNegative.sessionId),
+    enabledNonPtcCuaDispatches: 0,
+    standardPresetHasPtcExecutor: false,
     bundle: CUA_BUNDLE,
     agentPreset: composition.agentPreset,
     negativeEvidence: 'Host: profile selection absent + mounted roster has no cua row before enable; bounded zero cua dispatch; model compliance recorded separately',
@@ -1287,7 +1312,12 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
   ])
   const helpersBefore = ownedRoles(workRoot).helpers.filter(row => alive(row.pid))
   for (const helper of helpersBefore) {
-    try { process.kill(helper.pid, 'SIGTERM') } catch { /* already gone */ }
+    // The list was read a moment ago: re-prove the EXACT owned helper identity
+    // (pid + kernel start time) before signalling it.
+    const current = ownedRoles(workRoot).helpers
+      .find(row => row.pid === helper.pid && row.started === helper.started && alive(row.pid))
+    if (current === undefined) continue
+    try { process.kill(current.pid, 'SIGTERM') } catch { /* already gone */ }
   }
   for (const helper of helpersBefore) {
     try {
@@ -1439,9 +1469,9 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
   // ref may carry its pre-normalization originalDimensions instead. Either
   // pair proves the same attachment; both are recorded.
   const pixelPair = `${String(dimensions.width)}×${String(dimensions.height)}`
-  const rowGeometry = /\[IMAGE\].*?(\d+×\d+)/u.exec(imageFrame)?.[1]
-  assert(rowGeometry === pixelPair || rowGeometry !== undefined,
-    'MAC09-07: the Client image row paints no image geometry')
+  const rowGeometry = /\[IMAGE\][^\n]*?(\d+×\d+)/u.exec(imageFrame)?.[1]
+  assert(rowGeometry === pixelPair,
+    `MAC09-07: the Client image row geometry ${rowGeometry ?? '<none>'} is not this screenshot attachment's stored ${pixelPair}`)
   report.macos07 = {
     ...report.macos07,
     identityRowGeometry: rowGeometry,
@@ -1726,6 +1756,12 @@ async function sceneSplit({ installation, workRoot, report, textEditPid }) {
     `MAC09-10: the Split Client pid ${String(clientPid)} equals the Host pid ${String(registry.record.hostPid)}`)
   logOperator([`MAC09-10 is killing the Split Client pid ${String(clientPid)} while the Question is pending.`,
     'Do NOT answer it. A new Client will reopen the same Session.'])
+  // Re-prove the EXACT owned Client identity immediately before the signal: a
+  // reused pid with another start time must never be terminated.
+  const currentClient = ownedRoles(workRoot).clients
+    .find(row => row.pid === clientPid && row.started === clientStarted)
+  assert(currentClient !== undefined,
+    'MAC09-10: the owned Split Client identity changed before the signal; refusing to kill')
   try { process.kill(clientPid, 'SIGTERM') } catch { /* already gone */ }
   await waitOwnedRoleGone(workRoot, clientPid, clientStarted, 'MAC09-10 old Split Client')
   if (tmuxSessionExists(tui)) tmux(['kill-session', '-t', tui], 'MAC09-10 remove old Client pane', { allowMissing: true })
