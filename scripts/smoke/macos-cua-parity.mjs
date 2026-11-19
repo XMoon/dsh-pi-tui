@@ -1481,9 +1481,12 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
   // typeText settles BEFORE the sequential getState dispatch is durable: wait
   // for the getState dispatch on the live event stream instead of freezing the
   // list at the typeText result instant.
+  // The state read follows the settled typeText in the SAME run_code program,
+  // so it is due in seconds; a model that ends the program without it must
+  // fail this bounded wait instead of consuming the whole turn budget.
   const stateDispatch = await waitFor(() => liveInputDispatches()
     .find(dispatch => dispatchMethod(dispatch) === 'getState'),
-  'MAC09-08 official getState dispatch', TIMEOUTS.turn)
+  'MAC09-08 official getState dispatch', 120_000)
   assert(JSON.stringify(liveInputDispatches().map(dispatchMethod))
     === JSON.stringify(['getApp', 'listWindows', 'show', 'activate', 'typeText', 'getState']),
   'MAC09-08: the controlled root dispatched an unexpected cua method sequence')
