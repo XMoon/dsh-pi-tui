@@ -77,6 +77,12 @@ export interface SurfaceLifecycleDeps {
   readonly surface: SurfaceTeardownOwner
   /** Abort every in-flight lifecycle load (the runner lifetime signal). */
   readonly abortLifecycle: () => void
+  /**
+   * M6 UX PR1: retire the Client-local exit-intent choice and abort any Stop
+   * wait. It runs before the renderer/app teardown so a pending idle wait can
+   * never outlive the surface or commit an exit into a dying Client.
+   */
+  readonly disposeExitIntent: () => void
   readonly disposeViewer: () => void
   readonly clearDraftImages: () => void
   readonly clearDraftFiles: () => void
@@ -144,6 +150,7 @@ export function createSurfaceLifecycle(deps: SurfaceLifecycleDeps): SurfaceLifec
     markCleanedUp,
     surface,
     abortLifecycle,
+    disposeExitIntent,
     disposeViewer,
     clearDraftImages,
     clearDraftFiles,
@@ -225,6 +232,10 @@ export function createSurfaceLifecycle(deps: SurfaceLifecycleDeps): SurfaceLifec
       // (the TUI's physical owner.lock / lease / cooling stack is removed
       // legacy).
       () => abortLifecycle(),
+      // M6 UX PR1: the Client-local Exit Choice and any in-flight Stop wait
+      // are retired BEFORE the presentation/app resources they would repaint
+      // or commit into.
+      () => disposeExitIntent(),
       // M3-5 PR2: tear the child viewer down FIRST among the presentation
       // resources — a mounted viewer owns a client child generation + live
       // ingress (Remote) and an in-flight open may own a retained generation.

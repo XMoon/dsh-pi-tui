@@ -208,6 +208,9 @@ import {
 } from './event-routing.ts'
 import type { DisplayStatusFacts, SurfaceDisplaySeam, DisplayActivityFacts, DisplayWelcomeEligibility } from './display-seam.ts'
 import { pituiDisplaySeam } from './display-seam-pitui.ts'
+import type { SurfaceExitChoiceSeam } from './exit-choice.ts'
+import type { ExitSessionActivity } from '../../domain/command/policy.ts'
+import { pituiExitChoiceSeam } from './exit-choice-pitui.ts'
 import { pituiTaskCenterPresentation } from './task-presentation-pitui.ts'
 import type { TaskCenterPresentationPort } from './task-presentation-port.ts'
 
@@ -347,6 +350,13 @@ export interface SurfaceInputBinding {
    * never an unconditional exit; PR3-B §3.4 fixed keymap row 3).
    */
   cancel(): void
+  /**
+   * M6 UX PR1: the LIVE authoritative activity fact for the raw exit keys
+   * (Ctrl+C while working cancels once; an unknown state refuses to arm the
+   * double-press exit). Optional: a mount without it keeps the historical
+   * immediate/double-press behavior.
+   */
+  sessionActivity?(): ExitSessionActivity
   /**
    * The submission entry (PR3-B B2): the EXISTING application submit path
    * (`ApplicationEvents.events.onSubmit`), so a TSP Enter rides the ONE
@@ -696,6 +706,13 @@ export interface SurfaceRendererMount {
   ): {
     /** The renderer-facing display seam implementation. */
     readonly display: SurfaceDisplaySeam
+    /**
+     * M6 UX PR1: the renderer's ONE Client-local Exit Choice seat. The exit
+     * intent coordinator presents through this seam; every mount supplies it
+     * (its own degradation is the reachability truth), and no business
+     * decision lives here.
+     */
+    readonly exitChoice: SurfaceExitChoiceSeam
     /**
      * B3-A1: the renderer's Task Center presentation sink. The ONE Task
      * Runtime keeps every business fact; this port only carries the rows and
@@ -1113,6 +1130,12 @@ export interface SurfaceRuntime<Event extends RoutedSessionEvent> {
    * renderer). Throws if read before {@link SurfaceRuntime.start}.
    */
   readonly display: SurfaceDisplaySeam
+  /**
+   * M6 UX PR1: the mounted renderer's ONE Exit Choice seat, or undefined
+   * before a mount. The exit-intent coordinator presents the Client-local
+   * choice through it; no other owner writes this surface.
+   */
+  readonly exitChoice: SurfaceExitChoiceSeam | undefined
   /**
    * PR3-A: the ONE renderer-release promise. Resolves immediately on the
    * PiTui branch (the app disposal is synchronous); on the TSP branch it
@@ -1602,6 +1625,8 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
    * mount injects its own presenter.
    */
   let interactionPresenter: SurfaceInteractionPresenter | undefined
+  /** M6 UX PR1: the mounted renderer's ONE Exit Choice seat. */
+  let exitChoiceSeam: SurfaceExitChoiceSeam | undefined
   /**
    * PR3-A: the non-PiTui renderer's disposer (assigned by `start()` on the
    * renderer branch; released once in `dispose()`).
@@ -3463,6 +3488,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     get display(): SurfaceDisplaySeam {
       return displaySeam()
     },
+    get exitChoice() { return exitChoiceSeam },
     whenRendererReleased: () => rendererRelease,
     status,
     openingJournal,
@@ -3784,6 +3810,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
         acpPresentation = mounted.acpPresentation
         sessionBrowserPresentation = mounted.sessionBrowserPresentation
         interactionPresenter = mounted.interaction
+        exitChoiceSeam = mounted.exitChoice
         attachQueuePresentation(mounted.queuePresentation)
         rendererDispose = mounted.dispose
         // TSP I-C: keep ONLY the mount's installer reference (no catalog, no
@@ -3804,6 +3831,9 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
         pendingInputBinding = {
           exit: () => deps.events.onExit(),
           cancel: () => deps.events.onCancel?.(),
+          ...(deps.events.sessionActivity === undefined
+            ? {}
+            : { sessionActivity: () => deps.events.sessionActivity!() }),
           submit: (text, request, scopeToken) => deps.events.onSubmit(text, request, scopeToken),
           // PR2: the ONE synchronous admission shared with the application.
           // Absent wiring keeps the pre-PR2 (clear-first) TSP sequence.
@@ -3929,6 +3959,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
         ...(options.onProgramStatus === undefined ? {} : { onProgramStatus: options.onProgramStatus }),
       })
       display = pituiDisplaySeam(app)
+      exitChoiceSeam = pituiExitChoiceSeam(app)
       if (queueManager !== undefined) app.attachQueueManager(queueManager)
       // B3-A1: the PiTui Task Center presentation sink is the ONE live app
       // itself, wrapped by the pure delegation adapter. It is installed
@@ -3996,6 +4027,9 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
       // so no late catalog commit can reach a disposed mount (and nothing
       // survives into a remount, which mounts a NEW installer reference).
       rendererCommandCompletionsInstaller = undefined
+      // M6 UX PR1: the choice seat dies with its mount; a late coordinator
+      // update/close then finds no seat instead of painting into a dead app.
+      exitChoiceSeam = undefined
       // TSP I-D: withdraw the stager installer with the mount it points at, so a
       // late registration can never reach a disposed mount and a remount binds
       // its OWN installer reference.

@@ -3005,6 +3005,7 @@ function disposeThroughProductionLifecycle(h: SurfaceHarness): () => void {
     markCleanedUp: () => { cleanedUp = true },
     surface: h.surfaceRuntime,
     abortLifecycle: () => {},
+    disposeExitIntent: () => {},
     disposeViewer: () => {},
     clearDraftImages: () => {},
     clearDraftFiles: () => {},

@@ -85,6 +85,9 @@ import {
 } from './domain/terminal-progress/settings.ts'
 import { runSyncDisposalSteps, runSyncDisposalStepsWithPrimary } from './runtime/process/disposal.ts'
 import { Frame, FocusForwardingFrame, ResponsiveOverlayFrame, type ResponsiveOverlayGeometry } from './tui/components/frame.ts'
+import { ExitChoicePanel } from './tui/interaction/exit-choice.ts'
+import type { ExitChoiceModel } from './app/surface/exit-choice.ts'
+import type { ExitSessionActivity } from './domain/command/policy.ts'
 import { DockQueue, type DockQueueModel } from './tui/queue/dock-queue.ts'
 import { QueuePanel, queueOverlayGeometry } from './tui/queue/queue-panel.ts'
 import type { QueueManagerController, QueueManagerPresentation } from './app/queue/manager.ts'
@@ -1381,6 +1384,15 @@ export interface TuiAppEventsBase {
   /** The user asked to quit after the TUI's same-key keyboard exit
    * confirmation; Ctrl+C additionally clears the draft on its first press. */
   onExit: () => void
+  /**
+   * M6 UX PR1: the LIVE authoritative activity of the exact current Session
+   * for the keyboard exit rule. The default physical Ctrl+C cancels current
+   * work once while `working`, refuses to arm an exit while `unknown`, and
+   * keeps the historical clear-then-double-press exit only when `idle`.
+   * Optional; absent keeps the historical double-press exit for every state
+   * (a composition without a Session authority never claims a busy cancel).
+   */
+  sessionActivity?: () => ExitSessionActivity
   /** Stop the current activity (the interrupt action, default: Esc — a
    * SINGLE press fires this directly while busy; idle, a double press
    * within the window fires it when the editor is non-empty, and an
@@ -4261,6 +4273,15 @@ export class TuiApp {
   private teamConfirmationOverlay: {
     readonly handle: OverlayHandle
     readonly component: TeamDisableConfirmation
+    close(): void
+  } | undefined
+  /** M6 UX PR1: the ONE Client-local Exit Choice seat. It outlives no
+   *  session: the exit-intent coordinator owns its decision state and asks
+   *  this app only to paint/withdraw the model. */
+  private clientExitChoiceOverlay: {
+    readonly handle: OverlayHandle
+    readonly component: ExitChoicePanel
+    model: ExitChoiceModel
     close(): void
   } | undefined
   /** The injected Ctrl+R search source (the runner wires the file-backed
@@ -7757,12 +7778,33 @@ export class TuiApp {
       // missing key can only come from an internal legacy caller; fail closed
       // instead of treating an unknown trigger as an immediate exit.
       if (key === undefined) return true
-      this.handleExitRequest(trigger ?? {
+      const effectiveTrigger = trigger ?? {
         identity: `direct:${key}`,
         key,
         label: formatKeyId(key),
         clearsDraft: key === 'ctrl+c',
-      })
+      }
+      // M6 UX PR1: the DEFAULT builtin physical Ctrl+C (the ONE exit key with
+      // the clear-draft identity) is the only key with a busy-cancel rule.
+      // While the exact current Session is authoritatively working it cancels
+      // ONCE (the existing Busy Esc path: shell interrupt + exact-scope
+      // session interrupt), never arms an exit and never clears the draft. An
+      // unobservable state refuses to arm the exit and says so. Remapped exit
+      // keys and leader completions keep the ordinary same-key confirmation.
+      if (trigger === undefined && source === 'builtin' && effectiveTrigger.clearsDraft) {
+        const activity = this.events.sessionActivity?.()
+        if (activity === 'working') {
+          this.clearExitConfirmation()
+          this.events.onCancel?.()
+          return true
+        }
+        if (activity === 'unknown') {
+          this.clearExitConfirmation()
+          this.notify("The current session's running state cannot be verified.", 'error')
+          return true
+        }
+      }
+      this.handleExitRequest(effectiveTrigger)
       return true
     }
     // Every other semantic host action is an intervening user action. Clear
@@ -27411,6 +27453,72 @@ export class TuiApp {
     return closeHandle
   }
 
+  /**
+   * M6 UX PR1: present the ONE Client-local Exit Choice. The coordinator owns
+   * the model (title/copy/options and the ONE select callback); this app owns
+   * only the overlay lifetime. A second open replaces the previous seat — the
+   * coordinator never opens two, and a defensive replace can never leave a
+   * hidden seat accepting keys.
+   * @param model - the coordinator's frozen choice model.
+   */
+  openExitChoice(model: ExitChoiceModel): void {
+    // A real Host Question/Approval owns the seat. The Client choice must
+    // never stack above it; it is withdrawn with ZERO business action.
+    if (this.approvals.isActive() || this.activeQuestions !== undefined) {
+      model.dismiss()
+      return
+    }
+    this.closeExitChoice()
+    let handle: OverlayHandle | undefined
+    let hidden = false
+    let closeHandle: () => void = () => {}
+    const component = new ExitChoicePanel({
+      model,
+      requestRender: () => { this.requestRender() },
+      onClosed: () => {
+        if (this.clientExitChoiceOverlay?.handle === handle) this.clientExitChoiceOverlay = undefined
+      },
+    })
+    const frame = new FocusForwardingFrame(component, true)
+    handle = this.showOverlayOnHost(frame, { width: 64, maxHeight: 20 })
+    closeHandle = (): void => {
+      if (hidden) return
+      hidden = true
+      if (this.clientExitChoiceOverlay?.handle === handle) this.clientExitChoiceOverlay = undefined
+      handle?.hide()
+    }
+    this.clientExitChoiceOverlay = { handle, component, model, close: closeHandle }
+  }
+
+  /** Replace the painted model of the OPEN Exit Choice (a phase transition). */
+  updateExitChoice(model: ExitChoiceModel): void {
+    const seat = this.clientExitChoiceOverlay
+    if (seat === undefined) return
+    seat.model = model
+    seat.component.setModel(model)
+    this.requestRender()
+  }
+
+  /** Hide the open Exit Choice. Never a business action. */
+  closeExitChoice(): void {
+    const seat = this.clientExitChoiceOverlay
+    if (seat === undefined) return
+    this.clientExitChoiceOverlay = undefined
+    seat.close()
+  }
+
+  /**
+   * Withdraw the open Exit Choice because a real Host modal took the seat.
+   * The model's dismiss() reaches the coordinator with ZERO business action
+   * (no Host write, no exit); a later user intent opens a fresh choice.
+   */
+  private preemptClientExitChoice(): void {
+    const seat = this.clientExitChoiceOverlay
+    if (seat === undefined) return
+    seat.model.dismiss()
+    this.closeExitChoice()
+  }
+
   /** Close the Team-disable confirmation seat, if one is open and not
    *  mid-write. An in-flight write owns the seat until settlement; a new
    *  `/model` must not tear it down (the command's shared Team latch also
@@ -29309,6 +29417,10 @@ export class TuiApp {
     request: ApprovalPromptRequest,
     agentInputWait = false,
   ): Promise<ApprovalOutcome> {
+    // M6 UX PR1: a real Host modal always outranks the Client-local Exit
+    // Choice. A blocked request that is already aborted never takes the seat
+    // and must not withdraw the choice either.
+    if (request.signal?.aborted !== true) this.preemptClientExitChoice()
     // Phase 3B / B1-A modal precedence: the blocking owner ARRIVES — leave the
     // Job workspace BEFORE the approval claims the seat, so the restored surface
     // is the one the approval mounts on and no second keyboard owner can exist.
@@ -29562,6 +29674,9 @@ export class TuiApp {
      */
     agentInputWait = false,
   ): Promise<TuiQuestionAnswer[]> {
+    // M6 UX PR1: a foreground Question is a real Host modal and wins the seat
+    // over the Client-local Exit Choice.
+    this.preemptClientExitChoice()
     // A disposed surface must never leave the caller hanging: settle
     // rejected immediately (M0 stale-generation contract — the runner's
     // questions provider may fire during exit teardown).

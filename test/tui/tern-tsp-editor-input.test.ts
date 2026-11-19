@@ -1115,13 +1115,20 @@ test('a key batched with the SDK handshake is consumed through the composer', as
   }
 })
 
-test('an early Ctrl+D in the handshake batch routes the legal exit', async () => {
-  // A legal early quit during the PR3-A compatibility window still routes
-  // through the same exit controller (empty draft — nothing was typed yet).
+test('an early Ctrl+D in the handshake batch arms the bound double-press exit', async () => {
+  // M6 UX PR1: only the PRE-BIND Ctrl+C is an emergency exit. The early
+  // empty-draft Ctrl+D is replayed at the bind as the FIRST press of the
+  // same-key 1.5 s exit confirmation, never an immediate exit.
   const harness = await mountPane({ withHandshake: '\x04' })
   try {
+    // reason: the contract under test IS the 1.5 s same-key window; this flushes
+    // the one replay dispatch so the arm (not an exit) is observed.
     await settle()
-    assert.equal(harness.exitCount(), 1, 'the early empty-draft Ctrl+D routed the exit intent')
+    assert.equal(harness.exitCount(), 0, 'the early Ctrl+D only armed the exit confirmation')
+    harness.tern.input.type('\x04')
+    // reason: the confirming press lands inside the same 1.5 s contract window.
+    await settle()
+    assert.equal(harness.exitCount(), 1, 'the same-key second press routed the exit intent')
   } finally {
     await harness.dispose().catch(() => {})
     await harness.session.close().catch(() => {})
@@ -1196,12 +1203,17 @@ test('the bound exit handler routes the composer exit gesture', async () => {
     assert.equal(boundCancels, 2, 'Escape routed to the BOUND cancel handler')
     assert.equal(boundExits, 0)
     assert.equal(rendererExits, 0)
-    // The empty-draft Ctrl+D remains the EXIT gesture.
+    // The empty-draft Ctrl+D is the same-key double-press EXIT gesture.
     tern.input.type('\x7f')
     await settle()
     tern.input.type('\x04')
+    // reason: the confirmable pair is the 1.5 s same-key contract window.
     await settle()
-    assert.equal(boundExits, 1, 'the empty-draft Ctrl+D routed the bound exit handler')
+    assert.equal(boundExits, 0, 'the first empty-draft Ctrl+D only arms the exit')
+    tern.input.type('\x04')
+    // reason: the same-key second press inside the contract window.
+    await settle()
+    assert.equal(boundExits, 1, 'the same-key second Ctrl+D routed the bound exit handler')
     assert.equal(rendererExits, 0, 'the bound exit does not fire the injected requestExit')
   } finally {
     await renderer.dispose()
@@ -1264,8 +1276,13 @@ test('the empty-draft Ctrl+D exit shape (the real-pane v4 tail) through the boun
     await settle()
     assert.equal(lastEditorProps(harness.frames())?.text, '', 'the draft cleared')
     harness.tern.input.type('\x04')
+    // reason: the arm/confirm pair is the 1.5 s same-key contract window.
     await settle()
-    assert.equal(harness.exitCount(), 1, 'the empty-draft Ctrl+D routed exactly one exit')
+    assert.equal(harness.exitCount(), 0, 'the first empty-draft Ctrl+D only arms')
+    harness.tern.input.type('\x04')
+    // reason: the same-key second press inside the contract window.
+    await settle()
+    assert.equal(harness.exitCount(), 1, 'the same-key second Ctrl+D routed exactly one exit')
   } finally {
     await harness.dispose()
     await harness.session.close()

@@ -27,6 +27,36 @@
 
 import { safeErrorMessage } from '../../runtime/process/errors.ts'
 
+/**
+ * The fixed daemon-Client detach block printed AFTER the terminal restores.
+ * It states only what this Client can observe: the Host was not stopped by this
+ * action, the REAL effective profile and Session (when one exists) and the
+ * management commands. It never claims a Host state, PID or Turn outcome.
+ * @param facts - the exact profile/session facts and the verified-stop flag.
+ * @returns the complete multi-line hint.
+ */
+export function formatDaemonDetachHint(facts: {
+  readonly profile: string
+  readonly sessionId: string
+  readonly workStopped: boolean
+}): string {
+  const lines = [
+    'Disconnected from dsh-pi-tui (daemon client).',
+    'The daemon Host was not stopped by this action.',
+    ...(facts.workStopped ? ['Current work: stopped.'] : []),
+  ]
+  const sessionId = facts.sessionId.trim()
+  if (sessionId !== '') lines.push('', 'Resume this session:', `  dsh --profile ${facts.profile} --session ${sessionId}`)
+  lines.push(
+    '',
+    'Manage the daemon:',
+    `  dsh --profile ${facts.profile} daemon status`,
+    `  dsh --profile ${facts.profile} daemon logs`,
+    `  dsh --profile ${facts.profile} daemon stop`,
+  )
+  return lines.join('\n')
+}
+
 /** Diagnostics sink used by the exit controller (subset of Diag). */
 export interface ExitDiagLike {
   info(message: string, fields?: Record<string, unknown>): void

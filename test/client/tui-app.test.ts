@@ -25,6 +25,8 @@ import type { TranscriptMessage, TurnActivity } from '../../src/transcript.ts'
 import type { JsonValue } from '../../src/domain/transcript/types.ts'
 import type { AssistantLiveChunk, AssistantLiveInput } from '../../src/runtime/assistant-stream-port.ts'
 import { TuiApp, ThinkingCompactComponent, TODO_COMPACT_LIMIT, TODO_SHORT_COMPACT_LIMIT, TODO_SHORT_SCREEN_MAX_ROWS, todoCompactLimit, type OwnedRunner } from '../../src/tui-app.ts'
+import type { ExitSessionActivity as ExitActivity } from '../../src/domain/command/policy.ts'
+import { exitChoiceAsking, type ExitChoiceOption } from '../../src/app/surface/exit-choice.ts'
 import { Text, stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
 import { ExtensionLedger } from '../../src/extension/internal/ledger.ts'
 import { SurfaceHost } from '../../src/extension/internal/surface-host.ts'
@@ -6314,4 +6316,159 @@ test('PR2/RFL009: an accepted-while-stopped prompt recalls exactly once after th
   } finally {
     app.stop()
   }
+})
+
+// --- M6 UX PR1: the builtin physical Ctrl+C busy/unknown/idle rule ---
+
+/** Start an app whose sessions report the SCRIPTED authoritative activity, and
+ *  record the existing interrupt path (onCancel) beside the exit count. */
+function startAppWithActivity(activity: () => ExitActivity): {
+  vt: VirtualTerminal
+  app: TuiApp
+  submitted: string[]
+  get exits(): number
+  get cancels(): number
+} {
+  const vt = new VirtualTerminal(80, 24)
+  const submitted: string[] = []
+  let exits = 0
+  let cancels = 0
+  const app = new TuiApp(vt, {
+    onSubmit: (text) => { submitted.push(text) },
+    onExit: () => { exits += 1 },
+    onCancel: () => { cancels += 1 },
+    sessionActivity: activity,
+  })
+  app.start()
+  startedApps.add(app)
+  return {
+    vt,
+    app,
+    submitted,
+    get exits() { return exits },
+    get cancels() { return cancels },
+  }
+}
+
+test('ctrl+c while working cancels ONCE and never arms an exit or clears the draft', async () => {
+  const surface = startAppWithActivity(() => 'working')
+  await surface.vt.waitForRender()
+  surface.app.setDraft('working draft')
+  await surface.vt.waitForRender()
+  surface.vt.sendInput('\x03')
+  await surface.vt.waitForRender()
+  assert.equal(surface.cancels, 1, 'a busy Ctrl+C takes the existing cancel path exactly once')
+  assert.equal(surface.exits, 0, 'a busy Ctrl+C never requests the exit intent')
+  assert.equal(surface.app.getDraft(), 'working draft', 'a busy cancel preserves the draft')
+  // A repeated press is a NEW cancel, still never an exit confirmation.
+  surface.vt.sendInput('\x03')
+  await surface.vt.waitForRender()
+  assert.equal(surface.cancels, 2, 'each busy press re-cancels the live work')
+  assert.equal(surface.exits, 0)
+})
+
+test('ctrl+c while unknown refuses to arm the exit and says the state is unobservable', async () => {
+  const surface = startAppWithActivity(() => 'unknown')
+  await surface.vt.waitForRender()
+  surface.vt.sendInput('\x03')
+  await surface.vt.waitForRender()
+  assert.equal(surface.cancels, 0, 'unknown is not treated as busy')
+  assert.equal(surface.exits, 0, 'unknown is never treated as idle')
+  assert.match(surface.vt.getViewport().join('\n'), /running state cannot be verified/,
+    'the refusal is visible')
+  // A second press within the window still must not exit.
+  surface.vt.sendInput('\x03')
+  await surface.vt.waitForRender()
+  assert.equal(surface.exits, 0, 'a repeated unknown Ctrl+C still cannot exit')
+})
+
+test('ctrl+c while idle keeps the historical clear-then-same-key double press', async () => {
+  const surface = startAppWithActivity(() => 'idle')
+  await surface.vt.waitForRender()
+  surface.app.setDraft('idle draft')
+  await surface.vt.waitForRender()
+  surface.vt.sendInput('\x03')
+  await surface.vt.waitForRender()
+  assert.equal(surface.cancels, 0, 'an idle press never cancels work')
+  assert.equal(surface.exits, 0, 'the first idle press only clears + arms')
+  assert.equal(surface.app.getDraft(), '', 'the historical clear-draft behavior is preserved')
+  surface.vt.sendInput('\x03')
+  await surface.vt.waitForRender()
+  assert.equal(surface.exits, 1, 'the same key confirms the exit')
+})
+
+test('an idle arm cannot be used after the session becomes busy', async () => {
+  let activity: ExitActivity = 'idle'
+  const surface = startAppWithActivity(() => activity)
+  await surface.vt.waitForRender()
+  surface.vt.sendInput('\x03') // idle: arm
+  await surface.vt.waitForRender()
+  assert.equal(surface.exits, 0)
+  activity = 'working'
+  surface.vt.sendInput('\x03') // second press: the live state now wins
+  await surface.vt.waitForRender()
+  assert.equal(surface.cancels, 1, 'the second press cancels the now-working turn')
+  assert.equal(surface.exits, 0, 'a stale idle arm can never confirm a busy exit')
+})
+
+test('a busy cancel never arms the following idle double press by itself', async () => {
+  let activity: ExitActivity = 'working'
+  const surface = startAppWithActivity(() => activity)
+  await surface.vt.waitForRender()
+  surface.vt.sendInput('\x03') // busy: cancel
+  await surface.vt.waitForRender()
+  assert.equal(surface.cancels, 1)
+  activity = 'idle'
+  surface.vt.sendInput('\x03') // idle: first real arm
+  await surface.vt.waitForRender()
+  assert.equal(surface.exits, 0, 'the busy cancel did not count as an idle arm')
+  surface.vt.sendInput('\x03')
+  await surface.vt.waitForRender()
+  assert.equal(surface.exits, 1)
+})
+
+test('a REMAPPED exit key keeps its ordinary double-press semantics while working', async () => {
+  const surface = startAppWithActivity(() => 'working')
+  await surface.vt.waitForRender()
+  surface.app.applyUserKeybindings({ 'app.exit.request': 'ctrl+x' }, () => {})
+  await surface.vt.waitForRender()
+  surface.vt.sendInput('\x18') // Ctrl+X — the effective exit key now
+  await surface.vt.waitForRender()
+  assert.equal(surface.cancels, 0, 'the remapped key is never a busy cancel')
+  assert.equal(surface.exits, 0, 'the first remapped press only arms')
+  surface.vt.sendInput('\x18')
+  await surface.vt.waitForRender()
+  assert.equal(surface.exits, 1, 'the same remapped key confirms the exit intent')
+})
+
+test('ctrl+d while working still requires its own same-key confirmation', async () => {
+  const surface = startAppWithActivity(() => 'working')
+  await surface.vt.waitForRender()
+  surface.vt.sendInput('\x04')
+  await surface.vt.waitForRender()
+  assert.equal(surface.cancels, 0, 'Ctrl+D never becomes a busy cancel')
+  assert.equal(surface.exits, 0, 'the first Ctrl+D only arms')
+  surface.vt.sendInput('\x04')
+  await surface.vt.waitForRender()
+  assert.equal(surface.exits, 1, 'the confirmed Ctrl+D reaches the exit intent')
+})
+
+test('the exit choice never stacks above a live Host approval', async () => {
+  const surface = startApp()
+  await surface.vt.waitForRender()
+  let dismissed = 0
+  const selection: ExitChoiceOption[] = []
+  const pending = surface.app.showApprovalPrompt({ toolName: 'bash', reason: 'needs a shell', arguments: '{}' })
+  await surface.vt.waitForRender()
+  surface.app.openExitChoice({
+    ...exitChoiceAsking('daemon-busy', option => { selection.push(option) }, () => { dismissed += 1 }),
+  })
+  await surface.vt.waitForRender()
+  assert.equal(dismissed, 1, 'a real Host modal refuses the Client choice')
+  assert.deepEqual(selection, [], 'withdrawal is not a decision')
+  const view = surface.vt.getViewport().join('\n')
+  assert.ok(!view.includes('Disconnect from dsh-pi-tui'), `the choice never paints over the modal:\n${view}`)
+  surface.vt.sendInput('n')
+  await surface.vt.waitForRender()
+  assert.equal(await pending, 'rejected')
 })

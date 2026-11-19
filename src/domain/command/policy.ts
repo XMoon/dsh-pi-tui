@@ -420,6 +420,67 @@ export function isPlainExitPrompt(text: string): boolean {
   return text.trim() === 'exit'
 }
 
+/** The backend whose live authority classifies one exit intent. */
+export type ExitBackendKind = 'direct' | 'daemon'
+
+/**
+ * The exact current Session's authoritative activity for the exit decision:
+ * `working` is proven work, `idle` a proven no-work state, and `unknown` any
+ * state the live authority cannot prove (a missing Remote `running` bit, a
+ * rolled Connection/binding, a live owner without an observable agent).
+ * Unknown never degrades to idle.
+ */
+export type ExitSessionActivity = 'working' | 'idle' | 'unknown'
+
+/** The user entry that raised one exit intent (provenance only — never a
+ *  relaxation of the safety classification). */
+export type ExitIntentEntry = 'slash' | 'plain' | 'keyboard'
+
+/**
+ * The one classified outcome of an exit intent. `direct-exit` leaves the
+ * Direct process through the existing exit controller; `client-detach` leaves
+ * the daemon Client while the Host keeps running; the `show-*-choice` outcomes
+ * need one Client-local choice before anything is committed.
+ */
+export type ExitIntentDecision =
+  | 'direct-exit'
+  | 'client-detach'
+  | 'show-daemon-choice'
+  | 'show-direct-choice'
+  | 'show-unknown-choice'
+
+/** The frozen classifier input (no host/renderer object ever enters here). */
+export interface ExitIntentInput {
+  readonly currentBackend: ExitBackendKind
+  /** `none` only when no Session exists AND no submission admission is open. */
+  readonly sessionPresence: 'none' | 'live'
+  readonly activity: ExitSessionActivity
+  readonly entry: ExitIntentEntry
+}
+
+/**
+ * Classify one exit intent against the live authority facts. This is the ONE
+ * exit classifier: Direct and daemon branches differ only in the final
+ * destination, and an unknown activity is NEVER treated as idle (a daemon
+ * Client must not detach as if nothing were running, and a Direct process
+ * must not claim the in-process Host has nothing to retire).
+ * @param input - the captured backend/presence/activity/entry facts.
+ * @returns the single decision the exit-intent coordinator executes.
+ */
+export function classifyExitIntent(input: ExitIntentInput): ExitIntentDecision {
+  // A sessionless surface cannot be "working". A caller that reports any other
+  // activity with no live Session is internally inconsistent: fail safe.
+  if (input.sessionPresence === 'none') {
+    if (input.activity !== 'idle') return 'show-unknown-choice'
+    return input.currentBackend === 'direct' ? 'direct-exit' : 'client-detach'
+  }
+  if (input.activity === 'unknown') return 'show-unknown-choice'
+  if (input.activity === 'working') {
+    return input.currentBackend === 'direct' ? 'show-direct-choice' : 'show-daemon-choice'
+  }
+  return input.currentBackend === 'direct' ? 'direct-exit' : 'client-detach'
+}
+
 /**
  * The TUI-local commands whose OWN handler performs no persistent Host write
  * (they read/browse/stage locally, open a read-only panel, or are the reload

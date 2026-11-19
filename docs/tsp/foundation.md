@@ -360,6 +360,24 @@ content that already carries one frame is not wrapped in a second. Real-GUI,
 headless, SDK-level and business-chain evidence are separate tiers that do not
 substitute for one another.
 
+**Client-local Exit Choice.** `/exit`/`/quit`, the bare `exit` word and the
+bounded raw exit keys all reach the SAME application exit-intent coordinator;
+the renderer owns only the chosen seat's presentation. The TSP choice is a
+native `ui.overlay({modal:true})` in the SAME modal-first layer as the official
+Interaction seat, with real `ui.button` options (never text rows pretending to
+be buttons), `↑`/`↓` + Enter + Esc, and pointer `action` events admitted only
+for the CURRENT frame epoch's exact node ids; a superseded visit's click is
+dropped. The official Question/Approval seat always outranks it: a request that
+takes the seat dismisses the Client choice with zero business action, and the
+choice can never open on top of an active official modal or the Alt+Q list.
+Ctrl+C inside the choice is `Stay` (it never cancels the background Turn), and
+the Stop-in-flight window accepts no key until the exact-owner idle proof
+settles. Bound raw input keeps the product rule: idle Ctrl+C and empty-draft
+Ctrl+D need the same-key 1.5-second second press, working Ctrl+C cancels once,
+unknown Ctrl+C refuses to arm; the pre-bind Ctrl+C emergency exit is unchanged.
+The choice's stop/idle proof, session currentness and final exit commit stay in
+the application coordinator — the renderer never calls a Host cancel itself.
+
 Where a composite's own affordance contradicts the application's key contract,
 the minimum correction is ONE scoped rule installed once on the surface, never a
 per-render style write and never a broad client theme override.

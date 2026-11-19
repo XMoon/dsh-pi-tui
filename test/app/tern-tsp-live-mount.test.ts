@@ -1811,6 +1811,8 @@ test('the surface withdraws the interaction owner BEFORE it starts the renderer 
           },
           composer,
           interaction: presenter,
+          // M6 UX PR1: every mount supplies the ONE Exit Choice seat.
+          exitChoice: { open: () => {}, update: () => {}, close: () => {} },
           bindInput: () => {},
           dispose: async () => { order.push('renderer-release') },
         }

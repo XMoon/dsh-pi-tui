@@ -131,8 +131,41 @@ export function createC1Scene(context, options = {}) {
     const ready = await client.waitFor(record => record.m4a0 === 'ready', `${label} Client ready`, 180_000)
     return { client, ready }
   }
+  /**
+   * M6 UX PR1: `/exit` while the current Session is provably working opens the
+   * in-place Busy Choice instead of detaching silently. Its default focus is
+   * `Keep working and disconnect` (zero Host writes), so the Keep path is one
+   * Enter. An idle exit paints no choice and exits on its own.
+   * @returns whether a Busy Choice was taken (false = the exit was immediate).
+   */
+  const takeBusyExitChoiceKeep = async (client, label) => {
+    const deadline = Date.now() + 15_000
+    while (!client.exited && Date.now() < deadline) {
+      const frame = await client.viewport().catch(() => [])
+      if (frame.join('\n').includes('Disconnect from dsh-pi-tui')) {
+        await client.waitForScreen('Keep working and disconnect', `${label} busy exit choice`, 15_000)
+        client.send('\r')
+        return true
+      }
+      await new Promise(resolve => setTimeout(resolve, 50))
+    }
+    return false
+  }
+  /**
+   * M6 UX PR1: take the destructive daemon Stop branch of the Busy Choice:
+   * ↓ moves the focus to `Stop current work and disconnect`, Enter confirms it.
+   * The Client then waits for the exact owner's idle proof before exiting.
+   */
+  const takeBusyExitChoiceStop = async (client, label) => {
+    await client.waitForScreen('Disconnect from dsh-pi-tui', `${label} busy exit choice`, 15_000)
+    await client.waitForScreen('Keep working and disconnect', `${label} busy exit options`, 15_000)
+    client.send('\x1b[B')
+    await client.waitForScreen('❯ Stop current work and disconnect', `${label} stop focus`, 15_000)
+    client.send('\r')
+  }
   const exitC1Client = async (client, label) => {
     client.send('/exit\r')
+    await takeBusyExitChoiceKeep(client, label)
     let exit
     try {
       exit = await client.waitForExit(60_000)
@@ -244,6 +277,8 @@ export function createC1Scene(context, options = {}) {
     stopC1Host,
     startC1Client,
     exitC1Client,
+    takeBusyExitChoiceKeep,
+    takeBusyExitChoiceStop,
     openC1Session,
     hostIdentityFacts,
     assertHostIdentityKept,
