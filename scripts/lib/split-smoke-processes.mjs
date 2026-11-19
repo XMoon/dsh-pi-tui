@@ -73,6 +73,41 @@ export function alive(pid) {
 }
 
 /**
+ * The identity facts one entry published ABOUT ITSELF, read from its own JSONL
+ * records: a Host's `ready` record carries the local Host identity, a surface
+ * Client's `surface-status` record carries its own pid and the Host identity it
+ * authenticated against. The selected runner reports these after the process
+ * objects are gone, so the PASS line can name the real Host/Client instances
+ * instead of only the candidate hash. Nothing is inferred when a record is
+ * absent: the field is simply not reported.
+ */
+function publishedIdentityFacts(process) {
+  const pid = process.child?.pid
+  if (process.role === 'host') {
+    const ready = process.records.find(record => record.m4a0 === 'ready')
+    const localHost = ready?.localHost
+    return {
+      role: 'host',
+      pid: typeof localHost?.hostPid === 'number' ? localHost.hostPid : pid,
+      ...(typeof localHost?.instanceId === 'string' ? { instanceId: localHost.instanceId } : {}),
+      ...(typeof localHost?.scopeId === 'string' ? { scopeId: localHost.scopeId } : {}),
+      ...(localHost?.hostKernelIdentity?.uniqueId === undefined
+        ? {}
+        : { kernelUniqueId: String(localHost.hostKernelIdentity.uniqueId) }),
+    }
+  }
+  const status = [...process.records]
+    .reverse()
+    .find(record => record.m4b2s === 'surface-status' && record.host !== undefined)
+  return {
+    role: process.role,
+    pid: typeof status?.pid === 'number' ? status.pid : pid,
+    ...(typeof status?.host?.hostPid === 'number' ? { hostPid: status.host.hostPid } : {}),
+    ...(typeof status?.host?.instanceId === 'string' ? { instanceId: status.host.instanceId } : {}),
+  }
+}
+
+/**
  * One lane's process ownership: the entry constructors bound to THIS scope's
  * active set and path sequence. A second lane creates its own scope, so its
  * cleanup can never kill or report this lane's children.
@@ -80,6 +115,13 @@ export function alive(pid) {
 export function createSplitProcessScope() {
   let sequence = 0
   const activeProcesses = new Set()
+  /**
+   * Every process this scope ever created, in creation order. Entries are
+   * never removed: the selected runner takes a slice per case so the verdict
+   * can name the REAL Host/Client identities that case created, after the
+   * processes themselves are gone.
+   */
+  const createdProcesses = []
   /**
    * The Darwin surface PTY scope: the ONE private tmux server this lane run
    * owns. It is created lazily (no tmux server exists until the first Darwin
@@ -109,6 +151,7 @@ export function createSplitProcessScope() {
         detached: true,
       })
       activeProcesses.add(this)
+      createdProcesses.push(this)
       this.child.stdout.setEncoding('utf8')
       this.child.stderr.setEncoding('utf8')
       let buffer = ''
@@ -132,6 +175,11 @@ export function createSplitProcessScope() {
           resolveExit(this.exitResult)
         })
       })
+    }
+
+    /** @see publishedIdentityFacts */
+    identityFacts() {
+      return publishedIdentityFacts(this)
     }
 
     waitFor(predicate, label, timeoutMs = 120_000) {
@@ -276,15 +324,25 @@ export function createSplitProcessScope() {
           if (this.exited) return
           const facts = this.darwin.deadFacts()
           if (!facts.dead) return
-          // The REAL business Client exited; capture its shell-reported status.
           this.exited = true
-          this.exitResult = { code: facts.status, signal: null }
           activeProcesses.delete(this)
           clearInterval(this.recordTimer)
           clearInterval(this.panePollTimer)
+          if (facts.status === null) {
+            // The pane/session disappeared WITHOUT the wrapper recording a
+            // status. That is a scoped teardown (kill-session), never a Client
+            // exit: report the fact instead of inventing a code, and let any
+            // exit assertion fail on it.
+            this.exitResult = { code: null, signal: null, unrecorded: true }
+            this.resolveExit(this.exitResult)
+            return
+          }
+          // The REAL business Client exited; capture its shell-reported status.
+          this.exitResult = { code: facts.status, signal: null }
           this.resolveExit(this.exitResult)
         }, 50)
         activeProcesses.add(this)
+        createdProcesses.push(this)
         return
       }
       this.term = new xterm.Terminal({
@@ -310,6 +368,7 @@ export function createSplitProcessScope() {
         detached: true,
       })
       activeProcesses.add(this)
+      createdProcesses.push(this)
       this.child.stdout.setEncoding('utf8')
       this.child.stderr.setEncoding('utf8')
       this.child.stdout.on('data', chunk => {
@@ -355,6 +414,11 @@ export function createSplitProcessScope() {
           throw new Error(`${this.role}: malformed record line ${String(index)}: ${line.slice(0, 200)} (${String(error)})`)
         }
       })
+    }
+
+    /** @see publishedIdentityFacts */
+    identityFacts() {
+      return publishedIdentityFacts(this)
     }
 
     waitFor(predicate, label, timeoutMs = 120_000) {
@@ -643,21 +707,43 @@ export function createSplitProcessScope() {
           }))
         }, timeoutMs)
       })
-      return Promise.race([this.exit, deadline]).finally(() => clearTimeout(timer))
+      return Promise.race([this.exit, deadline])
+        .then(result => {
+          if (result?.unrecorded === true) {
+            throw new SplitSmokeAssertionError(
+              `NOT_QUIESCED: the ${this.role} Darwin pane disappeared without a recorded exit status; `
+                + 'a scoped teardown is not a business Client exit',
+            )
+          }
+          return result
+        })
+        .finally(() => clearTimeout(timer))
     }
 
     async dispose() {
       clearInterval(this.recordTimer)
       if (this.platform === 'darwin') {
-        clearInterval(this.panePollTimer)
-        // Only this scope's own pane is torn down; if the business Client is
-        // still alive, the pane death is awaited through the same poller the
-        // exit promise uses. A pane that survives is reported by the scope's
-        // stopServer, never killed by bare pid.
+        // The pane poller is the ONLY resolver of `this.exit`: never clear it
+        // before the business Client's end was observed. A Client still alive
+        // gets its own pane torn down first; the poller then records what the
+        // wrapper actually reported (a real status or the explicit unrecorded
+        // teardown fact).
         if (!this.exited) {
-          try { await this.waitForExit(15_000) } catch { /* reported by the scope */ }
+          await this.darwin.dispose()
+          const settled = await Promise.race([
+            this.exit.then(() => true, () => true),
+            new Promise(resolveWait => setTimeout(() => resolveWait(false), 5_000)),
+          ])
+          clearInterval(this.panePollTimer)
+          activeProcesses.delete(this)
+          if (!settled) {
+            throw new SplitSmokeAssertionError(
+              `NOT_QUIESCED: the ${this.role} Darwin pane did not die after its session was killed`,
+            )
+          }
+          return
         }
-        await this.darwin.dispose()
+        clearInterval(this.panePollTimer)
         activeProcesses.delete(this)
         return
       }
@@ -665,7 +751,14 @@ export function createSplitProcessScope() {
       try { await this.waitForExit(15_000) } catch { /* best effort */ }
     }
   }
-  return { EntryProcess, SurfaceEntryProcess, activeProcesses, darwinScope, darwinHostSeatFileFree }
+  return {
+    EntryProcess,
+    SurfaceEntryProcess,
+    activeProcesses,
+    createdProcesses,
+    darwinScope,
+    darwinHostSeatFileFree,
+  }
 }
 
 /** The last `surface-status` record of a surface Client (no stdin channel). */

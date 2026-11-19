@@ -96,6 +96,7 @@ import {
   inspectSplitCandidate,
 } from './lib/split-smoke-profile.mjs'
 import {
+  alive,
   createSplitProcessScope,
   findIsolatedProcesses,
   killIsolatedProcesses,
@@ -109,6 +110,7 @@ import {
   listSelectableCases,
   parseSelectionArgs,
   resolveSelection,
+  selectedNotVerifiedLine,
   selectedPassLine,
 } from './lib/split-smoke-selection.mjs'
 import { ENTRY_ADMISSION_MUTATIONS } from './smoke/split-process/entry-admission.mjs'
@@ -151,7 +153,7 @@ let diagnostics
 // The lane's ONE process scope: module-level qualification helpers and the
 // full/selected dispatchers resolve the same constructors. A CLI run takes
 // exactly one of those paths, so this active set never spans two runs.
-const { EntryProcess, SurfaceEntryProcess, activeProcesses, darwinScope, darwinHostSeatFileFree } = createSplitProcessScope()
+const { EntryProcess, SurfaceEntryProcess, activeProcesses, createdProcesses, darwinScope, darwinHostSeatFileFree } = createSplitProcessScope()
 /** Detached processes this round owns: PID -> its kernel starttime (if known). */
 const trackedProcesses = new Map()
 
@@ -319,6 +321,21 @@ async function main(explicitPath) {
       runStep: (name, operation) => diagnostics.runStep(name, operation),
       // Backstop only: the case kills its own detached processes first.
       trackDetachedPid: (pid, starttime) => trackedProcesses.set(pid, starttime),
+      // The current selected case id, so a case-owned boundary can name itself.
+      currentCaseId: undefined,
+      /**
+       * Report one qualified boundary this case DELIBERATELY did not run. It is
+       * a first-class, machine-visible NOT_VERIFIED fact (never a checkpoint
+       * name only), so a reader can never mistake the boundary for a pass.
+       */
+      reportBoundary: ({ boundary, reason }) => {
+        assert(typeof boundary === 'string' && boundary !== '', 'a boundary report needs a name')
+        assert(typeof reason === 'string' && reason !== '', 'a boundary report needs its blocker')
+        process.stdout.write(
+          `SPLIT_PROCESS_BOUNDARY_NOT_VERIFIED id=${String(context.currentCaseId)}`
+            + ` platform=${LANE_PLATFORM} boundary=${boundary} reason=${reason}\n`,
+        )
+      },
     }
     /**
      * The Full lane IS the default-lane registry: every default-lane case runs
@@ -948,12 +965,25 @@ async function runSelectedCases(selection) {
 
   let workDir
   let dshHome
+  /** Collected verdicts, printed ONLY after the scoped cleanup finished. */
+  let verdictReport
   try {
     workDir = mkdtempSync(join(tmpdir(), 'dsh-split-process-'))
     // The cleanup scans this exact DSH_HOME even when the profile installation
     // fails before returning: assign it before the install, not after.
     dshHome = join(workDir, 'dsh-home')
     const installation = createSplitSmokeProfile({ tarball, targetDshVersion, workDir })
+    // Qualification-only: the isolated Client environment is curated, so a
+    // selected run's operator-expiry fault switch must be forwarded explicitly
+    // (production never sets it; the case files pass their own probes the same
+    // way). Without this the switch would silently never reach the Client.
+    const operatorExpirySwitch = process.env.SPLIT_PROCESS_CLIENT_EXPIRE_OPERATOR_ONCE
+    if (operatorExpirySwitch !== undefined) {
+      installation.base.env.SPLIT_PROCESS_CLIENT_EXPIRE_OPERATOR_ONCE = operatorExpirySwitch
+      if (process.env.SPLIT_PROCESS_CLIENT_EXPIRE_OPERATOR_AFTER_MS !== undefined) {
+        installation.base.env.SPLIT_PROCESS_CLIENT_EXPIRE_OPERATOR_AFTER_MS = process.env.SPLIT_PROCESS_CLIENT_EXPIRE_OPERATOR_AFTER_MS
+      }
+    }
     diagnostics.checkpoint('setup/profile-install')
     // The SAME context shape the full lane passes to a migrated case; a selected
     // case gets the ONE installation of this run and never expands its own set.
@@ -980,28 +1010,25 @@ async function runSelectedCases(selection) {
       // Backstop only: the case kills its own detached processes first.
       trackDetachedPid: (pid, starttime) => trackedProcesses.set(pid, starttime),
     }
+    // The per-case verdict and identity facts are COLLECTED here and printed
+    // only after the cleanup below: a verdict announced before the scoped
+    // servers/work root/processes are quiesced would claim a run the lane has
+    // not finished (a cleanup failure must never leave a PASS behind).
     const selected = []
     for (const selectedCase of selection.cases) {
+      const createdMark = createdProcesses.length
+      context.currentCaseId = selectedCase.id
       const result = await runSelectedCase(diagnostics, selectedCase, context)
       selected.push({
         id: selectedCase.id,
         status: typeof result?.status === 'string' ? result.status : 'PASS',
         reason: typeof result?.reason === 'string' ? result.reason : undefined,
+        identities: createdProcesses.slice(createdMark).map(process => process.identityFacts()),
       })
     }
     assert(createHash('sha256').update(readFileSync(tarball)).digest('hex') === candidateSha256,
       'the candidate artifact changed during the selected qualification')
-    for (const entry of selected) {
-      // Only a real PASS may print SELECTED_PASS. An environment-gated
-      // NOT_VERIFIED is reported as its own distinct line and is non-zero, so a
-      // caller can never mistake it for a qualified pass.
-      if (entry.status === 'PASS') {
-        process.stdout.write(`${selectedPassLine(entry.id)}\n`)
-      } else {
-        process.stdout.write(`SPLIT_PROCESS_SELECTED_NOT_VERIFIED id=${entry.id} scope=SELECTABLE_ONLY reason=${entry.reason ?? entry.status}\n`)
-        process.exitCode = 1
-      }
-    }
+    verdictReport = selected
   } catch (error) {
     // Report BEFORE the cleanup below: the failure projection must read the
     // still-live process handles, and the work root must still exist while the
@@ -1030,6 +1057,55 @@ async function runSelectedCases(selection) {
       // Nothing was created: setup failed before the work root existed.
     } else if (!KEEP) rmSync(workDir, { recursive: true, force: true })
     else console.error(`preserved split-process environment: ${workDir}`)
+  }
+  // The scoped cleanup finished: only now may the lane name what it proved.
+  // A surviving entry process means the run is NOT quiesced, so it cannot
+  // print a PASS at all.
+  await announceSelectedVerdicts(verdictReport, { candidateSha256, targetDshVersion })
+}
+
+/**
+ * Print the collected selected verdicts and their real identity facts AFTER the
+ * scoped cleanup. Only a PASS prints `SPLIT_PROCESS_SELECTED_PASS`; an
+ * environment-gated NOT_VERIFIED prints its own non-zero line, and a
+ * non-quiesced run fails instead of claiming either.
+ */
+async function announceSelectedVerdicts(selected, candidateFacts) {
+  if (selected === undefined) return
+  for (const entry of selected) {
+    const escaped = entry.identities.filter(identity => typeof identity.pid === 'number')
+    let leaked = escaped.filter(identity => alive(identity.pid))
+    // A just-killed child is still observable until the OS reaps it: give the
+    // scoped cleanup a bounded window before declaring the run non-quiesced.
+    const reapDeadline = Date.now() + 5_000
+    while (leaked.length > 0 && Date.now() < reapDeadline) {
+      await new Promise(resolveSleep => setTimeout(resolveSleep, 50))
+      leaked = escaped.filter(identity => alive(identity.pid))
+    }
+    if (leaked.length > 0) {
+      throw new SplitSmokeAssertionError(
+        `NOT_QUIESCED: ${String(leaked.length)} selected-run process(es) are still alive after cleanup: `
+          + leaked.map(identity => `${identity.role}:${String(identity.pid)}`).join(', '),
+      )
+    }
+    if (entry.status === 'PASS') {
+      process.stdout.write(`${selectedPassLine(entry.id, LANE_PLATFORM)}\n`)
+    } else {
+      process.stdout.write(`${selectedNotVerifiedLine(entry.id, LANE_PLATFORM, entry.reason ?? entry.status)}\n`)
+      process.exitCode = 1
+    }
+    const hosts = entry.identities.filter(identity => identity.role === 'host')
+    const clients = entry.identities.filter(identity => identity.role !== 'host')
+    const hostFacts = hosts
+      .map(identity => `${String(identity.pid)}${identity.instanceId === undefined ? '' : `:${identity.instanceId}`}`)
+      .join(',')
+    const clientFacts = clients.map(identity => String(identity.pid)).join(',')
+    process.stdout.write(
+      `SPLIT_PROCESS_SELECTED_FACTS id=${entry.id} platform=${LANE_PLATFORM}`
+        + ` candidate=${candidateFacts.candidateSha256} pin=${candidateFacts.targetDshVersion}`
+        + ` hosts=${hostFacts === '' ? 'none' : hostFacts} clients=${clientFacts === '' ? 'none' : clientFacts}`
+        + ` quiesced=true\n`,
+    )
   }
 }
 

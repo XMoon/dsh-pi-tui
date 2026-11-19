@@ -377,10 +377,16 @@ native cases — (`SPLIT_PROCESS_SELECTABLE_CASES scope=SELECTABLE_ONLY`) with a
 trailing `platforms=` fact per row (the registry's executable support range),
 and exits without resolving a candidate, creating a work root or installing
 anything. `--suite` and `--case` run only the registered cases of that
-suite/id through their own isolated installation and print one
-`SPLIT_PROCESS_SELECTED_PASS id=… scope=SELECTABLE_ONLY` per case; that output
-names the selectable subset only — it never claims the complete inventory, a
-`T60` result or a Browser/Web product qualification. Platform eligibility is a
+suite/id through their own isolated installation and print, AFTER the scoped
+servers/processes/work root are quiesced, one
+`SPLIT_PROCESS_SELECTED_PASS id=… scope=SELECTABLE_ONLY platform=<os>` per case
+followed by `SPLIT_PROCESS_SELECTED_FACTS` with the real Host/Client identities
+and the quiescence fact; a non-quiesced run prints neither. That output names
+the selectable subset only — it never claims the complete inventory, a `T60`
+result or a Browser/Web product qualification. A case that deliberately skips
+one qualified boundary (a scene the lane cannot run honestly) prints
+`SPLIT_PROCESS_BOUNDARY_NOT_VERIFIED` with its blocker; it is never silently
+counted as covered. Platform eligibility is a
 registry fact, not a user API: every selected case — and a whole `--suite`,
 refused as a unit, never silently filtered — must support the current OS, and
 an unsupported selection fails closed as

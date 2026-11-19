@@ -21,7 +21,7 @@
 import { spawnSync } from 'node:child_process'
 import { closeSync, openSync, readFileSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
-import { homedir } from 'node:os'
+import { userInfo } from 'node:os'
 import { join } from 'node:path'
 
 import { SplitSmokeAssertionError } from './split-smoke-diagnostics.mjs'
@@ -292,16 +292,32 @@ export function createDarwinSurfacePtyScope() {
 }
 
 /**
+ * The Darwin Host seat file path, resolved exactly like the production seat
+ * (`src/app/remote-process/local-scope.ts` `darwinHostProfileSeatDir`): the OS
+ * ACCOUNT home from `os.userInfo()`, never `$HOME`/`DSH_HOME`/`$TMPDIR`. The
+ * lane runs the Client with an ISOLATED `$HOME`, so a probe based on
+ * `os.homedir()` would look at a directory the seat never lives in and report
+ * "free" for the wrong reason. The optional `accountHome` exists ONLY so the
+ * tooling guard can exercise the lock against a private directory.
+ */
+export function darwinHostSeatFilePath(scopeId, accountHome = userInfo().homedir) {
+  assert(typeof scopeId === 'string' && scopeId !== '', 'the Darwin seat probe needs a scope id')
+  return join(accountHome, '.dsh-pi-tui', 'run', scopeId, `seat-host-${scopeId}.lock`)
+}
+
+/**
  * Probe the Darwin Host seat file the same kernel claim the Host holds: the
  * seat is free exactly when the `O_EXLOCK` file lock can be taken again. The
  * probe never creates a missing file (ENOENT is already free) and never
  * removes or chmods anything.
  */
-export async function darwinHostSeatFileFree(scopeId, timeoutMs = 15_000) {
-  assert(typeof scopeId === 'string' && scopeId !== '', 'the Darwin seat probe needs a scope id')
+export async function darwinHostSeatFileFree(
+  scopeId,
+  { timeoutMs = 15_000, accountHome } = {},
+) {
   // O_RDWR|O_EXLOCK|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC — deliberately NO O_CREAT.
   const flags = 2 | 32 | 4 | 256 | 16777216
-  const path = join(homedir(), '.dsh-pi-tui', 'run', scopeId, `seat-host-${scopeId}.lock`)
+  const path = darwinHostSeatFilePath(scopeId, accountHome)
   const started = Date.now()
   while (Date.now() - started < timeoutMs) {
     let fd

@@ -36,6 +36,7 @@ import {
   listSelectableCases,
   parseSelectionArgs,
   resolveSelection,
+  selectedNotVerifiedLine,
   selectedPassLine,
 } from '../../scripts/lib/split-smoke-selection.mjs'
 import { HOST_ONLY_PATCH } from '../../src/app/remote-process/local-host-entry.ts'
@@ -450,9 +451,13 @@ test('every registry entry declares a conservative platform list and the eight s
     assert.ok(entry, `${id} must stay registered`)
     assert.deepEqual(entry.platforms, ['linux', 'darwin'], `${id} must be the dual-platform shared case`)
   }
-  // Everything else stays conservative until real native evidence exists.
+  // The invariant is a CEILING, not a frozen count: a case may claim Darwin
+  // support only after it is listed in this audited matrix. A future native
+  // evidence PR adds its id here deliberately; an accidental platform flag on
+  // any other registry entry fails this guard.
   const dual = cases.filter(entry => (entry.platforms ?? ['linux']).includes('darwin'))
-  assert.equal(dual.length, shared.length, 'only the eight audited cases may claim Darwin support')
+  const unaudited = dual.filter(entry => !shared.includes(entry.id)).map(entry => entry.id)
+  assert.deepEqual(unaudited, [], 'only the audited shared cases may claim Darwin support')
 })
 
 test('platform-unsupported selections are refused before any candidate inspection', () => {
@@ -1452,11 +1457,17 @@ test('the independent ACP SDK case is registered once as selectable-only and sta
   assert.ok(resolveSelection({ mode: 'suite', suite: 'acp' }, 'linux').cases.includes(entry))
 })
 
-test('a selected result names only the selectable scope', () => {
+test('a selected result names the selectable scope AND the platform it qualified', () => {
   const first = listSelectableCases()[0]
   assert.ok(first, 'the registry must expose a case')
-  assert.equal(selectedPassLine(first.id),
-    `SPLIT_PROCESS_SELECTED_PASS id=${first.id} scope=SELECTABLE_ONLY`)
+  // The historical prefix/id/scope stay byte-identical for existing consumers;
+  // the platform fact is what says which executable support range was proved.
+  assert.equal(selectedPassLine(first.id, 'linux'),
+    `SPLIT_PROCESS_SELECTED_PASS id=${first.id} scope=SELECTABLE_ONLY platform=linux`)
+  assert.equal(selectedPassLine(first.id, 'darwin'),
+    `SPLIT_PROCESS_SELECTED_PASS id=${first.id} scope=SELECTABLE_ONLY platform=darwin`)
+  assert.equal(selectedNotVerifiedLine(first.id, 'darwin', 'BROWSER_MISSING'),
+    `SPLIT_PROCESS_SELECTED_NOT_VERIFIED id=${first.id} scope=SELECTABLE_ONLY platform=darwin reason=BROWSER_MISSING`)
 })
 
 test('an SDK scene failure keeps its real assertion class, message, stack and cleanup facts', () => {

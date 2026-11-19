@@ -12,8 +12,16 @@
  */
 
 import assert from 'node:assert/strict'
+import { closeSync, existsSync, mkdirSync, openSync, writeFileSync } from 'node:fs'
+import { userInfo } from 'node:os'
+import { join } from 'node:path'
 import test from 'node:test'
-import { darwinKeyTokensOf } from '../../scripts/lib/split-smoke-darwin-pty.mjs'
+import { testLifecycle } from '../support/temp-lifecycle.ts'
+import {
+  darwinHostSeatFileFree,
+  darwinHostSeatFilePath,
+  darwinKeyTokensOf,
+} from '../../scripts/lib/split-smoke-darwin-pty.mjs'
 
 test('the Darwin key tokenizer maps the shared cases\u2019 exact control classes to named tmux keys', () => {
   // Plain literal text (UTF-8) stays one literal unit.
@@ -72,4 +80,55 @@ test('a delete key (0x7f mixed into text) is still a named key and never literal
     { kind: 'key', name: 'BSpace' },
     { kind: 'literal', text: 'def' },
   ])
+})
+
+/**
+ * The Host-seat probe must resolve the SAME account-home path the production
+ * seat uses (`src/app/remote-process/local-scope.ts`): the lane runs the Client
+ * with an ISOLATED `$HOME`, so a `$HOME`-based probe would look at a directory
+ * the seat never lives in and report "free" for the wrong reason.
+ */
+test('the Host-seat probe path is the account home, never an overridden $HOME', t => {
+  const life = testLifecycle(t)
+  const isolated = life.tempDir('seat-home-')
+  const previous = process.env.HOME
+  try {
+    process.env.HOME = isolated
+    assert.equal(
+      darwinHostSeatFilePath('scope-under-test'),
+      join(userInfo().homedir, '.dsh-pi-tui', 'run', 'scope-under-test', 'seat-host-scope-under-test.lock'),
+    )
+    assert.notEqual(darwinHostSeatFilePath('scope-under-test'), join(isolated, '.dsh-pi-tui', 'run', 'scope-under-test', 'seat-host-scope-under-test.lock'))
+  } finally {
+    if (previous === undefined) delete process.env.HOME
+    else process.env.HOME = previous
+  }
+})
+
+test('the Host-seat probe is free only when the real O_EXLOCK claim can be taken', { skip: process.platform !== 'darwin' ? 'the Darwin seat needs the qualified macOS ABI' : false }, async t => {
+  const life = testLifecycle(t)
+  const accountHome = life.tempDir('seat-account-')
+  const scopeId = 'seat-probe-scope'
+  const seatDir = join(accountHome, '.dsh-pi-tui', 'run', scopeId)
+  const seatPath = darwinHostSeatFilePath(scopeId, accountHome)
+  try {
+    // A missing seat file is already free and the probe must never create it.
+    assert.equal(await darwinHostSeatFileFree(scopeId, { timeoutMs: 200, accountHome }), true)
+    assert.equal(existsSync(seatPath), false, 'the probe must never create a missing seat file')
+    mkdirSync(seatDir, { recursive: true, mode: 0o700 })
+    writeFileSync(seatPath, '', { mode: 0o600 })
+    // Hold the SAME kernel claim the Host holds: O_RDWR|O_CREAT|O_EXLOCK|
+    // O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC on the qualified macOS ABI.
+    const holder = openSync(seatPath, 2 | 512 | 32 | 4 | 256 | 16777216, 0o600)
+    try {
+      assert.equal(await darwinHostSeatFileFree(scopeId, { timeoutMs: 300, accountHome }), false,
+        'a held seat must never be reported free')
+    } finally {
+      closeSync(holder)
+    }
+    assert.equal(await darwinHostSeatFileFree(scopeId, { timeoutMs: 2_000, accountHome }), true,
+      'releasing the claim must make the seat free')
+  } finally {
+    // The lifecycle owns the root; nothing to remove by hand.
+  }
 })

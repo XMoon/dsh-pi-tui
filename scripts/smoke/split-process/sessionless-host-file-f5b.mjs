@@ -267,6 +267,10 @@ export async function runSessionlessHostFileF5B(context) {
       unitContract: 'test/app/remote-process-local-workspace-equivalence.test.ts',
       requirement: 'WS-L2 remains open until a same-uid mount-namespace capable Linux host runs it',
     })
+    context.reportBoundary?.({
+      boundary: 'same-path-different-mount-view',
+      reason: 'an-unprivileged-user-namespace-maps-uid-0-and-a-same-uid-mount-namespace-needs-CAP_SYS_ADMIN',
+    })
 
     // ── F5B-D: a refused MANUAL Host path creates nothing and adopts nothing ─
     // The manual Host-path proposal outranks any auto candidate; the Host

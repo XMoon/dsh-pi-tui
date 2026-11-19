@@ -217,7 +217,7 @@ export function createC1Scene(context, options = {}) {
       // The Darwin Host seat is the account-home `O_EXLOCK` file, not a Linux
       // abstract socket: proving the SAME kernel claim is free again means
       // taking its file lock. A seat that stays held is a real leftover.
-      const free = await context.darwinSurface.hostSeatFileFree(sceneScopeId(), timeoutMs)
+      const free = await context.darwinSurface.hostSeatFileFree(sceneScopeId(), { timeoutMs })
       if (!free) {
         throw new SplitSmokeWaitError('WAIT_TIMEOUT', {
           code: 'SEAT_RELEASE_TIMEOUT',

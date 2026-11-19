@@ -660,7 +660,17 @@ export function casePlatformsOf(entry) {
   return (entry.platforms ?? LINUX_ONLY).join(',')
 }
 
-/** The ONE selected result line; it names the selectable scope, never full. */
-export function selectedPassLine(caseId) {
-  return `SPLIT_PROCESS_SELECTED_PASS id=${caseId} scope=${SELECTABLE_SCOPE}`
+/**
+ * The ONE selected result line. It keeps the historical prefix/id/scope for
+ * existing consumers and appends the platform fact the qualification must
+ * carry: the same case id may be qualified on more than one OS, so a PASS line
+ * without its platform would not say which executable support range it proved.
+ */
+export function selectedPassLine(caseId, platform) {
+  return `SPLIT_PROCESS_SELECTED_PASS id=${caseId} scope=${SELECTABLE_SCOPE} platform=${platform}`
+}
+
+/** The honest non-PASS sibling: same identity facts, never a success line. */
+export function selectedNotVerifiedLine(caseId, platform, reason) {
+  return `SPLIT_PROCESS_SELECTED_NOT_VERIFIED id=${caseId} scope=${SELECTABLE_SCOPE} platform=${platform} reason=${reason}`
 }
