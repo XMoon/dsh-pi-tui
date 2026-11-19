@@ -3209,7 +3209,7 @@ export function applyRunnerWithRuntime(
           : outcome.kind === 'unsupported'
             ? outcome.reason
             : outcome.kind === 'cancelled'
-              ? 'The daemon refused the stop before it was addressed to the session.'
+              ? 'The stop request was cancelled before the session confirmed it.'
               : 'The stop request was dispatched but its result could not be confirmed.'
         return { kind: 'unconfirmed', detail }
       }
