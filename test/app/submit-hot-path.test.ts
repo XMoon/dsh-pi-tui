@@ -685,6 +685,9 @@ async function mountRunner(
     // them cannot prove any "settings write is seen by the runtime" chain, so
     // the mount hands back the object it really used.
     boundConfigRefs = schemaConfig as unknown as Record<string, unknown>
+    // The canonical preferences row publishes the live references the Direct
+    // runner consumes; this harness mounts the runner directly.
+    ctx.provide('piTuiPreferences', schemaConfig)
     const fiber = ctx.plugin((pluginCtx) => applyRunner(pluginCtx, schemaConfig))
     await fiber
     for (let index = 0; index < 60; index += 1) await Promise.resolve()
@@ -2139,7 +2142,7 @@ async function bootCommandHarness(
   /** Bind the config `mountRunner` really used for THIS mount. */
   const bindLiveConfig = (config: Record<string, unknown>): void => { liveConfig = config }
   const settingsService = {
-    describe: () => [{ ns: 'tui-app', value: { ...doc }, user: { ...doc }, revision: 1 }],
+    describe: () => [{ ns: 'pi-tui-preferences', value: { ...doc }, user: { ...doc }, revision: 1 }],
     mutate: async (_ns: string, ops: readonly { op: string; path: readonly string[]; value?: unknown }[]) => {
       for (const op of ops) {
         if (op.op === 'set') doc[op.path[0]!] = op.value

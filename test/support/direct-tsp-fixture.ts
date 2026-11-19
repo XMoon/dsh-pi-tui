@@ -939,10 +939,11 @@ export async function createDirectTspFixture(
     const { default: SubagentRuntime } = await import('@deepseek-ai/dsh-subagent')
     await ctx.plugin(SubagentRuntime as never, { maxDepth: 3 } as never)
   }
-  const runnerFiber = await ctx.plugin(pluginCtx => applyRunner(
-    pluginCtx,
-    TuiConfigSchema({ fullscreen: 'off', ...options.tuiConfig } as never),
-  ))
+  const tuiConfig = TuiConfigSchema({ fullscreen: 'off', ...options.tuiConfig } as never)
+  // The canonical preferences row publishes the live references the Direct
+  // runner consumes (the legacy schema object is kept only for sessionId).
+  ctx.provide('piTuiPreferences', tuiConfig)
+  const runnerFiber = await ctx.plugin(pluginCtx => applyRunner(pluginCtx, tuiConfig))
   fibers.push(runnerFiber, contributionFiber, builtinsFiber, extensionFiber)
 
   life.defer(() => settle())

@@ -1,8 +1,9 @@
 /**
- * The Direct TUI-settings adapter (DSH 0.1.7 PR A): the `TuiSettingsConfig`
- * facade over the `tui-app` plugin's profile-owned volatile Config
- * references. The plugin's own `Config` schema (src/index.ts) is the ONE
- * runtime authority; this adapter only unwraps references into the detached
+ * The Direct TUI-settings adapter (M6 PR-A): the `TuiSettingsConfig` facade
+ * over the canonical `pi-tui-preferences` row's profile-owned volatile Config
+ * references. The canonical plugin's `PreferencesConfig` schema
+ * (src/app/config/schema.ts) is the ONE runtime authority; this adapter only
+ * unwraps references into the detached
  * `TuiSettingsDoc` snapshot consumers already use, and converts the legacy
  * whole-document `get → modify → replace` cycle into path-scoped
  * `SettingsForms.mutate` operations so inherited/base values are never
@@ -26,10 +27,10 @@
 import type { Volatile } from '@deepseek-ai/cordis'
 import type { TuiSettingsConfig, TuiSettingsDoc } from '../config-port.ts'
 
-/** The `tui-app` plugin Config's live preference references (the runtime
- * shape schemastery produces for the `.volatile()` fields declared in
- * src/index.ts). Every read goes through `.get()` at operation time — the
- * adapter never snapshots these across operations. */
+/** The preference row's live references (the runtime shape schemastery
+ * produces for the `.volatile()` fields declared by `PREFERENCE_FIELDS`).
+ * Every read goes through `.get()` at operation time — the adapter never
+ * snapshots these across operations. */
 export interface TuiConfigRefs {
   readonly theme: Volatile<string>
   readonly iconStyle: Volatile<string>
@@ -129,16 +130,16 @@ const DIFF_FIELDS: readonly (keyof TuiConfigRefs)[] = [
   'keybindings',
 ]
 
-/** The Direct `tui-app` settings facade: effective snapshot reads over the
- * plugin's volatile references, path-scoped profile writes through the
- * official SettingsForms surface. */
+/** The Direct canonical settings facade: effective snapshot reads over the
+ * row's volatile references, path-scoped profile writes through the official
+ * SettingsForms surface. */
 export class DirectTuiSettings implements TuiSettingsConfig {
   readonly mutationQueueKey = this
   private readonly refs: TuiConfigRefs
   private readonly forms: SettingsFormsLike | undefined
   private readonly ns: string
 
-  constructor(refs: TuiConfigRefs, forms: SettingsFormsLike | undefined, ns: string = 'tui-app') {
+  constructor(refs: TuiConfigRefs, forms: SettingsFormsLike | undefined, ns: string = 'pi-tui-preferences') {
     this.refs = refs
     this.forms = forms
     this.ns = ns
@@ -169,7 +170,7 @@ export class DirectTuiSettings implements TuiSettingsConfig {
     }
   }
 
-  /** The current `tui-app` descriptor (effective value + USER override +
+  /** The current canonical descriptor (effective value + USER override +
    * revision), or undefined when the settings surface cannot serve it. */
   readDescriptor(): TuiSettingsDescriptorLike | undefined {
     try {
@@ -194,14 +195,14 @@ export class DirectTuiSettings implements TuiSettingsConfig {
     // Runtime READS stay on the Config references (get()); the descriptor
     // projection is only the write-reconciliation snapshot.
     const descriptor = this.readDescriptor()
-    if (descriptor === undefined) throw new Error('settings entry "tui-app" is not configurable in this deployment')
+    if (descriptor === undefined) throw new Error(`settings entry "${this.ns}" is not configurable in this deployment`)
     if (descriptor.value === undefined) {
       // Upstream projectForm always returns a populated object for an entry
       // with volatile fields (the TUI declares 19), so an absent projection
       // is unrepresentable — fail loud rather than diffing every defaulted
       // field against undefined, which would pin the whole document into
       // the USER layer.
-      throw new Error('settings entry "tui-app" exposes no form projection')
+      throw new Error(`settings entry "${this.ns}" exposes no form projection`)
     }
     const current = descriptor.value as Record<string, unknown>
     const next = doc as unknown as Record<string, unknown>

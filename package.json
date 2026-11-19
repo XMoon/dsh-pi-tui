@@ -72,6 +72,10 @@
       "types": "./dist/acp-preferences.d.mts",
       "default": "./dist/acp-preferences.mjs"
     },
+    "./preferences": {
+      "types": "./dist/preferences.d.mts",
+      "default": "./dist/preferences.mjs"
+    },
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./package.json": "./package.json"
   },

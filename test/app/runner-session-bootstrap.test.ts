@@ -845,7 +845,7 @@ test('startup restores a persisted Compact preset unchanged and /display compact
   const mutations: Array<{ ns: string; ops: readonly { op: string; path: readonly string[]; value?: unknown }[] }> = []
   const settings = {
     describe: () => [{
-      ns: 'tui-app',
+      ns: 'pi-tui-preferences',
       value: effectiveConfigView({
         fullscreen: 'off',
         displayPreset: 'compact',
@@ -873,12 +873,10 @@ test('startup restores a persisted Compact preset unchanged and /display compact
   const app = probe.apps.at(-1)
   assert.ok(app !== undefined, 'the production runner must create a TuiApp')
   assert.equal(app.displayPreset(), 'compact', 'a persisted Compact must restore as Compact, never fall back to Full')
-  // The boot completes exactly the one-shot legacy-migration marker (no
-  // legacy document exists anywhere): NO preference field is pinned and the
-  // USER footer definitions are not copied over the project-layer value.
-  assert.deepEqual(mutations, [
-    { ns: 'tui-app', ops: [{ op: 'set', path: ['legacySettingsMigrationVersion'], value: 1 }] },
-  ], 'a canonical preset must not trigger a preference write')
+  // The runner pins NO preference field and never copies the USER footer
+  // definitions over the project-layer value. The one-shot migration marker is
+  // the Host-owned profile barrier's write, not a runner write.
+  assert.equal(mutations.length, 0, 'a canonical preset must not trigger a preference write')
 
   const displayHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('display')
   assert.ok(displayHandler !== undefined, 'the production runner must register /display')
@@ -886,12 +884,12 @@ test('startup restores a persisted Compact preset unchanged and /display compact
   assert.deepEqual(compactResult, { kind: 'success', text: 'Display: compact.' })
   await settle()
   assert.equal(app.displayPreset(), 'compact', 'Compact stays the live preset')
-  assert.equal(mutations.length, 1, 'an unchanged value emits no write (no pinning; only the boot marker)')
+  assert.equal(mutations.length, 0, 'an unchanged value emits no write (no pinning)')
   const focusResult = await (displayHandler as unknown as (invocation: { rawInput: string }) => Promise<{ kind: string; text?: string }>)({ rawInput: 'focus' })
   assert.deepEqual(focusResult, { kind: 'success', text: 'Display: focus.' })
   await settle()
-  assert.equal(mutations.length, 2, 'a changed value persists through one more path-scoped mutation')
-  assert.deepEqual(mutations[1]!.ops, [
+  assert.equal(mutations.length, 1, 'a changed value persists through one path-scoped mutation')
+  assert.deepEqual(mutations[0]!.ops, [
     { op: 'set', path: ['displayPreset'], value: 'focus' },
   ], 'only the changed field is written; the user footer items are not re-pinned')
   await fiber.dispose()
@@ -925,7 +923,7 @@ test('startup canonicalizes an invalid display preset, preserves raw fields, and
   let failFirstWrite = true
   const settings = {
     describe: () => [{
-      ns: 'tui-app',
+      ns: 'pi-tui-preferences',
       value: effectiveConfigView({
         fullscreen: 'off',
         displayPreset: 'garbage',
@@ -962,10 +960,9 @@ test('startup canonicalizes an invalid display preset, preserves raw fields, and
 
   const first = await mount()
   assert.equal(first.app.displayPreset(), 'full', 'an invalid canonical value resolves to Full before the first frame')
-  // The boot writes: the one-shot marker completion, then the canonicalizing
-  // displayPreset set — raw fields are never re-pinned.
+  // The boot writes only the canonicalizing displayPreset set — raw fields are
+  // never re-pinned and the migration marker belongs to the Host barrier.
   assert.deepEqual(written, [
-    { op: 'set', path: ['legacySettingsMigrationVersion'], value: 1 },
     { op: 'set', path: ['displayPreset'], value: 'full' },
   ])
   await first.fiber.dispose()
@@ -973,8 +970,7 @@ test('startup canonicalizes an invalid display preset, preserves raw fields, and
 
   const second = await mount()
   assert.equal(second.app.displayPreset(), 'full')
-  // The retry boot: the marker batch is now a no-op (the fake never commits
-  // the reference), so the canonicalizing write retries alone.
+  // The retry boot retries the canonicalizing write alone.
   assert.deepEqual(written.at(-1), { op: 'set', path: ['displayPreset'], value: 'full' },
     'a later boot must retry the failed canonicalization')
   await second.fiber.dispose()

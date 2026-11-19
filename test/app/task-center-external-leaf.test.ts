@@ -113,7 +113,9 @@ for (const [columns, rows] of SIZES) test(`the REAL Task Center external leaf fr
   context.provide('loader', { await: async () => {} } as never)
   await mountAgentLoopTestHarness(context)
   context.provide('agentDefaultModel', peripherals.defaultModel as never)
-  const fiber = await context.plugin(pluginCtx => applyRunner(pluginCtx, TuiConfigSchema({ sessionId: String(SESSION) } as never)))
+  const tuiConfig = TuiConfigSchema({ sessionId: String(SESSION) } as never)
+  context.provide('piTuiPreferences', tuiConfig)
+  const fiber = await context.plugin(pluginCtx => applyRunner(pluginCtx, tuiConfig))
   life.defer(() => fiber.dispose())
   const view = (): string => vt.getViewport().map(line => line.replace(/\u001b\[[0-9;]*m/g, '')).join('\n')
   for (let attempt = 0; attempt < 80 && !view().includes('dsh-pi-tui'); attempt += 1) {

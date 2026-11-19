@@ -288,7 +288,9 @@ async function mountRunner(
   ctx.provide('llm', harness.llm as never)
   ctx.provide('commands', harness.commands as never)
   ctx.provide('loader', { await: async () => {} } as never)
-  const fiber = ctx.plugin((pluginCtx) => applyRunner(pluginCtx, TuiConfigSchema({ sessionId, fullscreen: 'off' } as never)))
+  const tuiConfig = TuiConfigSchema({ sessionId, fullscreen: 'off' } as never)
+  ctx.provide('piTuiPreferences', tuiConfig)
+  const fiber = ctx.plugin((pluginCtx) => applyRunner(pluginCtx, tuiConfig))
   await fiber
   await drainMicrotasks()
   life.defer(() => fiber.dispose())

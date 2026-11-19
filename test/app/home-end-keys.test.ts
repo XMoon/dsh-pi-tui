@@ -616,7 +616,7 @@ function setupSettings(options: { homeEndKeys?: string } = {}) {
     find: () => undefined,
     execute: async () => undefined,
   } as never)
-  ctx.provide('settings', { describe: () => [{ ns: 'tui-app', user: {} }] } as never)
+  ctx.provide('settings', { describe: () => [{ ns: 'pi-tui-preferences', user: {} }] } as never)
   const settings = fakeTuiSettings(options.homeEndKeys ?? 'input')
   // The production bootstrap applies the persisted preset to the live keymap
   // before the workspace opens; do the same here (an invalid raw value falls

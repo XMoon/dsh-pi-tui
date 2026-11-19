@@ -4571,7 +4571,7 @@ test('the REAL Direct adapter drives the workspace write end to end (UI → path
   // the profile (the W-11 whole-document preservation property, through the real
   // adapter rather than a hand-rolled replace).
   assert.deepEqual(fixture.calls[0]!.ops, [{ op: 'set', path: ['theme'], value: 'light' }])
-  assert.equal(fixture.calls[0]!.ns, 'tui-app')
+  assert.equal(fixture.calls[0]!.ns, 'pi-tui-preferences')
   assert.equal(fixture.calls[0]!.revision, 7, 'the fence is the revision the diff was reconciled against')
   assert.equal(fixture.document().theme, 'light', 'the committed document carries the new value')
   assert.equal(fixture.document().iconStyle, 'symbols', 'and every other field is untouched')

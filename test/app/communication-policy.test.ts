@@ -311,7 +311,7 @@ test('production startup resolves both settings before compose and settings swit
       .map(([field, ref]) => [field, ref.get()]).filter(([, value]) => value !== undefined),
   )
   ctx.provide('settings', {
-    describe: () => [{ ns: 'tui-app', value: effective, user: { ...doc }, revision: 1 }],
+    describe: () => [{ ns: 'pi-tui-preferences', value: effective, user: { ...doc }, revision: 1 }],
     mutate: async (_ns: string, ops: readonly { op: string; path: readonly string[]; value?: unknown }[]) => {
       for (const op of ops) {
         if (op.op === 'set') doc[op.path[0]!] = op.value
@@ -460,7 +460,7 @@ test('a Settings workspace Confirm reaches the registered prompt section through
   const ctx = new Context()
   life.defer(() => disposeContext(ctx))
   ctx.provide('settings', {
-    describe: () => [{ ns: 'tui-app', value: { ...doc }, user: { ...doc }, revision: 1 }],
+    describe: () => [{ ns: 'pi-tui-preferences', value: { ...doc }, user: { ...doc }, revision: 1 }],
     mutate: async (_ns: string, ops: readonly { op: string; path: readonly string[]; value?: unknown }[]) => {
       for (const op of ops) {
         if (op.op === 'set') doc[op.path[0]!] = op.value

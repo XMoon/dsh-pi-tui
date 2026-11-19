@@ -102,6 +102,12 @@ export interface TuiSettingsDoc {
   keybindings?: unknown
 }
 
+/** The canonical profile row id / Settings namespace for the durable TUI
+ * preferences (M6 PR-A). Every backend reads and writes this ONE row; the
+ * retired `tui-app` / `split-host-pi-tui-runtime` namespaces are migration
+ * sources only. */
+export const CANONICAL_TUI_SETTINGS_NS = 'pi-tui-preferences'
+
 /** The TUI settings document surface (get/replace — the same shape the
  * commands surface consumes; the runner wires the registered settings
  * document). The port is deliberately get/replace ONLY: no watch /

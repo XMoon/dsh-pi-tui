@@ -203,7 +203,9 @@ test('a successful Host-registry compatibility mirror stays CLIENT_COMMAND — /
     ctx.provide('llm', harness.llm as never)
     ctx.provide('commands', harness.commands as never)
     ctx.provide('loader', { await: async () => {} } as never)
-    const started = ctx.plugin(pluginCtx => applyRunner(pluginCtx, TuiConfigSchema({ fullscreen: 'off' } as never)))
+    const tuiConfig = TuiConfigSchema({ fullscreen: 'off' } as never)
+    ctx.provide('piTuiPreferences', tuiConfig)
+    const started = ctx.plugin(pluginCtx => applyRunner(pluginCtx, tuiConfig))
     await started
     await settle(200)
     return started
@@ -342,10 +344,9 @@ test('the production Schedule composition captures scope and switches the receip
   ctx.provide('commands', harness.commands as never)
   ctx.provide('schedule', schedule as never)
   ctx.provide('loader', { await: async () => {} } as never)
-  const runnerFiber = ctx.plugin(pluginCtx => applyRunner(
-    pluginCtx,
-    TuiConfigSchema({ fullscreen: 'off' } as never),
-  ))
+  const tuiConfig = TuiConfigSchema({ fullscreen: 'off' } as never)
+  ctx.provide('piTuiPreferences', tuiConfig)
+  const runnerFiber = ctx.plugin(pluginCtx => applyRunner(pluginCtx, tuiConfig))
   try {
     await runnerFiber
     for (let attempt = 0; attempt < 80 && !vt.getViewport().join('').includes('dsh-pi-tui'); attempt += 1) {
@@ -428,7 +429,9 @@ test('a genuine Agent-SCOPED Host shadow over our global mirror stays HOST autho
     ctx.provide('llm', harness.llm as never)
     ctx.provide('commands', harness.commands as never)
     ctx.provide('loader', { await: async () => {} } as never)
-    const started = ctx.plugin(pluginCtx => applyRunner(pluginCtx, TuiConfigSchema({ fullscreen: 'off' } as never)))
+    const tuiConfig = TuiConfigSchema({ fullscreen: 'off' } as never)
+    ctx.provide('piTuiPreferences', tuiConfig)
+    const started = ctx.plugin(pluginCtx => applyRunner(pluginCtx, tuiConfig))
     await started
     await settle(200)
     return started

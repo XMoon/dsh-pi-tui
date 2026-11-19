@@ -550,7 +550,7 @@ test('runner search: a late session event never strands the current target', asy
     focusMode: 'off', wheelScrollLines: '1', notificationMode: 'unfocused', notificationMethod: 'auto',
   }
   context.provide('settings', {
-    describe: () => [{ ns: 'tui-app', user: { footerCustomItems: [] } }],
+    describe: () => [{ ns: 'pi-tui-preferences', user: { footerCustomItems: [] } }],
     register: () => ({
       get: () => ({ ...settingsDoc }),
       replace: async (next: Record<string, unknown>) => { Object.assign(settingsDoc, next) },

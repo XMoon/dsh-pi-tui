@@ -288,7 +288,7 @@ test('/footer is sessionless and opens the configurator; S saves and persists', 
   const persistedCustomItems = [...customItems, futureCustomItem, futureFieldCommand]
   app.setFooterCustomItems(customItems)
   const settings = fakeSettings({ footer: 'default', footerCustomItems: persistedCustomItems })
-  ctx.provide('settings', { describe: () => [{ ns: 'tui-app', user: { footerCustomItems: persistedCustomItems } }] } as never)
+  ctx.provide('settings', { describe: () => [{ ns: 'pi-tui-preferences', user: { footerCustomItems: persistedCustomItems } }] } as never)
   const applied: Array<{ footer: string; footerLayout?: unknown; footerCustomItems?: unknown }> = []
   const runner: TuiCommandRunner = {
     webAccess: unavailableWebAccess(),
@@ -461,7 +461,7 @@ test('/footer serializes overlapping saves and re-reads future USER definitions'
     get: () => ({ ...currentDoc, footerCustomItems: userRaw }),
     replace: (next) => new Promise<void>(resolve => pendingWrites.push({ next, resolve })),
   }
-  ctx.provide('settings', { describe: () => [{ ns: 'tui-app', user: { footerCustomItems: userRaw } }] } as never)
+  ctx.provide('settings', { describe: () => [{ ns: 'pi-tui-preferences', user: { footerCustomItems: userRaw } }] } as never)
   const capturedFooter = captureFooterSaves(app)
   const saveCallbacks = capturedFooter.saves
   const applied: Array<{ footerLayout?: unknown; footerCustomItems?: unknown }> = []
@@ -820,7 +820,7 @@ test('/footer starts from the EFFECTIVE COMPACT layout (a compact user pressing 
   const commands = fakeCommands()
   ctx.provide('commands', commands.service as never)
   const settings = fakeSettings({ footer: 'compact' })
-  ctx.provide('settings', { describe: () => [{ ns: 'tui-app', user: {} }] } as never)
+  ctx.provide('settings', { describe: () => [{ ns: 'pi-tui-preferences', user: {} }] } as never)
   const applied: Array<{ footer: string; footerLayout?: unknown }> = []
   const runner: TuiCommandRunner = {
     webAccess: unavailableWebAccess(),
@@ -942,7 +942,7 @@ test('/footer Enter with a FAILED settings write keeps the old layout and notifi
   startedApps.add(app)
   const commands = fakeCommands()
   ctx.provide('commands', commands.service as never)
-  ctx.provide('settings', { describe: () => [{ ns: 'tui-app', user: {} }] } as never)
+  ctx.provide('settings', { describe: () => [{ ns: 'pi-tui-preferences', user: {} }] } as never)
   // A settings document whose replace REJECTS (the write fails).
   const doc = { footer: 'default' as string, footerLayout: undefined as unknown }
   const failingSettings: TuiSettingsLike = {
@@ -1057,7 +1057,7 @@ test('/settings footer change is PERSIST-FIRST: a failed write keeps the old lay
   startedApps.add(app)
   const commands = fakeCommands()
   ctx.provide('commands', commands.service as never)
-  ctx.provide('settings', { describe: () => [{ ns: 'tui-app', user: {} }] } as never)
+  ctx.provide('settings', { describe: () => [{ ns: 'pi-tui-preferences', user: {} }] } as never)
   const doc = { footer: 'default' as string, footerLayout: undefined as unknown }
   // The failed write is observed at ITS entry and at ITS settlement: a silence
   // window proves neither. The mock records the document before it rejects.
@@ -1197,7 +1197,7 @@ test('/settings footer change PERSISTS footerFallbackMode (the command-mode rest
   startedApps.add(app)
   const commands = fakeCommands()
   ctx.provide('commands', commands.service as never)
-  ctx.provide('settings', { describe: () => [{ ns: 'tui-app', user: {} }] } as never)
+  ctx.provide('settings', { describe: () => [{ ns: 'pi-tui-preferences', user: {} }] } as never)
   const settings = fakeSettings({ footer: 'default' })
   const applied: Array<{ footer: string }> = []
   const runner: TuiCommandRunner = {
@@ -1314,7 +1314,7 @@ test('/footer save failures notify exactly once (validation and write failures)'
     }),
     replace: () => new Promise<void>((_resolve, reject) => { rejectReplace = reject }),
   }
-  ctx.provide('settings', { describe: () => [{ ns: 'tui-app', user: { footerCustomItems: [known] } }] } as never)
+  ctx.provide('settings', { describe: () => [{ ns: 'pi-tui-preferences', user: { footerCustomItems: [known] } }] } as never)
   const applied: Array<{ footerLayout?: unknown }> = []
   const runner: TuiCommandRunner = {
     webAccess: unavailableWebAccess(),
@@ -1442,7 +1442,7 @@ test('an unsaved custom command draft NEVER executes (preview, resize, Keep Edit
     const commands = fakeCommands()
     ctx.provide('commands', commands.service as never)
     const settings = fakeSettings({ footer: 'default' })
-    ctx.provide('settings', { describe: () => [{ ns: 'tui-app', user: {} }] } as never)
+    ctx.provide('settings', { describe: () => [{ ns: 'pi-tui-preferences', user: {} }] } as never)
     const applied: Array<{ footer: string }> = []
     const runner: TuiCommandRunner = {
       webAccess: unavailableWebAccess(),
@@ -1591,7 +1591,7 @@ test('a FAILED save never executes the new command (draft preserved, marker abse
   try {
     const commands = fakeCommands()
     ctx.provide('commands', commands.service as never)
-    ctx.provide('settings', { describe: () => [{ ns: 'tui-app', user: {} }] } as never)
+    ctx.provide('settings', { describe: () => [{ ns: 'pi-tui-preferences', user: {} }] } as never)
     const doc = { footer: 'default' as string, footerLayout: undefined as unknown, footerCustomItems: undefined as unknown }
     const failingSettings: TuiSettingsLike = {
       get: () => ({ theme: 'auto', iconStyle: 'emoji', footer: doc.footer, footerLayout: doc.footerLayout, footerCustomItems: doc.footerCustomItems as never, fullscreen: 'on', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', wheelScrollLines: '1', notificationMode: 'unfocused', terminalProgress: 'on', notificationMethod: 'auto' }),
@@ -1716,7 +1716,7 @@ test('a SUCCESSFUL save is the ONLY event that arms the runtime (marker appears 
     const commands = fakeCommands()
     ctx.provide('commands', commands.service as never)
     const settings = fakeSettings({ footer: 'default' })
-    ctx.provide('settings', { describe: () => [{ ns: 'tui-app', user: {} }] } as never)
+    ctx.provide('settings', { describe: () => [{ ns: 'pi-tui-preferences', user: {} }] } as never)
     const applied: Array<{ footer: string; footerCustomItems?: unknown }> = []
     const runner: TuiCommandRunner = {
       webAccess: unavailableWebAccess(),

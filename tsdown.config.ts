@@ -44,6 +44,9 @@ const bundleConfig = defineConfig({
     { 'daemon-launcher': './src/app/remote-process/daemon-launcher.ts' },
     // PO-1B: the profile-owned ACP startup preference row. Same precedent.
     { 'acp-preferences': './src/app/host/acp-preferences.ts' },
+    // M6 PR-A: the canonical profile-owned TUI preference row. Same precedent:
+    // the canonical nested app/config module under a flat package subpath.
+    { preferences: './src/app/config/preferences.ts' },
   ],
   format: ['esm'],
   outDir: 'dist',
