@@ -1105,7 +1105,14 @@ function textEditPids() {
 async function openBlankTextEdit(workRoot) {
   const directory = join(workRoot, 'textedit')
   mkdirSync(directory, { recursive: true })
-  const file = join(directory, 'cua-blank.txt')
+  // The document NAME is the run's owned-window identity: TextEdit titles the
+  // window after the file, and the MAC09-08 audit requires exactly ONE window
+  // whose title carries the run's token. A fixed name would collide with
+  // documents left by an earlier run (including an aborted one), so the run's
+  // own token is part of the file name and the scene never matches a stale
+  // window.
+  const runToken = `cua-blank-${randomUUID().slice(0, 8)}`
+  const file = join(directory, `${runToken}.txt`)
   writeFileSync(file, '', { mode: 0o600 })
   const before = new Set(textEditPids())
   const opened = spawnSync('open', ['-na', 'TextEdit', file], { encoding: 'utf8', timeout: 30_000 })
@@ -1116,7 +1123,7 @@ async function openBlankTextEdit(workRoot) {
   }, 'ONE new TextEdit instance for the qualification', TIMEOUTS.process)
   const started = processStarted(pid)
   assert(started !== undefined, 'the qualification TextEdit instance has no kernel start identity')
-  return { file, pid, started, before: [...before] }
+  return { file, runToken, pid, started, before: [...before] }
 }
 
 function processIsTextEdit(pid, started) {
@@ -1237,7 +1244,7 @@ function fillUnreachedCases(report) {
 
 // ── Direct scene ──────────────────────────────────────────────────────────
 
-async function sceneDirect({ installation, workRoot, report, operator, helperAppPath, textEditPid }) {
+async function sceneDirect({ installation, workRoot, report, operator, helperAppPath, textEditPid, runToken }) {
   const dshHome = installation.dshHome
   let tui = startTui({ installation, workRoot, sessionName: `cua-direct-${randomUUID().slice(0, 6)}` })
   report.directTui = { session: tui }
@@ -1529,7 +1536,7 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
     tui,
     dshHome,
     sessionId: consent.sessionId,
-    prompt: `Run exactly this in run_code: const app = await tools.cua({ method: 'getApp', params: { selector: '${String(textEditPid)}' } }); const windows = await tools.cua({ method: 'listWindows', params: { appHandle: app.appHandle } }); const window = windows.find(item => String(item.title ?? '').includes('cua-blank')); if (!window) throw new Error('the controlled TextEdit window was not found'); const shot = await tools.cua({ method: 'screenshot', params: { appHandle: app.appHandle, windowId: window.windowId } }); return { width: shot.pixelWidth, height: shot.pixelHeight }`,
+    prompt: `Run exactly this in run_code: const app = await tools.cua({ method: 'getApp', params: { selector: '${String(textEditPid)}' } }); const windows = await tools.cua({ method: 'listWindows', params: { appHandle: app.appHandle } }); const window = windows.find(item => String(item.title ?? '').includes('${runToken}')); if (!window) throw new Error('the controlled TextEdit window was not found'); const shot = await tools.cua({ method: 'screenshot', params: { appHandle: app.appHandle, windowId: window.windowId } }); return { width: shot.pixelWidth, height: shot.pixelHeight }`,
     label: 'MAC09-07 screenshot',
     method: 'screenshot',
     timeoutMs: TIMEOUTS.screenshot,
@@ -1558,7 +1565,7 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
   const windowsResult = cuaResults(shotEvents, 0).find(result => result.subCallId === shotWindows?.subCallId)
   const windows = dispatchJsonContent(windowsResult)
   const controlledWindow = Array.isArray(windows)
-    ? windows.find(window => window?.windowId === shotWindowId && String(window?.title ?? '').includes('cua-blank'))
+    ? windows.find(window => window?.windowId === shotWindowId && String(window?.title ?? '').includes(runToken))
     : undefined
   assert(controlledWindow !== undefined,
     'MAC09-07: the screenshot window is not this run\'s controlled cua-blank document')
@@ -1621,7 +1628,7 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
   // scene re-runs the SAME bounded program once with an explicit instruction and
   // records the retry. Every attempt keeps its own random marker, so the
   // identity checks below always bind the attempt that actually ran.
-  const controlledProgram = marker => `Run exactly this in run_code and DO NOT stop early — every call below must run in this one program: const app = await tools.cua({ method: 'getApp', params: { selector: '${String(textEditPid)}' } }); const windows = await tools.cua({ method: 'listWindows', params: { appHandle: app.appHandle } }); const window = windows.find(item => String(item.title ?? '').includes('cua-blank')); if (!window) throw new Error('the controlled TextEdit window was not found'); await tools.cua({ method: 'show', params: { appHandle: app.appHandle, windowId: window.windowId } }); await tools.cua({ method: 'activate', params: { appHandle: app.appHandle } }); await app.typeText('${marker}'); const tree = await app.getAccessibilityTree(); return JSON.stringify(tree).includes('${marker}') ? 'MARKER_PRESENT' : 'MARKER_MISSING'`
+  const controlledProgram = marker => `Run exactly this in run_code and DO NOT stop early — every call below must run in this one program: const app = await tools.cua({ method: 'getApp', params: { selector: '${String(textEditPid)}' } }); const windows = await tools.cua({ method: 'listWindows', params: { appHandle: app.appHandle } }); const window = windows.find(item => String(item.title ?? '').includes('${runToken}')); if (!window) throw new Error('the controlled TextEdit window was not found'); await tools.cua({ method: 'show', params: { appHandle: app.appHandle, windowId: window.windowId } }); await tools.cua({ method: 'activate', params: { appHandle: app.appHandle } }); await app.typeText('${marker}'); const tree = await app.getAccessibilityTree(); return JSON.stringify(tree).includes('${marker}') ? 'MARKER_PRESENT' : 'MARKER_MISSING'`
   let input
   let inputResult
   let marker
@@ -1692,7 +1699,7 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
   // legal shape of a controlled program is:
   //   for EVERY segment (split at each getApp):
   //     getApp(this run's exact PID) -> listWindows(that handle)
-  //     -> show(that handle, a window whose title is the run's cua-blank)
+  //     -> show(that handle, a window whose title carries THIS run's token)
   //     -> optional activate(that handle) / read-only getState(that handle)
   //   and exactly ONE typeText in the WHOLE trace, in the FINAL segment, typed
   //   with that segment's handle and this run's marker, observed by the final
@@ -1732,7 +1739,7 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
       'MAC09-08: a controlled listWindows did not use its own getApp handle')
     const windows = dispatchJsonContent(resultOf(windowDispatch))
     const ownedWindowIds = (Array.isArray(windows) ? windows : [])
-      .filter(window => String(window?.title ?? '').includes('cua-blank'))
+      .filter(window => String(window?.title ?? '').includes(runToken))
       .map(window => window?.windowId)
     assert(ownedWindowIds.length === 1,
       `MAC09-08: the controlled app did not expose exactly one owned cua-blank window in a segment: ${JSON.stringify(ownedWindowIds)}`)
@@ -1832,7 +1839,7 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
     'MAC09-08: the controlled attempt did not show a window of the approved app handle')
   const controlledInputWindow = Array.isArray(controlledWindows)
     ? controlledWindows.find(window => window?.windowId === showParams?.windowId
-      && String(window?.title ?? '').includes('cua-blank'))
+      && String(window?.title ?? '').includes(runToken))
     : undefined
   assert(controlledInputWindow !== undefined,
     'MAC09-08: show windowId is not this run\'s controlled cua-blank listWindows result')
@@ -1911,7 +1918,7 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
 
 // ── Split scene ───────────────────────────────────────────────────────────
 
-async function sceneSplit({ installation, workRoot, report, textEditPid }) {
+async function sceneSplit({ installation, workRoot, report, textEditPid, runToken }) {
   const dshHome = installation.dshHome
   const tui = startTui({ installation, workRoot, backend: 'daemon', sessionName: `cua-split-${randomUUID().slice(0, 6)}` })
   report.splitTui = { session: tui }
@@ -1939,7 +1946,7 @@ async function sceneSplit({ installation, workRoot, report, textEditPid }) {
     tui,
     dshHome,
     sessionId: capabilities.sessionId,
-    prompt: `Run exactly this in run_code: const app = await tools.cua({ method: 'getApp', params: { selector: '${String(textEditPid)}' } }); const windows = await tools.cua({ method: 'listWindows', params: { appHandle: app.appHandle } }); const window = windows.find(item => String(item.title ?? '').includes('cua-blank')); if (!window) throw new Error('the controlled TextEdit window was not found'); const shot = await tools.cua({ method: 'screenshot', params: { appHandle: app.appHandle, windowId: window.windowId } }); return { width: shot.pixelWidth, height: shot.pixelHeight }`,
+    prompt: `Run exactly this in run_code: const app = await tools.cua({ method: 'getApp', params: { selector: '${String(textEditPid)}' } }); const windows = await tools.cua({ method: 'listWindows', params: { appHandle: app.appHandle } }); const window = windows.find(item => String(item.title ?? '').includes('${runToken}')); if (!window) throw new Error('the controlled TextEdit window was not found'); const shot = await tools.cua({ method: 'screenshot', params: { appHandle: app.appHandle, windowId: window.windowId } }); return { width: shot.pixelWidth, height: shot.pixelHeight }`,
     label: 'MAC09-10 Split screenshot selection',
     method: 'getApp',
     timeoutMs: TIMEOUTS.turn,
@@ -1999,7 +2006,7 @@ async function sceneSplit({ installation, workRoot, report, textEditPid }) {
   const splitWindows = dispatchJsonContent(splitWindowsResult)
   assert(typeof splitWindowId === 'number' && Array.isArray(splitWindows)
     && splitWindows.some(window => window?.windowId === splitWindowId
-      && String(window?.title ?? '').includes('cua-blank')),
+      && String(window?.title ?? '').includes(runToken)),
   'Split MAC09-10: the screenshot window is not this run\'s controlled cua-blank document')
   const splitRefs = [...attachmentRefs(splitShotResult.result)]
   assert(splitRefs.length > 0, 'Split screenshot carried no durable attachment reference')
@@ -2277,10 +2284,10 @@ async function main() {
     report = makeReport({ candidate, preflight, installation, model, helper: distribution })
     operator = createOperatorConsole()
     textEdit = await openBlankTextEdit(workRoot)
-    report.textEdit = { pid: textEdit.pid, file: textEdit.file }
+    report.textEdit = { pid: textEdit.pid, file: textEdit.file, runToken: textEdit.runToken }
 
-    const directScene = await sceneDirect({ installation, workRoot, report, operator, helperAppPath, textEditPid: textEdit.pid })
-    const splitTui = await sceneSplit({ installation, workRoot, report, textEditPid: textEdit.pid })
+    const directScene = await sceneDirect({ installation, workRoot, report, operator, helperAppPath, textEditPid: textEdit.pid, runToken: textEdit.runToken })
+    const splitTui = await sceneSplit({ installation, workRoot, report, textEditPid: textEdit.pid, runToken: textEdit.runToken })
 
     // MAC09-11: the operator disables the bundle through the real Plugin
     // Manager; the tool is withdrawn, but the OS TCC entry and the durable
