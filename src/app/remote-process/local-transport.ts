@@ -482,6 +482,31 @@ function waitForReplacementGeneration(
 }
 
 /**
+ * Await one shared operation but let THIS caller stop waiting when its own
+ * request is cancelled. The shared operation itself keeps running for the other
+ * waiters; only this caller's await is released.
+ */
+function settleWithOwnSignal(operation: Promise<void>, signal: AbortSignal | undefined): Promise<void> {
+  if (signal === undefined) return operation
+  return new Promise<void>((resolveWait, rejectWait) => {
+    if (signal.aborted) {
+      operation.catch(() => {})
+      rejectWait(signal.reason instanceof Error ? signal.reason : new Error('local transport: request aborted'))
+      return
+    }
+    const onAbort = (): void => {
+      operation.catch(() => {})
+      rejectWait(signal.reason instanceof Error ? signal.reason : new Error('local transport: request aborted'))
+    }
+    signal.addEventListener('abort', onAbort, { once: true })
+    operation.then(
+      () => { signal.removeEventListener('abort', onAbort); resolveWait() },
+      error => { signal.removeEventListener('abort', onAbort); rejectWait(error) },
+    )
+  })
+}
+
+/**
  * Whether one 401 answer may be retried after the operator was rebuilt. The two
  * hard rules live here, not in the caller:
  *
@@ -497,10 +522,34 @@ export function operatorRecoveryMayRetry(
   init: RequestInit | undefined,
   origin: string,
 ): boolean {
-  if (init?.signal?.aborted === true) return false
-  if (init?.body !== undefined && typeof init.body !== 'string') return false
+  return operatorRecoveryDecision(input, init, origin).retry
+}
+
+/** The two independent decisions one 401 requires. */
+export interface OperatorRecoveryDecision {
+  /** Rebuild the connection and its operator? (A dead operator affects every route.) */
+  readonly rebuild: boolean
+  /** Re-send THIS request once after the rebuild completed? */
+  readonly retry: boolean
+}
+
+/**
+ * Decide what one 401 requires. Rebuilding and re-sending are separate facts:
+ * a forwarded event RESULT is owned by the Gateway's generation abort + Host
+ * re-delivery (neither), while a non-replayable upload must still rebuild the
+ * connection (otherwise every later request keeps using the expired operator)
+ * even though the upload itself cannot be re-sent.
+ */
+export function operatorRecoveryDecision(
+  input: string | URL,
+  init: RequestInit | undefined,
+  origin: string,
+): OperatorRecoveryDecision {
   const route = new URL(typeof input === 'string' ? input : input.href, `${origin}/`)
-  return !route.pathname.includes('$events/result')
+  if (route.pathname.includes('$events/result')) return { rebuild: false, retry: false }
+  const retry = init?.signal?.aborted !== true
+    && (init?.body === undefined || typeof init.body === 'string')
+  return { rebuild: true, retry }
 }
 
 /**
@@ -526,10 +575,13 @@ function createOperatorRecovery(
       if (connection === undefined) {
         throw new LocalScopeError('HOST_UNRESPONSIVE', 'local transport: no Connection to re-admit')
       }
-      const combined = signal === undefined ? lifetime : AbortSignal.any([signal, lifetime])
       const previousId = connection.generation.getSnapshot()?.id
       connection.reconnect()
-      await waitForReplacementGeneration(connection, previousId, combined, OPERATOR_RECOVERY_TIMEOUT_MS)
+      // The SHARED re-admit is bounded by the transport lifetime only. A
+      // caller's own signal is usually generation-bound: `reconnect()` aborts
+      // it immediately, so joining it here would cancel the recovery for every
+      // other waiter the moment the first caller's generation closed.
+      await waitForReplacementGeneration(connection, previousId, lifetime, OPERATOR_RECOVERY_TIMEOUT_MS)
     })().finally(() => { inflight = undefined })
     await inflight
   }
@@ -757,24 +809,35 @@ export async function installLocalTransport(
     const recoverOperator = createOperatorRecovery(() => connection, disposal.signal)
     /**
      * The ONE auth-recovery wrapper for the official unary carrier and every
-     * borrowed authenticated route. A 401 here was rejected BEFORE Host
-     * dispatch, so retrying a replayable request after the re-admitted
-     * generation is ready cannot duplicate a write. `$events/result` is never
-     * retried (its payload belongs to the old stream's Peer), and a body this
-     * transport cannot replay is not retried either.
+     * borrowed authenticated route. Two DIFFERENT questions are kept apart:
+     *
+     * 1. Must the connection be rebuilt? YES for every 401 except a forwarded
+     *    event RESULT, whose payload belongs to the stream and Peer that
+     *    received the invocation — there the Gateway's own generation abort +
+     *    Host re-delivery is the only correct recovery. A dead operator affects
+     *    EVERY route, so a non-replayable request (a stream/FormData upload)
+     *    still triggers the rebuild even though it cannot be re-sent; otherwise
+     *    that upload would leave every later request on the expired operator.
+     * 2. May THIS payload be re-sent? Only a replayable body, only once, and
+     *    only after the re-admitted generation is ready. A 401 is rejected
+     *    before Host dispatch, so this retry cannot duplicate a write.
      */
     const withOperatorRecovery = (send: (input: string | URL, init?: RequestInit) => Promise<Response>) =>
       async (input: string | URL, init?: RequestInit): Promise<Response> => {
         const response = await send(input, init)
         if (response.status !== 401) return response
-        if (!operatorRecoveryMayRetry(input, init, origin)) return response
+        const decision = operatorRecoveryDecision(input, init, origin)
+        if (!decision.rebuild) return response
         try {
-          await recoverOperator(init?.signal ?? undefined)
+          await settleWithOwnSignal(recoverOperator(init?.signal ?? undefined), init?.signal ?? undefined)
         } catch {
           // A recovery that cannot re-admit leaves the original 401 with the
           // caller: the authentication failure is never hidden.
           return response
         }
+        // A request cancelled while the re-admit was running is not re-sent.
+        if (init?.signal?.aborted === true) return response
+        if (!decision.retry) return response
         return await send(input, init)
       }
     sendAuthenticated = withOperatorRecovery(fetchAuthenticated)

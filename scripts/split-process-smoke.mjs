@@ -321,21 +321,10 @@ async function main(explicitPath) {
       runStep: (name, operation) => diagnostics.runStep(name, operation),
       // Backstop only: the case kills its own detached processes first.
       trackDetachedPid: (pid, starttime) => trackedProcesses.set(pid, starttime),
-      // The current selected case id, so a case-owned boundary can name itself.
+      // The case id a boundary report names (the full lane sets it per scene).
       currentCaseId: undefined,
-      /**
-       * Report one qualified boundary this case DELIBERATELY did not run. It is
-       * a first-class, machine-visible NOT_VERIFIED fact (never a checkpoint
-       * name only), so a reader can never mistake the boundary for a pass.
-       */
-      reportBoundary: ({ boundary, reason }) => {
-        assert(typeof boundary === 'string' && boundary !== '', 'a boundary report needs a name')
-        assert(typeof reason === 'string' && reason !== '', 'a boundary report needs its blocker')
-        process.stdout.write(
-          `SPLIT_PROCESS_BOUNDARY_NOT_VERIFIED id=${String(context.currentCaseId)}`
-            + ` platform=${LANE_PLATFORM} boundary=${boundary} reason=${reason}\n`,
-        )
-      },
+      /** @see emitBoundaryNotVerified */
+      reportBoundary: ({ boundary, reason }) => emitBoundaryNotVerified(context.currentCaseId, { boundary, reason }),
     }
     /**
      * The Full lane IS the default-lane registry: every default-lane case runs
@@ -346,6 +335,7 @@ async function main(explicitPath) {
      */
     const actualCaseResults = []
     for (const registeredCase of listDefaultLaneCases()) {
+      context.currentCaseId = registeredCase.id
       const result = await diagnostics.runStep(
         `case/${registeredCase.id}`,
         () => registeredCase.run(context),
@@ -1009,6 +999,12 @@ async function runSelectedCases(selection) {
       runStep: (name, operation) => diagnostics.runStep(name, operation),
       // Backstop only: the case kills its own detached processes first.
       trackDetachedPid: (pid, starttime) => trackedProcesses.set(pid, starttime),
+      // The current selected case id + the shared boundary reporter: a selected
+      // case must be able to publish the same NOT_VERIFIED line as a full-lane
+      // scene, and the line has to name the case it belongs to.
+      currentCaseId: undefined,
+      /** @see emitBoundaryNotVerified */
+      reportBoundary: ({ boundary, reason }) => emitBoundaryNotVerified(context.currentCaseId, { boundary, reason }),
     }
     // The per-case verdict and identity facts are COLLECTED here and printed
     // only after the cleanup below: a verdict announced before the scoped
@@ -1053,6 +1049,10 @@ async function runSelectedCases(selection) {
       await proveFailpointCleanup(dshHome)
     }
     await stopDarwinSurfaceServer()
+    // Quiescence is decided BEFORE the private work root is removed: a
+    // NOT_QUIESCED run must keep its scene for diagnosis, and no verdict may be
+    // printed for a run that still owns a live process.
+    if (verdictReport !== undefined) await assertSelectedQuiesced(verdictReport)
     if (workDir === undefined) {
       // Nothing was created: setup failed before the work root existed.
     } else if (!KEEP) rmSync(workDir, { recursive: true, force: true })
@@ -1065,6 +1065,33 @@ async function runSelectedCases(selection) {
 }
 
 /**
+ * Decide quiescence for EVERY selected case before any verdict is printed. A
+ * survivor means the run cannot claim a PASS for ANY case (its scene stays for
+ * diagnosis because the work root is removed only after this check).
+ */
+async function assertSelectedQuiesced(selected) {
+  const leaked = []
+  for (const entry of selected) {
+    const pids = entry.identities.filter(identity => typeof identity.pid === 'number')
+    // A just-killed child is still observable until the OS reaps it: give the
+    // scoped cleanup a bounded window before declaring the run non-quiesced.
+    const reapDeadline = Date.now() + 5_000
+    let survivors = pids.filter(identity => alive(identity.pid))
+    while (survivors.length > 0 && Date.now() < reapDeadline) {
+      await new Promise(resolveSleep => setTimeout(resolveSleep, 50))
+      survivors = pids.filter(identity => alive(identity.pid))
+    }
+    for (const identity of survivors) leaked.push(`${entry.id}:${identity.role}:${String(identity.pid)}`)
+  }
+  if (leaked.length > 0) {
+    throw new SplitSmokeAssertionError(
+      `NOT_QUIESCED: ${String(leaked.length)} selected-run process(es) are still alive after cleanup: `
+        + `${leaked.join(', ')} (the private scene is preserved)`,
+    )
+  }
+}
+
+/**
  * Print the collected selected verdicts and their real identity facts AFTER the
  * scoped cleanup. Only a PASS prints `SPLIT_PROCESS_SELECTED_PASS`; an
  * environment-gated NOT_VERIFIED prints its own non-zero line, and a
@@ -1073,21 +1100,6 @@ async function runSelectedCases(selection) {
 async function announceSelectedVerdicts(selected, candidateFacts) {
   if (selected === undefined) return
   for (const entry of selected) {
-    const escaped = entry.identities.filter(identity => typeof identity.pid === 'number')
-    let leaked = escaped.filter(identity => alive(identity.pid))
-    // A just-killed child is still observable until the OS reaps it: give the
-    // scoped cleanup a bounded window before declaring the run non-quiesced.
-    const reapDeadline = Date.now() + 5_000
-    while (leaked.length > 0 && Date.now() < reapDeadline) {
-      await new Promise(resolveSleep => setTimeout(resolveSleep, 50))
-      leaked = escaped.filter(identity => alive(identity.pid))
-    }
-    if (leaked.length > 0) {
-      throw new SplitSmokeAssertionError(
-        `NOT_QUIESCED: ${String(leaked.length)} selected-run process(es) are still alive after cleanup: `
-          + leaked.map(identity => `${identity.role}:${String(identity.pid)}`).join(', '),
-      )
-    }
     if (entry.status === 'PASS') {
       process.stdout.write(`${selectedPassLine(entry.id, LANE_PLATFORM)}\n`)
     } else {
@@ -1096,14 +1108,22 @@ async function announceSelectedVerdicts(selected, candidateFacts) {
     }
     const hosts = entry.identities.filter(identity => identity.role === 'host')
     const clients = entry.identities.filter(identity => identity.role !== 'host')
+    // <pid>:<instanceId>:<kernel uniqueId — the macOS process identity fact the
+    // plan requires, never a Linux /proc value.
     const hostFacts = hosts
-      .map(identity => `${String(identity.pid)}${identity.instanceId === undefined ? '' : `:${identity.instanceId}`}`)
+      .map(identity => [
+        String(identity.pid),
+        identity.instanceId ?? '',
+        identity.kernelUniqueId ?? '',
+      ].join(':'))
       .join(',')
     const clientFacts = clients.map(identity => String(identity.pid)).join(',')
+    const sessionIds = [...new Set(clients.flatMap(identity => identity.sessionIds ?? []))]
     process.stdout.write(
       `SPLIT_PROCESS_SELECTED_FACTS id=${entry.id} platform=${LANE_PLATFORM}`
         + ` candidate=${candidateFacts.candidateSha256} pin=${candidateFacts.targetDshVersion}`
         + ` hosts=${hostFacts === '' ? 'none' : hostFacts} clients=${clientFacts === '' ? 'none' : clientFacts}`
+        + ` sessions=${sessionIds.length === 0 ? 'none' : sessionIds.join(',')}`
         + ` quiesced=true\n`,
     )
   }
@@ -1116,6 +1136,21 @@ async function announceSelectedVerdicts(selected, candidateFacts) {
  * preflight from a non-Linux host. Nothing else reads it.
  */
 const LANE_PLATFORM = process.env.SPLIT_PROCESS_TEST_PLATFORM === 'linux' ? 'linux' : process.platform
+
+/**
+ * The ONE machine-visible NOT_VERIFIED boundary line. A case that deliberately
+ * did not execute one qualified scene reports it here, so the evidence carries
+ * the fact (never a checkpoint name alone) and a reader can never mistake the
+ * boundary for a pass.
+ */
+function emitBoundaryNotVerified(caseId, { boundary, reason }) {
+  assert(typeof boundary === 'string' && boundary !== '', 'a boundary report needs a name')
+  assert(typeof reason === 'string' && reason !== '', 'a boundary report needs its blocker')
+  process.stdout.write(
+    `SPLIT_PROCESS_BOUNDARY_NOT_VERIFIED id=${String(caseId)}`
+      + ` platform=${LANE_PLATFORM} boundary=${boundary} reason=${reason}\n`,
+  )
+}
 
 /** Strict CLI dispatch: `--list`, the old full run, or one selected case set. */
 async function runLane() {

@@ -11,47 +11,50 @@
  */
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { operatorRecoveryMayRetry } from '../../src/app/remote-process/local-transport.ts'
+import { operatorRecoveryDecision } from '../../src/app/remote-process/local-transport.ts'
 
 const ORIGIN = 'http://127.0.0.1:6553'
 
-test('a replayable unary request may be retried once', () => {
-  assert.equal(operatorRecoveryMayRetry(
+test('a replayable unary request rebuilds the operator and is retried once', () => {
+  assert.deepEqual(operatorRecoveryDecision(
     `${ORIGIN}/api/session/list`,
     { method: 'POST', body: JSON.stringify({ args: [] }) },
     ORIGIN,
-  ), true)
-  assert.equal(operatorRecoveryMayRetry('/api/session/list', { method: 'GET' }, ORIGIN), true)
+  ), { rebuild: true, retry: true })
+  assert.deepEqual(operatorRecoveryDecision('/api/session/list', { method: 'GET' }, ORIGIN), { rebuild: true, retry: true })
 })
 
-test('a forwarded-event result is never retried, whoever asks', () => {
-  assert.equal(operatorRecoveryMayRetry(
+test('a forwarded-event result is neither rebuilt nor retried here', () => {
+  // Its clientId belongs to the stream/Peer that received the invocation: the
+  // Gateway's own generation abort + Host re-delivery owns the recovery.
+  assert.deepEqual(operatorRecoveryDecision(
     `${ORIGIN}/api/$events/result`,
     { method: 'POST', body: JSON.stringify({ args: {} }) },
     ORIGIN,
-  ), false)
+  ), { rebuild: false, retry: false })
   // The relative route resolves against the Host origin exactly like the
   // official rpc caller sends it.
-  assert.equal(operatorRecoveryMayRetry(
-    'api/$events/result',
-    { method: 'POST', body: '{}' },
-    ORIGIN,
-  ), false)
+  assert.deepEqual(operatorRecoveryDecision('api/$events/result', { method: 'POST', body: '{}' }, ORIGIN),
+    { rebuild: false, retry: false })
 })
 
-test('a body the transport cannot replay is not re-sent', () => {
+test('a non-replayable body still rebuilds the connection but is not re-sent', () => {
+  // A dead operator affects EVERY route: the upload cannot be replayed, but the
+  // connection must be rebuilt so the user's next request is not 401ed forever.
   const stream = new ReadableStream()
-  assert.equal(operatorRecoveryMayRetry(`${ORIGIN}/api/upload`, { method: 'POST', body: stream }, ORIGIN), false)
+  assert.deepEqual(operatorRecoveryDecision(`${ORIGIN}/api/upload`, { method: 'POST', body: stream }, ORIGIN),
+    { rebuild: true, retry: false })
   const form = new FormData()
-  assert.equal(operatorRecoveryMayRetry(`${ORIGIN}/api/upload`, { method: 'POST', body: form }, ORIGIN), false)
+  assert.deepEqual(operatorRecoveryDecision(`${ORIGIN}/api/upload`, { method: 'POST', body: form }, ORIGIN),
+    { rebuild: true, retry: false })
 })
 
 test('an already-aborted request is not retried', () => {
   const controller = new AbortController()
   controller.abort(new Error('cancelled'))
-  assert.equal(operatorRecoveryMayRetry(
+  assert.deepEqual(operatorRecoveryDecision(
     `${ORIGIN}/api/session/list`,
     { method: 'POST', body: '{}', signal: controller.signal },
     ORIGIN,
-  ), false)
+  ), { rebuild: true, retry: false })
 })

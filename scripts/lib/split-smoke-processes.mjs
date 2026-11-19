@@ -96,14 +96,17 @@ function publishedIdentityFacts(process) {
         : { kernelUniqueId: String(localHost.hostKernelIdentity.uniqueId) }),
     }
   }
-  const status = [...process.records]
-    .reverse()
-    .find(record => record.m4b2s === 'surface-status' && record.host !== undefined)
+  const statuses = process.records.filter(record => record.m4b2s === 'surface-status')
+  const status = [...statuses].reverse().find(record => record.host !== undefined)
+  const sessionIds = [...new Set(statuses
+    .map(record => record.openSessionId)
+    .filter(sessionId => typeof sessionId === 'string' && sessionId !== ''))]
   return {
     role: process.role,
     pid: typeof status?.pid === 'number' ? status.pid : pid,
     ...(typeof status?.host?.hostPid === 'number' ? { hostPid: status.host.hostPid } : {}),
     ...(typeof status?.host?.instanceId === 'string' ? { instanceId: status.host.instanceId } : {}),
+    ...(sessionIds.length === 0 ? {} : { sessionIds }),
   }
 }
 
