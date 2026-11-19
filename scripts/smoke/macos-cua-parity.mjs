@@ -1744,10 +1744,14 @@ async function sceneSplit({ installation, workRoot, report, textEditPid }) {
   // the resumed Client neither repaints the Question nor answers it.
   const staleResults = cuaResults(eventsOf(dshHome, reconnect.sessionId), 0)
     .filter(item => item.subCallId === reconnect.dispatch.subCallId)
+  // The official disconnect classification is carried by the structured error
+  // envelope (`error.code`), not by the model-facing sentence (whose message
+  // text does not repeat the uppercase code).
+  const settleCode = item => item.error?.code ?? dispatchErrorCode(item)
   const disconnectSettles = staleResults.filter(item => item.isError === true
-    && dispatchErrorCode(item) === 'ASK_ABORTED')
+    && settleCode(item) === 'ASK_ABORTED')
   const lateAnswers = staleResults.filter(item => !(item.isError === true
-    && dispatchErrorCode(item) === 'ASK_ABORTED'))
+    && settleCode(item) === 'ASK_ABORTED'))
   assert(lateAnswers.length === 0,
     `MAC09-10: the dead Client's dispatch settled by something other than the official disconnect abort: ${
       JSON.stringify(lateAnswers.map(item => ({
