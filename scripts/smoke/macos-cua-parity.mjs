@@ -1524,9 +1524,10 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
   const shotEvents = eventsOf(dshHome, screenshot.sessionId)
   const shotDispatches = cuaDispatches(shotEvents, screenshot.afterIndex)
     .filter(dispatch => dispatch.rootCallId === screenshot.dispatch.rootCallId)
-  assert(JSON.stringify(shotDispatches.map(dispatchMethod))
+  const shotSequence = shotDispatches.map(dispatchMethod)
+  assert(JSON.stringify(shotSequence)
     === JSON.stringify(['getApp', 'listWindows', 'screenshot']),
-  'MAC09-07: the controlled root dispatched an unexpected cua method sequence')
+  `MAC09-07: the controlled root dispatched an unexpected cua method sequence: ${JSON.stringify(shotSequence)}`)
   const shotGetApp = shotDispatches.find(dispatch => dispatchMethod(dispatch) === 'getApp')
   const shotWindows = shotDispatches.find(dispatch => dispatchMethod(dispatch) === 'listWindows')
   const shotDispatch = shotDispatches.find(dispatch => dispatchMethod(dispatch) === 'screenshot')
@@ -1650,9 +1651,10 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
   const showDispatch = liveInputDispatches().find(dispatch => dispatchMethod(dispatch) === 'show')
   const activateDispatch = liveInputDispatches().find(dispatch => dispatchMethod(dispatch) === 'activate')
   const typeDispatch = liveInputDispatches().find(dispatch => dispatchMethod(dispatch) === 'typeText')
-  assert(JSON.stringify(liveInputDispatches().map(dispatchMethod))
+  const inputSequence = liveInputDispatches().map(dispatchMethod)
+  assert(JSON.stringify(inputSequence)
     === JSON.stringify(['getApp', 'listWindows', 'show', 'activate', 'typeText', 'getState']),
-  'MAC09-08: the controlled root dispatched an unexpected cua method sequence')
+  `MAC09-08: the controlled root dispatched an unexpected cua method sequence: ${JSON.stringify(inputSequence)}`)
   assert(getAppDispatch !== undefined && dispatchParams(getAppDispatch)?.selector === String(textEditPid),
     'MAC09-08: the official getApp did not select this run\'s exact TextEdit PID')
   const inputEventsNow = eventsOf(dshHome, input.sessionId)
