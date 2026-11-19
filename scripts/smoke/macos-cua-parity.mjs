@@ -1156,6 +1156,12 @@ async function stopBlankTextEdit(textEdit) {
 
 // ── report / case bookkeeping ──────────────────────────────────────────────
 
+/** The checkout revision whose scripts/ judged this run ('' when unavailable). */
+function gitRevision() {
+  const result = spawnSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8', timeout: 10_000 })
+  return result.status === 0 ? result.stdout.trim() : ''
+}
+
 function makeReport({ candidate, preflight, installation, model, helper }) {
   return {
     schemaVersion: 1,
@@ -1171,6 +1177,10 @@ function makeReport({ candidate, preflight, installation, model, helper }) {
       sha256: candidate.candidateSha256,
       version: candidate.manifest.version,
       dshPin: candidate.targetDshVersion,
+      // The tarball does NOT contain scripts/, so the LANE logic that judged
+      // this run comes from the checkout: record that revision so lane-only
+      // changes can never ride on an unchanged product sha.
+      laneRevision: gitRevision(),
     },
     isolatedProfile: {
       dshHome: installation.dshHome,
