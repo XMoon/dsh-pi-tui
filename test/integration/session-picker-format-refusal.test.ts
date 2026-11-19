@@ -9,9 +9,8 @@
  *
  * FIXTURE (real): the runner + real TuiApp on a virtual terminal, the real
  * `/sessions` command and picker path. STAND-IN: the resume operation itself
- * (the harness rejects with the OFFICIAL refusal message the persistence
- * throws). ABSENT: a corrupt artifact on disk (the reader-level proof lives in
- * `session-v4-rc2-persistence.test.ts`).
+ * (the harness supplies a newer-format refusal). On-disk format admission and
+ * migration belong to official DSH persistence and its own tests.
  *
  * @module @xmoon76/dsh-pi-tui/session-picker-format-refusal.test
  */

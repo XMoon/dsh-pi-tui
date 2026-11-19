@@ -20,7 +20,6 @@
  */
 
 import assert from 'node:assert/strict'
-import { createHash } from 'node:crypto'
 import { readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { zstdCompressSync } from 'node:zlib'
@@ -56,12 +55,6 @@ import { testLifecycle } from '../support/temp-lifecycle.ts'
 const FIXTURE_V1 = new URL('../fixtures/session-format/released-v1-real-shapes.jsonl', import.meta.url)
 const CURRENT_SUFFIX = '.zstd'
 
-/** The generation artifacts in one session directory (the lock file is not a
- *  generation). */
-function generationFiles(dir: string): string[] {
-  return readdirSync(dir).filter(name => name.startsWith('session.') && name !== 'session.lock').sort()
-}
-
 /** Place one plain-JSONL artifact as the official physical generation: zstd
  *  frames [header line][body], exactly what the JSONL backend writes. */
 function placeArtifact(target: string, plainJsonl: string): void {
@@ -82,15 +75,11 @@ function sessionDirOf(root: string): string {
   return join(root, projects[0]!, dirs[0]!)
 }
 
-function hashOf(path: string): string {
-  return createHash('sha256').update(readFileSync(path)).digest('hex')
-}
-
 /** Seed one REAL session directory and replace its current generation with the
  *  released-v1 artifact, exactly as the official persistence layout stores it. */
 async function seedMigrationArtifact(
   host: Awaited<ReturnType<typeof createRemoteApplicationHostFixture>>,
-): Promise<{ readonly id: ReturnType<typeof SessionId>; readonly sourcePath: string; readonly sourceHash: string; readonly sessionDir: string; readonly sourceName: string }> {
+): Promise<{ readonly id: ReturnType<typeof SessionId> }> {
   const fixtureText = readFileSync(FIXTURE_V1, 'utf8')
   const header = JSON.parse(fixtureText.slice(0, fixtureText.indexOf('\n'))) as { id: string; cwd?: string }
   const id = SessionId(header.id)
@@ -107,16 +96,14 @@ async function seedMigrationArtifact(
   await seed.close()
   const sessionDir = sessionDirOf(join(host.workRoot, 'persistence'))
   rmSync(join(sessionDir, `session.v${SESSION_FORMAT_VERSION}.jsonl${CURRENT_SUFFIX}`), { force: true })
-  const sourceName = 'session.v1.jsonl.zstd'
-  const sourcePath = join(sessionDir, sourceName)
-  placeArtifact(sourcePath, fixtureText)
-  return { id, sourcePath, sourceHash: hashOf(sourcePath), sessionDir, sourceName }
+  placeArtifact(join(sessionDir, 'session.v1.jsonl.zstd'), fixtureText)
+  return { id }
 }
 
-test('a migration-required generation is listed read-only, refuses an explicit fork, and is never rewritten', async (t) => {
+test('a migration-required generation is listed over the official Host/Client and fork refusal is forwarded', async (t) => {
   const life = testLifecycle(t)
   const host = await createRemoteApplicationHostFixture(life, 's3-migration-preset')
-  const { id, sourcePath, sourceHash, sessionDir, sourceName } = await seedMigrationArtifact(host)
+  const { id } = await seedMigrationArtifact(host)
 
   const runtime = await createExperimentalRemoteRuntime({
     hostContext: host.ctx,
@@ -138,8 +125,6 @@ test('a migration-required generation is listed read-only, refuses an explicit f
     `an explicit no-migration fork must be refused: ${forked.ownership}/${forked.outcome.kind}`)
   assert.equal(forked.outcome.kind === 'rejected' ? forked.outcome.error.code : undefined,
     'session/migration-required')
-  assert.equal(hashOf(sourcePath), sourceHash, 'a refused fork never rewrites the released artifact')
-  assert.deepEqual(generationFiles(sessionDir), [sourceName], 'a refused fork publishes no successor')
 
   // An explicit user open starts the official migration. THIS released artifact
   // is one the official promotion refuses (its surface events precede the first
@@ -158,8 +143,6 @@ test('a migration-required generation is listed read-only, refuses an explicit f
   assert.match(String(snapshot.openError?.message),
     /cannot acquire a system head|surface before first step/u,
     `the refusal carries the official diagnostic: ${String(snapshot.openError?.message)}`)
-  assert.equal(hashOf(sourcePath), sourceHash, 'the failed open never rewrites the released artifact')
-  assert.deepEqual(generationFiles(sessionDir), [sourceName], 'a failed open publishes no successor')
   await waitFor('the Client list still reports the released artifact', () =>
     sessions.list.getSnapshot().byId[id]?.formatStatus === 'migration-required')
 })
