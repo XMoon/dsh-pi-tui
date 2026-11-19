@@ -1259,7 +1259,8 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
   // bundle being enabled on the Host says nothing about the standard preset's
   // tool admission.
   await sendKeys(tui, '/preset default standard', 'MAC09-02 standard preset')
-  await sendKeys(tui, '/new', 'MAC09-02 standard Session')
+  await waitComposer(tui, 'MAC09-02 standard preset settled')
+  await newSession(tui, 'MAC09-02 standard Session')
   const enabledNegative = await promptAndRequireNoCua({
     tui,
     dshHome,
@@ -1274,6 +1275,7 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
   // The rest of the lane runs PTC Sessions: restore the shipped default so the
   // negative above cannot change later cases' admission.
   await sendKeys(tui, '/preset default ptc', 'MAC09-02 restore PTC default')
+  await waitComposer(tui, 'MAC09-02 PTC default restored')
   await newSession(tui, 'MAC09-02 restore PTC Session')
   pushRow(report, 'MAC09-02', 'PASS', {
     sessionId: sha16(capabilities.sessionId),
