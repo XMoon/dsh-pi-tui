@@ -90,6 +90,7 @@
     "bundle": {
       "patch": [
         "./cordis.patch.yml",
+        "./generated/web-access/cordis.patch.yml",
         "./generated/dsh-presets/standard.patch.yml",
         "./generated/dsh-presets/ptc.patch.yml",
         "./generated/dsh-presets/minimal.patch.yml",
@@ -328,7 +329,7 @@
     "clean": "rm -rf dist",
     "clean:fork": "pnpm --dir packages/pi-tui clean",
     "build:fork": "pnpm --dir packages/pi-tui build",
-    "build:bundle": "pnpm gen:dsh-presets && tsdown && node scripts/copy-pi-darwin-native.mjs",
+    "build:bundle": "pnpm gen:dsh-presets && pnpm gen:web-access && tsdown && node scripts/copy-pi-darwin-native.mjs",
     "build": "pnpm build:fork && pnpm build:bundle",
     "typecheck:fork": "pnpm --dir packages/pi-tui typecheck",
     "typecheck:bundle": "tsc -p tsconfig.json --noEmit",
@@ -394,6 +395,8 @@
     "test:tooling": "node scripts/run-test-lane.mjs tooling",
     "test:product": "node scripts/run-test-lane.mjs product",
     "gen:dsh-presets": "node scripts/generate-dsh-presets.mjs",
+    "gen:web-access": "node --import tsx/esm scripts/generate-web-access-patch.mjs",
+    "gate:web-access-patch": "node --import tsx/esm scripts/generate-web-access-patch.mjs --check",
     "gate:dsh-preset-parity": "node scripts/generate-dsh-presets.mjs --check",
     "smoke:job-controller-profile": "node scripts/dsh-job-controller-profile-smoke.mjs",
     "smoke:optional-bundles": "node scripts/dsh-optional-bundles-smoke.mjs",

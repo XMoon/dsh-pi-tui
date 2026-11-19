@@ -20,16 +20,17 @@
  * concurrent serialized mutation (`changing`) from a settled state.
  *
  * Every mutation goes through `Entry.update({ disabled })` on the rows the
- * Host-only overlay already declares — never `loader.update()`, never a
- * `ConfigEditor`/plugin-manager write, never `cordis.patch.yml`. The toggle is
- * therefore ephemeral by construction: a cold boot starts from the overlay's
- * default-off rows, and only the profile's own `pi-tui-web-preferences.autoStart`
- * preference (a separate, durable next-launch fact) can ask the boot sequence to
- * enable the same roster before Ready.
+ * BUNDLE declares (generated from this same roster) — never `loader.update()`,
+ * never a `ConfigEditor`/plugin-manager write, never `cordis.patch.yml`. The
+ * toggle is therefore ephemeral by construction: a cold boot starts from the
+ * bundle's default-off rows, and only the profile's own
+ * `pi-tui-web-preferences.autoStart` preference (a separate, durable
+ * next-launch fact) can ask the boot sequence to enable the same roster before
+ * Ready.
  *
  * PROFILE RECOMPOSITION: the official settings write (`SettingsForms.mutate` →
  * `ConfigEditor.edit`) reconciles the whole profile patch stack before and after
- * writing the user patch, and `recompose()` re-applies this overlay's declarative
+ * writing the user patch, and `recompose()` re-applies the bundle's declarative
  * `disabled: true` rows — which would otherwise silently disable a running Web
  * frontend whenever the user saves ANY setting. The service therefore keeps the
  * current Host lifetime's last SUCCESSFULLY requested enablement as a TARGET
@@ -91,7 +92,7 @@ const SHARED_HOST_SERVICES = ['mcpManager'] as const
 const BROWSER_GRAPH_ROWS = ['modules', 'client-hmr', 'cordis-client-runner', 'terminal-controller'] as const
 const SPA_ROW = 'web-runtime'
 
-/** The Browser presentation rows, in the overlay's canonical order. */
+/** The Browser presentation rows, in the production roster's canonical order. */
 const PRESENTATION_ROWS = PI_TUI_WEB_ACCESS_ROWS
   .map(row => row.id)
   .filter(id => id !== SPA_ROW && !(BROWSER_GRAPH_ROWS as readonly string[]).includes(id))
@@ -197,7 +198,7 @@ export class PiTuiWebAccessHostService extends TypertRemoteService {
    */
   constructor(ctx: Context) {
     super(ctx, PI_TUI_WEB_ACCESS_NAMESPACE)
-    // The official profile recomposition re-applies this overlay's declarative
+    // The official profile recomposition re-applies the bundle's declarative
     // `disabled: true` rows. Restore THIS Host's live target after it settled,
     // through the one serialized mutation queue. The event is the official
     // post-settlement signal; there is no earlier hook.
