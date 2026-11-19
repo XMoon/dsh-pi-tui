@@ -13,6 +13,7 @@
  * @module @xmoon76/dsh-pi-tui/runtime/direct/cua-access-direct
  */
 
+import { symbols } from '@deepseek-ai/cordis'
 import {
   CuaAccessUnavailableError,
   type CuaAccessObservation,
@@ -52,9 +53,20 @@ export class DirectCuaAccessPort implements CuaAccessPort {
   readonly observation: CuaAccessObservation = {
     // The service VALUE itself is the Direct observation basis: a plugin reload
     // can replace the provider while it stays present, and a present/absent
-    // boolean would let an old confirmation dispatch to the new service. Every
-    // read/action compares this object before touching the new provider.
-    readSnapshot: () => this.ctx.get('cuaAccess'),
+    // boolean would let an old confirmation dispatch to the new service.
+    //
+    // Cordis resolves every `ctx.get(service)` through a fresh traceable proxy,
+    // so the raw value changes on EVERY read and can never be an identity
+    // basis. Unwrap to the underlying service object first (the same rule the
+    // Direct Settings authority follows); a real provider replacement changes
+    // that underlying object, while repeat reads of one generation stay
+    // identical.
+    readSnapshot: () => {
+      const service = this.ctx.get('cuaAccess') as
+        | (CuaAccessServiceLike & { readonly [symbols.original]?: CuaAccessServiceLike })
+        | undefined
+      return service === undefined ? undefined : service[symbols.original] ?? service
+    },
     subscribe: () => () => {},
   }
 

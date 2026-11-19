@@ -15,6 +15,7 @@ import { DIRECT_CUA_ACCESS_REASON, DirectCuaAccessPort } from '../../src/runtime
 import { CuaAccessUnavailableError, type CuaApplicationState, type CuaPtcConfiguration, type CuaSystemStatus } from '../../src/runtime/cua-access-port.ts'
 import { RemoteCuaAccessPort, type RemoteCuaAccessNamespace } from '../../src/runtime/remote/cua-access-remote.ts'
 import { SupersededReadError } from '../../src/runtime/read-error.ts'
+import { symbols } from '@deepseek-ai/cordis'
 
 const STATUS: CuaSystemStatus = {
   platform: 'darwin',
@@ -30,6 +31,32 @@ const APPLICATIONS: CuaApplicationState = {
   persistentAvailable: true,
 }
 const PTC: CuaPtcConfiguration = { persistent: false, writable: true }
+
+
+test('the Direct observation basis is the unwrapped service identity, not a fresh Cordis proxy', () => {
+  const service = {
+    systemStatus: async () => STATUS,
+    applications: async () => APPLICATIONS,
+    applicationIcons: async () => ({}),
+    ptcConfiguration: () => PTC,
+    requestPermission: async () => STATUS,
+    openSettings: async () => {},
+    enablePersistentPtc: async () => {},
+    revoke: async () => {},
+    retryApproval: async () => {},
+  }
+  // Cordis resolves every get through a new traceable proxy whose
+  // [symbols.original] is the one underlying service. A page/action basis must
+  // compare that underlying identity, or every read looks like a replacement.
+  const ctx = { get: (name: string): unknown => name === 'cuaAccess' ? { [symbols.original]: service } : undefined }
+  const port = new DirectCuaAccessPort(ctx)
+  const first = port.observation.readSnapshot()
+  const second = port.observation.readSnapshot()
+  assert.equal(first, service, 'the basis unwraps the proxy to the service object')
+  assert.equal(second, first, 'repeat reads of one generation are identical')
+  assert.equal(new DirectCuaAccessPort({ get: () => undefined }).observation.readSnapshot(), undefined,
+    'an absent provider is undefined, never a proxy')
+})
 
 test('Direct CUA access resolves the official service per call and fails closed without it', async () => {
   let service: {

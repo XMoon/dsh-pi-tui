@@ -407,26 +407,22 @@ export class CuaAccessSettingsController {
       // a provider that changes again during the read keeps the action
       // refused (the genuine fail-closed case).
       await this.invalidateObservation()
-      // A page read can itself surface a provider status event that replaces
-      // the basis once more; refusing forever after that turns a fresh action
-      // into an unrecoverable NOT-dispatched receipt. The action is admissible
-      // while the provider still EXISTS; an absent provider is the genuine
-      // fail-closed case. The adopted basis is this dispatch's own generation.
-      const settled = this.deps.cuaAccess.observation.readSnapshot()
-      if (settled === undefined) {
+      // A genuine provider replacement DURING the refresh still keeps the
+      // action refused (the fresh basis could not be attributed to the page
+      // the user acted on); only a settled refresh may re-admit the action.
+      if (!Object.is(this.deps.cuaAccess.observation.readSnapshot(), this.observedBasis)) {
         this.patch({
           action: {
             ...receipt,
             kind,
             state: 'unknown',
-            text: 'The Host CUA provider is gone; the action was NOT dispatched. Refresh before retrying.',
+            text: 'The Host CUA provider changed again while refreshing; the action was NOT dispatched. Refresh before retrying.',
             at: Date.now(),
           },
           busy: false,
         })
         return
       }
-      this.observedBasis = settled
     }
     this.actionInFlight = true
     const epoch = this.epoch
