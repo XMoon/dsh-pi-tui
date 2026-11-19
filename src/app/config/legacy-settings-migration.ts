@@ -20,7 +20,7 @@
  *   `displayPreset` (canonical valid → copy, else focusMode 'on' → focus,
  *   else full) and is never carried as a canonical field.
  *
- * @module @xmoon76/dsh-pi-tui/app/bootstrap/legacy-settings-migration
+ * @module @xmoon76/dsh-pi-tui/app/config/legacy-settings-migration
  */
 
 import { existsSync } from 'node:fs'

@@ -32,7 +32,7 @@ import { DirectTuiSettings, type TuiConfigRefs } from '../../src/runtime/direct/
 import {
   migrateProfileTuiPreferences,
   type ProfileConfigEditorLike,
-} from '../../src/app/bootstrap/profile-preferences-migration.ts'
+} from '../../src/app/config/profile-preferences-migration.ts'
 import {
   mountPreferencesSettingsPlane,
   PREFERENCES_ROW_ID as ROW_ID,

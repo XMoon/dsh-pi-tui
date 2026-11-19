@@ -25,13 +25,13 @@
  * The migrator is Host-owned. A Split Client never reads the Host Profile and
  * never triggers it.
  *
- * @module @xmoon76/dsh-pi-tui/app/bootstrap/profile-preferences-migration
+ * @module @xmoon76/dsh-pi-tui/app/config/profile-preferences-migration
  */
 
 import { readFileSync } from 'node:fs'
 import { isDeepStrictEqual } from 'node:util'
 import { parse as parseYaml } from 'yaml'
-import { PREFERENCE_FIELD_NAMES, PreferencesConfig } from '../config/schema.ts'
+import { PREFERENCE_FIELD_NAMES, PreferencesConfig } from './schema.ts'
 import {
   legacyPreferenceValues,
   legacyPresetDefault,
@@ -40,7 +40,7 @@ import {
   type LegacyPresetResolver,
   type MigrationDiagLike,
 } from './legacy-settings-migration.ts'
-import type { SettingsFormsLike } from '../../runtime/direct/tui-settings-direct.ts'
+import type { SettingsFormsLike } from '../../runtime/config-port.ts'
 
 /** The canonical Loader row id / Settings namespace. */
 export const TUI_PREFERENCES_NAMESPACE = 'pi-tui-preferences'

@@ -23,8 +23,8 @@ import {
   TuiPreferencesMigrationError,
   type ProfileConfigEditorLike,
   type ProfilePreferencesMigrationInput,
-} from '../../src/app/bootstrap/profile-preferences-migration.ts'
-import type { MigrationDiagLike } from '../../src/app/bootstrap/legacy-settings-migration.ts'
+} from '../../src/app/config/profile-preferences-migration.ts'
+import type { MigrationDiagLike } from '../../src/app/config/legacy-settings-migration.ts'
 import type { SettingsFormsLike, TuiSettingsDescriptorLike, TuiSettingsPathOp } from '../../src/runtime/direct/tui-settings-direct.ts'
 
 const CANONICAL = 'pi-tui-preferences'

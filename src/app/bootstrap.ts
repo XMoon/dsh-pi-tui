@@ -83,7 +83,7 @@ import { projectedPlanActive, type PlanProjectionLike } from '../domain/status/d
 import {
   migrateProfileTuiPreferences,
   type ProfileConfigEditorLike,
-} from './bootstrap/profile-preferences-migration.ts'
+} from './config/profile-preferences-migration.ts'
 import type { TuiConfigRefs } from '../runtime/direct/tui-settings-direct.ts'
 import { color } from '../tui/theme/runtime.ts'
 import type { TuiApp } from '../tui-app.ts'

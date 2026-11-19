@@ -102,6 +102,34 @@ export interface TuiSettingsDoc {
   keybindings?: unknown
 }
 
+/** The structural 0.1.7 SettingsForms surface the TUI preference writers use
+ * (the service resolves from the dsh installation; this is never a package
+ * dependency). Shared by the Direct adapter and the Host-owned migration so a
+ * non-Direct owner never imports the Direct adapter module. */
+export interface SettingsFormsLike {
+  describe(options?: { readonly redactSecrets?: boolean }): readonly TuiSettingsDescriptorLike[] | undefined
+  mutate(
+    ns: string,
+    ops: readonly TuiSettingsPathOp[],
+    expectedRevision?: number,
+  ): Promise<unknown>
+}
+
+/** The descriptor slice the TUI preference writers/trust reads consume. */
+export interface TuiSettingsDescriptorLike {
+  readonly ns: string
+  /** The form-projected EFFECTIVE value (volatile fields only). */
+  readonly value?: unknown
+  /** The form-projected USER profile override. */
+  readonly user?: unknown
+  readonly revision?: number
+}
+
+/** One path-addressed form edit (the 0.1.7 `SettingsPathOp` shape). */
+export type TuiSettingsPathOp =
+  | { readonly op: 'set'; readonly path: readonly string[]; readonly value: unknown }
+  | { readonly op: 'unset'; readonly path: readonly string[] }
+
 /** The canonical profile row id / Settings namespace for the durable TUI
  * preferences (M6 PR-A). Every backend reads and writes this ONE row; the
  * retired `tui-app` / `split-host-pi-tui-runtime` namespaces are migration

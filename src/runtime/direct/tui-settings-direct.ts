@@ -25,7 +25,18 @@
  */
 
 import type { Volatile } from '@deepseek-ai/cordis'
-import type { TuiSettingsConfig, TuiSettingsDoc } from '../config-port.ts'
+import type {
+  SettingsFormsLike,
+  TuiSettingsConfig,
+  TuiSettingsDescriptorLike,
+  TuiSettingsDoc,
+  TuiSettingsPathOp,
+} from '../config-port.ts'
+
+// Kept as named exports of this module for the existing Direct tests and
+// adapters; the ONE definition lives in the neutral runtime port so the
+// Host-owned migration can use it without importing a Direct module.
+export type { SettingsFormsLike, TuiSettingsDescriptorLike, TuiSettingsPathOp } from '../config-port.ts'
 
 /** The preference row's live references (the runtime shape schemastery
  * produces for the `.volatile()` fields declared by `PREFERENCE_FIELDS`).
@@ -55,32 +66,6 @@ export interface TuiConfigRefs {
   /** Internal one-shot legacy-migration marker; never a product row. */
   readonly legacySettingsMigrationVersion: Volatile<number>
 }
-
-/** The structural 0.1.7 SettingsForms surface the writer needs (the service
- * resolves from the dsh installation; this is never a package dependency). */
-export interface SettingsFormsLike {
-  describe(options?: { readonly redactSecrets?: boolean }): readonly TuiSettingsDescriptorLike[] | undefined
-  mutate(
-    ns: string,
-    ops: readonly TuiSettingsPathOp[],
-    expectedRevision?: number,
-  ): Promise<unknown>
-}
-
-/** The descriptor slice the writer/trust reads consume. */
-export interface TuiSettingsDescriptorLike {
-  readonly ns: string
-  /** The form-projected EFFECTIVE value (volatile fields only). */
-  readonly value?: unknown
-  /** The form-projected USER profile override. */
-  readonly user?: unknown
-  readonly revision?: number
-}
-
-/** One path-addressed form edit (the 0.1.7 `SettingsPathOp` shape). */
-export type TuiSettingsPathOp =
-  | { readonly op: 'set'; readonly path: readonly string[]; readonly value: unknown }
-  | { readonly op: 'unset'; readonly path: readonly string[] }
 
 /** Whether two whole-value field snapshots are observationally equal (the
  * fields are JSON-shaped persisted data; a stable key order keeps the

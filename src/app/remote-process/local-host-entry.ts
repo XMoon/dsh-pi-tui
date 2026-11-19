@@ -48,8 +48,8 @@ import {
   type ProcessSeat,
 } from './local-scope.ts'
 import { runDetached } from '../../runtime/process/tasks.ts'
-import type { ProfileConfigEditorLike } from '../bootstrap/profile-preferences-migration.ts'
-import type { SettingsFormsLike } from '../../runtime/direct/tui-settings-direct.ts'
+import type { ProfileConfigEditorLike } from '../config/profile-preferences-migration.ts'
+import type { SettingsFormsLike } from '../../runtime/config-port.ts'
 import {
   PI_TUI_WEB_ACCESS_NAMESPACE,
   type PiTuiWebAccessStatus,
@@ -1326,7 +1326,7 @@ async function runLocalHostEntryOwned(options: LocalHostEntryOptions, scratchOwn
       // graph must not import the Schemastery-backed preference schema before
       // the launcher installed the official package resolution. The same
       // reason `host-bootstrap.ts` is a dynamic import above.
-      const { migrateProfileTuiPreferences } = await import('../bootstrap/profile-preferences-migration.ts')
+      const { migrateProfileTuiPreferences } = await import('../config/profile-preferences-migration.ts')
       await migrateProfileTuiPreferences({
         patchPath: profileContext.patchPath,
         configEditor: settled.ctx.get('configEditor') as ProfileConfigEditorLike | undefined,
