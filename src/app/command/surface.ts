@@ -748,16 +748,22 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
 
   const skillsChangeGate = new CoalescingRefreshGate(() => {
     runOwned('skills/change refresh', async () => {
-      const refresh = catalogRefreshRequest
-      if (refresh === undefined) return undefined
       const remote = deps.backend.kind !== 'direct'
       // The Host invalidation stream emits its subscribe→reread startup frame
       // as soon as it is attached, which can precede the launch Workspace
       // preflight. Wait for that EXISTING single-flight barrier and re-read
       // every owner fact below — never a target captured before the wait.
       if (remote && deps.ownership.currentSessionId() === undefined) {
+        if (catalogRefreshRequest === undefined) return undefined
         await deps.session.awaitWorkspacePreflight?.()
       }
+      // Re-read the refresh slot AFTER the wait. `disposeCatalog()` retires the
+      // coordinator and this slot while a continuation is still pending; a
+      // retired surface owns nothing to refresh, so the continuation is a
+      // no-op (never a call through the disposed coordinator, never a false
+      // `catalog refresh failed` notice on exit).
+      const refresh = catalogRefreshRequest
+      if (refresh === undefined) return undefined
       const sessionId = remote ? deps.ownership.currentSessionId() : undefined
       const liveAgent = remote ? undefined : deps.liveAgent()
       if (sessionId !== undefined) {
@@ -1366,7 +1372,11 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
                   // Workspace preflight. Wait for that EXISTING single-flight
                   // completion, then re-read the owner and the confirmed
                   // Host WorkspaceId at execution time.
+                  if (catalogRefreshRequest === undefined) return undefined
                   await deps.session.awaitWorkspacePreflight?.()
+                  // The surface may have retired while waiting: the retired
+                  // refresh slot owns no continuation and must not error.
+                  if (catalogRefreshRequest === undefined) return undefined
                   const currentSessionId = deps.ownership.currentSessionId()
                   if (currentSessionId !== undefined) {
                     return refreshLiveCatalogById(currentSessionId, 'invalidation')

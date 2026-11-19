@@ -212,8 +212,11 @@ function fakeRunnerDeps(options: {
   readonly awaitWorkspacePreflight?: () => Promise<void>
   /** The user-visible notice sink (the stale-selection assertions). */
   readonly notify?: (message: string, kind: 'info' | 'error' | undefined) => void
+  /** The diagnostics sink (the retired-continuation assertions). */
+  readonly diag?: import('../../src/runtime/process/diagnostics.ts').Diag
 }) {
   const ctx = new Context()
+  const diag = options.diag ?? silentDiag
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   startedApps.add(app)
@@ -236,7 +239,7 @@ function fakeRunnerDeps(options: {
     deliveredFilesSnapshot: () => undefined,
     ctx,
     app,
-    diag: silentDiag,
+    diag,
     ...sessionScopeFacts(() => undefined, () => 0),
     sessionPolicy: unconfiguredSessionPolicyPort(),
     policy: unconfiguredPolicyObservation(),
@@ -324,7 +327,7 @@ function fakeRunnerDeps(options: {
   const surface = createCommandSurface<ModelSelectionValue, string, never>({
     ctx,
     logError: () => {},
-    diag: silentDiag,
+    diag,
     policy: unconfiguredPolicyObservation(),
     signal: options.signal ?? new AbortController().signal,
     app: () => app,
@@ -1295,6 +1298,98 @@ test('B2-DIRECT: a Direct invalidation never waits for a Remote Workspace prefli
       'Direct keeps its co-located directory and never reads a Host WorkspaceId')
     assert.equal(preflightAwaited, 0, 'the Direct branch never consumes the Remote preflight seam')
   } finally {
+    harness.dispose()
+  }
+})
+
+/* ── B2-RETIRE: disposal during the preflight wait ─────────────────────── */
+
+/** A recording diagnostics sink (only the entries the assertions read). */
+function recordingDiag(): import('../../src/runtime/process/diagnostics.ts').Diag & {
+  readonly errors: Array<{ message: string; fields?: Record<string, unknown> }>
+} {
+  const errors: Array<{ message: string; fields?: Record<string, unknown> }> = []
+  const noop = (): void => {}
+  return {
+    debug: noop,
+    info: noop,
+    warn: noop,
+    error: (message, fields) => { errors.push({ message, fields }) },
+    dispose: noop,
+    errors,
+  }
+}
+
+test('B2-RETIRE: catalog disposal during the preflight wait retires the invalidation continuation without a false failure', async () => {
+  const source = controlledRemoteSource({})
+  const workspace = createWorkspaceNextIntentOwner(undefined)
+  const preflight = deferred()
+  const notices: Array<{ message: string; kind: string | undefined }> = []
+  const diag = recordingDiag()
+  const harness = fakeRunnerDeps({
+    remoteSource: source,
+    currentSessionId: () => undefined,
+    workspace,
+    awaitWorkspacePreflight: () => preflight.promise,
+    notify: (message, kind) => { notices.push({ message, kind }) },
+    diag,
+  })
+  const standings = recordStandingReads(harness)
+  const stream = captureSkillsStream(harness)
+  try {
+    harness.register()
+    stream.frame()
+    await new Promise(resolve => setTimeout(resolve, 30))
+    assert.equal(standings.length, 0)
+    // The surface retires while the continuation is still awaiting the
+    // preflight: the retired refresh slot must be a no-op, not a call through
+    // the disposed coordinator (which used to paint `skill catalog refresh
+    // failed: Cannot read properties of undefined`).
+    harness.surface.disposeCatalog()
+    workspace.setResolvedWorkspace('ws-after-dispose', '/host/after')
+    preflight.resolve()
+    await new Promise(resolve => setTimeout(resolve, 80))
+    assert.deepEqual(notices, [], 'a retired continuation must not paint a refresh failure')
+    assert.deepEqual(diag.errors, [], 'a retired continuation must not log a primary error')
+    assert.equal(standings.length, 0, 'a retired continuation must not issue a Host standing read')
+  } finally {
+    workspace.dispose()
+    harness.dispose()
+  }
+})
+
+test('B2-RETIRE-RECONNECT: catalog disposal during the reconnect preflight wait is a silent retirement', async () => {
+  const source = controlledRemoteSource({})
+  const workspace = createWorkspaceNextIntentOwner(undefined)
+  const preflight = deferred()
+  const notices: Array<{ message: string; kind: string | undefined }> = []
+  const diag = recordingDiag()
+  const harness = fakeRunnerDeps({
+    remoteSource: source,
+    currentSessionId: () => undefined,
+    workspace,
+    awaitWorkspacePreflight: () => preflight.promise,
+    notify: (message, kind) => { notices.push({ message, kind }) },
+    diag,
+  })
+  const standings = recordStandingReads(harness)
+  try {
+    harness.register()
+    // A sessionless reconnect starts its own preflight continuation, then the
+    // catalog is disposed while that continuation is still pending.
+    source.replace(undefined)
+    source.replace(source.tokens.b)
+    await new Promise(resolve => setTimeout(resolve, 30))
+    assert.equal(standings.length, 0)
+    harness.surface.disposeCatalog()
+    workspace.setResolvedWorkspace('ws-reconnect-after-dispose', '/host/reconnect-after')
+    preflight.resolve()
+    await new Promise(resolve => setTimeout(resolve, 80))
+    assert.deepEqual(notices, [], 'the retired reconnect continuation must not paint a failure')
+    assert.equal(diag.errors.length, 0, 'the retired reconnect continuation must not log a primary error')
+    assert.equal(standings.length, 0, 'the retired reconnect continuation must not issue a standing read')
+  } finally {
+    workspace.dispose()
     harness.dispose()
   }
 })
