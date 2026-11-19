@@ -165,6 +165,8 @@ const QUESTION_OFF = 1
 /** The fixture's ONE official late-override control file (under the private
  *  C1 work root): `{ nonce, op: 'set' | 'clear' }`. */
 const OVERRIDE_REQUEST_FILE = 'f3-search-override-request.json'
+const WEB_PROVIDER_REQUEST_FILE = 'f3-web-provider-request.json'
+const CUSTOM_SEARCH_PROVIDER = 'acme-search'
 /** The official settings sections the page owns. */
 const WEB_NS = 'web'
 const WEB_API_NS = 'web-deepseek-api'
@@ -624,6 +626,22 @@ async function requestSearchOverride(root, op, label) {
     120_000)
   assert(event.kind === 'f3-search-override',
     `${label}: the Host refused the official YAML-only override mutation: ${JSON.stringify(event)}`)
+  return event
+}
+
+/** Ask the Host fixture to move `web.searchProvider` through ONE official
+ *  Settings mutation: `automatic` (unset), `custom` (a non-official id), or an
+ *  explicit official id. The event is nonce-matched like the override control. */
+async function requestWebProvider(root, mode, value, label) {
+  const nonce = `f3-web-${mode}-${String(Date.now())}-${String(Math.random()).slice(2, 8)}`
+  writeFileSync(join(root, WEB_PROVIDER_REQUEST_FILE),
+    JSON.stringify({ nonce, mode, ...(value === undefined ? {} : { value }) }), { mode: 0o600 })
+  const event = await waitForC1WorkEvent(root,
+    entry => (entry.kind === 'f3-web-provider' || entry.kind === 'f3-web-provider-failed') && entry.nonce === nonce,
+    label,
+    120_000)
+  assert(event.kind === 'f3-web-provider',
+    `${label}: the Host refused the official search-provider mutation: ${JSON.stringify(event)}`)
   return event
 }
 
@@ -1087,6 +1105,50 @@ export async function runWebProviderSettingsF3(context) {
       customRouteSeeded,
       customRouteReplaceRefused: negative.customRouteRefusal?.rejected === true,
     })
+
+    // ── 5d. The REAL Host moves the Search provider to AUTOMATIC and to a
+    // CUSTOM id: the scheduled Billing row must stay inert with ZERO Host
+    // mutations in both states (the A5 matrix's remaining real-path cases).
+    const automaticWeb = await requestWebProvider(root, 'automatic', undefined,
+      'UI_L6 automatic search provider')
+    assert(automaticWeb.searchProvider === undefined,
+      `UI_L6 automatic: the official Host still pins a searchProvider: ${JSON.stringify(automaticWeb)}`)
+    assert(!Object.hasOwn(namespaceConfig(documentPath, WEB_NS) ?? {}, 'searchProvider'),
+      'UI_L6 automatic: the official user layer must not carry a searchProvider')
+    await reopenWebPage(clientA, 'UI_L6 automatic A re-read')
+    await waitForScreenText(clientA, 'Current: Automatic', 'UI_L6 automatic page current fact')
+    await assertInertBilling(clientA, documentPath, ROW.searchBilling, 'Not selected',
+      'Billing is EDITABLE HERE', 'UI_L6 automatic billing route gate')
+    trace('f3.ui-l6', {
+      verdict: 'UI_L6_PASS',
+      phase: 'automatic-billing-inert',
+      searchProvider: 'Automatic',
+      confirmed: false,
+      hostWrites: 0,
+    })
+
+    const customWeb = await requestWebProvider(root, 'custom', CUSTOM_SEARCH_PROVIDER,
+      'UI_L6 custom search provider')
+    assert(customWeb.searchProvider === CUSTOM_SEARCH_PROVIDER,
+      `UI_L6 custom: the official Host must keep the custom id: ${JSON.stringify(customWeb)}`)
+    await reopenWebPage(clientA, 'UI_L6 custom A re-read')
+    await waitForScreenText(clientA, CUSTOM_SEARCH_PROVIDER, 'UI_L6 custom page current fact')
+    await assertInertBilling(clientA, documentPath, ROW.searchBilling, 'Not selected',
+      'Billing is EDITABLE HERE', 'UI_L6 custom billing route gate')
+    trace('f3.ui-l6', {
+      verdict: 'UI_L6_PASS',
+      phase: 'custom-billing-inert',
+      searchProvider: CUSTOM_SEARCH_PROVIDER,
+      confirmed: false,
+      hostWrites: 0,
+    })
+
+    // Restore the explicit official provider so the later override/restore
+    // phases keep a writable Billing row.
+    const explicitWeb = await requestWebProvider(root, 'explicit', 'deepseek-search-api',
+      'UI_L6 restore explicit search provider')
+    assert(explicitWeb.searchProvider === 'deepseek-search-api',
+      `UI_L6 restore explicit: the official Host must pin the API again: ${JSON.stringify(explicitWeb)}`)
 
     // ── 6. Both Clients drop and re-establish their Gateway carrier. ────────
     const documentBeforeReconnect = readFileSync(documentPath, 'utf8')

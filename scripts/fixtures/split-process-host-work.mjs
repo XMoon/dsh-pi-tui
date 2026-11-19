@@ -1416,6 +1416,48 @@ export async function apply(ctx) {
             .finally(() => { overrideBusy = false })
         }, 40)
         ctx.effect(() => () => clearInterval(overrideTimer))
+        // The A5 negative matrix: the smoke asks the REAL Host to move the
+        // search provider to AUTOMATIC (unset), a CUSTOM id, or an explicit
+        // official id through ONE official Settings mutation, so the inert
+        // Billing row's zero-write evidence runs on the real Host path.
+        const webRequestPath = join(root, 'f3-web-provider-request.json')
+        let webRequestBusy = false
+        const applyWebProvider = async request => {
+          await ctx.settings.mutate(webNamespace, [request.mode === 'automatic'
+            ? { op: 'unset', path: ['searchProvider'] }
+            : { op: 'set', path: ['searchProvider'], value: String(request.value) }])
+          const descriptor = ctx.settings.describe().find(entry => entry.ns === webNamespace)
+          const value = plainValue(descriptor)
+          record('f3-web-provider', {
+            nonce: request.nonce,
+            mode: request.mode,
+            searchProvider: value?.searchProvider,
+            fetchProvider: value?.fetchProvider,
+          })
+        }
+        const webRequestTimer = setInterval(() => {
+          if (webRequestBusy || !existsSync(webRequestPath)) return
+          webRequestBusy = true
+          let request
+          try {
+            request = JSON.parse(readFileSync(webRequestPath, 'utf8'))
+          } catch (error) {
+            rmSync(webRequestPath, { force: true })
+            webRequestBusy = false
+            record('f3-web-provider-failed', {
+              message: error instanceof Error ? error.message : String(error),
+            })
+            return
+          }
+          rmSync(webRequestPath, { force: true })
+          void applyWebProvider(request)
+            .catch(error => record('f3-web-provider-failed', {
+              nonce: request?.nonce,
+              message: error instanceof Error ? error.message : String(error),
+            }))
+            .finally(() => { webRequestBusy = false })
+        }, 40)
+        ctx.effect(() => () => clearInterval(webRequestTimer))
         const { credentialRef } = await import('@deepseek-ai/dsh-credentials')
         const ref = credentialRef('DEEPSEEK_API_KEY')
         // The sentinel reference is fixture state on the shared lane's ONE
