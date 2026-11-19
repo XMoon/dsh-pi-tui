@@ -836,6 +836,56 @@ the built-in row to be ACTIVE, checks the official and private Typert
 missing row, artifact, binding or readiness gate fails Host startup before any
 identity is published.
 
+### Canonical TUI preferences and migration
+
+The 20 durable TUI preferences live in the ONE profile row
+`pi-tui-preferences` (package subpath `@xmoon76/dsh-pi-tui/preferences`), whose
+`.volatile()` Config is also the Settings namespace and whose `piTuiPreferences`
+Cordis service carries the live references. The row is a CONFIG-ONLY carrier:
+it starts no TUI, Agent, Session, Gateway, timer or watcher, it is not gated on
+`tuiStartup`, and it is disabled only in the daemon supervisor PID. Its
+auto-generated Settings page is hidden because that page would expose the
+internal migration marker; `Settings.describe()`/`mutate()` remain the
+authority and every consumer still writes through the official
+revision-checked path.
+
+Persistence and read authority are therefore single-sourced:
+
+- Direct reads the row's live volatile references through the injected
+  `piTuiPreferences` service and writes path-scoped `SettingsForms.mutate`
+  operations against the row.
+- A Split Host reads the same row and serves its descriptors over the official
+  Settings wire; a Remote Client reads and writes only that namespace (a
+  missing canonical section is `unavailable`, never a fallback to an old
+  namespace or to schema defaults).
+- The retired `tui-app` and `split-host-pi-tui-runtime` rows keep their
+  published schemas only for installed-profile/API compatibility and as
+  migration sources. They are not a runtime preference authority, and their
+  USER values are never copied back after migration.
+- Footer command/custom-item trust reads only the canonical USER layer; a
+  project, home or command-line layer can never authorize execution.
+
+The Host owns a one-shot migration barrier, run by the Direct runner before the
+first display/Agent read and by the Split Host entry after Loader settlement
+and before the Web/ACP startup preferences and Ready publication. It re-reads
+the profile USER patch inside the official profile file lock, resolves each
+field as canonical USER -> legacy Direct/Split profile USER (RAW-equal sources
+migrate once; different sources are a fail-closed conflict) -> the retired
+`settings.yaml(.imported)` document -> leave inherited, then writes the
+migrated fields plus `legacySettingsMigrationVersion: 2` in ONE official
+`ConfigEditor.edit`. Conflicts, unreadable sources, `!!js` scalars and refused
+writes fail the start visibly and never advance the marker; the old profile
+rows and the imported document are preserved for downgrade/diagnosis. A Split
+Client never reads the Host profile and never migrates.
+
+The official Web roster is declared by the BUNDLE from the ONE production
+roster table (a generated bundle layer, default-disabled), not by the
+Host-only command-line overlay: an overlay config override makes the official
+ConfigEditor refuse that row's user writes. The Host-only overlay keeps only
+the three fixed non-user values without volatile Settings forms (Web runtime
+silence, Office Kit Host output directory, Office Skill user Python); the
+private `piTuiWebAccess` service remains the only runtime owner of the toggle.
+
 ### Host liveness observation
 
 The Host-only entry installs exactly one internal, read-only

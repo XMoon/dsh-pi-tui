@@ -76,18 +76,19 @@ test('the retired path-root preset model is gone from the composition and the pa
   // development dependency for the real-mount composition test.
 })
 
-test('dsh.bundle.patch is the ordered five-patch composition and ships in files', () => {
+test('dsh.bundle.patch is the ordered composition (main, Web roster, four presets) and ships in files', () => {
   const manifest = JSON.parse(readFileSync(join(REPO_ROOT, 'package.json'), 'utf8')) as {
     files: readonly string[]
     dsh: { bundle: { patch: readonly string[] | string } }
   }
   assert.deepEqual(manifest.dsh.bundle.patch, [
     './cordis.patch.yml',
+    './generated/web-access/cordis.patch.yml',
     './generated/dsh-presets/standard.patch.yml',
     './generated/dsh-presets/ptc.patch.yml',
     './generated/dsh-presets/minimal.patch.yml',
     './generated/dsh-presets/cordis.patch.yml',
-  ], 'the registry patch composes first, then the four declarations in order')
+  ], 'the registry patch composes first, then the generated Web roster, then the four declarations in order')
   for (const file of manifest.dsh.bundle.patch as readonly string[]) {
     assert.equal(existsSync(join(REPO_ROOT, file)), true, `${file} must exist`)
   }
