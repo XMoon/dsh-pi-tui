@@ -1401,13 +1401,25 @@ test('exit facts: the official Remote running bit and its absence decide working
   assert.equal(h.facts.capture().activity, 'unknown', 'a rolled transport is never idle')
 })
 
-test('exit facts: a pending navigation is unknown, never idle or working', () => {
-  // RFL-002: the transition authority is part of the idle proof.
+test('exit facts: a pending navigation of a LIVE owner is unknown, never idle', () => {
+  // RFL-002: the transition authority is part of the LIVE idle proof.
   const h = exitFactsHarness()
   h.state.transition = true
   assert.equal(h.facts.capture().activity, 'unknown')
+  h.state.transition = false
+  assert.equal(h.facts.capture().activity, 'idle')
+})
+
+test('exit facts: a sessionless surface is never deferred behind a pending create', () => {
+  // The repository contract (test/app/runner-session-bootstrap.test.ts):
+  // `/exit` during a `/new` pre-gate Workspace resolution exits immediately.
+  // There is no Session work to protect, so a pending create is NOT unknown.
+  const h = exitFactsHarness()
   h.state.sessionId = undefined
-  assert.equal(h.facts.capture().activity, 'unknown', 'a pending create with no Session is unknown too')
+  h.state.transition = true
+  assert.equal(h.facts.capture().activity, 'idle')
+  h.state.admission = true
+  assert.equal(h.facts.capture().activity, 'working', 'a held submission is still protected')
 })
 
 test('exit facts: a sessionless capture is a real generation and its first Session invalidates it', () => {

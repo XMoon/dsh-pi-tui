@@ -85,9 +85,15 @@ export function createExitIntentFacts(sources: ExitIntentFactSources): ExitInten
       live,
       ...(remote ? { transportToken } : {}),
     }
-    // A navigation owns the surface: neither the old nor a pending owner is a
-    // provable idle state.
-    if (sources.transitionPending()) return { ...base, activity: 'unknown' as ExitSessionActivity }
+    // A pending navigation of a LIVE owner is not a provable idle state: the
+    // owner is about to be replaced, so the Exit must not silently detach as
+    // if nothing were happening. A SESSIONLESS surface keeps the existing
+    // `/exit` contract: there is no Session work to protect and the exit is
+    // never deferred behind a pending `/new` pre-gate Workspace resolution
+    // (test/app/runner-session-bootstrap.test.ts owns that contract).
+    if (live !== undefined && sources.transitionPending()) {
+      return { ...base, activity: 'unknown' as ExitSessionActivity }
+    }
     if (live === undefined) {
       return {
         ...base,
