@@ -2,12 +2,9 @@
  * Static audit for the long-lived application-layer dependency direction between
  * `src/app/**` owners, `src/runtime/**` semantic/adaptor layers, presentation/TUI
  * modules, and the experimental Remote composition boundary (see
- * `docs/architecture/overview.md`): the real
- * production tree must satisfy every application-layer rule, and the gate's
- * AST scanner must catch each synthetic violation while ignoring comments,
- * dynamic imports, package imports, and the deliberate non-Backend Direct
- * application owners. The gate itself (`scripts/application-architecture-gate.mjs`)
- * is the enforcement; this test guards the rules against regressions.
+ * `docs/architecture/overview.md`). The production CLI gate enforces the
+ * real-tree contract; these tests exercise its AST rules against synthetic
+ * legal and illegal imports without repeating a full production-tree scan.
  * @module @xmoon76/dsh-pi-tui/application-architecture-gate.test
  */
 
@@ -64,17 +61,6 @@ import {
 
 /** One synthetic source entry; `findViolations` only needs rel + source. */
 const entry = (rel, source) => ({ rel, source })
-
-test('the real production tree satisfies every architecture rule', () => {
-  const violations = findViolations(collectSourceEntries())
-  assert.deepEqual(
-    violations,
-    [],
-    `application-layer dependency direction violated — fix the import or record a deliberate exception:\n${violations
-      .map(v => `src/${v.file}:${v.line} [${v.rule}] ${v.detail}`)
-      .join('\n')}`,
-  )
-})
 
 test('runtime importing app is rejected', () => {
   const violations = findViolations([
@@ -319,15 +305,7 @@ test('the bootstrap composition zone may construct Direct wiring (TS2)', () => {
   assert.equal(isDirectCompositionFile('bootstrap.ts'), false)
 })
 
-test('the production tree has no non-composition Direct import (the historical allowlist is gone)', () => {
-  // TS8-F2 moved the legacy settings migration into the composition zone and
-  // removed the historical exception, so no non-composition module may import
-  // Direct wiring at all — with or without an allowlist.
-  assert.deepEqual(
-    findViolations(collectSourceEntries(), { allowlist: [] }).map(v => `${v.file}:${v.rule}`),
-    [],
-    'no non-composition Direct import may remain',
-  )
+test('the architecture gate retains an empty Direct-import allowlist', () => {
   assert.deepEqual(ARCHITECTURE_ALLOWLIST, [], 'the checked-in allowlist is empty')
 })
 
