@@ -785,7 +785,17 @@ test('the page deeplink is reachable and Esc cancels without a write', async t =
   await key(h, ESC) // list -> Tools rows
   // The root keeps the row's Detail focus, exactly like the allowlist picker
   // return: the Tools rows are painted again with the Web row selected.
-  assert.match(h.view(), /Rows \(5\)/u, 'Esc from the list returns to the Tools rows')
+  // Assert the RETURN, not the category's row count: a new specialist row must
+  // not make this journey fail. The Tools category paints its own chrome (the
+  // Categories/Rows columns) with the Web row visible, and the Web page's own
+  // header is gone, which is what the escape contract promises.
+  const returned = h.view()
+  assert.match(returned, /Settings · Tools · /u, 'the workspace still shows the Tools scope')
+  // The category view is the ONLY surface that paints both columns; the Web
+  // page itself paints neither, so their presence proves the page was left.
+  assert.match(returned, /Categories \(\d+\)/u, 'Esc from the list returns to the Tools category')
+  assert.match(returned, /Rows \(\d+\)/u, 'the category chrome is painted again')
+  assert.match(returned, /Web Search \/ Fetch/u, 'the Web row is painted again')
   assert.match(h.view(), /Configure Web…/u, 'the Web row owns the frame again')
   assert.deepEqual(h.writes, [], 'the whole cancel path wrote nothing')
 })

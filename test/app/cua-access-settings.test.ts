@@ -17,6 +17,10 @@ import type { PluginManagerPort } from '../../src/runtime/plugin-manager-port.ts
 import type { PresetDefaultConfig } from '../../src/runtime/config-port.ts'
 import { SupersededReadError } from '../../src/runtime/read-error.ts'
 
+const quietDiag = {
+  debug: () => {}, info: () => {}, warn: () => {}, error: () => {}, dispose: () => {},
+}
+
 const STATUS: CuaSystemStatus = {
   platform: 'darwin',
   accessibility: false,
@@ -101,6 +105,7 @@ function controller(options: {
     pluginManager: pluginManager(options.bundle ?? { enabled: true, version: '0.2.2-rc.3' }),
     presetDefault: preset,
     locale: () => 'zh',
+    diag: quietDiag,
   })
   return { controller, calls: [], portCalls: fake.calls }
 }
@@ -122,6 +127,7 @@ test('enabled reads settle independently and an icon failure does not block perm
     pluginManager: pluginManager({ enabled: true, version: '0.2.2-rc.3' }),
     presetDefault: presetDefault().config,
     locale: () => 'zh',
+    diag: quietDiag,
   })
   await page.refresh()
   const snapshot = page.getSnapshot()
@@ -162,6 +168,7 @@ test('a superseded connection read becomes Unknown and never keeps a stale Allow
     pluginManager: pluginManager({ enabled: true }),
     presetDefault: presetDefault().config,
     locale: () => 'zh',
+    diag: quietDiag,
   })
   await page.refresh()
   assert.equal(page.getSnapshot().system.phase, 'unknown')
@@ -182,6 +189,7 @@ test('revoke and retry keep the exact painted id and admit ONE write at a time',
     pluginManager: pluginManager({ enabled: true }),
     presetDefault: presetDefault().config,
     locale: () => 'zh',
+    diag: quietDiag,
   })
   const revoke = page.revoke('app-1')
   const duplicate = page.retryApproval('app-2')
@@ -212,6 +220,7 @@ test('a generation rollover during an in-flight write keeps admission and publis
     pluginManager: pluginManager({ enabled: true }),
     presetDefault: presetDefault().config,
     locale: () => 'zh',
+    diag: quietDiag,
   })
   const write = page.revoke('app-1')
   await new Promise(resolve => setTimeout(resolve, 5))
@@ -236,6 +245,7 @@ test('dispose discards a late read and drops every listener', async () => {
     pluginManager: pluginManager({ enabled: true }),
     presetDefault: presetDefault().config,
     locale: () => 'zh',
+    diag: quietDiag,
   })
   let updates = 0
   page.subscribe(() => { updates += 1 })

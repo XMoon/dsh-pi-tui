@@ -28,6 +28,8 @@ import {
   type TuiMouseEvent,
   type TuiMouseEventResult,
 } from '@xmoon76/pi-tui'
+import { runDetached } from '../../runtime/process/tasks.ts'
+import type { Diag } from '../../runtime/process/diagnostics.ts'
 import type {
   CuaAccessSettingsController,
   CuaAccessSettingsSnapshot,
@@ -199,6 +201,7 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
   private readonly requestRender: () => void
   private readonly done: () => void
   private readonly openPlugins: (() => void) | undefined
+  private readonly diag: Diag
   private readonly unsubscribe: () => void
 
   readonly title = COMPUTER_USE_PAGE_TITLE
@@ -228,16 +231,30 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
     readonly requestRender: () => void
     readonly done: () => void
     readonly openPlugins?: () => void
+    readonly diag: Diag
   }) {
     this.controller = intents.controller
     this.requestRender = intents.requestRender
     this.done = intents.done
     this.openPlugins = intents.openPlugins
+    this.diag = intents.diag
     this.unsubscribe = this.controller.subscribe(() => {
       this.revision += 1
       this.requestRender()
     })
-    void this.controller.refresh()
+    this.start('computer use settings refresh', () => this.controller.refresh())
+  }
+
+  /**
+   * Start one controller intent from a synchronous input/paint handler.
+   *
+   * The handler cannot await, so the intent becomes a detached task with a real
+   * owner: a failure reaches the runner diagnostics instead of becoming an
+   * unhandled rejection, while the controller still publishes the action's own
+   * outcome (ok / failed / unknown) into the snapshot.
+   */
+  private start(label: string, intent: () => Promise<void>): void {
+    runDetached(label, intent, { diag: this.diag })
   }
 
   setMaxRows(rows: number): void {
@@ -860,7 +877,7 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
     }
     switch (action.kind) {
       case 'refresh':
-        void this.controller.refresh()
+        this.start('computer use settings refresh', () => this.controller.refresh())
         return
       case 'plugins':
         if (this.openPlugins === undefined) {
@@ -875,19 +892,19 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
         this.bump()
         return
       case 'preset':
-        void this.controller.setPtcDefault()
+        this.start('computer use settings PTC default', () => this.controller.setPtcDefault())
         return
       case 'request-accessibility':
-        void this.controller.requestPermission('accessibility')
+        this.start('computer use accessibility request', () => this.controller.requestPermission('accessibility'))
         return
       case 'open-accessibility':
-        void this.controller.openSettings('accessibility')
+        this.start('computer use accessibility settings', () => this.controller.openSettings('accessibility'))
         return
       case 'request-screen-recording':
-        void this.controller.requestPermission('screenRecording')
+        this.start('computer use screen recording request', () => this.controller.requestPermission('screenRecording'))
         return
       case 'open-screen-recording':
-        void this.controller.openSettings('screenRecording')
+        this.start('computer use screen recording settings', () => this.controller.openSettings('screenRecording'))
         return
       case 'persistent-ptc':
         this.confirmation = {
@@ -946,9 +963,10 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
     const action = confirmation.action
     this.confirmation = undefined
     this.bump()
-    if (action.kind === 'persistent-ptc') void this.controller.enablePersistentPtc()
-    else if (action.kind === 'revoke' && action.applicationId !== undefined) void this.controller.revoke(action.applicationId)
-    else if (action.kind === 'retry' && action.applicationId !== undefined) void this.controller.retryApproval(action.applicationId)
+    const applicationId = action.applicationId
+    if (action.kind === 'persistent-ptc') this.start('computer use persistent PTC', () => this.controller.enablePersistentPtc())
+    else if (action.kind === 'revoke' && applicationId !== undefined) this.start('computer use revoke', () => this.controller.revoke(applicationId))
+    else if (action.kind === 'retry' && applicationId !== undefined) this.start('computer use retry approval', () => this.controller.retryApproval(applicationId))
   }
 
   private cancelConfirmation(): void {

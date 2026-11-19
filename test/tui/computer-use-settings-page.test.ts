@@ -19,6 +19,10 @@ import type { PluginManagerPort } from '../../src/runtime/plugin-manager-port.ts
 import type { PresetDefaultConfig } from '../../src/runtime/config-port.ts'
 import { COMPUTER_USE_PAGE_TITLE, ComputerUseSettingsPage } from '../../src/tui/panels/computer-use-settings-page.ts'
 
+const quietDiag = {
+  debug: () => {}, info: () => {}, warn: () => {}, error: () => {}, dispose: () => {},
+}
+
 const STATUS: CuaSystemStatus = {
   platform: 'darwin',
   accessibility: false,
@@ -93,9 +97,11 @@ function mount(options: { bundleEnabled?: boolean; preset?: string; cua?: Partia
     pluginManager: fakePluginManager(options.bundleEnabled ?? true),
     presetDefault: fakePreset(options.preset ?? 'ptc'),
     locale: () => 'zh',
+    diag: quietDiag,
   })
   let closed = false
   const page = new ComputerUseSettingsPage({
+    diag: quietDiag,
     controller,
     requestRender: () => {},
     done: () => { closed = true },

@@ -35,6 +35,8 @@ import {
 } from '../../runtime/cua-access-port.ts'
 import type { PresetDefaultConfig } from '../../runtime/config-port.ts'
 import type { PluginAvailability, PluginManagerPort } from '../../runtime/plugin-manager-port.ts'
+import { runDetached } from '../../runtime/process/tasks.ts'
+import type { Diag } from '../../runtime/process/diagnostics.ts'
 import { SupersededReadError } from '../../runtime/read-error.ts'
 
 /** The official bundle this page manages. */
@@ -102,6 +104,8 @@ export interface CuaAccessSettingsDeps {
   readonly pluginManager: PluginManagerPort
   readonly presetDefault: PresetDefaultConfig
   /** The current Client language for the official native guide. */
+  /** The runner's diagnostics channel: it owns every read this controller STARTS. */
+  readonly diag: Diag
   readonly locale: () => string
 }
 
@@ -153,12 +157,12 @@ export class CuaAccessSettingsController {
     // remain actionable or paintable after it. The callback invalidates the
     // current read epoch and immediately performs ONE fresh read.
     this.observedBasis = deps.cuaAccess.observation.readSnapshot()
-    this.unsubscribeObservation = deps.cuaAccess.observation.subscribe(() => { void this.invalidateObservation() })
+    this.unsubscribeObservation = deps.cuaAccess.observation.subscribe(() => { this.startInvalidate() })
     // The official Plugin Manager is the Direct bundle-change authority (and
     // also observes same-connection Remote changes). A bundle enable/disable is
     // an observation boundary even when the CUA service object is unchanged.
     this.unsubscribePlugins = typeof deps.pluginManager.subscribeInvalidation === 'function'
-      ? deps.pluginManager.subscribeInvalidation(() => { void this.invalidateObservation() })
+      ? deps.pluginManager.subscribeInvalidation(() => { this.startInvalidate() })
       : () => {}
   }
 
@@ -318,6 +322,15 @@ export class CuaAccessSettingsController {
     this.close()
     this.disposed = Promise.all([this.readInFlight, this.tail]).then(() => {})
     await this.disposed
+  }
+
+  /**
+   * Start ONE invalidation read from an observation callback. The callback
+   * cannot await, so the read is a detached task with a real owner: failures
+   * reach the runner diagnostics instead of becoming an unhandled rejection.
+   */
+  private startInvalidate(): void {
+    runDetached('cua observation invalidation', () => this.invalidateObservation(), { diag: this.deps.diag })
   }
 
   private async invalidateObservation(): Promise<void> {

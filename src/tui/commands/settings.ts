@@ -1425,6 +1425,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
             cuaAccess,
             pluginManager,
             presetDefault: runner.config.presetDefault,
+            diag: runner.diag,
             locale: () => {
               const locale = Intl.DateTimeFormat().resolvedOptions().locale
               return locale === '' ? 'en-US' : locale
@@ -1435,6 +1436,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
             requestRender: () => { if (!app.isDisposed()) app.requestRender() },
             done,
             openPlugins,
+            diag: runner.diag,
           })
         },
         // The About page's two version facts: read ONCE per workspace open on
