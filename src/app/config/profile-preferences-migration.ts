@@ -44,6 +44,8 @@ import type { SettingsFormsLike } from '../../runtime/config-port.ts'
 
 /** The canonical Loader row id / Settings namespace. */
 export const TUI_PREFERENCES_NAMESPACE = 'pi-tui-preferences'
+/** The canonical row's published package identity. */
+export const TUI_PREFERENCES_ROW_NAME = '@xmoon76/dsh-pi-tui/preferences'
 /** The retired Direct profile row (read only, migration source). */
 export const LEGACY_DIRECT_NAMESPACE = 'tui-app'
 /** The retired Split Host profile row (read only, migration source). */
@@ -240,6 +242,12 @@ export async function migrateProfileTuiPreferences(
       reason: `no "${TUI_PREFERENCES_NAMESPACE}" Loader entry in this composition`,
     })
     return { status: 'unavailable', reason: 'canonical preferences row is not Loader-managed' }
+  }
+  if (entry.options.name !== TUI_PREFERENCES_ROW_NAME) {
+    throw new TuiPreferencesMigrationError(
+      'TUI_PREFERENCES_MIGRATION_SOURCE',
+      `the "${TUI_PREFERENCES_NAMESPACE}" entry loads ${JSON.stringify(entry.options.name ?? null)}, expected "${TUI_PREFERENCES_ROW_NAME}"; refusing to write the canonical preference authority`,
+    )
   }
   const canonical = forms.describe()?.find(descriptor => descriptor.ns === TUI_PREFERENCES_NAMESPACE)
   if (canonical === undefined) {

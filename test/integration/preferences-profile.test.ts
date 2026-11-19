@@ -23,7 +23,8 @@
  */
 
 import assert from 'node:assert/strict'
-import { readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 import test from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
@@ -227,6 +228,69 @@ test('the Host migration writes the canonical USER row under the real profile lo
     diag: { warn: () => {}, info: () => {} },
   })
   assert.equal(retry.status, 'current', 'marker 2 makes a retry a pure read')
+})
+
+test('a same-id Loader row with a non-canonical package identity is refused before any mutation', async t => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('prefs-wrong-identity-')
+  const plane = await bootPlane(life, root, { rowName: '@xmoon76/dsh-pi-tui' })
+  const before = readFileSync(plane.patchPath, 'utf8')
+  await assert.rejects(
+    () => migrateProfileTuiPreferences({
+      patchPath: plane.patchPath,
+      configEditor: (plane.ctx as unknown as { configEditor: ProfileConfigEditorLike }).configEditor,
+      forms: settingsOf(plane.ctx),
+      home: root,
+      resolvePreset: async () => {},
+      diag: { warn: () => {}, info: () => {} },
+    }),
+    /canonical preference authority/u,
+  )
+  assert.equal(readFileSync(plane.patchPath, 'utf8'), before,
+    'a wrong-package row must never receive the canonical migration write')
+})
+
+test('the official settings importer and the Host migration interleave without losing or overwriting the legacy values', async t => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('prefs-importer-race-')
+  // The retired document is present BEFORE the real SettingsForms service is
+  // constructed, so its official importer (rename -> import sections) races
+  // the Host migration that reads the same document.
+  writeFileSync(join(root, 'settings.yaml'), [
+    'dsh-pi-tui:',
+    '  theme: dark',
+    '  responseStyle: concise',
+    '',
+  ].join('\n'))
+  const plane = await bootPlane(life, root, { resetUserDocument: true })
+  // Start the migration immediately: it must either read the live file or the
+  // importer's .imported backup, never a half-written one.
+  const report = await migrateProfileTuiPreferences({
+    patchPath: plane.patchPath,
+    configEditor: (plane.ctx as unknown as { configEditor: ProfileConfigEditorLike }).configEditor,
+    forms: settingsOf(plane.ctx),
+    home: root,
+    resolvePreset: async () => {},
+    diag: { warn: () => {}, info: () => {} },
+  })
+  assert.equal(report.status, 'migrated')
+  // Let the official importer finish its own rename/import work.
+  for (let attempt = 0; attempt < 100 && !existsSync(join(root, 'settings.yaml.imported')); attempt += 1) {
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
+  assert.equal(existsSync(join(root, 'settings.yaml')), false,
+    'the official importer renames the retired document before its first write')
+  const imported = readFileSync(join(root, 'settings.yaml.imported'), 'utf8')
+  assert.match(imported, /theme: dark/u, 'the imported backup retains the original opinion')
+  const canonical = descriptorOf(plane.ctx)
+  assert.deepEqual(canonical?.user, {
+    theme: 'dark', responseStyle: 'concise', legacySettingsMigrationVersion: 2,
+  }, 'the canonical values survived the importer interleave exactly once')
+  assert.equal((canonical?.user as { legacySettingsMigrationVersion?: number }).legacySettingsMigrationVersion, 2,
+    'the marker advances only after the complete canonical write')
+  const document = parseYaml(readFileSync(plane.patchPath, 'utf8')) as Array<Record<string, unknown>>
+  assert.equal(document.some(row => row.id === 'dsh-pi-tui'), false,
+    'the importer must not create a second legacy preference entry')
 })
 
 test('a conflicting legacy Direct/Split pair fails closed and never writes the canonical row', async t => {

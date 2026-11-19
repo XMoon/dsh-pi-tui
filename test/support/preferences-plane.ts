@@ -37,6 +37,7 @@ export interface PreferencesPlaneOptions {
   readonly resetUserDocument?: boolean
   /** Mount the canonical row DISABLED (the negative control). */
   readonly disabledRow?: boolean
+  readonly rowName?: string
   /** Extra profile USER rows written before mount (for example the retired
    * `tui-app` migration source). */
   readonly userRows?: readonly Record<string, unknown>[]
@@ -75,17 +76,26 @@ export function writePreferencesProfile(root: string, options: PreferencesPlaneO
       private: true,
       dsh: { bundle: { patch: ['./cordis.patch.yml'] } },
     }, null, 2))
-    // The row module is a one-line re-export of the PRODUCTION row: the Loader
-    // resolves the schema, apply function and plugin identity from here.
-    const rowModule = join(root, 'preferences-row.mjs')
-    writeFileSync(rowModule, [
+    // A faithful minimal INSTALLED package: the Loader row names the real
+    // package subpath, so the fixture exercises the same entry identity a
+    // production profile resolves (never a test-only file URL).
+    const installedPackage = join(profileDir, 'node_modules', '@xmoon76', 'dsh-pi-tui')
+    mkdirSync(installedPackage, { recursive: true })
+    writeFileSync(join(installedPackage, 'package.json'), JSON.stringify({
+      name: '@xmoon76/dsh-pi-tui',
+      version: '0.0.0',
+      private: true,
+      type: 'module',
+      exports: { './preferences': './preferences.mjs' },
+    }, null, 2))
+    writeFileSync(join(installedPackage, 'preferences.mjs'), [
       `export { name, Config, apply } from ${JSON.stringify(pathToFileURL(join(process.cwd(), 'src/app/config/preferences.ts')).href)}`,
       '',
     ].join('\n'))
     writeFileSync(join(bundleDir, 'cordis.patch.yml'), [
       '- insert:',
       `    - id: ${PREFERENCES_ROW_ID}`,
-      `      name: ${JSON.stringify(rowModule)}`,
+      `      name: ${JSON.stringify(options.rowName ?? '@xmoon76/dsh-pi-tui/preferences')}`,
       ...(options.disabledRow === true ? ['      disabled: true'] : []),
       '',
     ].join('\n'))
@@ -114,7 +124,9 @@ export async function mountPreferencesSettingsPlane(
   readonly configEditor: NonNullable<ReturnType<Context['get']>>
 }> {
   const plane = writePreferencesProfile(root, options)
-  const anchor = join(process.cwd(), 'package.json')
+  // Resolve the fixture package from the PROFILE's own node_modules, exactly
+  // like an installed `dsh plugin add` profile does.
+  const anchor = join(plane.profileDir, 'package.json')
   const overlay = options.overlay ?? []
   ctx.provide('profileContext', {
     name: 'preferences-profile',

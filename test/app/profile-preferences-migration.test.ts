@@ -68,6 +68,7 @@ function harness(options: {
   readonly split?: Record<string, unknown>
   readonly registry?: Record<string, unknown>
   readonly extraRows?: string
+  readonly entryName?: string
   readonly refuseWrite?: boolean
   readonly beforeChange?: (state: HarnessState, patchPath: string) => void
 } = {}) {
@@ -103,7 +104,7 @@ function harness(options: {
     },
   }
   const configEditor: ProfileConfigEditorLike = {
-    entries: () => [{ options: { id: CANONICAL, name: '@xmoon76/dsh-pi-tui/preferences' } }],
+    entries: () => [{ options: { id: CANONICAL, name: options.entryName ?? '@xmoon76/dsh-pi-tui/preferences' } }],
     edit: async (_entry, change) => {
       if (options.refuseWrite === true) {
         throw new Error(`Configuration for "${CANONICAL}" is overridden by a home patch or command-line overlay`)
@@ -287,6 +288,19 @@ test('a registry selectedDefault the USER already owns is never rewritten', asyn
   const h = withLegacy(harness({ registry: { selectedDefault: 'standard' } }))
   await migrateProfileTuiPreferences(h.input(alwaysResolves))
   assert.equal(h.mutations.some(call => call.ns === 'agent-preset-registry'), false)
+})
+
+test('a non-canonical package identity is rejected before any write', async () => {
+  const h = harness({ entryName: '@xmoon76/dsh-pi-tui', direct: { theme: 'dark' } })
+  const before = h.document()
+  await assert.rejects(
+    () => migrateProfileTuiPreferences(h.input()),
+    (error: unknown) => error instanceof TuiPreferencesMigrationError
+      && error.code === 'TUI_PREFERENCES_MIGRATION_SOURCE'
+      && /expected "@xmoon76\/dsh-pi-tui\/preferences"/u.test(error.message),
+  )
+  assert.equal(h.writes.length, 0, 'a wrong package identity must never receive the canonical write')
+  assert.equal(h.document(), before, 'the profile is untouched')
 })
 
 test('a refused canonical write is a WRITE failure and does not advance the marker', async () => {
