@@ -1814,6 +1814,10 @@ test('the official Web settings Remotes and /settings page use the same Host aut
     assert.deepEqual(await config.web.read(), {
       searchProvider: 'deepseek-official',
       fetchProvider: 'http',
+      providerSelection: {
+        search: { baseId: 'deepseek-official', userSet: false, userId: undefined },
+        fetch: { baseId: 'http', userSet: false, userId: undefined },
+      },
       api: { searchBilling: 'auto', fetchBilling: 'auto', count: 10, sendOriginalQuestion: true },
       advanced: {},
       credential: { configured: true, source: 'file' },
@@ -1845,6 +1849,10 @@ test('the official Web settings Remotes and /settings page use the same Host aut
     assert.deepEqual(await config.web.read(), {
       searchProvider: 'deepseek-search-api',
       fetchProvider: 'deepseek-fetch-api',
+      providerSelection: {
+        search: { baseId: 'deepseek-official', userSet: true, userId: 'deepseek-search-api' },
+        fetch: { baseId: 'http', userSet: true, userId: 'deepseek-fetch-api' },
+      },
       api: { searchBilling: 'account', fetchBilling: 'api-key', count: 20, sendOriginalQuestion: false },
       advanced: {},
       credential: { configured: true, source: 'file' },
@@ -2047,12 +2055,14 @@ test('the official Web settings Remotes and /settings page use the same Host aut
     const customDetail = fixture.view()
     assert.match(customDetail, /Current: custom-f3-event/u)
     assert.match(customDetail, /CUSTOM route/u)
-    assert.doesNotMatch(customDetail, /› /u, 'the custom route has no selectable candidate')
-    assert.doesNotMatch(customDetail, /Enter confirm/u, 'the Remote UI offers no write for the custom route')
+    assert.doesNotMatch(customDetail, /› DeepSeek Search API/u,
+      'a custom route is never replaceable by another explicit official provider')
+    assert.match(customDetail, /› DeepSeek server-side search · deployment default/u,
+      'the deployment default is reachable ONLY through the official reset entry')
+    assert.match(customDetail, /Confirm \[Enter\]/u, 'the reset entry is really executable')
     const customRevision = forms.describe().find(entry => entry.ns === 'web')?.revision
-    await fixture.key('\r')
     assert.equal(forms.describe().find(entry => entry.ns === 'web')?.revision, customRevision,
-      'Enter cannot normalize or replace the custom Host route')
+      'opening the Detail never writes or normalizes the custom Host route')
     fixture.dispose()
     fixture = undefined
 

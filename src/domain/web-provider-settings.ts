@@ -133,3 +133,43 @@ export function webApiAdvancedFactsOf(value: Record<string, unknown>): WebApiAdv
     ...(legacyOverrideDetected ? { legacyOverrideDetected: true } : {}),
   }
 }
+
+/** One capability's OFFICIAL layering facts on the `web` descriptor. These are
+ *  three DISTINCT facts, never interchangeable: `baseId` is the deployment
+ *  layer's own selection (which the TUI only maps to an official unset — it is
+ *  NOT the provider a request executes), `userSet` is whether the USER layer
+ *  carries the field at all (the ONLY override authority), and `userId` is that
+ *  own-field's raw id when it is a non-empty string (display/stale-guard only).
+ *  `userSet: true` with `userId: undefined` is a real state (an abnormal/empty
+ *  raw USER value) and must not collapse into `userSet: false`. */
+export interface WebProviderSelectionFacts {
+  readonly baseId: string | undefined
+  readonly userSet: boolean
+  readonly userId: string | undefined
+}
+
+/** Project one capability's layering facts from the SAME `web` descriptor's
+ *  `base`/`user` projections. `undefined` when either layer is not a plain
+ *  object: the caller MUST treat that as an unreadable section, never as "no
+ *  USER override". */
+export function webProviderSelectionFactsOf(
+  base: unknown,
+  user: unknown,
+  field: 'searchProvider' | 'fetchProvider',
+): WebProviderSelectionFacts | undefined {
+  if (!isPlainRecord(base) || !isPlainRecord(user)) return undefined
+  const baseValue = base[field]
+  const userValue = user[field]
+  return {
+    baseId: typeof baseValue === 'string' && baseValue !== '' ? baseValue : undefined,
+    userSet: Object.hasOwn(user, field),
+    userId: typeof userValue === 'string' && userValue !== '' ? userValue : undefined,
+  }
+}
+
+/** Whether a value is a plain data object (not an array, null, or class instance). */
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
+  const proto: unknown = Object.getPrototypeOf(value)
+  return proto === Object.prototype || proto === null
+}

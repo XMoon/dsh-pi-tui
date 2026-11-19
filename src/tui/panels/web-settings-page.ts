@@ -33,7 +33,7 @@
  */
 
 import { matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi, type TuiMouseEvent, type TuiMouseEventResult } from '@xmoon76/pi-tui'
-import { maskWebProviderOverrideUrl } from '../../domain/web-provider-settings.ts'
+import { maskWebProviderOverrideUrl, type WebProviderSelectionFacts } from '../../domain/web-provider-settings.ts'
 import type { WebProviderSettings } from '../../runtime/config-port.ts'
 import { sanitizedPhysicalLine } from '../presentation/lines.ts'
 import { color } from '../theme/runtime.ts'
@@ -69,6 +69,36 @@ export const WEB_FETCH_PROVIDER_CANDIDATES = [
   { id: 'http', label: 'HTTP' },
   { id: 'deepseek-fetch-api', label: 'DeepSeek Fetch API' },
 ] as const
+
+/** The option identity of the Automatic row: offered only while the deployment
+ *  composes NO provider for the capability. A NUL-prefixed key can never
+ *  collide with a real provider id (which is painted sanitized) nor be written
+ *  as one: the command maps it to the official USER-layer reset. */
+export const WEB_PROVIDER_AUTOMATIC_KEY = '\u0000automatic'
+/** The option identity of the `Use deployment default` row for a deployment
+ *  selection outside the official candidates. Same typed reset intent; NEVER
+ *  the custom id. */
+export const WEB_PROVIDER_RESTORE_KEY = '\u0000restore-deployment-default'
+
+/** One CONFIRMED provider selection intent. `observed` carries the same `web`
+ *  descriptor layer facts the page painted, so the queue head can refuse a
+ *  gesture a newer Host state no longer describes (never silently re-target). */
+export type WebProviderCommitIntent =
+  | {
+      /** Explicitly select this official provider id (`set`). */
+      readonly kind: 'provider-select'
+      readonly id: string
+      readonly observed: WebProviderSelectionFacts
+    }
+  | {
+      /** Restore the deployment selection: the ONE official `unset`. */
+      readonly kind: 'provider-restore'
+      readonly observed: WebProviderSelectionFacts
+    }
+
+/** One commit request: a plain string for the non-provider rows (unchanged),
+ *  a typed intent for the two provider rows. */
+export type WebSettingsCommitRequest = string | WebProviderCommitIntent
 
 /** The four recommended result-count presets. The official `count` domain is
  *  1–50; a stored integer outside this list is still reported verbatim and is
@@ -192,7 +222,7 @@ export interface WebSettingsPageIntents {
   /** Whether the official credential store is mounted right now. */
   readonly credentialAvailable: () => boolean
   /** Queue ONE confirmed intent on the command owner's single Web FIFO. */
-  readonly commit: (id: WebSettingRowId, requested: string) => Promise<WebCommitResult>
+  readonly commit: (id: WebSettingRowId, requested: WebSettingsCommitRequest) => Promise<WebCommitResult>
   /** Start a fresh authoritative Host read (`r` and page entry). */
   readonly refresh: () => void
   /** The root's narrow page-switch intent: retire this page and open the
@@ -349,6 +379,16 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
   private region: WebPageRegion = 'list'
   /** The highlighted candidate of the selected choice row (presentation only). */
   private choiceIndex = 0
+  /** Whether the first READABLE authority was already taken as the Detail's
+   *  highlight anchor. The page is constructed while the read is pending, so
+   *  the initial index is a placeholder: once real facts arrive the highlight
+   *  must point at the value the Host holds (an unrelated later read must not
+   *  yank a draft the user already moved). */
+  private authorityAnchored = false
+  /** The authority facts the LAST painted frame used. A confirmed provider
+   *  gesture carries THESE facts (not a read that settled after the paint), so
+   *  the command queue can detect that the Host changed under the gesture. */
+  private paintedFacts: WebSettingsFacts | undefined
   /** The highlighted credential action. */
   private actionIndex = 0
   private listOffset = 0
@@ -691,12 +731,35 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     // The candidate must be VISIBLE in this frame: an off-screen highlight is
     // never confirmed (the same rule the workspace's choice projection keeps).
     if (!this.paintedChoiceVisible(requested)) return
-    this.confirmChoice(rowId, requested)
+    const request = this.commitRequestFor(rowId, requested)
+    if (request === undefined) return
+    this.confirmChoice(rowId, request)
+  }
+
+  /** The TYPED intent a provider option really means, carrying the page-time
+   *  layer facts. It is decided HERE (not re-derived by the queue head): a
+   *  candidate equal to the deployment default is the official reset, every
+   *  other candidate is an explicit set, and the restore rows are never a
+   *  provider id. Non-provider rows keep their plain string request. */
+  private commitRequestFor(rowId: WebSettingRowId, requested: string): WebSettingsCommitRequest | undefined {
+    if (rowId !== 'web-search-provider' && rowId !== 'web-fetch-provider') return requested
+    // The intent records the read the PAINTED frame was built from: a read
+    // that settles afterwards must make the queue refuse (Not saved), never
+    // silently re-interpret the same key as a different official action.
+    const facts = this.paintedFacts ?? this.intents.readFacts()
+    if (facts.kind !== 'ready') return undefined
+    const capability = rowId === 'web-search-provider' ? 'search' : 'fetch'
+    const observed = facts.settings.providerSelection[capability]
+    const choice = this.providerChoices(rowId, facts.settings).find(entry => entry.key === requested)
+    if (choice === undefined) return undefined
+    if (choice.action === 'restore') return { kind: 'provider-restore', observed }
+    if (choice.id === undefined) return undefined
+    return { kind: 'provider-select', id: choice.id, observed }
   }
 
   /** ONE explicit confirm → the command owner's FIFO → the painted verdict. The
    *  page never dispatches a second write for the same draft. */
-  private confirmChoice(rowId: WebSettingRowId, requested: string): void {
+  private confirmChoice(rowId: WebSettingRowId, requested: WebSettingsCommitRequest): void {
     if (this.phases.get(rowId)?.kind === 'saving') return
     this.commitPresentation(() => {
       this.phases.set(rowId, { kind: 'saving' })
@@ -737,13 +800,9 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     if (this.intents.writableRefusal() !== undefined) return []
     switch (rowId) {
       case 'web-search-provider':
-        return this.providerSelectable(facts.settings.searchProvider, WEB_SEARCH_PROVIDER_CANDIDATES)
-          ? WEB_SEARCH_PROVIDER_CANDIDATES.map(candidate => candidate.id)
-          : []
+        return this.providerChoices(rowId, facts.settings).map(choice => choice.key)
       case 'web-fetch-provider':
-        return this.providerSelectable(facts.settings.fetchProvider, WEB_FETCH_PROVIDER_CANDIDATES)
-          ? WEB_FETCH_PROVIDER_CANDIDATES.map(candidate => candidate.id)
-          : []
+        return this.providerChoices(rowId, facts.settings).map(choice => choice.key)
       case 'web-search-count':
         return WEB_SEARCH_COUNT_CANDIDATES
       case 'web-send-original-question':
@@ -780,15 +839,72 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     return this.billingProviderSelected(settings, capability) && !this.billingOverridden(settings, capability)
   }
 
-  /** Whether the configured provider id is one of the official candidates this
-   *  page may select. `undefined` = the Host's AUTOMATIC routing state, which
-   *  IS selectable (an explicit Confirm writes the real pin); any other id is
-   *  a CUSTOM route and offers no candidate at all. */
-  private providerSelectable(
-    current: string | undefined,
-    candidates: readonly { readonly id: string }[],
-  ): boolean {
-    return current === undefined || candidates.some(candidate => candidate.id === current)
+  /**
+   * The provider rows' real choices, derived from the SAME Host read's
+   * `value`/`base`/`user` facts:
+   *
+   * - the deployment composes no provider -> an Automatic row (the official
+   *   unset, never a provider id) plus the official candidates;
+   * - a candidate whose id EQUALS the deployment `baseId` keeps its provider
+   *   label but confirms the official reset ("deployment default");
+   * - a custom effective route keeps the explicit-set protection (no official
+   *   candidate is offered to replace it) while a USER override still gets the
+   *   ONE restore row that maps to `unset` — never the custom id;
+   * - an inherited custom route (no USER own-field) offers nothing to reset.
+   */
+  private providerChoices(
+    rowId: 'web-search-provider' | 'web-fetch-provider',
+    settings: WebProviderSettings,
+  ): readonly { readonly key: string; readonly label: string; readonly note: string; readonly action: 'select' | 'restore'; readonly id?: string }[] {
+    const capability = rowId === 'web-search-provider' ? 'search' : 'fetch'
+    const candidates = capability === 'search' ? WEB_SEARCH_PROVIDER_CANDIDATES : WEB_FETCH_PROVIDER_CANDIDATES
+    const selection = capability === 'search' ? settings.providerSelection.search : settings.providerSelection.fetch
+    const effective = capability === 'search' ? settings.searchProvider : settings.fetchProvider
+    const choices: { key: string; label: string; note: string; action: 'select' | 'restore'; id?: string }[] = []
+    if (selection.baseId === undefined) {
+      choices.push({
+        key: WEB_PROVIDER_AUTOMATIC_KEY,
+        label: 'Automatic',
+        note: 'the Host selects per request',
+        action: 'restore',
+      })
+    }
+    const baseCandidate = candidates.find(candidate => candidate.id === selection.baseId)
+    const explicitSetsAllowed = effective === undefined || candidates.some(candidate => candidate.id === effective)
+    if (explicitSetsAllowed) {
+      for (const candidate of candidates) {
+        const restoresBase = candidate.id === selection.baseId
+        choices.push({
+          key: candidate.id,
+          label: candidate.label,
+          note: restoresBase ? 'deployment default' : this.providerCandidateNote(capability, candidate.id),
+          action: restoresBase ? 'restore' : 'select',
+          ...restoresBase ? {} : { id: candidate.id },
+        })
+      }
+    } else if (baseCandidate !== undefined && selection.userSet) {
+      // A custom effective route blocks explicit official sets, but the
+      // deployment's own provider is still reachable through the official
+      // reset: offer ONLY that restore row (the custom route is never written).
+      choices.push({ key: baseCandidate.id, label: baseCandidate.label, note: 'deployment default', action: 'restore' })
+    }
+    if (baseCandidate === undefined && selection.baseId !== undefined && selection.userSet) {
+      choices.push({
+        key: WEB_PROVIDER_RESTORE_KEY,
+        label: 'Use deployment default',
+        note: `deployment default: ${sanitizedPhysicalLine(selection.baseId)}`,
+        action: 'restore',
+      })
+    }
+    return choices
+  }
+
+  /** The billing/product note one explicit official candidate paints (a
+   *  deployment-default row carries its own note instead). */
+  private providerCandidateNote(capability: 'search' | 'fetch', id: string): string {
+    return capability === 'search'
+      ? id === 'deepseek-search-api' ? 'explicit · billed per Search API call' : 'server-side · model-token billed'
+      : id === 'http' ? 'anonymous · no billed API' : 'separately billed'
   }
 
   /** The highlighted candidate of the selected row, positioned on the value the
@@ -797,9 +913,35 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     if (facts.kind !== 'ready') return 0
     const rowId = this.selectedSettingId()
     if (rowId === undefined) return 0
-    const committed = this.committedIdentity(facts.settings, rowId)
+    const committed = this.currentChoiceValue(facts.settings, rowId)
     const index = this.choiceValues().findIndex(value => value === committed)
     return index < 0 ? 0 : index
+  }
+
+  /** The option whose `[current]` chip the LATEST read earns. Provider rows
+   *  report the option that really owns the effective value: the Automatic row
+   *  while no deployment/effective selection exists, or the official candidate
+   *  whose id is the effective one. A custom effective route owns NO option chip
+   *  (the restore row is an action, not the current value). */
+  private currentChoiceValue(settings: WebProviderSettings, rowId: WebSettingRowId): string | undefined {
+    switch (rowId) {
+      case 'web-search-provider':
+        return this.providerCurrentKey(settings, 'search')
+      case 'web-fetch-provider':
+        return this.providerCurrentKey(settings, 'fetch')
+      default:
+        return this.committedIdentity(settings, rowId)
+    }
+  }
+
+  private providerCurrentKey(settings: WebProviderSettings, capability: 'search' | 'fetch'): string | undefined {
+    const effective = capability === 'search' ? settings.searchProvider : settings.fetchProvider
+    const candidates = capability === 'search' ? WEB_SEARCH_PROVIDER_CANDIDATES : WEB_FETCH_PROVIDER_CANDIDATES
+    const key = effective === undefined
+      ? WEB_PROVIDER_AUTOMATIC_KEY
+      : candidates.some(candidate => candidate.id === effective) ? effective : undefined
+    if (key === undefined) return undefined
+    return this.choiceValues().includes(key) ? key : undefined
   }
 
   /** The authority's RAW identity of one field (never a display label). The
@@ -808,8 +950,6 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
    *  this identity is display-only). */
   private committedIdentity(settings: WebProviderSettings, rowId: WebSettingRowId): string | undefined {
     switch (rowId) {
-      case 'web-search-provider': return settings.searchProvider
-      case 'web-fetch-provider': return settings.fetchProvider
       case 'web-search-count': return String(settings.api.count)
       case 'web-send-original-question': return settings.api.sendOriginalQuestion ? 'on' : 'off'
       case 'web-search-billing': return settings.api.searchBilling
@@ -1081,6 +1221,11 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     const grant = this.rowGrant
     const bodyRows = this.bodyRows()
     const facts = this.intents.readFacts()
+    // Anchor the placeholder highlight on the FIRST readable authority so the
+    // Automatic / deployment-default row is never painted as selected while a
+    // different option carries `[current]`. A later read keeps the user's draft.
+    this.anchorAuthorityChoice(facts, width, bodyRows)
+    this.paintedFacts = facts
     const targets: PageTarget[] = []
     const lines: string[] = []
     const both = this.paintsBothRegions(width, bodyRows)
@@ -1142,6 +1287,27 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     lines.push(fit(this.paintBarWording(bar), width))
     this.paint = { width, rows: grant, bodyRows, targetRows: targets }
     return lines.slice(0, grant)
+  }
+
+  /** Point the page's placeholder highlight at the FIRST readable authority.
+   *  The page is constructed while its read is pending, so the initial index 0
+   *  is not a user draft: without this anchor an Automatic / deployment-default
+   *  row could be painted as selected while a different option carries
+   *  `[current]`. The projection uses THIS frame's real width/rows (the paint of
+   *  the previous frame — possibly none — is not a layout authority). A later
+   *  read never re-anchors, so a draft the user moved stays put. */
+  private anchorAuthorityChoice(facts: WebSettingsFacts, width: number, bodyRows: number): void {
+    if (facts.kind !== 'ready' || this.authorityAnchored) return
+    this.authorityAnchored = true
+    const viewport = this.detailViewport(width, bodyRows)
+    const projection = this.detailProjection(this.detailWidth(width, bodyRows), viewport)
+    this.detailOffset = 0
+    this.choiceIndex = this.currentChoiceIndex(facts)
+    const requested = this.choiceValues()[this.choiceIndex]
+    const entry = requested === undefined ? undefined : projection.optionLines.find(line => line.value === requested)
+    if (entry !== undefined && entry.line >= viewport) {
+      this.detailOffset = Math.min(entry.line - viewport + 1, projection.maxOffset)
+    }
   }
 
   /** The pane-header line the root paints inside the shared body grant. The
@@ -1353,8 +1519,9 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     const values = this.choiceValues()
     if (values.length > 0) {
       lines.push({ text: '' })
-      const committed = facts.kind === 'ready' ? this.committedIdentity(facts.settings, rowId) : undefined
-      for (const [index, value] of values.entries()) lines.push(this.optionLine(rowId, value, index, committed, width))
+      const committed = facts.kind === 'ready' ? this.currentChoiceValue(facts.settings, rowId) : undefined
+      const settings = facts.kind === 'ready' ? facts.settings : undefined
+      for (const [index, value] of values.entries()) lines.push(this.optionLine(rowId, value, index, committed, width, settings))
       lines.push({ text: '' })
     }
     lines.push(...this.rowNotes(rowId, facts, width).map(text => ({ text })))
@@ -1407,11 +1574,15 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     index: number,
     committed: string | undefined,
     width: number,
+    settings: WebProviderSettings | undefined,
   ): DetailLine {
     const selected = index === this.choiceIndex
     const marker = selected ? (this.region === 'detail' ? color.primary('› ') : color.textDim('› ')) : '  '
-    const label = this.optionLabel(rowId, value)
-    const note = this.optionNote(rowId, value)
+    const providerChoice = settings === undefined || (rowId !== 'web-search-provider' && rowId !== 'web-fetch-provider')
+      ? undefined
+      : this.providerChoices(rowId, settings).find(choice => choice.key === value)
+    const label = providerChoice?.label ?? this.optionLabel(rowId, value)
+    const note = providerChoice?.note ?? this.optionNote(rowId, value)
     let text = `${marker}${selected ? color.textStrong(label) : color.text(label)}`
     if (committed === value && visibleWidth(`${text} [current]`) <= width) text += ` ${color.textMuted('[current]')}`
     if (note !== '' && visibleWidth(`${text} · ${note}`) <= width) text += color.textDim(` · ${note}`)
@@ -1420,8 +1591,9 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
 
   private optionLabel(rowId: WebSettingRowId, value: string): string {
     switch (rowId) {
-      case 'web-search-provider': return WEB_SEARCH_PROVIDER_CANDIDATES.find(candidate => candidate.id === value)?.label ?? value
-      case 'web-fetch-provider': return WEB_FETCH_PROVIDER_CANDIDATES.find(candidate => candidate.id === value)?.label ?? value
+      case 'web-search-provider':
+      case 'web-fetch-provider':
+        return value
       case 'web-search-billing':
       case 'web-fetch-billing': return webBillingLabel(value)
       default: return value
@@ -1431,9 +1603,8 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
   private optionNote(rowId: WebSettingRowId, value: string): string {
     switch (rowId) {
       case 'web-search-provider':
-        return value === 'deepseek-search-api' ? 'explicit · billed per Search API call' : 'server-side · model-token billed'
       case 'web-fetch-provider':
-        return value === 'http' ? 'anonymous · no billed API' : 'separately billed'
+        return ''
       case 'web-search-count':
         return value === '10' ? 'packed default' : ''
       case 'web-send-original-question':
@@ -1464,37 +1635,77 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     return overrides.map(entry => `${entry.field}=${sanitizedPhysicalLine(entry.value)}`).join(' · ')
   }
 
+  /** The provider Detail's layer-aware explanation. It is DERIVED from the
+   *  latest `value`/`base`/`user` facts and states only what they prove: the
+   *  deployment default, whether a reset entry exists, the routing rule when
+   *  the deployment composes no provider, and the ONE residual state in which
+   *  the Host keeps an explicit USER value equal to the deployment default
+   *  (the official reset restores the effective value; it is not a
+   *  promise that the USER field is deleted while a sibling override exists). */
+  private providerLayerNotes(capability: 'search' | 'fetch', settings: WebProviderSettings | undefined): string[] {
+    const notes: string[] = []
+    if (settings === undefined) return notes
+    const selection = capability === 'search' ? settings.providerSelection.search : settings.providerSelection.fetch
+    const effective = capability === 'search' ? settings.searchProvider : settings.fetchProvider
+    const candidates = capability === 'search' ? WEB_SEARCH_PROVIDER_CANDIDATES : WEB_FETCH_PROVIDER_CANDIDATES
+    const official = candidates.find(candidate => candidate.id === effective) !== undefined
+    if (effective !== undefined && !official) {
+      notes.push(capability === 'search'
+        ? 'The configured search provider is a CUSTOM route: it is displayed as-is and is not selectable here. '
+          + 'The official candidates are DeepSeek server-side search and DeepSeek Search API.'
+        : 'The configured fetch provider is a CUSTOM route: it is displayed as-is and is not selectable here. '
+          + 'The official candidates are HTTP and DeepSeek Fetch API.')
+    }
+    if (selection.baseId === undefined) {
+      notes.push(capability === 'search'
+        ? 'This deployment composes no Search provider, so Automatic is available: with no explicit USER selection '
+          + 'the Host routes AUTOMATICALLY (DSH rc.5) — a request on a DeepSeek model route PREFERS DeepSeek '
+          + 'server-side search (no per-search charge), while other models and requests outside a model route prefer '
+          + 'the DeepSeek Search API (billed per Search API call; a Messages plan does not guarantee coverage). An '
+          + 'explicit USER selection always overrides the automatic routing. When no preferred provider is usable the '
+          + 'Host may pick another single usable provider or fail with an explicit error; this page states the '
+          + 'configured fact, never which provider one request actually consumed. The choice applies to the NEXT '
+          + 'search. No write happens without an explicit Enter.'
+        : 'This deployment composes no Fetch provider, so Automatic is available: with no explicit USER selection '
+          + 'the Host auto-selects exactly one usable fetch provider, otherwise the fetch fails with an explicit '
+          + 'error. HTTP calls no billed API. DeepSeek Fetch API is the opt-in alternative and is separately billed: '
+          + 'a Messages plan does not guarantee coverage. The choice applies to the NEXT fetch.')
+    } else {
+      notes.push(capability === 'search'
+        ? `The deployment default Search provider is "${sanitizedPhysicalLine(selection.baseId)}". Choosing that `
+          + 'candidate runs the official reset of the USER selection (never a write of the deployment id as a '
+          + 'provider); the deployment selection then applies. An explicit USER selection still overrides it until '
+          + 'it is reset.'
+        : `The deployment default Fetch provider is "${sanitizedPhysicalLine(selection.baseId)}". Choosing that `
+          + 'candidate runs the official reset of the USER selection (never a write of the deployment id as a '
+          + 'provider); the deployment selection then applies. An explicit USER selection still overrides it until '
+          + 'it is reset.')
+    }
+    if (selection.baseId !== undefined && !candidates.some(candidate => candidate.id === selection.baseId)
+      && selection.userSet) {
+      notes.push('The "Use deployment default" row is the official reset of this capability\'s USER selection. '
+        + 'It maps to the official unset path op only: the custom deployment id is never written and the other '
+        + 'Web fields are untouched.')
+    }
+    if (selection.userSet && selection.baseId !== undefined && selection.userId === selection.baseId) {
+      notes.push('The effective value already equals the deployment default, but the USER layer still carries this '
+        + 'value explicitly. Choosing the deployment-default candidate (or "Use deployment default") replaces that '
+        + 'explicit value with the official reset; the effective value stays the deployment default.')
+    }
+    return notes
+  }
+
   /** The row's static explanation, wrapped to the Detail column. These are the
    *  durable product facts (defaults, billing, payload boundary, override
    *  ownership) this page freezes; they are never derived from the request. */
   private rowNotes(rowId: WebSettingRowId, facts: WebSettingsFacts, width: number): string[] {
     const notes: string[] = []
     switch (rowId) {
-      case 'web-search-provider': {
-        const custom = facts.kind === 'ready'
-          && !this.providerSelectable(facts.settings.searchProvider, WEB_SEARCH_PROVIDER_CANDIDATES)
-        notes.push(custom
-          ? 'The configured search provider is a CUSTOM route: it is displayed as-is and is not selectable here. '
-            + 'The official candidates are DeepSeek server-side search and DeepSeek Search API.'
-          : 'With no explicit selection the Host routes AUTOMATICALLY (DSH rc.5): a request on a DeepSeek model route '
-            + 'PREFERS DeepSeek server-side search (no per-search charge), while other models and requests outside a '
-            + 'model route prefer the DeepSeek Search API (billed per Search API call; a Messages plan does not '
-            + 'guarantee coverage). An explicit selection always overrides the automatic routing. When no preferred '
-            + 'provider is usable the Host may pick another single usable provider or fail with an explicit error; '
-            + 'this page states the configured fact, never which provider one request actually consumed. '
-            + 'The choice applies to the NEXT search. No write happens without an explicit Enter.')
-        break
-      }
+      case 'web-search-provider':
       case 'web-fetch-provider': {
-        const custom = facts.kind === 'ready'
-          && !this.providerSelectable(facts.settings.fetchProvider, WEB_FETCH_PROVIDER_CANDIDATES)
-        notes.push(custom
-          ? 'The configured fetch provider is a CUSTOM route: it is displayed as-is and is not selectable here. '
-            + 'The official candidates are HTTP and DeepSeek Fetch API.'
-          : 'With no explicit selection the Host auto-selects: exactly one usable fetch provider runs, otherwise the '
-            + 'fetch fails with an explicit error. HTTP calls no billed API. DeepSeek Fetch API is the opt-in '
-            + 'alternative and is separately billed: a Messages plan does not guarantee coverage. The choice applies '
-            + 'to the NEXT fetch.')
+        const capability = rowId === 'web-search-provider' ? 'search' : 'fetch'
+        const settings = facts.kind === 'ready' ? facts.settings : undefined
+        notes.push(...this.providerLayerNotes(capability, settings))
         break
       }
       case 'web-search-count':

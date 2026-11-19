@@ -33,6 +33,7 @@ import { CredentialWorkflow, resolveLoginDestination, resolveLogoutDestination }
 interface FakeNamespace {
   ns: string
   value: Record<string, unknown>
+  base?: Record<string, unknown>
   user?: Record<string, unknown>
   revision: number
 }
@@ -147,6 +148,17 @@ function applyPath(target: Record<string, unknown>, path: readonly string[], val
   current[path[path.length - 1]!] = value
 }
 
+/** Read one own-member path from a layer (undefined when absent or unreadable). */
+function pathValue(target: Record<string, unknown> | undefined, path: readonly string[]): unknown {
+  let current: unknown = target
+  for (const key of path) {
+    if (typeof current !== 'object' || current === null || Array.isArray(current)) return undefined
+    if (!Object.hasOwn(current, key)) return undefined
+    current = (current as Record<string, unknown>)[key]
+  }
+  return current
+}
+
 function unsetPath(target: Record<string, unknown>, path: readonly string[]): void {
   let current: Record<string, unknown> | undefined = target
   for (let index = 0; index < path.length - 1; index += 1) {
@@ -200,6 +212,7 @@ function createBackend(seed?: (state: FakeState) => void, options: { readonly au
   const viewOf = (ns: FakeNamespace) => ({
     ns: ns.ns,
     value: structuredClone(ns.value),
+    ...ns.base === undefined ? {} : { base: structuredClone(ns.base) },
     ...ns.user === undefined ? {} : { user: structuredClone(ns.user) },
     revision: ns.revision,
     applies: 'live',
@@ -252,8 +265,24 @@ function createBackend(seed?: (state: FakeState) => void, options: { readonly au
               }
             }
             for (const op of ops) {
-              if (op.op === 'set') applyPath(entry.value, op.path, op.value)
-              else unsetPath(entry.value, op.path)
+              if (op.op === 'set') {
+                applyPath(entry.value, op.path, op.value)
+                entry.user ??= {}
+                applyPath(entry.user, op.path, op.value)
+                continue
+              }
+              // The rc.5 official `mutate` substitutes `set(base)` for an
+              // `unset` whose path has a deployment value; otherwise it removes
+              // the USER own-field.
+              const inherited = pathValue(entry.base, op.path)
+              if (inherited !== undefined) {
+                applyPath(entry.value, op.path, inherited)
+                entry.user ??= {}
+                applyPath(entry.user, op.path, inherited)
+              } else {
+                unsetPath(entry.value, op.path)
+                if (entry.user !== undefined) unsetPath(entry.user, op.path)
+              }
             }
             entry.revision += 1
           }
@@ -1802,7 +1831,13 @@ test('a stale webStartupPreference read stays last-known and the write is refuse
 
 function seedWebNamespaces(state: FakeState, options: { readonly omit?: 'web' | 'api' } = {}): void {
   if (options.omit !== 'web') {
-    state.namespaces.set(WEB_NS, { ns: WEB_NS, value: { ...WEB_DEFAULTS }, revision: 4 })
+    state.namespaces.set(WEB_NS, {
+      ns: WEB_NS,
+      value: { ...WEB_DEFAULTS },
+      base: { fetchProvider: 'http' },
+      user: { searchProvider: 'deepseek-official' },
+      revision: 4,
+    })
   }
   if (options.omit !== 'api') {
     state.namespaces.set(WEB_API_NS, { ns: WEB_API_NS, value: { ...WEB_API_DEFAULTS }, revision: 8 })
@@ -1820,6 +1855,10 @@ test('the Remote Web adapter reads both Host sections and writes each exact fiel
   assert.deepEqual(await port.web.read(), {
     searchProvider: 'deepseek-official',
     fetchProvider: 'http',
+    providerSelection: {
+      search: { baseId: undefined, userSet: true, userId: 'deepseek-official' },
+      fetch: { baseId: 'http', userSet: false, userId: undefined },
+    },
     api: { searchBilling: 'auto', fetchBilling: 'auto', count: 10, sendOriginalQuestion: true },
     advanced: {},
     credential: { configured: true, source: 'file' },
@@ -1842,6 +1881,10 @@ test('the Remote Web adapter reads both Host sections and writes each exact fiel
   assert.deepEqual(await port.web.read(), {
     searchProvider: 'deepseek-search-api',
     fetchProvider: 'deepseek-fetch-api',
+    providerSelection: {
+      search: { baseId: undefined, userSet: true, userId: 'deepseek-search-api' },
+      fetch: { baseId: 'http', userSet: true, userId: 'deepseek-fetch-api' },
+    },
     api: { searchBilling: 'account', fetchBilling: 'api-key', count: 20, sendOriginalQuestion: false },
     advanced: {},
     credential: { configured: true, source: 'file' },
@@ -2059,4 +2102,106 @@ test('a Host revision change before Remote Web dispatch rejects the stale mutati
   await assert.rejects(port.web.setSearchProvider('deepseek-search-api'), /revision 4 != 5/u)
   assert.equal(state.namespaces.get(WEB_NS)?.value.searchProvider, 'custom-concurrent-writer')
   assert.equal(port.configReadiness(), 'ready', 'the failure path refreshed the authoritative winner')
+})
+
+// ── PR2: the mirrored web descriptor's USER/base layers + official reset ─────
+
+test('the Remote Web adapter projects the SAME namespace view value/base/user', async () => {
+  const { port } = createBackend(current => {
+    seedWebNamespaces(current)
+    const web = current.namespaces.get(WEB_NS)!
+    web.base = { searchProvider: 'deepseek-official', fetchProvider: 'http' }
+    web.user = { searchProvider: 'deepseek-search-api', fetchProvider: 'deepseek-fetch-api' }
+    web.value = { searchProvider: 'deepseek-search-api', fetchProvider: 'deepseek-fetch-api' }
+  })
+  await port.describe()
+  assert.deepEqual((await port.web.read())?.providerSelection, {
+    search: { baseId: 'deepseek-official', userSet: true, userId: 'deepseek-search-api' },
+    fetch: { baseId: 'http', userSet: true, userId: 'deepseek-fetch-api' },
+  })
+
+  // A non-object/missing layer is unreadable, never "no USER override".
+  for (const layer of ['base', 'user'] as const) {
+    const missing = createBackend(current => {
+      seedWebNamespaces(current)
+      Reflect.deleteProperty(current.namespaces.get(WEB_NS)!, layer)
+    })
+    await missing.port.describe()
+    assert.equal(await missing.port.web.read(), undefined, `a missing ${layer} layer is unavailable`)
+    await assert.rejects(missing.port.web.restoreSearchProvider(), /USER\/base layers/u)
+    assert.deepEqual(missing.state.mutateCalls, [])
+  }
+})
+
+test('the Remote Web reset dispatches the exact official unset on the mirror revision', async () => {
+  const { port, state } = createBackend(current => { seedWebNamespaces(current) })
+  await port.describe()
+  await port.web.restoreSearchProvider()
+  assert.deepEqual(state.mutateCalls.map(call => ({ ns: call.ns, ops: call.ops, revision: call.revision })), [
+    { ns: WEB_NS, ops: [{ op: 'unset', path: ['searchProvider'] }], revision: 4 },
+  ], 'one unset op carrying the descriptor revision, never a provider id write')
+  const read = await port.web.read()
+  assert.equal(read?.searchProvider, undefined, 'Search base is absent, so the effective value is Automatic')
+  assert.deepEqual(read?.providerSelection.search, { baseId: undefined, userSet: false, userId: undefined })
+  assert.equal(read?.fetchProvider, 'http', 'the Fetch sibling keeps its value')
+  // A reset with no USER own-field is a real no-op.
+  const before = state.mutateCalls.length
+  await port.web.restoreFetchProvider()
+  assert.equal(state.mutateCalls.length, before, 'no unset is dispatched when the USER field is absent')
+})
+
+test('an rc.5 sibling keeps an explicit USER value equal to the deployment base after reset (mirror projection)', async () => {
+  // The REAL rc.5 SettingsForms rewrites an unset whose path has a base value as
+  // `set(base)`; with a sibling USER override the persisted USER section keeps
+  // that explicit value. The adapter must project the Host's answer truthfully
+  // (the TUI then credits the reset by the effective value, not by a claim that
+  // the USER field was deleted).
+  const { port, state } = createBackend(current => {
+    seedWebNamespaces(current)
+    const web = current.namespaces.get(WEB_NS)!
+    web.value = { searchProvider: 'deepseek-search-api', fetchProvider: 'deepseek-fetch-api' }
+    web.user = { searchProvider: 'deepseek-search-api', fetchProvider: 'deepseek-fetch-api' }
+  })
+  await port.describe()
+  await port.web.restoreFetchProvider()
+  const read = await port.web.read()
+  assert.equal(read?.fetchProvider, 'http', 'the effective value returns to the deployment HTTP')
+  assert.deepEqual(read?.providerSelection.fetch, { baseId: 'http', userSet: true, userId: 'http' },
+    'the Host kept the explicit USER value; the adapter does not pretend it vanished')
+  assert.equal(read?.providerSelection.search.userSet, true, 'the Search sibling is untouched')
+  assert.deepEqual(state.mutateCalls.map(call => call.ops), [[{ op: 'unset', path: ['fetchProvider'] }]])
+})
+
+test('a custom effective Remote provider is restorable through unset while an explicit official set stays refused', async () => {
+  const { port, state } = createBackend(current => {
+    seedWebNamespaces(current)
+    const web = current.namespaces.get(WEB_NS)!
+    web.base = { searchProvider: 'deepseek-official', fetchProvider: 'http' }
+    web.user = { searchProvider: 'acme-search' }
+    web.value = { searchProvider: 'acme-search', fetchProvider: 'http' }
+  })
+  await port.describe()
+  assert.equal((await port.web.read())?.providerSelection.search.baseId, 'deepseek-official')
+  await assert.rejects(port.web.setSearchProvider('deepseek-search-api'), /custom route/u)
+  assert.equal(state.mutateCalls.length, 0, 'the explicit-set guard refuses before the Host mutate')
+  await port.web.restoreSearchProvider()
+  assert.deepEqual(state.mutateCalls.map(call => call.ops), [[{ op: 'unset', path: ['searchProvider'] }]])
+  assert.equal((await port.web.read())?.searchProvider, 'deepseek-official',
+    'the deployment default applies after the official reset')
+})
+
+test('a stale mirrored USER layer never authorizes a reset after the Host moved', async () => {
+  const { port, state, emit } = createBackend(current => { seedWebNamespaces(current) })
+  await port.describe()
+  // Another writer removes the USER override; an invalidation marks the mirror
+  // stale. The reset must re-read (the adapter's ensureCurrent + beforeDispatch)
+  // and then dispatch NOTHING, instead of unsetting the last-known layer.
+  const web = state.namespaces.get(WEB_NS)!
+  delete web.user!.searchProvider
+  web.value = { fetchProvider: 'http' }
+  web.revision += 1
+  emit('settings/document-updated')
+  await port.web.restoreSearchProvider()
+  assert.deepEqual(state.mutateCalls, [], 'the refreshed layer has no own-field, so the reset is a no-op')
+  assert.equal((await port.web.read())?.providerSelection.search.userSet, false)
 })

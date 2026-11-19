@@ -1425,6 +1425,10 @@ export async function apply(ctx) {
         // so a rejected/same-value call is invisible there; counting the
         // ingress itself is what proves ZERO Billing mutation calls.
         const mutationCounts = {}
+        // The op KIND and path per ingress: `set` and `unset` on the same field
+        // are different official operations, so the reset evidence cannot be
+        // inferred from a field-count / revision alone.
+        const mutationOps = []
         const settingsService = ctx.settings
         const originalMutate = settingsService.mutate
         settingsService.mutate = async function countedMutate(namespace, ops, expected) {
@@ -1433,6 +1437,15 @@ export async function apply(ctx) {
             : ''
           mutationCounts[namespace] = (mutationCounts[namespace] ?? 0) + 1
           mutationCounts[`${namespace}:${fields}`] = (mutationCounts[`${namespace}:${fields}`] ?? 0) + 1
+          mutationOps.push({
+            namespace,
+            ops: Array.isArray(ops)
+              ? ops.map(op => ({
+                  op: op?.op,
+                  path: Array.isArray(op?.path) ? op.path.map(String) : [],
+                }))
+              : [],
+          })
           return originalMutate.call(this, namespace, ops, expected)
         }
         const webRequestPath = join(root, 'f3-web-provider-request.json')
@@ -1461,6 +1474,7 @@ export async function apply(ctx) {
             revision: descriptor?.revision,
             apiRevision: apiDescriptor?.revision,
             mutationCounts: { ...mutationCounts },
+            mutationOps: mutationOps.map(entry => ({ namespace: entry.namespace, ops: entry.ops.map(op => ({ ...op, path: [...op.path] })) })),
           })
         }
         const webRequestTimer = setInterval(() => {

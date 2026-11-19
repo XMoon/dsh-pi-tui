@@ -61,6 +61,7 @@ import {
   assertWebApiBilling,
   readWebApiBilling,
   webApiAdvancedFactsOf,
+  webProviderSelectionFactsOf,
 } from '../../domain/web-provider-settings.ts'
 import type {
   AccountBalanceOutcome,
@@ -2420,6 +2421,12 @@ class RemoteWebProviderConfig implements WebProviderConfig {
       const webValue = plainRecord(web.value)
       const apiValue = plainRecord(api.value)
       if (webValue === undefined || apiValue === undefined) return undefined
+      // The SAME mirrored `web` view carries the `base`/`user` projections.
+      // A missing/non-object layer is UNAVAILABLE — never "there is no USER
+      // override" (the official controller always sends both objects).
+      const searchSelection = webProviderSelectionFactsOf(web.base, web.user, 'searchProvider')
+      const fetchSelection = webProviderSelectionFactsOf(web.base, web.user, 'fetchProvider')
+      if (searchSelection === undefined || fetchSelection === undefined) return undefined
       // There is NO single `baseURL` requirement: the read stays ready without
       // one (the Host selects the actual provider at request time). A
       // missing/foreign billing value is UNAVAILABLE — never a silent `auto` —
@@ -2442,6 +2449,7 @@ class RemoteWebProviderConfig implements WebProviderConfig {
         fetchProvider: typeof webValue.fetchProvider === 'string' && webValue.fetchProvider !== ''
           ? webValue.fetchProvider
           : undefined,
+        providerSelection: { search: searchSelection, fetch: fetchSelection },
         api: { searchBilling, fetchBilling, count, sendOriginalQuestion },
         advanced: webApiAdvancedFactsOf(apiValue),
         credential,
@@ -2450,11 +2458,13 @@ class RemoteWebProviderConfig implements WebProviderConfig {
     throw new SupersededReadError('the Remote Web settings read was repeatedly superseded')
   }
 
-  private async mutate(
+  /** One revision-checked official settings mutation on the EXISTING mirror
+   *  write queue (the Host CAS revision is the selected descriptor's own
+   *  revision; the post-settlement `describe` is the only new authority). */
+  private async dispatch(
     ns: typeof WEB_PROVIDER_NS | typeof WEB_SEARCH_API_NS,
-    field: string,
-    value: unknown,
-    protectProvider?: 'searchProvider' | 'fetchProvider',
+    ops: readonly RemoteSettingsPathOp[],
+    guard?: (descriptor: RemoteSettingsNamespaceView) => void,
   ): Promise<void> {
     await this.mirror.ensureCurrent()
     if (this.mirror.readiness() !== 'ready'
@@ -2464,9 +2474,22 @@ class RemoteWebProviderConfig implements WebProviderConfig {
     }
     await this.mirror.mutate(
       ns,
-      [{ op: 'set', path: [field], value }],
+      ops,
       undefined,
       'reject',
+      guard === undefined ? undefined : descriptor => { guard(descriptor) },
+    )
+  }
+
+  private async mutate(
+    ns: typeof WEB_PROVIDER_NS | typeof WEB_SEARCH_API_NS,
+    field: string,
+    value: unknown,
+    protectProvider?: 'searchProvider' | 'fetchProvider',
+  ): Promise<void> {
+    await this.dispatch(
+      ns,
+      [{ op: 'set', path: [field], value }],
       protectProvider === undefined
         ? undefined
         : descriptor => {
@@ -2475,6 +2498,47 @@ class RemoteWebProviderConfig implements WebProviderConfig {
             if (protectProvider === 'searchProvider') assertSearchProviderReplaceable(current.searchProvider)
             else assertFetchProviderReplaceable(current.fetchProvider)
           },
+    )
+  }
+
+  async restoreSearchProvider(): Promise<void> {
+    await this.restoreProvider('searchProvider')
+  }
+
+  async restoreFetchProvider(): Promise<void> {
+    await this.restoreProvider('fetchProvider')
+  }
+
+  /** The ONE official USER-layer reset of one provider selection: a single
+   *  `unset` path op on the mirror's existing write queue. Both layers must be
+   *  readable; an already-absent USER own-field is a real no-op (sending
+   *  `unset` would let the official base substitution PIN it again when a
+   *  sibling USER field exists, so it must never be dispatched blindly). The
+   *  synchronous `beforeDispatch` re-proves the same facts against the exact
+   *  descriptor revision that is about to be sent as the CAS token. */
+  private async restoreProvider(field: 'searchProvider' | 'fetchProvider'): Promise<void> {
+    await this.mirror.ensureCurrent()
+    const web = this.mirror.namespace(WEB_PROVIDER_NS)
+    if (web === undefined) throw new Error('the official Host Web settings section is unavailable')
+    const user = plainRecord(web.user)
+    const base = plainRecord(web.base)
+    if (user === undefined || base === undefined) {
+      throw new Error('the official Host Web settings section does not report its USER/base layers')
+    }
+    if (!Object.hasOwn(user, field)) return
+    await this.dispatch(
+      WEB_PROVIDER_NS,
+      [{ op: 'unset', path: [field] }],
+      descriptor => {
+        const liveUser = plainRecord(descriptor.user)
+        const liveBase = plainRecord(descriptor.base)
+        if (liveUser === undefined || liveBase === undefined) {
+          throw new Error('the official Host Web settings section does not report its USER/base layers')
+        }
+        if (!Object.hasOwn(liveUser, field)) {
+          throw new Error(`the ${field} USER override was already removed by another writer; no reset was dispatched`)
+        }
+      },
     )
   }
 

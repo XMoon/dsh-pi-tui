@@ -814,7 +814,9 @@ export async function runWebProviderSettingsF3(context) {
     // ── 2. Provider edits through the real page, and the Billing route gate. ─
     const beforeSearchProvider = sectionsSnapshot(documentPath)
     await openWebRow(clientA, ROW.searchProvider, 'UI_L6 A search provider')
-    await selectCandidate(clientA, 0, 'UI_L6 A search provider', MESSAGES_PROVIDER_LABEL)
+    // The deployment composes no Search provider, so the page lists Automatic
+    // first: the two official provider candidates are at 1 and 2.
+    await selectCandidate(clientA, 1, 'UI_L6 A search provider', MESSAGES_PROVIDER_LABEL)
     await confirmCandidate(clientA, MESSAGES_PROVIDER_LABEL, 'UI_L6 A search provider write')
     assertNamespaceWrite(documentPath, WEB_NS, beforeSearchProvider, config => {
       assert(config.searchProvider === 'deepseek-official',
@@ -831,7 +833,7 @@ export async function runWebProviderSettingsF3(context) {
 
     const beforeSearchProviderBack = sectionsSnapshot(documentPath)
     await openWebRow(clientA, ROW.searchProvider, 'UI_L6 A search provider back')
-    await selectCandidate(clientA, 1, 'UI_L6 A search provider back', SEARCH_API_PROVIDER_LABEL)
+    await selectCandidate(clientA, 2, 'UI_L6 A search provider back', SEARCH_API_PROVIDER_LABEL)
     await confirmCandidate(clientA, SEARCH_API_PROVIDER_LABEL, 'UI_L6 A search provider back write')
     assertWebEffective(documentPath, { searchProvider: 'deepseek-search-api', fetchProvider: 'deepseek-fetch-api' },
       'UI_L6 A search provider back')
@@ -1031,6 +1033,17 @@ export async function runWebProviderSettingsF3(context) {
       `UI_L6 positive calibration: the real TUI Billing confirm must be counted EXACTLY once at the mutation ingress (${String(billingMutationsOf(billingControlBefore))} -> ${String(billingMutationsOf(billingControlAfter))})`)
     assert(billingControlAfter.apiRevision > billingControlBefore.apiRevision,
       `UI_L6 positive calibration: a real Billing mutation must bump the observed Billing-namespace revision (${String(billingControlBefore.apiRevision)} -> ${String(billingControlAfter.apiRevision)})`)
+    // The SAME ingress records the op KIND: the TUI's write must be a `set` on
+    // the exact Billing field, which keeps the reset evidence (`unset`) apart
+    // from a field-count / revision-only observation.
+    const calibrationOps = (billingControlAfter.mutationOps ?? [])
+      .slice((billingControlBefore.mutationOps ?? []).length)
+      .filter(entry => entry.namespace === WEB_API_NS)
+    assert(calibrationOps.length === 1
+      && calibrationOps[0].ops.length === 1
+      && calibrationOps[0].ops[0].op === 'set'
+      && calibrationOps[0].ops[0].path[0] === 'searchBilling',
+    `UI_L6 positive calibration: the TUI Billing write must be ONE official set ingress: ${JSON.stringify(calibrationOps)}`)
     trace('f3.ui-l6', {
       verdict: 'UI_L6_PASS',
       phase: 'billing-mutation-calibration',
@@ -1290,7 +1303,7 @@ export async function runWebProviderSettingsF3(context) {
     await confirmCandidate(clientA, 'off', 'UI_L6 restore original question write')
     // Providers back to the explicit restored selection (server-side / HTTP).
     await openWebRow(clientA, ROW.searchProvider, 'UI_L6 restore search provider')
-    await selectCandidate(clientA, 0, 'UI_L6 restore search provider', MESSAGES_PROVIDER_LABEL)
+    await selectCandidate(clientA, 1, 'UI_L6 restore search provider', MESSAGES_PROVIDER_LABEL)
     await confirmCandidate(clientA, MESSAGES_PROVIDER_LABEL, 'UI_L6 restore search provider write')
     await openWebRow(clientA, ROW.fetchProvider, 'UI_L6 restore fetch provider')
     await selectCandidate(clientA, 0, 'UI_L6 restore fetch provider', HTTP_PROVIDER_LABEL)
@@ -1331,6 +1344,92 @@ export async function runWebProviderSettingsF3(context) {
       searchBilling: 'auto',
       fetchBilling: 'auto',
       advancedOverrides: 'unset',
+    })
+
+    // ── 7b. The official USER-layer reset through the REAL TUI. Each action
+    // sends exactly ONE `web` unset (never a provider id write), the read-back
+    // restores the deployment value, Client B observes the same Host facts and
+    // the sibling Web configuration survives.
+    // Fetch first: its deployment base is `http`, and the explicit Search USER
+    // override must remain untouched. The rc.5 Host keeps the explicit
+    // `fetchProvider: http` copy while that sibling exists — the TUI credits the
+    // reset by the restored effective value and states the residual.
+    const fetchRestoreBefore = await requestWebProvider(root, 'observe', undefined,
+      'UI_L6 restore-fetch mutation mark')
+    const fetchRestoreMark = (fetchRestoreBefore.mutationOps ?? []).length
+    const apiBeforeFetchRestore = snapshot(namespaceConfig(documentPath, WEB_API_NS))
+    await reopenWebPage(clientA, 'UI_L6 restore-fetch A page')
+    await openWebRow(clientA, ROW.fetchProvider, 'UI_L6 restore-fetch row')
+    await selectCandidate(clientA, 0, 'UI_L6 restore-fetch candidate', HTTP_PROVIDER_LABEL)
+    await confirmCandidate(clientA, HTTP_PROVIDER_LABEL, 'UI_L6 restore-fetch write')
+    const fetchRestoreAfter = await requestWebProvider(root, 'observe', undefined,
+      'UI_L6 restore-fetch ingress')
+    const fetchRestoreOps = (fetchRestoreAfter.mutationOps ?? [])
+      .slice(fetchRestoreMark)
+      .filter(entry => entry.namespace === WEB_NS)
+    assert(fetchRestoreOps.length === 1,
+      `UI_L6 restore-fetch: exactly ONE "web" mutation must reach the official Host ingress: ${JSON.stringify(fetchRestoreOps)}`)
+    assert(fetchRestoreOps[0].ops.length === 1
+      && fetchRestoreOps[0].ops[0].op === 'unset'
+      && fetchRestoreOps[0].ops[0].path[0] === 'fetchProvider',
+    `UI_L6 restore-fetch: the TUI must send the official unset path op: ${JSON.stringify(fetchRestoreOps[0])}`)
+    assertWebEffective(documentPath, { searchProvider: 'deepseek-official', fetchProvider: 'http' },
+      'UI_L6 restore-fetch')
+    const webAfterFetchRestore = namespaceConfig(documentPath, WEB_NS) ?? {}
+    assert(webAfterFetchRestore.searchProvider === 'deepseek-official',
+      `UI_L6 restore-fetch: the sibling Search USER override was lost: ${JSON.stringify(webAfterFetchRestore)}`)
+    assert(snapshot(namespaceConfig(documentPath, WEB_API_NS)) === apiBeforeFetchRestore,
+      'UI_L6 restore-fetch: the reset mutated the "web-deepseek-api" section')
+    await returnToWebList(clientA, 'UI_L6 restore-fetch list')
+    trace('f3.ui-l6', {
+      verdict: 'UI_L6_PASS',
+      phase: 'user-layer-restore-fetch',
+      operation: 'official unset',
+      effective: { fetchProvider: 'http' },
+      siblingSearchOverride: 'preserved',
+      residualUserField: Object.hasOwn(webAfterFetchRestore, 'fetchProvider'),
+      webMutations: fetchRestoreOps.length,
+    })
+
+    // Search: the deployment composes no Search provider, so the official
+    // reset removes the field and (with no remaining USER field) the whole
+    // `web` section from the profile patch.
+    const searchRestoreBefore = await requestWebProvider(root, 'observe', undefined,
+      'UI_L6 restore-search mutation mark')
+    const searchRestoreMark = (searchRestoreBefore.mutationOps ?? []).length
+    const apiBeforeSearchRestore = snapshot(namespaceConfig(documentPath, WEB_API_NS))
+    await openWebRow(clientA, ROW.searchProvider, 'UI_L6 restore-search row')
+    await selectCandidate(clientA, 0, 'UI_L6 restore-search candidate', 'Automatic')
+    await confirmCandidate(clientA, 'Automatic', 'UI_L6 restore-search write')
+    const searchRestoreAfter = await requestWebProvider(root, 'observe', undefined,
+      'UI_L6 restore-search ingress')
+    const searchRestoreOps = (searchRestoreAfter.mutationOps ?? [])
+      .slice(searchRestoreMark)
+      .filter(entry => entry.namespace === WEB_NS)
+    assert(searchRestoreOps.length === 1,
+      `UI_L6 restore-search: exactly ONE "web" mutation must reach the official Host ingress: ${JSON.stringify(searchRestoreOps)}`)
+    assert(searchRestoreOps[0].ops.length === 1
+      && searchRestoreOps[0].ops[0].op === 'unset'
+      && searchRestoreOps[0].ops[0].path[0] === 'searchProvider',
+    `UI_L6 restore-search: the TUI must send the official unset path op: ${JSON.stringify(searchRestoreOps[0])}`)
+    assert(namespaceConfig(documentPath, WEB_NS) === undefined,
+      `UI_L6 restore-search: the cleared Search field must leave no "web" USER section: ${JSON.stringify(namespaceConfig(documentPath, WEB_NS))}`)
+    assert(snapshot(namespaceConfig(documentPath, WEB_API_NS)) === apiBeforeSearchRestore,
+      'UI_L6 restore-search: the reset mutated the "web-deepseek-api" section')
+    await returnToWebList(clientA, 'UI_L6 restore-search list')
+    // Client B re-reads the SAME Host facts through its own real mirror read.
+    await reopenWebPage(clientB, 'UI_L6 restore-search B re-read')
+    await openWebRow(clientB, ROW.searchProvider, 'UI_L6 restore-search B provider')
+    await waitForCurrentValue(clientB, 'Automatic', 'UI_L6 restore-search B current fact')
+    await returnToWebList(clientB, 'UI_L6 restore-search B list')
+    trace('f3.ui-l6', {
+      verdict: 'UI_L6_PASS',
+      phase: 'user-layer-restore-search',
+      operation: 'official unset',
+      effective: 'Automatic',
+      userLayer: namespaceConfig(documentPath, WEB_NS) === undefined ? 'removed' : 'present',
+      crossClientRead: true,
+      webMutations: searchRestoreOps.length,
     })
 
     // ── 8. The credential reference stays metadata-only. ────────────────────
