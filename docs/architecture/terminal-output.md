@@ -380,8 +380,8 @@ the live server, identity, hard-off or revoke checks.
   id/geometry, never emits one anchor per row, never relocates an unmarked
   foreign virtual image, and leaves visible-anchor, Native and text output
   unchanged. Authority: `src/tui/graphics/tmux-image.ts`,
-  `src/tui/graphics/kitty-terminal.ts`, `src/layout.ts` +
-  `src/terminal-image.ts` (vendored divergence X067); proof:
+  `src/tui/graphics/kitty-terminal.ts`, `packages/pi-tui/src/layout.ts` +
+  `packages/pi-tui/src/terminal-image.ts` (vendored divergence X067); proof:
   `packages/pi-tui/test/layout.test.ts` plus the real-Screen first-middle and
   foreign-negative cases in `test/integration/kitty-tmux-screen.test.ts`.
 - **Grid provenance is per row; content is never proof.** Every managed grid row
