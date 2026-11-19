@@ -1670,16 +1670,39 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
   const activateDispatch = firstOf('activate')
   const typeDispatch = firstOf('typeText')
   const attemptStateDispatch = firstOf('getState')
-  // NO earlier segment is exempt from the audit: every getApp in the root must
-  // select this run's exact PID, and every typeText must type this run's marker.
-  // A retry that used another target or another text would otherwise hide here.
+  // NO earlier segment is exempt: the WHOLE settled trace must satisfy the same
+  // safety constraints, otherwise a retry could hide another target, another
+  // text or an un-audited side effect (click/pressKey/scroll/...) behind the
+  // final segment. Only the six controlled methods are allowed at all.
+  const TRACE_METHODS = new Set(['getApp', 'listWindows', 'show', 'activate', 'typeText', 'getState'])
+  for (const dispatch of trace) {
+    assert(TRACE_METHODS.has(dispatchMethod(dispatch)),
+      `MAC09-08: the controlled call dispatched a method the scene does not audit: ${dispatchMethod(dispatch)}`)
+  }
+  // Every handle used anywhere in the trace must come from a getApp result of
+  // THIS trace: a cached/foreign handle (or one issued by an earlier run) would
+  // otherwise act on a target this scene never approved.
+  const issuedHandles = new Set()
   for (const dispatch of trace.filter(item => dispatchMethod(item) === 'getApp')) {
-    assert(dispatchParams(dispatch)?.selector === String(textEditPid),
-      `MAC09-08: an earlier attempt's getApp did not select this run's exact TextEdit PID: ${JSON.stringify(dispatchParams(dispatch)?.selector)}`)
+    const params = dispatchParams(dispatch)
+    assert(params?.selector === String(textEditPid),
+      `MAC09-08: the controlled call obtained an app handle for a target other than this run's exact TextEdit PID: ${JSON.stringify(params?.selector)}`)
+    const result = cuaResults(eventsOf(dshHome, input.sessionId), 0)
+      .find(item => item.subCallId === dispatch.subCallId)
+    const handle = dispatchJsonContent(result)?.appHandle
+    assert(typeof handle === 'string' && handle !== '',
+      'MAC09-08: a controlled getApp result carried no app handle')
+    issuedHandles.add(handle)
+  }
+  for (const dispatch of trace) {
+    const params = dispatchParams(dispatch)
+    if (dispatchMethod(dispatch) === 'getApp' || params?.appHandle === undefined) continue
+    assert(issuedHandles.has(params.appHandle),
+      `MAC09-08: a controlled ${dispatchMethod(dispatch)} used an app handle this trace never issued`)
   }
   for (const dispatch of trace.filter(item => dispatchMethod(item) === 'typeText')) {
     assert(dispatchParams(dispatch)?.text === marker,
-      'MAC09-08: an earlier attempt typed text other than this run\'s marker')
+      'MAC09-08: the controlled call typed text other than this run\'s marker')
   }
   // The CLAIM is one bounded input observed by the same call: getApp ->
   // listWindows -> typeText -> getState on ONE root call. The window pre-steps
@@ -1687,10 +1710,15 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
   // is app-level (keyboard: ["app"]) and the DSH 0.2.2-rc.5 pairing does not need
   // them before an app-scoped typeText, so a model that skips them still proves
   // the claim. If they ARE dispatched they must be validated (below).
-  const INPUT_SEQUENCE = ['getApp', 'listWindows', 'typeText', 'getState']
-  const INPUT_OPTIONAL = ['show', 'activate']
+  const INPUT_SEQUENCE = ['getApp', 'listWindows', 'show', 'typeText', 'getState']
+  const INPUT_OPTIONAL = ['activate']
+  // `show` (the OWNED window) is REQUIRED, not optional: getState carries no
+  // window identity, so the explicit owned-window selection is the only proof
+  // that the app-scoped typeText targeted the controlled `cua-blank` window.
+  // `activate` is optional. The final segment carries no repeats.
   const sequenceShaped = attemptMethods[0] === 'getApp'
     && attemptMethods[1] === 'listWindows'
+    && attemptMethods[2] === 'show'
     && attemptMethods.at(-1) === 'getState'
     && attemptMethods.lastIndexOf('typeText') === attemptMethods.length - 2
     && attemptMethods.every(method => INPUT_SEQUENCE.includes(method) || INPUT_OPTIONAL.includes(method))
@@ -1727,14 +1755,14 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
     && (showParams === undefined || handleBound(showParams))
     && (activateParams === undefined || handleBound(activateParams)),
     'MAC09-08: listWindows/typeText/getState (or a dispatched pre-step) do not use the exact approved getApp handle')
-  if (showParams !== undefined) {
-    const controlledInputWindow = Array.isArray(controlledWindows)
-      ? controlledWindows.find(window => window?.windowId === showParams?.windowId
-        && String(window?.title ?? '').includes('cua-blank'))
-      : undefined
-    assert(controlledInputWindow !== undefined,
-      'MAC09-08: show windowId is not this run\'s controlled cua-blank listWindows result')
-  }
+  assert(showParams !== undefined && showParams.appHandle === controlledHandle,
+    'MAC09-08: the controlled attempt did not show a window of the approved app handle')
+  const controlledInputWindow = Array.isArray(controlledWindows)
+    ? controlledWindows.find(window => window?.windowId === showParams?.windowId
+      && String(window?.title ?? '').includes('cua-blank'))
+    : undefined
+  assert(controlledInputWindow !== undefined,
+    'MAC09-08: show windowId is not this run\'s controlled cua-blank listWindows result')
   const markerResult = await waitFor(() => cuaResults(eventsOf(dshHome, input.sessionId), 0)
     .find(result => result.subCallId === attemptStateDispatch.subCallId
       && dispatchMethod(result) === 'getState'
@@ -1747,7 +1775,7 @@ async function sceneDirect({ installation, workRoot, report, operator, helperApp
     sequence: attemptMethods,
     rootSequence: inputSequence,
     attemptSegments: segmentStarts.length,
-    windowPreSteps: showDispatch !== undefined || activateDispatch !== undefined,
+    windowPreSteps: true,
     markerDigest: sha16(marker),
     attempts: attempts + 1,
     windowId: typeParams.windowId,
