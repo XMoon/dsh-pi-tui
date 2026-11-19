@@ -4561,6 +4561,11 @@ export function applyRunnerWithRuntime(
         // A Session committed while the preflight awaited owns the live
         // catalog: the standing read must never replace it.
         if (ownership.currentSessionId() !== undefined) return undefined
+        // The automatic sessionless read is admitted only for a confirmed
+        // Host-issued WorkspaceId. Without one the Welcome/Workspace UX owns
+        // the prompt, and this automatic refresh must not paint a stale
+        // selection notice against a surface that is legitimately unselected.
+        if (workspaceNextIntent.snapshot().intent?.kind !== 'workspace-id') return undefined
         return command.runner().refreshStandingCatalog(
           command.runner().effectivePresetId,
           'invalidation',

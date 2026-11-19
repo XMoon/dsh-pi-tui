@@ -42,6 +42,7 @@ import { DirectHostFilePort } from '../../src/runtime/direct/host-file-direct.ts
 import { DraftImageStore } from '../../src/client/media/image/draft-store.ts'
 import type { ModelSelectionValue } from '../../src/domain/session/model-selection.ts'
 import { unconfiguredPolicyObservation, unconfiguredSessionPolicyPort } from '../support/session-policy-fake.ts'
+import { createWorkspaceNextIntentOwner, type WorkspaceNextIntentOwner } from '../../src/app/session/workspace-next-intent.ts'
 
 process.env.NO_COLOR = ''
 process.env.FORCE_COLOR = ''
@@ -203,6 +204,14 @@ function fakeRunnerDeps(options: {
     presetId: string,
     signal: AbortSignal,
   ) => Promise<PermissionPresetApplyOutcome>
+  /** The Client-local next-create intent owner the surface reads for its Host
+   *  Workspace identity (the deferred-preflight tests). Omitted = no owner. */
+  readonly workspace?: WorkspaceNextIntentOwner
+  /** The existing single-flight launch preflight the automatic invalidation
+   *  admission awaits. Omitted = no preflight seam. */
+  readonly awaitWorkspacePreflight?: () => Promise<void>
+  /** The user-visible notice sink (the stale-selection assertions). */
+  readonly notify?: (message: string, kind: 'info' | 'error' | undefined) => void
 }) {
   const ctx = new Context()
   const vt = new VirtualTerminal(100, 24)
@@ -319,7 +328,7 @@ function fakeRunnerDeps(options: {
     policy: unconfiguredPolicyObservation(),
     signal: options.signal ?? new AbortController().signal,
     app: () => app,
-    notify: () => {},
+    notify: (message, kind) => { options.notify?.(message, kind) },
     liveAgent: () => undefined,
     sessionScope: {
       capture: () => scopeFacts.captureSessionScope(),
@@ -404,6 +413,10 @@ function fakeRunnerDeps(options: {
       forkSession: async () => ({ kind: 'committed', value: undefined }) as never,
       isNavigationCurrent: () => false,
       transitionTo: runner.transitionTo,
+      ...(options.workspace === undefined ? {} : { workspaceNextIntent: options.workspace }),
+      ...(options.awaitWorkspacePreflight === undefined
+        ? {}
+        : { awaitWorkspacePreflight: options.awaitWorkspacePreflight }),
     },
     status: {
       forceContextMeasurement: () => undefined,
@@ -947,6 +960,340 @@ test('the CommandSurface prefers the explicit operation signal and forwards abor
       'an already-aborted caller signal is forwarded unchanged, never replaced')
     assert.equal(received[0]?.aborted, true,
       'the official executor still observes the caller cancellation')
+  } finally {
+    harness.dispose()
+  }
+})
+
+/* ── B2: sessionless first-frame admission (Workspace preflight barrier) ── */
+
+/** Poll a synchronous predicate with real timer turns (never a bare sleep). */
+async function waitUntil(predicate: () => boolean, label: string, timeoutMs = 3_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (predicate()) return
+    await new Promise(resolve => setTimeout(resolve, 5))
+  }
+  assert.fail(label)
+}
+
+/** One recorded standing read (its production arguments). */
+interface StandingReadCall {
+  readonly presetId: string | undefined
+  readonly location: import('../../src/runtime/catalog-port.ts').StandingSkillLocation
+}
+
+/** Replace the REAL catalog capability's standing read with a recorder. */
+function recordStandingReads(
+  harness: ReturnType<typeof fakeRunnerDeps>,
+  read?: (call: number) => Promise<import('../../src/runtime/catalog-port.ts').StandingSkillRead>,
+): StandingReadCall[] {
+  const calls: StandingReadCall[] = []
+  const skills = harness.runner.catalog.skills as unknown as {
+    standing: (
+      presetId: string | undefined,
+      location: import('../../src/runtime/catalog-port.ts').StandingSkillLocation,
+      signal?: AbortSignal,
+    ) => Promise<import('../../src/runtime/catalog-port.ts').StandingSkillRead>
+  }
+  skills.standing = async (presetId, location) => {
+    calls.push({ presetId, location })
+    if (read !== undefined) return read(calls.length)
+    return {
+      catalog: { skills: [{ name: 'host-skill', description: 'Host skill', modelInvocable: true }], complete: true },
+    }
+  }
+  return calls
+}
+
+/** Capture the installed Host invalidation stream's two sinks. */
+function captureSkillsStream(harness: ReturnType<typeof fakeRunnerDeps>): {
+  frame: () => void
+  fail: (error: unknown) => void
+} {
+  const sinks: { frame?: () => void; fail?: (error: unknown) => void } = {}
+  const skills = harness.runner.catalog.skills as unknown as {
+    onSkillsChange: (listener: () => void, onError: (error: unknown) => void) => () => void
+  }
+  skills.onSkillsChange = (listener, onError) => {
+    sinks.frame = listener
+    sinks.fail = onError
+    return () => {}
+  }
+  return {
+    frame: () => {
+      assert.ok(sinks.frame !== undefined, 'registration installed the invalidation subscription')
+      sinks.frame()
+    },
+    fail: (error) => {
+      assert.ok(sinks.fail !== undefined, 'registration installed the invalidation error sink')
+      sinks.fail(error)
+    },
+  }
+}
+
+/** A deferred gate the test resolves explicitly (the controlled preflight). */
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve: () => void = () => {}
+  const promise = new Promise<void>(done => { resolve = done })
+  return { promise, resolve }
+}
+
+test('B2-RACE-1: the host startup invalidation waits for the Workspace preflight, then reads the confirmed Host WorkspaceId', async () => {
+  const source = controlledRemoteSource({})
+  const workspace = createWorkspaceNextIntentOwner(undefined)
+  const preflight = deferred()
+  const notices: Array<{ message: string; kind: string | undefined }> = []
+  const harness = fakeRunnerDeps({
+    remoteSource: source,
+    currentSessionId: () => undefined,
+    workspace,
+    awaitWorkspacePreflight: () => preflight.promise,
+    notify: (message, kind) => { notices.push({ message, kind }) },
+  })
+  const standings = recordStandingReads(harness)
+  const stream = captureSkillsStream(harness)
+  try {
+    harness.register()
+    // The real Host stream's subscribe→reread startup frame arrives BEFORE the
+    // launch preflight commits.
+    stream.frame()
+    await new Promise(resolve => setTimeout(resolve, 30))
+    assert.equal(standings.length, 0, 'no Host standing RPC may be issued before the preflight settles')
+    assert.deepEqual(notices, [], 'the pending preflight must not paint a selection error')
+
+    workspace.setResolvedWorkspace('ws-host-1', '/host/workspace')
+    preflight.resolve()
+    await waitUntil(() => standings.length === 1, 'the admitted standing read')
+    assert.deepEqual(standings[0]?.location, { kind: 'host-workspace', workspaceId: 'ws-host-1' },
+      'the standing read must use the Host-issued WorkspaceId read AFTER the preflight')
+    assert.equal(standings[0]?.presetId, undefined, 'the effective preset id is read at admission time')
+    await waitUntil(() => harness.surface.isSkillWrapperName('host-skill'),
+      'the served skill is installed as the current wrapper')
+    assert.deepEqual(notices, [], 'the successful admitted read paints no stale selection notice')
+  } finally {
+    workspace.dispose()
+    harness.dispose()
+  }
+})
+
+test('B2-RACE-2: a live Session published while the preflight is held wins; no sessionless Host read is issued', async () => {
+  const source = controlledRemoteSource({})
+  const workspace = createWorkspaceNextIntentOwner(undefined)
+  const preflight = deferred()
+  let currentSession: string | undefined
+  const harness = fakeRunnerDeps({
+    remoteSource: source,
+    currentSessionId: () => currentSession,
+    workspace,
+    awaitWorkspacePreflight: () => preflight.promise,
+  })
+  const standings = recordStandingReads(harness)
+  const stream = captureSkillsStream(harness)
+  try {
+    harness.register()
+    stream.frame()
+    await new Promise(resolve => setTimeout(resolve, 30))
+    assert.equal(standings.length, 0)
+    // The first Session commits while the preflight is still held.
+    currentSession = 'session-live'
+    source.script([['live-command']])
+    preflight.resolve()
+    await waitUntil(() => source.reads.length === 1, 'the live catalog read after the preflight')
+    assert.deepEqual(source.reads, [{ sessionId: 'session-live' }],
+      'the re-read live owner owns the refresh: never the sessionless standing target')
+    assert.equal(standings.length, 0, 'no Host standing RPC may run for a live Session')
+  } finally {
+    workspace.dispose()
+    harness.dispose()
+  }
+})
+
+test('B2-RACE-3: an unselected surface publishes no automatic standing read, while /reload keeps its explicit notice', async () => {
+  const source = controlledRemoteSource({})
+  const workspace = createWorkspaceNextIntentOwner(undefined)
+  const notices: Array<{ message: string; kind: string | undefined }> = []
+  const harness = fakeRunnerDeps({
+    remoteSource: source,
+    currentSessionId: () => undefined,
+    workspace,
+    awaitWorkspacePreflight: async () => {},
+    notify: (message, kind) => { notices.push({ message, kind }) },
+  })
+  const standings = recordStandingReads(harness)
+  const stream = captureSkillsStream(harness)
+  try {
+    harness.register()
+    stream.frame()
+    await new Promise(resolve => setTimeout(resolve, 30))
+    assert.equal(standings.length, 0,
+      'an automatic invalidation without a confirmed Workspace must issue no Host RPC')
+    assert.deepEqual(notices, [], 'the automatic path must not paint the stale selection error')
+    assert.equal(harness.surface.catalogRefreshAvailable(), true, 'global commands remain available')
+
+    // The EXPLICIT owner refresh keeps the pre-existing selection notice: the
+    // two admission decisions are different, not a blanket silence.
+    const explicit = await harness.surface.requestCatalogRefresh({
+      source: 'reload',
+      target: { kind: 'preset', presetId: 'code' },
+    })
+    assert.equal(explicit.kind, 'applied', 'the explicit reload still runs its standing projection')
+    if (explicit.kind === 'applied') {
+      assert.match(String(explicit.notice), /Select a Host workspace to load skills/u,
+        'an explicit /reload keeps the explicit selection notice')
+    }
+    assert.equal(standings.length, 0, 'the unavailable Workspace is projected locally, never as an RPC')
+  } finally {
+    workspace.dispose()
+    harness.dispose()
+  }
+})
+
+test('B2-RECONNECT: a sessionless generation change waits for the preflight, keeps last-good, then refreshes the current target', async () => {
+  const source = controlledRemoteSource({})
+  const workspace = createWorkspaceNextIntentOwner(undefined)
+  const preflight = deferred()
+  let currentSession: string | undefined = 'session-live'
+  const harness = fakeRunnerDeps({
+    remoteSource: source,
+    currentSessionId: () => currentSession,
+    workspace,
+    awaitWorkspacePreflight: () => preflight.promise,
+  })
+  const standings = recordStandingReads(harness)
+  try {
+    harness.register()
+    source.script([['host-a']])
+    await harness.surface.refreshLiveCatalogById('session-live')
+    assert.equal(harness.surface.hostOriginClaimOf({ name: 'host-a' })?.claimed, true)
+
+    // The Client lost its Session and reconnected while the launch preflight
+    // is still held: no read, no clear, last-good retained.
+    currentSession = undefined
+    source.replace(undefined)
+    source.replace(source.tokens.b)
+    await new Promise(resolve => setTimeout(resolve, 30))
+    assert.deepEqual(source.reads.map(read => read.sessionId), ['session-live'],
+      'a held preflight must not start the reconnect refresh')
+    assert.equal(harness.surface.hostOriginClaimOf({ name: 'host-a' })?.claimed, true,
+      'the last-good Host claim survives the held preflight')
+
+    workspace.setResolvedWorkspace('ws-reconnect', '/host/reconnect')
+    preflight.resolve()
+    await waitUntil(() => standings.length === 1, 'the admitted reconnect standing refresh')
+    assert.deepEqual(standings[0]?.location, { kind: 'host-workspace', workspaceId: 'ws-reconnect' },
+      'the reconnect refresh reads the Workspace confirmed at admission time')
+  } finally {
+    workspace.dispose()
+    harness.dispose()
+  }
+})
+
+test('B2-COALESCE: two invalidation frames during one read still perform the follow-up read with the CURRENT target', async () => {
+  const source = controlledRemoteSource({})
+  const workspace = createWorkspaceNextIntentOwner(undefined)
+  const release: Array<() => void> = []
+  const harness = fakeRunnerDeps({
+    remoteSource: source,
+    currentSessionId: () => undefined,
+    workspace,
+    awaitWorkspacePreflight: async () => {},
+    notify: () => {},
+  })
+  const standings = recordStandingReads(harness, async call => {
+    if (call === 1) await new Promise<void>(resolve => { release.push(resolve) })
+    return {
+      catalog: {
+        skills: [{ name: call === 1 ? 'first-skill' : 'second-skill', description: 's', modelInvocable: true }],
+        complete: true,
+      },
+    }
+  })
+  const stream = captureSkillsStream(harness)
+  try {
+    harness.register()
+    workspace.setResolvedWorkspace('ws-coalesce', '/host/coalesce')
+    stream.frame()
+    stream.frame()
+    await waitUntil(() => standings.length === 1, 'the first coalesced read')
+    release[0]?.()
+    await waitUntil(() => standings.length === 2, 'the follow-up read is never dropped')
+    await waitUntil(() => harness.surface.isSkillWrapperName('second-skill'),
+      'the LAST frame\'s catalog is installed')
+    assert.equal(harness.surface.isSkillWrapperName('first-skill'), false,
+      'the superseded first read did not remain installed')
+  } finally {
+    for (const releaseRead of release) releaseRead()
+    workspace.dispose()
+    harness.dispose()
+  }
+})
+
+test('B2-STREAM-ERROR: a failed invalidation stream is visible and an explicit reload re-arms it', async () => {
+  const source = controlledRemoteSource({})
+  let currentSession: string | undefined = 'session-live'
+  const notices: Array<{ message: string; kind: string | undefined }> = []
+  const harness = fakeRunnerDeps({
+    remoteSource: source,
+    currentSessionId: () => currentSession,
+    notify: (message, kind) => { notices.push({ message, kind }) },
+  })
+  const rearms = { count: 0 }
+  const skills = harness.runner.catalog.skills as unknown as {
+    rearmSkillsChange?: () => void
+    onSkillsChange: (listener: () => void, onError: (error: unknown) => void) => () => void
+  }
+  skills.rearmSkillsChange = () => { rearms.count += 1 }
+  let streamError: ((error: unknown) => void) | undefined
+  const onSkillsChange = skills.onSkillsChange
+  skills.onSkillsChange = (listener, onError) => {
+    streamError = onError
+    return onSkillsChange.call(skills, listener, onError)
+  }
+  try {
+    harness.register()
+    assert.ok(streamError !== undefined)
+    streamError(new Error('Host skills watch failed'))
+    await waitUntil(() => notices.length === 1, 'the visible stream failure')
+    assert.match(notices[0]?.message ?? '', /Skills invalidation stream/u)
+    assert.equal(notices[0]?.kind, 'error')
+    // The explicit owner refresh re-arms the failed stream exactly once.
+    source.script([['host-a']])
+    await harness.surface.refreshLiveCatalogById('session-live')
+    assert.equal(rearms.count, 1, 'an explicit Live Session refresh re-arms the failed stream')
+  } finally {
+    harness.dispose()
+  }
+})
+
+test('B2-DIRECT: a Direct invalidation never waits for a Remote Workspace preflight and keeps its co-located standing read', async () => {
+  let preflightAwaited = 0
+  const harness = fakeRunnerDeps({
+    remoteSource: undefined,
+    currentSessionId: () => undefined,
+    awaitWorkspacePreflight: () => {
+      preflightAwaited += 1
+      return new Promise<void>(() => {})
+    },
+  })
+  const standings = recordStandingReads(harness)
+  const skills = harness.runner.catalog.skills as unknown as {
+    onSkillsChange: (listener: () => void, onError: (error: unknown) => void) => () => void
+  }
+  let frame: (() => void) | undefined
+  const original = skills.onSkillsChange
+  skills.onSkillsChange = (listener, onError) => {
+    frame = listener
+    return original.call(skills, listener, onError)
+  }
+  try {
+    harness.register()
+    assert.ok(frame !== undefined)
+    frame()
+    await waitUntil(() => standings.length === 1, 'the Direct standing read')
+    assert.deepEqual(standings[0]?.location, { kind: 'co-located-directory', cwd: '/ws' },
+      'Direct keeps its co-located directory and never reads a Host WorkspaceId')
+    assert.equal(preflightAwaited, 0, 'the Direct branch never consumes the Remote preflight seam')
   } finally {
     harness.dispose()
   }

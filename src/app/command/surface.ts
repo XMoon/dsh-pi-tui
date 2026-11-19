@@ -750,19 +750,38 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
     runOwned('skills/change refresh', async () => {
       const refresh = catalogRefreshRequest
       if (refresh === undefined) return undefined
-      const sessionId = deps.backend.kind === 'direct' ? undefined : deps.ownership.currentSessionId()
-      const liveAgent = deps.backend.kind === 'direct' ? deps.liveAgent() : undefined
-      const remoteLive = sessionId !== undefined
-      const directLive = liveAgent !== undefined
-      const target = remoteLive || directLive
-        ? { kind: 'agent', key: deps.ownership.generation() } as const
-        : standingTargetOf(deps.presets.pending() ?? deps.presets.launch)
+      const remote = deps.backend.kind !== 'direct'
+      // The Host invalidation stream emits its subscribe→reread startup frame
+      // as soon as it is attached, which can precede the launch Workspace
+      // preflight. Wait for that EXISTING single-flight barrier and re-read
+      // every owner fact below — never a target captured before the wait.
+      if (remote && deps.ownership.currentSessionId() === undefined) {
+        await deps.session.awaitWorkspacePreflight?.()
+      }
+      const sessionId = remote ? deps.ownership.currentSessionId() : undefined
+      const liveAgent = remote ? undefined : deps.liveAgent()
+      if (sessionId !== undefined) {
+        return refresh({
+          source: 'invalidation',
+          target: { kind: 'agent', key: deps.ownership.generation() },
+          agent: remoteCatalogTargetOf(sessionId),
+        })
+      }
+      if (liveAgent !== undefined) {
+        return refresh({
+          source: 'invalidation',
+          target: { kind: 'agent', key: deps.ownership.generation() },
+          agent: deps.toCatalogAgent(liveAgent),
+        })
+      }
+      // An automatic sessionless invalidation is admitted only for a CONFIRMED
+      // Host workspace. Without one there is no legal Host read, so publish
+      // nothing: the Welcome/Workspace UX owns the prompt and an explicit
+      // `/reload` still reports its selection notice.
+      if (remote && confirmedHostWorkspaceId() === undefined) return undefined
       return refresh({
         source: 'invalidation',
-        target,
-        ...(remoteLive ? { agent: remoteCatalogTargetOf(sessionId) }
-          : directLive ? { agent: deps.toCatalogAgent(liveAgent) }
-            : {}),
+        target: standingTargetOf(deps.presets.pending() ?? deps.presets.launch),
       })
     }, {
       diag: deps.diag,
@@ -813,15 +832,23 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
     const record = target as { [REMOTE_CATALOG_TARGET]?: string }
     return typeof record[REMOTE_CATALOG_TARGET] === 'string' ? record[REMOTE_CATALOG_TARGET] : undefined
   }
-  const standingTargetOf = (presetId: string | undefined): CatalogRefreshRequest['target'] => {
-    const workspace = deps.backend.kind === 'direct'
-      ? undefined
-      : deps.session.workspaceNextIntent?.snapshot()
+  /**
+   * The confirmed Host Workspace identity of this Remote surface, or undefined
+   * when the create intent is not a Host-issued `workspace-id`. `intent` is the
+   * identity authority (never `status` or `displayPath`): the standing read must
+   * not fabricate a Workspace from the Client cwd or a display label.
+   */
+  const confirmedHostWorkspaceId = (): string | undefined => {
+    if (deps.backend.kind === 'direct') return undefined
+    const intent = deps.session.workspaceNextIntent?.snapshot().intent
     // The create intent is the owner: `intent` is the IDENTITY authority, so
     // the still-confirmed target stays usable while a DIFFERENT Add verifies
     // or is refused (`status` is transient, review P1). An UNSELECTED surface
     // has no Host workspace: the standing read must not fabricate one.
-    const workspaceId = workspace?.intent?.kind === 'workspace-id' ? workspace.intent.workspaceId : undefined
+    return intent?.kind === 'workspace-id' ? intent.workspaceId : undefined
+  }
+  const standingTargetOf = (presetId: string | undefined): CatalogRefreshRequest['target'] => {
+    const workspaceId = confirmedHostWorkspaceId()
     return {
       kind: 'preset',
       presetId,
@@ -1334,11 +1361,23 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
             if (sessionId === undefined) {
               runOwned(
                 'remote reconnect standing refresh',
-                () => requestCatalogRefresh({
-                  source: 'invalidation',
-                  target: standingTargetOf(deps.presets.pending() ?? deps.presets.launch),
-                }),
-                { diag: deps.diag, sessionId: () => undefined },
+                async () => {
+                  // The reconnect subscription does not replace the launch
+                  // Workspace preflight. Wait for that EXISTING single-flight
+                  // completion, then re-read the owner and the confirmed
+                  // Host WorkspaceId at execution time.
+                  await deps.session.awaitWorkspacePreflight?.()
+                  const currentSessionId = deps.ownership.currentSessionId()
+                  if (currentSessionId !== undefined) {
+                    return refreshLiveCatalogById(currentSessionId, 'invalidation')
+                  }
+                  if (confirmedHostWorkspaceId() === undefined) return undefined
+                  return requestCatalogRefresh({
+                    source: 'invalidation',
+                    target: standingTargetOf(deps.presets.pending() ?? deps.presets.launch),
+                  })
+                },
+                { diag: deps.diag, sessionId: () => deps.ownership.currentSessionId() },
               )
               return
             }
