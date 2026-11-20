@@ -273,11 +273,11 @@ export function createExitIntentCoordinator(deps: ExitIntentCoordinatorDeps): Ex
     const backend = deps.facts.currentBackend()
     // An ALREADY-ACCEPTED `!`/`!!` submission can start its shell owner AFTER
     // this choice opened (`ensureSession().then(shell.run)` in the submission
-    // controller). Re-read the live shell fact before acting: a Busy/Unknown
-    // confirmation must never Keep/Stop/exit over a shell it did not present.
-    // The truthful shell choice replaces it; the old operation cannot commit.
-    if (facts.shellRunning && identity.kind !== 'shell') {
-      openChoice('shell', facts, backend)
+    // controller). The exit options are preserved (Owner decision), but the
+    // user must SEE the shell reminder before acting: an un-warned confirmation
+    // refreshes the SAME family with the reminder instead of committing.
+    if (facts.shellRunning && model.shellRunning !== true) {
+      openChoice(identity.kind, facts, backend)
       return
     }
     // The choice captured an exact identity. A backend flip retires it with no
@@ -312,7 +312,8 @@ export function createExitIntentCoordinator(deps: ExitIntentCoordinatorDeps): Ex
       if (facts.activity === 'idle') {
         // The exact owner became idle by itself: the SAME captured identity is
         // already proven current above, so detach without sending a cancel.
-        commitAfterClose(identity, true, epoch)
+        // A running user shell is not proven by the Agent waiter: no stopped claim.
+        commitAfterClose(identity, !facts.shellRunning, epoch)
         return
       }
       if (facts.activity === 'unknown') {
@@ -371,7 +372,7 @@ export function createExitIntentCoordinator(deps: ExitIntentCoordinatorDeps): Ex
       live: facts.live,
       transportToken: facts.transportToken,
     }
-    open = exitChoiceAsking(kind, select, dismiss)
+    open = exitChoiceAsking(kind, select, dismiss, facts.shellRunning)
     seam.open(open)
   }
 
@@ -397,7 +398,9 @@ export function createExitIntentCoordinator(deps: ExitIntentCoordinatorDeps): Ex
         settleUnconfirmed('The captured session is no longer current.')
         return
       }
-      commitAfterClose(identity, true, epoch)
+      // The Agent idle proof does not prove a Client-owned shell finished; the
+      // stopped line is withheld while a shell is still running.
+      commitAfterClose(identity, !deps.facts.capture().shellRunning, epoch)
       return
     }
     settleUnconfirmed(outcome.detail)
@@ -415,7 +418,6 @@ export function createExitIntentCoordinator(deps: ExitIntentCoordinatorDeps): Ex
       currentBackend: backend,
       sessionPresence: facts.scope.sessionId === undefined ? 'none' : 'live',
       activity: facts.activity,
-      shellRunning: facts.shellRunning,
       entry,
     })
     switch (decision) {
@@ -431,9 +433,6 @@ export function createExitIntentCoordinator(deps: ExitIntentCoordinatorDeps): Ex
         return
       case 'show-unknown-choice':
         openChoice(backend === 'daemon' ? 'daemon-unknown' : 'direct-unknown', facts, backend)
-        return
-      case 'show-shell-choice':
-        openChoice('shell', facts, backend)
         return
     }
   }

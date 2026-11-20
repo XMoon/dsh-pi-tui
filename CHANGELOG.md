@@ -50,7 +50,7 @@
 
 - **退出与断开现在先看当前 Session 的真实状态，且不再暗示会停止 daemon Host。** `/exit`、`/quit`、裸 `exit`、默认退出键与 TSP 退出键统一进入同一个退出意图：当前 Session 明确空闲时 Direct 直接退出、daemon Client 直接断开；明确正在工作时弹出同页选择——daemon 默认 `Keep working and disconnect`（不发任何 Host 取消），也可 `Stop current work and disconnect` 或 `Stay`；Direct 默认 `Stay`，停止必须显式选择并由原有退出控制器完成。状态无法证明（Remote 缺少运行位、连接/绑定换代等）时只显示 `Disconnect without stopping` / `Exit and retire local Host` 与 `Stay`，绝不当作空闲。daemon 的 `Stop current work and disconnect` 只向弹窗捕获的那一个 Session 发送一次官方取消，并且只有同一 owner 的权威 Idle 证明之后才断开；取消回执、断线或 `unobservable` 都不会被说成已停止，界面显示 `Stop could not be confirmed. The daemon may still be working.` 且不会自动重试或自动断开。Choice 打开期间 `Esc` / `Ctrl+C` 只等于 `Stay`，出现真正的 Host Question/Approval 时本地 Choice 自动撤回。daemon Client 退出后终端恢复时打印真实 Profile/Session 的恢复命令与 `daemon status/logs/stop` 管理命令，不输出无法观察的 Host 状态或 PID；已验证停止时才额外打印 `Current work: stopped.`。Direct 仍只打印原有 resume 行。
 Choix 会随终端尺寸降级：极窄或极低的行数下只保留真正可读、可操作的 `Stay`（或单行 `Esc Stay`），被裁切的破坏性操作永远不会通过键盘或鼠标触达；全屏切换会重挂同一个 Choice，Host Question/Approval 出现时本地 Choice 会被撤回且不会自动恢复。
-当 `!`/`!!` 用户 Shell 仍在运行时，退出仅提供 `Stay in the TUI` 并说明离开会中止该 Shell；不会用 Agent idle 冒充 Shell 已结束，也不会承诺 Keep。
+当 `!`/`!!` 用户 Shell 仍在运行时，退出保留原有选项并追加提醒：离开会中止该 Shell，Agent idle 不代表 Shell 已结束；运行中 Shell 不会打印 `Current work: stopped.`。
 Daemon 退出后的恢复命令会保留临时的 `DSH_PI_TUI_BACKEND=daemon` 覆盖（Profile 仍可能是 Direct），并对 Profile/Session 参数做 shell 安全引用。
 - **默认 `Ctrl+C` 在忙碌时一次取消，空闲时同键两按退出。** 当前 Session 真实正在工作时，默认物理 `Ctrl+C` 立即走原有取消通路（不清草稿、不进入退出确认）；状态无法证明时拒绝武装退出并提示；空闲时才保留首次清空草稿 + 1.5 秒同键两按退出。`Ctrl+D` 有内容时仍是向前删除。用户把退出动作改绑到其他键、使用 Leader、或把取消动作改绑到 `Ctrl+C` 时，各自保持原有语义；TSP 绑定后的裸输入遵守同一规则（空闲 `Ctrl+C` 与空草稿 `Ctrl+D` 都需同键两按），绑定前的 `Ctrl+C` 仍是紧急退出。
 

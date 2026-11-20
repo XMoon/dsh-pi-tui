@@ -895,14 +895,19 @@ test('an accepted shell that starts AFTER the Busy choice opened supersedes the 
   assert.equal(harness.executions, 1, 'the real caller started the shell after the choice opened')
   assert.equal(harness.shellRunning(), true)
 
+  // The un-warned confirmation must first refresh the SAME family with the
+  // shell reminder (options preserved, Owner decision); it cannot commit blind.
   opened!.select('keep-and-disconnect')
-  assert.deepEqual(commits, [], 'the old Keep never exits over the newly started shell')
+  assert.deepEqual(commits, [], 'the un-warned Keep refreshes instead of committing')
   assert.deepEqual(stops, [], 'no Agent Stop stands in for the shell')
-  assert.equal(opened?.kind, 'shell', 'the truthful shell choice replaces the stale confirmation')
-  assert.equal(harness.shellRunning(), true, 'the shell was not aborted by the stale Keep')
+  assert.equal(opened?.kind, 'daemon-busy')
+  assert.equal(opened?.shellRunning, true, 'the refreshed choice carries the shell reminder')
+  assert.ok(opened?.body.some(paragraph => paragraph.includes('user shell')))
+  assert.equal(harness.shellRunning(), true, 'the shell was not aborted by the refresh')
 
-  opened!.select('stay')
-  assert.deepEqual(commits, [])
+  // With the reminder shown, Keep is preserved and commits without a stopped claim.
+  opened!.select('keep-and-disconnect')
+  assert.deepEqual(commits, [{ workStopped: false }])
   harness.finishShell(shellOk())
   await drainMicrotasks()
 })

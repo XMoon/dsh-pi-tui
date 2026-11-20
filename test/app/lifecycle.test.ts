@@ -1295,7 +1295,7 @@ test('daemon detach hint: a temporary backend override is preserved and argument
 
 test('classifyExitIntent: the frozen decision matrix, unknown never idle', () => {
   const decide = classifyExitIntent
-  const base = { shellRunning: false } as const
+  const base = {} as const
   assert.equal(decide({ ...base, currentBackend: 'direct', sessionPresence: 'live', activity: 'idle', entry: 'slash' }), 'direct-exit')
   assert.equal(decide({ ...base, currentBackend: 'daemon', sessionPresence: 'live', activity: 'idle', entry: 'slash' }), 'client-detach')
   assert.equal(decide({ ...base, currentBackend: 'direct', sessionPresence: 'none', activity: 'idle', entry: 'plain' }), 'direct-exit')
@@ -1311,26 +1311,32 @@ test('classifyExitIntent: the frozen decision matrix, unknown never idle', () =>
   for (const entry of ['slash', 'plain', 'keyboard'] as const) {
     assert.equal(decide({ ...base, currentBackend: 'daemon', sessionPresence: 'live', activity: 'unknown', entry }), 'show-unknown-choice')
   }
-  // A Client-owned user shell outranks the Agent family: neither Keep nor an
-  // Agent-idle Stop may stand in for the shell's terminal state.
-  assert.equal(decide({ ...base, shellRunning: true, currentBackend: 'daemon', sessionPresence: 'live', activity: 'working', entry: 'slash' }), 'show-shell-choice')
-  assert.equal(decide({ ...base, shellRunning: true, currentBackend: 'direct', sessionPresence: 'live', activity: 'idle', entry: 'plain' }), 'show-shell-choice')
-  assert.equal(decide({ ...base, shellRunning: true, currentBackend: 'daemon', sessionPresence: 'none', activity: 'idle', entry: 'keyboard' }), 'show-shell-choice')
+  // A running user shell is a REMINDER on the normal family (Owner decision),
+  // not a separate decision: the activity/backend matrix is unchanged.
 })
 
-test('exit intent: a running user shell offers only the truthful Stay choice', () => {
+test('exit intent: a running user shell keeps the exit options and adds a reminder', () => {
   const h = exitIntentHarness({ backend: 'daemon', activity: 'working' })
   h.state.shell = true
   h.coordinator.request('slash')
-  assert.equal(h.current()?.kind, 'shell')
-  assert.deepEqual(h.current()?.options.map(option => option.id), ['stay'])
-  assert.equal(h.current()?.focus, 'stay')
-  assert.deepEqual(h.commits, [])
-  assert.deepEqual(h.stopCalls, [])
-  h.current()!.select('stay')
-  assert.equal(h.current(), undefined)
-  assert.deepEqual(h.commits, [], 'Stay never exits or stops the shell')
-  assert.deepEqual(h.stopCalls, [])
+  assert.equal(h.current()?.kind, 'daemon-busy')
+  assert.equal(h.current()?.shellRunning, true)
+  assert.deepEqual(h.current()?.options.map(option => option.id), ['keep-and-disconnect', 'stop-and-disconnect', 'stay'])
+  assert.ok(h.current()?.body.some(paragraph => paragraph.includes('user shell')), 'the shell reminder is painted')
+  // Keep is preserved (Owner decision) and commits without a stopped claim.
+  h.current()!.select('keep-and-disconnect')
+  assert.deepEqual(h.commits, [{ workStopped: false }])
+  assert.deepEqual(h.stopCalls, [], 'Keep sends no Host cancel')
+})
+
+test('exit intent: a Stop while a user shell runs never claims the shell stopped', async () => {
+  const h = exitIntentHarness({ backend: 'daemon', activity: 'working' })
+  h.state.shell = true
+  h.coordinator.request('slash')
+  h.current()!.select('stop-and-disconnect')
+  await new Promise<void>(resolve => setImmediate(resolve))
+  await new Promise<void>(resolve => setImmediate(resolve))
+  assert.deepEqual(h.commits, [{ workStopped: false }], 'the Agent idle proof does not prove the shell finished')
 })
 
 test('exit intent: a committed session switch retires the open choice with zero action', () => {

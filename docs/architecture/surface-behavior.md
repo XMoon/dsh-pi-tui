@@ -51,12 +51,14 @@ the `appExit` disposal). There is no second exit controller, no new Host RPC,
 and no `/detach`/`/shutdown` command.
 
 **A running user shell is not an Agent Turn.** While a `!` / `!!` Host user
-shell is in flight the choice offers only `Stay in the TUI` plus the
-explanation that leaving aborts the shell; the user must let it finish or
-cancel it first. A shell has no Agent-idle terminal proof of its own, so Keep
-and Stop are never offered for it, and `Current work: stopped.` is never derived
-from the Agent waiter alone. The keyboard's busy Ctrl+C remains the existing
-cancel path, which aborts the shell and the exact live Session turn together.
+shell is in flight the choice keeps the normal exit options but adds the
+reminder that leaving aborts the shell and that Agent idle does not prove the
+shell finished (Owner decision: remind, do not remove the exit options).
+`Current work: stopped.` is never derived from the Agent waiter alone while a
+shell runs, and a confirmation made before the shell started refreshes the same
+family with the reminder before it can act. The keyboard's busy Ctrl+C remains
+the existing cancel path, which aborts the shell and the exact live Session
+turn together.
 
 **Daemon Stop terminal proof.** `Stop current work and disconnect` captures the
 Session scope and the exact Remote transport identity once, re-validates both
@@ -91,7 +93,8 @@ user re-triggers the intent), an Idle→Working transition re-opens the Busy
 Choice through the normal entry, and a Busy→Idle transition lets Keep proceed
 and lets Stop detach without a cancel. A user shell that starts AFTER the choice
 opened (an already-accepted `!`/`!!` submission whose session creation was still
-pending) re-presents the shell choice before any Keep/Stop can act. A real Host Question/Approval withdraws
+pending) refreshes the same family with the shell reminder before any Keep/Stop
+can act. A real Host Question/Approval withdraws
 the Client choice with zero business action. `Esc` and `Ctrl+C` inside the choice
 mean `Stay`; no Host work is cancelled by either. The exit controller is called
 only at the final commit.

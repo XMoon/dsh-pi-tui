@@ -182,12 +182,12 @@ test('a started Host Shell transport loss leaves a visible no-retry card and no 
   assert.equal(transitionRan, true, 'the transition still completes after the drain')
 })
 
-test('a running user shell keeps the exit choice Stay-only and is never aborted by Stay', async () => {
-  // External review P1: a Client-owned `!`/`!!` shell is NOT the Session Agent
-  // Turn. The real user-shell owner reports it running; the facts and the
-  // coordinator must present only the truthful Stay explanation, and a Stay
-  // must neither exit nor abort the run. Only the user's own cancel (Esc) ends
-  // it, after which a normal idle detach is possible again.
+test('a running user shell keeps the exit options with a reminder and is never aborted by Stay', async () => {
+  // External review P1 + Owner decision: a Client-owned `!`/`!!` shell is NOT
+  // the Session Agent Turn. The real user-shell owner reports it running; the
+  // choice keeps the normal exit options but carries the shell reminder, and a
+  // Stay must neither exit nor abort the run. Only the user's own cancel (Esc)
+  // ends it, after which a normal idle detach is possible again.
   const scope = { sessionId: 'session-a' } as unknown as LiveSessionScope
   let finish!: () => void
   const finished = new Promise<void>(resolve => { finish = resolve })
@@ -288,11 +288,11 @@ test('a running user shell keeps the exit choice Stay-only and is never aborted 
   })
 
   coordinator.request('slash')
-  assert.equal(opened?.kind, 'shell')
-  assert.deepEqual(opened?.options.map(option => option.id), ['stay'])
-  assert.equal(opened?.focus, 'stay')
-  assert.deepEqual(commits, [], 'the shell choice never exits on open')
-  assert.deepEqual(stopCalls, [], 'no Agent Stop is offered for the Client-owned shell')
+  assert.equal(opened?.kind, 'daemon-busy')
+  assert.equal(opened?.shellRunning, true)
+  assert.deepEqual(opened?.options.map(option => option.id), ['keep-and-disconnect', 'stop-and-disconnect', 'stay'])
+  assert.ok(opened?.body.some(paragraph => paragraph.includes('user shell')), 'the shell reminder is painted')
+  assert.deepEqual(commits, [], 'the choice never exits on open')
 
   opened!.select('stay')
   assert.deepEqual(commits, [], 'Stay never exits')
