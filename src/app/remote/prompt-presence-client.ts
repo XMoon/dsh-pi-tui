@@ -107,6 +107,10 @@ export interface PromptPresenceTransportProbe {
   capture(sessionId: string): { readonly generation: unknown; readonly binding: unknown } | undefined
   /** Whether the captured identity is still the current one. */
   isCurrent(sessionId: string, token: unknown): boolean
+  /** The exact current official main-view retain fact of one Session: a
+   *  generic binding kept alive by another source (operation/child) or a
+   *  released main-view reference is NOT a view and never votes. */
+  mainViewRetained(sessionId: string): boolean
 }
 
 export interface PromptPresenceClientOptions {
@@ -190,16 +194,20 @@ export function createPromptPresenceClient(options: PromptPresenceClientOptions)
     const revision = nextRevision
     nextRevision += 1
     active += 1
-    const captured = tokenFor(view)
-    // BEFORE any projection: a view has no authority until its Session's
-    // official retained main-view binding exists on the current generation.
-    // An absent generation or binding is never a vacuous match.
-    if (view.viewedSessionId !== null && transport !== undefined
-      && (captured === undefined || captured.token.generation === undefined || captured.token.binding === undefined)) {
-      committed = undefined
-      return { kind: 'unconfirmed' }
-    }
     try {
+      const captured = tokenFor(view)
+      // BEFORE any projection: a view has no authority until its Session's
+      // official retained main-view binding exists on the current generation.
+      // An absent generation or binding is never a vacuous match, and a
+      // generic binding kept alive by another source (operation/child) is not
+      // a view either.
+      if (view.viewedSessionId !== null && transport !== undefined
+        && (captured === undefined || captured.token.generation === undefined || captured.token.binding === undefined
+          || !transport.mainViewRetained(view.viewedSessionId))) {
+        committed = undefined
+        committedToken = undefined
+        return { kind: 'unconfirmed' }
+      }
       let answer: Awaited<ReturnType<RemotePromptPresenceCapability['syncView']>>
       try {
         answer = await capability.syncView(view.viewedSessionId, view.displayPreset, revision, lifetime.signal)
@@ -226,8 +234,12 @@ export function createPromptPresenceClient(options: PromptPresenceClientOptions)
         return { kind: 'unconfirmed' }
       }
       // The record lives on the connection that acknowledged it: an ACK carried
-      // by a superseded Connection generation or a replaced binding is UNKNOWN.
-      if (captured !== undefined && transport !== undefined && !transport.isCurrent(captured.sessionId, captured.token)) {
+      // by a superseded Connection generation or a replaced binding is UNKNOWN,
+      // and the exact main-view ownership is re-proven AFTER the ACK (the
+      // main-view reference may have been released during the round trip).
+      if (captured !== undefined && transport !== undefined
+        && (!transport.isCurrent(captured.sessionId, captured.token)
+          || !transport.mainViewRetained(captured.sessionId))) {
         committed = undefined
         committedToken = undefined
         return { kind: 'unconfirmed' }
@@ -292,17 +304,21 @@ export function createPromptPresenceClient(options: PromptPresenceClientOptions)
     withdraw: () => enqueue({ viewedSessionId: null, displayPreset: localView().displayPreset }),
     ackCurrentView: async (): Promise<PromptPresenceAckOutcome> => {
       // Fast path: the committed view IS the current local view on the SAME
-      // transport identity — nothing to re-sync, so the send-boundary
-      // re-checks stay local. A superseded generation or a released binding
-      // falls through to the settle loop and re-projects on the current
-      // connection (the record lives on the connection that acknowledged it).
+      // transport identity AND the chain is fully settled (no newer revision
+      // in flight or queued — an in-flight superseding dispatch may still
+      // commit a different view before the prompt goes out). A superseded
+      // generation or a released binding falls through to the settle loop and
+      // re-projects on the current connection.
       const view = localView()
       const committedCurrent = committed !== undefined
         && committed.viewedSessionId === view.viewedSessionId
         && committed.displayPreset === view.displayPreset
       const tokenStillCurrent = transport === undefined || view.viewedSessionId === null
-        || (committedToken !== undefined && transport.isCurrent(view.viewedSessionId, committedToken))
-      if (committedCurrent && tokenStillCurrent) return { kind: 'confirmed' }
+        || (committedToken !== undefined
+          && transport.isCurrent(view.viewedSessionId, committedToken)
+          && transport.mainViewRetained(view.viewedSessionId))
+      const settled = active === 0 && !queued && desired === undefined
+      if (committedCurrent && tokenStillCurrent && settled) return { kind: 'confirmed' }
       for (let round = 0; round < ACK_SETTLE_ROUNDS; round += 1) {
         const outcome = await enqueue(localView())
         if (outcome.kind === 'refused') return { kind: 'refused' }

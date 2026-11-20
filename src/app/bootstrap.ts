@@ -681,6 +681,7 @@ export function applyRunnerWithRuntime(
             | { readonly generation: unknown; readonly binding: unknown }
             | undefined,
           isCurrent: (sessionId, token) => override.presentation.sessionFacts.isTransportTokenCurrent(sessionId, token),
+          mainViewRetained: (sessionId) => override.presentation.sessionFacts.mainViewRetained(sessionId),
         },
         diag,
       })

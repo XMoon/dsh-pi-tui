@@ -441,7 +441,7 @@ test('listing selectable split cases does not install a profile or claim complet
   assert.deepEqual(readdirSync(dir), [], 'a listing must not install or write a report')
 })
 
-test('every registry entry declares a conservative platform list and the nine shared cases are dual-platform', () => {
+test('every registry entry declares a conservative platform list and the ten shared cases are dual-platform', () => {
   const shared = [
     'surface.sessionless-host-file-f5b',
     'surface.generic-file-upload-f4',
@@ -460,6 +460,12 @@ test('every registry entry declares a conservative platform list and the nine sh
     // the profile file and cold Host boots; there is no platform-specific
     // process/seat primitive beyond the shared Split harness.
     'profile.preferences',
+    // The prompt parity case drives only the shared Split harness (the
+    // barrier file, deterministic prompt evidence and screen waits) plus the
+    // same per-platform connection seam every other dual case already uses;
+    // it has a real packed-candidate Darwin run (multi-Client, dual-Session,
+    // identity-kept, quiesced).
+    'prompt.session-focus-turn-parity',
   ]
   const cases = listSelectableCases()
   for (const entry of cases) {

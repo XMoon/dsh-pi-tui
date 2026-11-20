@@ -101,6 +101,10 @@ export interface RemoteSessionFacts {
   captureTransportToken(sessionId: string): unknown
   /** Whether the captured transport token still matches the live identity. */
   isTransportTokenCurrent(sessionId: string, token: unknown): boolean
+  /** The exact current official main-view retain fact of one Session (its
+   *  already-retained binding is held by the `tuiMainView` owner). A generic
+   *  binding kept alive by another source is NOT a view. */
+  mainViewRetained(sessionId: string): boolean
   /**
    * S3-R0 read→commit proof for one window re-fold. Returns the official
    * identity (Connection generation + exact retained binding) together with the
@@ -249,6 +253,13 @@ export function createRemotePresentationSource(
         if (captured === undefined || typeof captured !== 'object') return false
         if (!Object.is(captured.generation, generation.getSnapshot())) return false
         return sessions.binding(sessionId as never) === captured.binding
+      },
+      mainViewRetained(sessionId: string): boolean {
+        // The EXACT current main-view retain fact: a binding kept alive by
+        // another source (operation/child) is not a view, and a released
+        // main-view reference is not a view either.
+        if (sessions.binding(sessionId as never) === undefined) return false
+        return (sessions.retainInfo(sessionId as never).getSnapshot().retainedBy.tuiMainView ?? 0) > 0
       },
       windowRefoldProof(sessionId: string, revision: number): PresentationWindowRefoldProof | undefined {
         const current = generation.getSnapshot()

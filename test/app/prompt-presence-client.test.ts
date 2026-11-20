@@ -33,19 +33,22 @@ interface WireCall {
 
 /** One controlled wire capability recording every dispatched call. */
 function fakeCapability(
-  answer: (call: WireCall) => RemotePromptPresenceAck | { readonly ok: false },
+  answer: (call: WireCall) =>
+    | RemotePromptPresenceAck
+    | { readonly ok: false }
+    | Promise<RemotePromptPresenceAck | { readonly ok: false }>,
 ): { calls: WireCall[]; capability: RemotePromptPresenceCapability } {
   const calls: WireCall[] = []
   return {
     calls,
     capability: {
-      syncView: (viewedSessionId, displayPreset, revision) => {
+      syncView: async (viewedSessionId, displayPreset, revision) => {
         const call: WireCall = { viewedSessionId, displayPreset, revision }
         calls.push(call)
-        const result = answer(call)
-        return Promise.resolve('kind' in result
+        const result = await answer(call)
+        return 'kind' in result
           ? { ok: true as const, value: result }
-          : { ok: false as const, error: 'wire failure' })
+          : { ok: false as const, error: 'wire failure' }
       },
     },
   }
@@ -129,6 +132,7 @@ test('an ACK carried by a superseded transport is unconfirmed and retires the co
     transport: {
       capture: () => ({ generation: 1, binding: {} }),
       isCurrent: () => current,
+      mainViewRetained: () => true,
     },
     diag: DIAG,
   })
@@ -235,6 +239,7 @@ test('ackCurrentView is local (no wire call) while the committed view is still c
     transport: {
       capture: () => ({ generation: 1, binding: {} }),
       isCurrent: () => true,
+      mainViewRetained: () => true,
     },
     diag: DIAG,
   })
@@ -260,6 +265,7 @@ test('a transport reconnect self-heals: the stale committed view re-projects on 
     transport: {
       capture: () => ({ generation, binding: {} }),
       isCurrent: (_sessionId, token) => (token as { generation: number }).generation === generation,
+      mainViewRetained: () => true,
     },
     diag: DIAG,
   })
@@ -299,4 +305,104 @@ test('the owner withdraws its view and stops dispatching after the lifecycle abo
   const before = calls.length
   await owner.sync()
   assert.equal(calls.length, before, 'a disposed owner never dispatches again')
+})
+
+test('a view without its exact main-view retain is never projected, and the refusal leaks no counter (RFL-007/011)', async () => {
+  // A generic binding kept alive by an operation/child source (or a released
+  // main-view reference) is NOT a view: it must never reach the wire.
+  const view: PromptPresenceLocalView = { viewedSessionId: 'session-x', displayPreset: 'focus' }
+  const { calls, capability } = fakeCapability(ackOf)
+  let retained = false
+  const owner = createPromptPresenceClient({
+    capability,
+    localView: () => view,
+    signal: new AbortController().signal,
+    transport: {
+      capture: () => ({ generation: 1, binding: {} }),
+      isCurrent: () => true,
+      mainViewRetained: () => retained,
+    },
+    diag: DIAG,
+  })
+  try {
+    assert.deepEqual(await owner.sync(), { kind: 'unconfirmed' })
+    assert.equal(calls.length, 0, 'a non-main-view binding must never reach the wire')
+    assert.equal(owner.inFlight(), false, 'the pre-dispatch refusal must decrement the in-flight counter')
+    retained = true
+    assert.deepEqual(await owner.sync(), { kind: 'applied', revision: 2 })
+  } finally {
+    owner.dispose()
+  }
+})
+
+test('a main-view release DURING the round trip leaves the ACK unconfirmed (RFL-007 post-ACK proof)', async () => {
+  const view: PromptPresenceLocalView = { viewedSessionId: 'session-x', displayPreset: 'focus' }
+  let retained = true
+  const { calls, capability } = fakeCapability((call) => {
+    // The main-view reference is released while syncView is in flight.
+    retained = false
+    return ackOf(call)
+  })
+  const owner = createPromptPresenceClient({
+    capability,
+    localView: () => view,
+    signal: new AbortController().signal,
+    transport: {
+      capture: () => ({ generation: 1, binding: {} }),
+      isCurrent: () => true,
+      mainViewRetained: () => retained,
+    },
+    diag: DIAG,
+  })
+  try {
+    assert.deepEqual(await owner.sync(), { kind: 'unconfirmed' },
+      'the exact main-view ownership is re-proven AFTER the ACK')
+    assert.equal(calls.length, 1)
+    assert.equal(owner.committed(), undefined)
+  } finally {
+    owner.dispose()
+  }
+})
+
+test('the gate never confirms a stale view while a superseding dispatch is in flight (A→B→A, held B ACK)', async () => {
+  // A=Focus is ACKed; the user toggles Full (B: dispatched, its ACK HELD),
+  // then back to Focus (A2: queued behind B) and submits. The gate must not
+  // confirm from the stale committed A while B can still commit before the
+  // prompt goes out — it settles only after the chain drains A2.
+  let view: PromptPresenceLocalView = { viewedSessionId: 'session-x', displayPreset: 'focus' }
+  const held: Array<() => void> = []
+  const { calls, capability } = fakeCapability(async (call) => {
+    if (call.displayPreset === 'full') await new Promise<void>(release => held.push(release))
+    return ackOf(call)
+  })
+  const owner = createPromptPresenceClient({
+    capability,
+    localView: () => view,
+    signal: new AbortController().signal,
+    diag: DIAG,
+  })
+  try {
+    assert.deepEqual(await owner.sync(), { kind: 'applied', revision: 1 }, 'A=Focus is ACKed')
+    view = { viewedSessionId: 'session-x', displayPreset: 'full' }
+    const syncB = owner.sync()
+    await new Promise(resolveWait => setImmediate(resolveWait))
+    view = { viewedSessionId: 'session-x', displayPreset: 'focus' }
+    let gateSettled = false
+    const gate = owner.ackCurrentView().then(outcome => {
+      gateSettled = true
+      return outcome
+    })
+    await new Promise(resolveWait => setImmediate(resolveWait))
+    assert.equal(gateSettled, false,
+      'the gate must not confirm from the stale committed A while B is in flight')
+    held.forEach(release => release())
+    assert.deepEqual(await syncB, { kind: 'applied', revision: 2 })
+    assert.deepEqual(await gate, { kind: 'confirmed' })
+    assert.equal(calls.length, 3,
+      'the gate re-projects the CURRENT view after the superseding dispatch')
+    assert.equal(owner.committed()?.displayPreset, 'focus',
+      'the committed view at confirm time is the re-projected current A')
+  } finally {
+    owner.dispose()
+  }
 })

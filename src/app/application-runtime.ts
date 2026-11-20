@@ -434,6 +434,10 @@ export interface RemoteSessionFactsSource {
    *  generation + exact binding object; see the owning module). */
   captureTransportToken(sessionId: string): unknown
   isTransportTokenCurrent(sessionId: string, token: unknown): boolean
+  /** The exact current official main-view retain fact of one Session: its
+   *  already-retained binding is held by the `tuiMainView` owner. A generic
+   *  binding kept alive by another source (operation/child) is NOT a view. */
+  mainViewRetained(sessionId: string): boolean
   /** S3-R0: the read→commit revision/identity proof of one window re-fold
    *  (undefined when a newer window or a replaced identity made the read
    *  superseded; see the owning module). */

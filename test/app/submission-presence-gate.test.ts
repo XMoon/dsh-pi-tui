@@ -16,6 +16,10 @@ import test from 'node:test'
 import { mergeDraft } from '../../src/app/submission/steer.ts'
 import { createSessionScopeAuthority } from '../../src/app/session/scope.ts'
 import {
+  createPromptPresenceClient,
+  type PromptPresenceLocalView,
+} from '../../src/app/remote/prompt-presence-client.ts'
+import {
   bindSubmissionRuntime,
   steer,
   type PromptAttemptHooks,
@@ -245,4 +249,39 @@ test('a refused presence refuses the steer/queue admission and never dispatches'
     'the user sees the truthful refusal notice on the steer path')
   assert.ok(harness.settledAcks.some(reason => reason.includes('steer session view refused')),
     'the steer submit-ack row settles with the truthful refusal reason')
+})
+
+test('the submission sink holds the prompt until the CURRENT view revision is ACKed (A->B->A)', async () => {
+  // The REAL owner drives the gate hook; B's ACK is held in flight while the
+  // user toggles back to Focus and submits.
+  let view: PromptPresenceLocalView = { viewedSessionId: 'session-gate', displayPreset: 'focus' }
+  const held: Array<() => void> = []
+  const owner = createPromptPresenceClient({
+    capability: {
+      syncView: async (_viewedSessionId, displayPreset, revision) => {
+        if (displayPreset === 'full') await new Promise<void>(release => held.push(release))
+        return { ok: true as const, value: { kind: 'applied' as const, revision } }
+      },
+    },
+    localView: () => view,
+    signal: new AbortController().signal,
+    diag: { debug: () => {}, info: () => {}, warn: () => {}, error: () => {}, dispose: () => {} },
+  })
+  const harness = gateHarness({ ack: () => owner.ackCurrentView() })
+  try {
+    assert.deepEqual(await owner.sync(), { kind: 'applied', revision: 1 }, 'A=Focus is ACKed')
+    view = { viewedSessionId: 'session-gate', displayPreset: 'full' }
+    owner.resample()
+    await new Promise(resolveWait => setImmediate(resolveWait))
+    view = { viewedSessionId: 'session-gate', displayPreset: 'focus' }
+    const submit = harness.submit('please run')
+    await new Promise(resolveWait => setImmediate(resolveWait))
+    assert.deepEqual(harness.dispatched, [], 'the prompt waits for the CURRENT revision ACK')
+    held.forEach(release => release())
+    await submit
+    assert.deepEqual(harness.dispatched, ['session-gate'],
+      'the prompt dispatches only after the superseding sync drains')
+  } finally {
+    owner.dispose()
+  }
 })
