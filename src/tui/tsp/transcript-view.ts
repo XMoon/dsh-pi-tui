@@ -2034,9 +2034,13 @@ function preparingKeyOf(preview: StreamingToolPreview): string {
     : preview.callId}`
 }
 
-/** The display stamp of one live Preparing row (its whole visible content). */
-function preparingStampOf(preview: StreamingToolPreview): readonly TranscriptMainStampPart[] {
-  return [preview.callId, preview.turn, preview.step, preview.index, preview.name, preview.summary, preview.argumentBytes]
+/**
+ * The display stamp of one live Preparing row (its whole visible content).
+ * The summary is relativized against the mapper root at materialization, so
+ * the root is a display input of this row too.
+ */
+function preparingStampOf(preview: StreamingToolPreview, cwd: string | undefined): readonly TranscriptMainStampPart[] {
+  return [preview.callId, preview.turn, preview.step, preview.index, preview.name, preview.summary, preview.argumentBytes, cwd ?? '']
 }
 
 /** The selected-figure state a published figure paints ('' when none). */
@@ -2226,6 +2230,10 @@ function messageStampOf(
         const answers = options.settledQuestionAnswersLookup?.(message.callId)
         parts.push(answers === undefined ? -1 : JSON.stringify({ answers }))
       }
+      // The header, the displayed target, its `targetKind` and every nested
+      // PTC child card derive their path text from the SAME root, so the
+      // root is a display input of the whole tool subtree.
+      parts.push(options.cwd ?? '')
       break
     case 'thinking':
       parts.push(disclosureTokenOf(message, key, options))
@@ -2314,7 +2322,7 @@ function preparingDescriptor(
 ): TranscriptMainBlockDescriptor {
   return {
     key: `${keyPrefix}${preparingKeyOf(preview)}`,
-    stamp: ['preparing', ...preparingStampOf(preview)],
+    stamp: ['preparing', ...preparingStampOf(preview, cwd)],
     owners: [],
     materialize: () => preparingRow(preview, cwd, keyPrefix),
   }
@@ -2505,7 +2513,7 @@ function focusNestedWorkDescriptor(
   const key = `${prefix}work-${keys.keyFor(span.owner)}`
   const expanded = options.expandedWorkOwners?.has(span.owner) === true
   const stamp: TranscriptMainStampPart[] = ['work', key, expanded ? 1 : 0, lifetime?.startedAt, lifetime?.endedAt, span.parts.length]
-  for (const preview of preparing) stamp.push(...preparingStampOf(preview))
+  for (const preview of preparing) stamp.push(...preparingStampOf(preview, options.cwd))
   for (const part of span.parts) {
     stamp.push(...(part.kind === 'message'
       ? messageStampOf(part.message, keys.keyFor(part.message), options)
@@ -2630,8 +2638,12 @@ function focusRootDescriptor(
     options.focusPhase ?? '',
     options.focusElapsedMs?.get(slot.activity),
   ]
-  for (const preview of slot.preparing) stamp.push(...preparingStampOf(preview))
+  for (const preview of slot.preparing) stamp.push(...preparingStampOf(preview, options.cwd))
   for (const child of slot.children) stamp.push(...child.stamp)
+  // R13: the collapsed Focus root head paints its own Action through
+  // `options.cwd`, and children need not be expanded for it to show — the
+  // root stamp covers that root on its own.
+  if (slot.action !== undefined) stamp.push(options.cwd ?? '')
   return {
     key,
     stamp,
@@ -2943,8 +2955,13 @@ function compactWorkDescriptor(slot: {
     slot.lifetimeStartedAt,
     slot.lifetimeEndedAt,
   ]
-  for (const preview of slot.previews) stamp.push(...preparingStampOf(preview))
+  for (const preview of slot.previews) stamp.push(...preparingStampOf(preview, options.cwd))
   for (const member of slot.members) stamp.push(...member.stamp)
+  // R13: a Work whose Action slot is a real Tool/Action paints a path through
+  // `options.cwd` in its collapsed Activity head, so the root is its display
+  // input (the Tool members already carry their own cwd-aware stamps; a
+  // path-bearing Preparing summary rides `preparingStampOf` above).
+  if (summarizeWorkSpan(slot.span).action !== undefined) stamp.push(options.cwd ?? '')
   return {
     key: slot.key,
     stamp,
@@ -3217,7 +3234,7 @@ function legacyWorkDescriptor(
 ): TranscriptMainBlockDescriptor {
   const key = `${prefix}work-${keys.keyFor(span.owner)}`
   const stamp: TranscriptMainStampPart[] = ['work', key, span.parts.length]
-  for (const preview of previews) stamp.push(...preparingStampOf(preview))
+  for (const preview of previews) stamp.push(...preparingStampOf(preview, options.cwd))
   for (const part of span.parts) {
     stamp.push(...(part.kind === 'message'
       ? messageStampOf(part.message, keys.keyFor(part.message), options)

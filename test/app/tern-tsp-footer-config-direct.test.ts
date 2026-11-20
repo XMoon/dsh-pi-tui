@@ -268,7 +268,6 @@ test('the REAL Direct chain projects a custom USER config onto the native wire t
       resolveFooterConfig: () => runtime.resolveTspFooterConfig(),
       connectTsp: productionTspConnector({
         copyVisual: async () => false,
-        cwd: '/tmp',
         displayState: { preset: 'full' },
         requestExit: () => {},
         onFatal: () => {},
@@ -387,7 +386,7 @@ test('a merged PROJECT command config with no USER trust never executes and surf
       env: { DSH_PI_TUI_RENDERER: 'tsp' },
       resolveFooterConfig: () => runtime.resolveTspFooterConfig(),
       connectTsp: productionTspConnector({
-        copyVisual: async () => false, cwd: '/tmp', displayState: { preset: 'full' }, requestExit: () => {}, onFatal: () => {}, log: () => {}, logError: () => {},
+        copyVisual: async () => false, displayState: { preset: 'full' }, requestExit: () => {}, onFatal: () => {}, log: () => {}, logError: () => {},
         connect: async () => session,
       }),
     })
@@ -453,7 +452,6 @@ test('the mount wiring binds the footer config exactly once through the producti
       },
       connectTsp: productionTspConnector({
         copyVisual: async () => false,
-        cwd: '/tmp',
         displayState: { preset: 'full' },
         requestExit: () => {},
         onFatal: () => {},

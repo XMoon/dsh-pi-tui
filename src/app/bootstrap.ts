@@ -3842,7 +3842,9 @@ export function applyRunnerWithRuntime(
         // readiness-gated ConfigPort read.
         resolveFooterConfig: () => settings.resolveTspFooterConfig(),
         connectTsp: productionTspConnector({
-          cwd,
+          // R13: no boot-time cwd: the production renderer's tool-path root is
+          // the CURRENT formally committed display-subject workspace, sampled
+          // through its bound status reader — never this Client launch cwd.
           displayState,
           // PR-Q: the SAME effective `app.queue.open` action the PiTui keymap
           // compiles (definitions + persisted user overrides + safe mode). The

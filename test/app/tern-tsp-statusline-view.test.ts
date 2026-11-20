@@ -753,7 +753,6 @@ test('PR-A A-24: a REAL binder throw propagates and the production release close
     const { selectRendererMount, productionTspConnector } = await import('../../src/app/bootstrap/renderer-selection.ts')
     const production = productionTspConnector({
       copyVisual: async () => false,
-      cwd: '/tmp',
       displayState: { preset: 'full' },
       requestExit: () => {},
       onFatal: () => {},
