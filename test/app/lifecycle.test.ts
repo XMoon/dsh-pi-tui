@@ -964,6 +964,7 @@ interface ExitIntentHarness {
     mounted: boolean
     /** The transient daemon→direct conversion intent. */
     hostStopEligible: boolean
+    hostStopGate?: Promise<unknown>
     /** A reentrant hook run from the presenter's close (focus restoration). */
     onClose: (() => void) | undefined
     /** Optional presenter failure injection (phase: 'open' | 'update' | 'close'). */
@@ -1007,6 +1008,7 @@ function exitIntentHarness(options: {
     scopeCurrent: options.scopeCurrent ?? true,
     mounted: options.mounted ?? true,
     hostStopEligible: options.hostStopEligible ?? false,
+    hostStopGate: undefined,
     onClose: undefined,
     presenterFault: undefined,
     stop: options.stop ?? (async () => ({ kind: 'stopped' })),
@@ -1049,7 +1051,12 @@ function exitIntentHarness(options: {
       }),
       isScopeCurrent: () => state.scopeCurrent,
       hostStopIntentCurrent: () => state.hostStopEligible === true,
-      hostStopEligible: async () => state.hostStopEligible === true,
+      hostStopEligible: async () => {
+        // Optional pending gate so a test can hold the fresh read open while a
+        // newer operation starts (RFL-011 ownership).
+        if (state.hostStopGate !== undefined) await state.hostStopGate
+        return state.hostStopEligible === true
+      },
     },
     commit: (options) => { commits.push(options) },
     presenter: () => state.mounted ? seam : undefined,
@@ -1992,4 +1999,18 @@ test('a stale identity during the verification wait retires the seat instead of 
   h.coordinator.request('slash')
   await tick()
   assert.equal(h.current()?.kind, 'daemon-host-stop', 'a fresh exit still reaches the confirm')
+})
+
+test('a late verification read never closes a newer exit seat', async () => {
+  const gate = deferred<unknown>()
+  const h = exitIntentHarness({ backend: 'daemon', activity: 'idle', hostStopEligible: true })
+  h.state.hostStopGate = gate.promise
+  h.coordinator.request('slash')      // verify1 opens; its read is pending
+  h.current()!.dismiss()              // the user withdraws verify1
+  h.coordinator.request('slash')      // verify2 opens a NEW seat
+  gate.resolve(undefined)             // verify1's read settles LATE
+  await tick()
+  await tick()
+  // The late old settlement must never close the newer seat (RFL-011).
+  assert.equal(h.current()?.kind, 'daemon-host-stop', 'the newer seat survives the late old read')
 })

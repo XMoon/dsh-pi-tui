@@ -297,18 +297,20 @@ export function createExitIntentCoordinator(deps: ExitIntentCoordinatorDeps): Ex
       } catch {
         ok = false
       }
-      // Abandon cleanly if this wait is no longer live (a newer operation, a
-      // retire, a dispose, or the identity went stale): clear the guard and
-      // CLOSE the now-stale seat so it never locks future exits (RFL-010).
-      if (disposed || stopWait !== controller || operationEpoch !== epoch || !identityCurrent(identity)) {
-        if (stopWait === controller) stopWait = undefined
-        if (!disposed && open !== undefined) closeChoice()
-        return
-      }
+      // A newer operation or a dispose owns the seat now: this late settlement
+      // must NEVER touch it. Only clear/close the seat THIS wait still owns
+      // (RFL-011 regression guard).
+      if (disposed || stopWait !== controller || operationEpoch !== epoch) return
       stopWait = undefined
       if (!ok) {
         safeDiag('info', 'host stop declined: the fresh authoritative Backend read did not confirm the transition')
         commitAfterClose(identity, workStopped, epoch)
+        return
+      }
+      if (!identityCurrent(identity)) {
+        // The identity went stale while THIS wait still owns the seat: retire it
+        // cleanly rather than leave it locked.
+        closeChoice()
         return
       }
       commitAfterClose(identity, workStopped, epoch, true)
@@ -361,28 +363,24 @@ export function createExitIntentCoordinator(deps: ExitIntentCoordinatorDeps): Ex
       } catch {
         ok = false
       }
-      // The read settled. If this wait is no longer the live one (a newer
-      // operation, a retire, a dispose, or the identity went stale), abandon it
-      // cleanly: clear the guard and CLOSE the now-stale seat so it can never
-      // lock future exits (RFL-010).
-      if (disposed || stopWait !== controller || operationEpoch !== epoch || !identityCurrent(identity)) {
-        if (stopWait === controller) stopWait = undefined
-        if (!disposed && open !== undefined) closeChoice()
-        return
-      }
+      // The read settled. A newer operation or a dispose owns the seat now: its own
+      // seat is managed by it, so this late settlement must NEVER touch it. Only
+      // clear/close the seat THIS wait still owns (RFL-010 regression guard).
+      if (disposed || stopWait !== controller || operationEpoch !== epoch) return
       stopWait = undefined
       if (!ok) {
-        safeDiag('info', 'host stop not offered: the fresh authoritative Backend read did not confirm the transition')
+        safeDiag('info', 'host stop declined: the fresh authoritative Backend read did not confirm the transition')
         commitAfterClose(identity, workStopped, epoch)
         return
       }
-      // Still THIS operation (the pre-open check above is not enough: the read
-      // itself takes time): only a current, undismissed decision opens the
-      // confirm. This is the dangerous revival gate.
-      if (disposed || operationEpoch !== epoch || !identityCurrent(identity)) {
-        if (!disposed && open !== undefined) closeChoice()
+      if (!identityCurrent(identity)) {
+        // The identity went stale while THIS wait still owns the seat: retire it
+        // cleanly rather than leave it locked.
+        closeChoice()
         return
       }
+      // Still THIS operation: only a current, undismissed decision opens the
+      // confirm. This is the dangerous revival gate.
       openHostStopChoice(facts, backend, workStopped)
     }, {
       diag: deps.diag,
