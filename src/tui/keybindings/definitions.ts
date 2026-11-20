@@ -96,7 +96,7 @@ export const APP_KEYBINDINGS: Record<AppKeybindingId, AppKeybindingDefinition> =
     // Key-neutral on purpose: the description shows in /keybindings and
     // must not hard-code a physical chord (a remap must not make it a
     // lie — see the copy-convention in docs/architecture/keybindings.md).
-    description: 'Quit the TUI (keyboard exit requires a same-key second press; the default clear-draft and forward-delete editor behaviors are preserved)',
+    description: 'Exit this TUI (a same-key second press confirms; a daemon Host keeps running; the editor keeps its default clear-draft and forward-delete behavior)',
     category: 'Agent',
     scope: 'global',
     configurable: true,

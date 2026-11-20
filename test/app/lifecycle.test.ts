@@ -11,7 +11,12 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { createExitController } from '../../src/app/bootstrap/exit.ts'
+import { createExitController, daemonResumeBackendOverride, formatDaemonDetachHint } from '../../src/app/bootstrap/exit.ts'
+import { createExitIntentCoordinator, type ExitIntentCoordinator, type StopCurrentWorkOutcome } from '../../src/app/bootstrap/exit-intent.ts'
+import { createExitIntentFacts } from '../../src/app/bootstrap/exit-facts.ts'
+import type { ExitChoiceModel, SurfaceExitChoiceSeam } from '../../src/app/surface/exit-choice.ts'
+import type { LiveSessionScope, SessionScope } from '../../src/app/session/scope.ts'
+import { classifyExitIntent, type ExitBackendKind, type ExitSessionActivity } from '../../src/domain/command/policy.ts'
 import { cancellationError, isCancellation, runDetached, runOwned } from '../../src/runtime/process/tasks.ts'
 import { createDiag, type Diag } from '../../src/runtime/process/diagnostics.ts'
 
@@ -918,4 +923,797 @@ test('exit: cleanup AND preparation throwing still exits exactly once', async ()
   } finally {
     process.off('unhandledRejection', listener)
   }
+})
+
+// --- M6 UX PR1: the ONE exit-intent coordinator (Direct/daemon x idle/working/unknown) ---
+
+/** A stand-in captured scope: the coordinator only passes it back to the
+ *  injected currentness read, so the branded value is never inspected here. */
+function exitScope(sessionId = 'session-a'): LiveSessionScope {
+  return { sessionId } as unknown as LiveSessionScope
+}
+
+interface ExitIntentHarness {
+  readonly coordinator: ExitIntentCoordinator
+  readonly commits: Array<{ workStopped: boolean }>
+  readonly opens: ExitChoiceModel[]
+  readonly updates: ExitChoiceModel[]
+  /** Every created model (open + update) in creation order. */
+  readonly models: ExitChoiceModel[]
+  readonly stopCalls: Array<{ readonly scope: LiveSessionScope; readonly signal: AbortSignal }>
+  /** The runner diagnostics lines the owned task recorded. */
+  readonly diagLines: string[]
+  readonly state: {
+    backend: ExitBackendKind
+    activity: ExitSessionActivity
+    /** The live projection; undefined models a sessionless surface. */
+    live: LiveSessionScope | undefined
+    /** A Client-owned user shell is running. */
+    shell: boolean
+    scopeCurrent: boolean
+    mounted: boolean
+    /** A reentrant hook run from the presenter's close (focus restoration). */
+    onClose: (() => void) | undefined
+    /** Optional presenter failure injection (phase: 'open' | 'update' | 'close'). */
+    presenterFault: ((phase: 'open' | 'update' | 'close') => void) | undefined
+    stop: (signal: AbortSignal) => Promise<StopCurrentWorkOutcome>
+  }
+  closed(): number
+  current(): ExitChoiceModel | undefined
+  dispose(): void
+}
+
+/** A stand-in SESSIONLESS scope: a real identity with no Session id. */
+function sessionlessScope(): SessionScope {
+  return { sessionId: undefined } as unknown as SessionScope
+}
+
+function exitIntentHarness(options: {
+  readonly backend?: ExitBackendKind
+  readonly activity?: ExitSessionActivity
+  /** Explicit live projection; `undefined` (with `sessionless`) models no Session. */
+  readonly live?: LiveSessionScope | undefined
+  readonly sessionless?: boolean
+  readonly scopeCurrent?: boolean
+  readonly mounted?: boolean
+  readonly stop?: (signal: AbortSignal) => Promise<StopCurrentWorkOutcome>
+} = {}): ExitIntentHarness {
+  let closes = 0
+  let currentModel: ExitChoiceModel | undefined
+  let disposed = false
+  const commits: Array<{ workStopped: boolean }> = []
+  const opens: ExitChoiceModel[] = []
+  const updates: ExitChoiceModel[] = []
+  const models: ExitChoiceModel[] = []
+  const stopCalls: Array<{ readonly scope: LiveSessionScope; readonly signal: AbortSignal }> = []
+  const state: ExitIntentHarness['state'] = {
+    backend: options.backend ?? 'daemon',
+    activity: options.activity ?? 'idle',
+    live: options.sessionless === true ? undefined : (options.live ?? exitScope()),
+    shell: false,
+    scopeCurrent: options.scopeCurrent ?? true,
+    mounted: options.mounted ?? true,
+    onClose: undefined,
+    presenterFault: undefined,
+    stop: options.stop ?? (async () => ({ kind: 'stopped' })),
+  }
+  const seam: SurfaceExitChoiceSeam = {
+    open: (model) => {
+      state.presenterFault?.('open')
+      currentModel = model
+      opens.push(model)
+      models.push(model)
+    },
+    update: (model) => {
+      state.presenterFault?.('update')
+      currentModel = model
+      updates.push(model)
+      models.push(model)
+    },
+    close: () => {
+      currentModel = undefined
+      closes += 1
+      state.onClose?.()
+      state.presenterFault?.('close')
+    },
+  }
+  const diagLines: string[] = []
+  const diag = createDiag({
+    filePath: undefined,
+    stderrLevel: 'off',
+    sinks: [{ write: (line: string) => { diagLines.push(line) } }],
+  })
+  const coordinator = createExitIntentCoordinator({
+    diag,
+    facts: {
+      currentBackend: () => state.backend,
+      capture: () => ({
+        scope: state.live ?? sessionlessScope(),
+        live: state.live,
+        activity: state.activity,
+        shellRunning: state.shell,
+      }),
+      isScopeCurrent: () => state.scopeCurrent,
+    },
+    commit: (options) => { commits.push(options) },
+    presenter: () => state.mounted ? seam : undefined,
+    stopCurrentWork: (scope, signal) => {
+      stopCalls.push({ scope, signal })
+      return state.stop(signal)
+    },
+  })
+  return {
+    coordinator,
+    commits,
+    opens,
+    updates,
+    models,
+    stopCalls,
+    diagLines,
+    state,
+    closed: () => closes,
+    current: () => currentModel,
+    dispose: () => {
+      if (disposed) return
+      disposed = true
+      coordinator.dispose()
+    },
+  }
+}
+
+test('exit intent: a proven idle daemon Client detaches immediately with no choice', () => {
+  const h = exitIntentHarness({ backend: 'daemon', activity: 'idle' })
+  h.coordinator.request('slash')
+  assert.deepEqual(h.commits, [{ workStopped: false }], 'the existing exit controller is the only commit')
+  assert.equal(h.opens.length, 0, 'an idle daemon exit never opens a choice')
+  assert.equal(h.stopCalls.length, 0, 'an idle detach sends no Host cancel')
+})
+
+test('exit intent: a proven idle Direct session exits immediately with no choice', () => {
+  const h = exitIntentHarness({ backend: 'direct', activity: 'idle' })
+  h.coordinator.request('plain')
+  assert.deepEqual(h.commits, [{ workStopped: false }])
+  assert.equal(h.opens.length, 0)
+})
+
+test('exit intent: a sessionless surface exits/detaches immediately', () => {
+  for (const backend of ['direct', 'daemon'] as const) {
+    const h = exitIntentHarness({ backend, activity: 'idle', sessionless: true })
+    h.coordinator.request('keyboard')
+    assert.deepEqual(h.commits, [{ workStopped: false }], `${backend}: sessionless exit is immediate`)
+    assert.equal(h.opens.length, 0)
+  }
+})
+
+test('exit intent: a sessionless surface with an open admission is unknown, not idle', () => {
+  const h = exitIntentHarness({ backend: 'direct', activity: 'working', sessionless: true })
+  h.coordinator.request('slash')
+  assert.equal(h.opens.length, 1, 'a pending admission without a Session fails safe')
+  assert.equal(h.commits.length, 0)
+  assert.equal(h.current()?.kind, 'direct-unknown')
+})
+
+test('daemon busy: the default Keep detaches with zero Host writes; Stay commits nothing', () => {
+  const h = exitIntentHarness({ backend: 'daemon', activity: 'working' })
+  h.coordinator.request('slash')
+  const model = h.opens[0]!
+  assert.equal(model.kind, 'daemon-busy')
+  assert.deepEqual(model.options.map(option => option.id), ['keep-and-disconnect', 'stop-and-disconnect', 'stay'])
+  assert.equal(model.focus, 'keep-and-disconnect', 'Keep is the safe default')
+  h.current()!.select('keep-and-disconnect')
+  assert.deepEqual(h.commits, [{ workStopped: false }])
+  assert.equal(h.stopCalls.length, 0, 'Keep never sends a Host cancel')
+
+  const stay = exitIntentHarness({ backend: 'daemon', activity: 'working' })
+  stay.coordinator.request('keyboard')
+  stay.current()!.select('stay')
+  assert.deepEqual(stay.commits, [], 'Stay performs zero Host writes and zero exit')
+  assert.equal(stay.closed(), 1, 'Stay closes the one choice')
+})
+
+test('daemon busy: Stop sends exactly one cancel and exits only after the same-owner idle proof', async () => {
+  const idle = deferred<StopCurrentWorkOutcome>()
+  const h = exitIntentHarness({ backend: 'daemon', activity: 'working', stop: () => idle.promise })
+  h.coordinator.request('slash')
+  h.current()!.select('stop-and-disconnect')
+  assert.equal(h.updates[0]?.phase, 'stopping', 'the same seat states the in-flight stop')
+  assert.equal(h.current()?.phase, 'stopping')
+  assert.equal(h.stopCalls.length, 1, 'one official cancel is dispatched')
+  // A second confirmation during the wait must not dispatch another cancel.
+  h.current()!.select('stop-and-disconnect')
+  assert.equal(h.stopCalls.length, 1)
+  assert.deepEqual(h.commits, [], 'the Client must not exit before the idle proof')
+  idle.resolve({ kind: 'stopped' })
+  await idle.promise
+  // Let the coordinator's continuation run.
+  await new Promise<void>(resolve => setImmediate(resolve))
+  assert.deepEqual(h.commits, [{ workStopped: true }], 'the verified stop commits exactly once')
+})
+
+test('daemon busy: an unconfirmable stop keeps Keep/Stay, never auto-detaches or claims stopped', async () => {
+  const h = exitIntentHarness({
+    backend: 'daemon',
+    activity: 'working',
+    stop: async () => ({ kind: 'unconfirmed', detail: 'the daemon refused the stop' }),
+  })
+  h.coordinator.request('slash')
+  h.current()!.select('stop-and-disconnect')
+  await new Promise<void>(resolve => setImmediate(resolve))
+  const model = h.current()!
+  assert.equal(model.phase, 'unconfirmed')
+  assert.deepEqual(model.options.map(option => option.id), ['disconnect-without-stop', 'stay'])
+  assert.equal(model.status, 'the daemon refused the stop', 'a proven refusal is stated')
+  assert.deepEqual(h.commits, [], 'no exit and no stopper claim on an unconfirmed stop')
+  h.current()!.select('disconnect-without-stop')
+  assert.deepEqual(h.commits, [{ workStopped: false }], 'the user can still choose a truthful detach')
+})
+
+test('daemon busy: a stale captured scope retires the choice with zero side effects', () => {
+  const h = exitIntentHarness({ backend: 'daemon', activity: 'working' })
+  h.coordinator.request('slash')
+  h.state.scopeCurrent = false
+  h.current()!.select('stop-and-disconnect')
+  assert.deepEqual(h.commits, [])
+  assert.equal(h.stopCalls.length, 0, 'a stale choice can never cancel a newer owner')
+  assert.equal(h.closed(), 1)
+})
+
+test('daemon busy: a Stop confirmed after the owner became idle never sends a cancel', () => {
+  const h = exitIntentHarness({ backend: 'daemon', activity: 'working' })
+  h.coordinator.request('slash')
+  h.state.activity = 'idle'
+  h.current()!.select('stop-and-disconnect')
+  assert.deepEqual(h.commits, [{ workStopped: true }], 'the same identity is proven idle')
+  assert.equal(h.stopCalls.length, 0, 'no redundant cancel is sent')
+})
+
+test('daemon busy: an unobservable state at confirm retires the choice instead of stopping', () => {
+  const h = exitIntentHarness({ backend: 'daemon', activity: 'working' })
+  h.coordinator.request('slash')
+  h.state.activity = 'unknown'
+  h.current()!.select('stop-and-disconnect')
+  assert.deepEqual(h.commits, [])
+  assert.equal(h.stopCalls.length, 0)
+  assert.equal(h.closed(), 1)
+})
+
+test('daemon unknown: only the truthful disconnect/stay options exist (no Stop)', () => {
+  const h = exitIntentHarness({ backend: 'daemon', activity: 'unknown' })
+  h.coordinator.request('plain')
+  const model = h.opens[0]!
+  assert.equal(model.kind, 'daemon-unknown')
+  assert.deepEqual(model.options.map(option => option.id), ['disconnect-without-stop', 'stay'])
+  assert.equal(model.focus, 'disconnect-without-stop')
+})
+
+test('direct busy: Stay is the default; Stop+Exit is one explicit choice', () => {
+  const h = exitIntentHarness({ backend: 'direct', activity: 'working' })
+  h.coordinator.request('slash')
+  const model = h.opens[0]!
+  assert.equal(model.kind, 'direct-busy')
+  assert.deepEqual(model.options.map(option => option.id), ['stop-and-exit', 'stay'])
+  assert.equal(model.focus, 'stay', 'the destructive Direct action is never the default')
+  h.current()!.select('stop-and-exit')
+  assert.deepEqual(h.commits, [{ workStopped: false }], 'the existing Direct controller owns the retirement')
+  assert.equal(h.stopCalls.length, 0, 'the Direct path never uses the daemon cancel operation')
+})
+
+test('direct unknown: two options, Stay default, no idle or stopped claim', () => {
+  const h = exitIntentHarness({ backend: 'direct', activity: 'unknown' })
+  h.coordinator.request('keyboard')
+  const model = h.opens[0]!
+  assert.equal(model.kind, 'direct-unknown')
+  assert.deepEqual(model.options.map(option => option.id), ['exit-local', 'stay'])
+  assert.equal(model.focus, 'stay')
+  h.current()!.select('exit-local')
+  assert.deepEqual(h.commits, [{ workStopped: false }], 'never claims the work stopped')
+})
+
+test('exit intent: repeated requests never stack a second choice', () => {
+  const h = exitIntentHarness({ backend: 'daemon', activity: 'working' })
+  h.coordinator.request('slash')
+  h.coordinator.request('keyboard')
+  h.coordinator.request('plain')
+  assert.equal(h.opens.length, 1, 'exactly one Client-local choice exists')
+})
+
+test('exit intent: no mounted surface fails closed (no exit, no write)', () => {
+  const h = exitIntentHarness({ backend: 'daemon', activity: 'working', mounted: false })
+  h.coordinator.request('slash')
+  assert.deepEqual(h.commits, [], 'an unavailable choice surface never degrades to an exit')
+  assert.equal(h.opens.length, 0)
+})
+
+test('exit intent: dispose aborts an in-flight Stop wait and never commits afterwards', async () => {
+  let seen: AbortSignal | undefined
+  const h = exitIntentHarness({
+    backend: 'daemon',
+    activity: 'working',
+    stop: signal => new Promise(resolve => {
+      seen = signal
+      signal.addEventListener('abort', () => resolve({ kind: 'unconfirmed', detail: 'aborted' }), { once: true })
+    }),
+  })
+  h.coordinator.request('slash')
+  h.current()!.select('stop-and-disconnect')
+  h.dispose()
+  assert.equal(seen?.aborted, true, 'the wait is aborted with the surface')
+  await new Promise<void>(resolve => setImmediate(resolve))
+  assert.deepEqual(h.commits, [], 'a disposed coordinator never exits')
+})
+
+test('exit intent: a host modal withdrawal (dismiss) performs zero business action', () => {
+  const h = exitIntentHarness({ backend: 'daemon', activity: 'working' })
+  h.coordinator.request('slash')
+  h.current()!.dismiss()
+  assert.deepEqual(h.commits, [], 'preemption is not a Stay/Keep/Stop decision')
+  assert.equal(h.stopCalls.length, 0)
+})
+
+// --- M6 UX PR1: the fixed daemon detach hint ---
+
+test('daemon detach hint: fixed block, real profile/session, no unobservable Host claim', () => {
+  const hint = formatDaemonDetachHint({ profile: 'pi-tui-dev', sessionId: 'session-42', workStopped: false })
+  assert.equal(hint, [
+    'Disconnected from dsh-pi-tui (daemon client).',
+    'The daemon Host was not stopped by this action.',
+    '',
+    'Resume this session:',
+    '  dsh --profile pi-tui-dev --session session-42',
+    '',
+    'Manage the daemon:',
+    '  dsh --profile pi-tui-dev daemon status',
+    '  dsh --profile pi-tui-dev daemon logs',
+    '  dsh --profile pi-tui-dev daemon stop',
+  ].join('\n'))
+  assert.ok(!/Host:\s*running|Turn stopped|pid/i.test(hint), 'no unverified Host state/PID is printed')
+})
+
+test('daemon detach hint: sessionless omits Resume; a verified stop adds the one stopped line', () => {
+  const sessionless = formatDaemonDetachHint({ profile: 'pi-tui-dev', sessionId: '', workStopped: false })
+  assert.ok(!sessionless.includes('Resume this session:'), 'a sessionless detach prints no resume line')
+  assert.ok(sessionless.includes('Manage the daemon:'))
+
+  const stopped = formatDaemonDetachHint({ profile: 'pi-tui-dev', sessionId: 'session-42', workStopped: true })
+  assert.match(stopped, /^Current work: stopped\.$/m)
+  assert.equal(stopped.split('Current work: stopped.').length - 1, 1, 'printed at most once')
+})
+
+test('daemon detach hint: a temporary backend override is preserved and arguments are shell-safe', () => {
+  const override = formatDaemonDetachHint({ profile: 'pi-tui-dev', sessionId: 'session-42', workStopped: false, backendOverride: true })
+  assert.match(override, /DSH_PI_TUI_BACKEND=daemon dsh --profile pi-tui-dev --session session-42/u)
+  const persisted = formatDaemonDetachHint({ profile: 'pi-tui-dev', sessionId: 'session-42', workStopped: false, backendOverride: false })
+  assert.ok(!persisted.includes('DSH_PI_TUI_BACKEND'), 'a Profile-persisted daemon needs no override')
+  const quoted = formatDaemonDetachHint({ profile: "team's profile", sessionId: 'session 42', workStopped: false, backendOverride: true })
+  assert.match(quoted, /--profile 'team'\\''s profile' --session 'session 42'/u)
+  assert.equal(daemonResumeBackendOverride(undefined), true)
+  assert.equal(daemonResumeBackendOverride(''), true)
+  assert.equal(daemonResumeBackendOverride('{"value":"daemon","source":"env"}'), true)
+  assert.equal(daemonResumeBackendOverride('{"value":"daemon","source":"profile"}'), false)
+  assert.equal(daemonResumeBackendOverride('not-json'), true)
+})
+
+test('classifyExitIntent: the frozen decision matrix, unknown never idle', () => {
+  const decide = classifyExitIntent
+  const base = {} as const
+  assert.equal(decide({ ...base, currentBackend: 'direct', sessionPresence: 'live', activity: 'idle', entry: 'slash' }), 'direct-exit')
+  assert.equal(decide({ ...base, currentBackend: 'daemon', sessionPresence: 'live', activity: 'idle', entry: 'slash' }), 'client-detach')
+  assert.equal(decide({ ...base, currentBackend: 'direct', sessionPresence: 'none', activity: 'idle', entry: 'plain' }), 'direct-exit')
+  assert.equal(decide({ ...base, currentBackend: 'daemon', sessionPresence: 'none', activity: 'idle', entry: 'plain' }), 'client-detach')
+  assert.equal(decide({ ...base, currentBackend: 'direct', sessionPresence: 'live', activity: 'working', entry: 'keyboard' }), 'show-direct-choice')
+  assert.equal(decide({ ...base, currentBackend: 'daemon', sessionPresence: 'live', activity: 'working', entry: 'keyboard' }), 'show-daemon-choice')
+  assert.equal(decide({ ...base, currentBackend: 'direct', sessionPresence: 'live', activity: 'unknown', entry: 'slash' }), 'show-unknown-choice')
+  assert.equal(decide({ ...base, currentBackend: 'daemon', sessionPresence: 'live', activity: 'unknown', entry: 'slash' }), 'show-unknown-choice')
+  // A sessionless surface that claims activity is internally inconsistent: fail safe.
+  assert.equal(decide({ ...base, currentBackend: 'daemon', sessionPresence: 'none', activity: 'unknown', entry: 'keyboard' }), 'show-unknown-choice')
+  assert.equal(decide({ ...base, currentBackend: 'direct', sessionPresence: 'none', activity: 'working', entry: 'keyboard' }), 'show-unknown-choice')
+  // The entry is provenance, never a safety relaxation: every entry classifies alike.
+  for (const entry of ['slash', 'plain', 'keyboard'] as const) {
+    assert.equal(decide({ ...base, currentBackend: 'daemon', sessionPresence: 'live', activity: 'unknown', entry }), 'show-unknown-choice')
+  }
+  // A running user shell is a REMINDER on the normal family (Owner decision),
+  // not a separate decision: the activity/backend matrix is unchanged.
+})
+
+test('exit intent: a running user shell keeps the exit options and adds a reminder', () => {
+  const h = exitIntentHarness({ backend: 'daemon', activity: 'working' })
+  h.state.shell = true
+  h.coordinator.request('slash')
+  assert.equal(h.current()?.kind, 'daemon-busy')
+  assert.equal(h.current()?.shellRunning, true)
+  assert.deepEqual(h.current()?.options.map(option => option.id), ['keep-and-disconnect', 'stop-and-disconnect', 'stay'])
+  assert.ok(h.current()?.body.some(paragraph => paragraph.includes('user shell')), 'the shell reminder is painted')
+  // Keep is preserved (Owner decision) and commits without a stopped claim.
+  h.current()!.select('keep-and-disconnect')
+  assert.deepEqual(h.commits, [{ workStopped: false }])
+  assert.deepEqual(h.stopCalls, [], 'Keep sends no Host cancel')
+})
+
+test('exit intent: a Stop while a user shell runs never claims the shell stopped', async () => {
+  const h = exitIntentHarness({ backend: 'daemon', activity: 'working' })
+  h.state.shell = true
+  h.coordinator.request('slash')
+  h.current()!.select('stop-and-disconnect')
+  await new Promise<void>(resolve => setImmediate(resolve))
+  await new Promise<void>(resolve => setImmediate(resolve))
+  assert.deepEqual(h.commits, [{ workStopped: false }], 'the Agent idle proof does not prove the shell finished')
+})
+
+test('exit intent: a shell reminder on Stop-Unconfirmed keeps the safe option set', async () => {
+  const h = exitIntentHarness({ backend: 'daemon', activity: 'working' })
+  h.state.shell = true
+  h.state.stop = async () => ({ kind: 'unconfirmed', detail: 'the cancel was rejected' })
+  h.coordinator.request('slash')
+  h.current()!.select('stop-and-disconnect')
+  await new Promise<void>(resolve => setImmediate(resolve))
+  await new Promise<void>(resolve => setImmediate(resolve))
+  const unconfirmed = h.current()
+  assert.equal(unconfirmed?.phase, 'unconfirmed')
+  assert.equal(unconfirmed?.shellRunning, true, 'the unconfirmed seat carries the shell reminder')
+  assert.ok(unconfirmed?.body.some(paragraph => paragraph.includes('user shell')))
+  assert.deepEqual(unconfirmed?.options.map(option => option.id), ['disconnect-without-stop', 'stay'])
+  assert.equal(unconfirmed?.status, 'the cancel was rejected')
+  // The safe Disconnect detaches once and never re-opens a second Stop.
+  unconfirmed!.select('disconnect-without-stop')
+  assert.deepEqual(h.commits, [{ workStopped: false }])
+  assert.equal(h.stopCalls.length, 1, 'no second Agent cancel')
+})
+
+test('exit intent: a shell that starts after the Stop refreshes Unconfirmed, never Busy', async () => {
+  const h = exitIntentHarness({ backend: 'daemon', activity: 'working' })
+  h.state.stop = async () => ({ kind: 'unconfirmed', detail: 'the wait was aborted' })
+  h.coordinator.request('slash')
+  h.current()!.select('stop-and-disconnect')
+  await new Promise<void>(resolve => setImmediate(resolve))
+  await new Promise<void>(resolve => setImmediate(resolve))
+  assert.equal(h.current()?.phase, 'unconfirmed')
+  assert.equal(h.current()?.shellRunning, false)
+  // The shell starts AFTER the Stop request (the late ensureSession boundary).
+  h.state.shell = true
+  h.current()!.select('disconnect-without-stop')
+  assert.deepEqual(h.commits, [], 'the un-warned confirmation refreshes instead of committing')
+  assert.equal(h.stopCalls.length, 1, 'the refresh never re-offers a second cancel')
+  const refreshed = h.current()
+  assert.equal(refreshed?.phase, 'unconfirmed', 'the refusal facts are never replaced by a Busy choice')
+  assert.equal(refreshed?.shellRunning, true)
+  assert.equal(refreshed?.status, 'the wait was aborted', 'the refusal detail is preserved')
+  assert.deepEqual(refreshed?.options.map(option => option.id), ['disconnect-without-stop', 'stay'])
+  refreshed!.select('disconnect-without-stop')
+  assert.deepEqual(h.commits, [{ workStopped: false }])
+  assert.equal(h.stopCalls.length, 1)
+})
+
+test('exit intent: a shell-reminder refresh never rebinds the captured transport identity', () => {
+  // F1: the refresh must validate the ORIGINAL identity first and update the
+  // model in place; a Connection/binding rollover (scope unchanged) retires
+  // the choice instead of letting the old intent act on the new generation.
+  const h = exitIntentHarness({ backend: 'daemon', activity: 'working' })
+  h.coordinator.request('slash')
+  const opened = h.current()
+  assert.equal(opened?.shellRunning, false)
+  h.state.shell = true
+  h.state.scopeCurrent = false // the transport token rolled over; the scope id is unchanged
+  h.current()!.select('keep-and-disconnect')
+  assert.deepEqual(h.commits, [], 'a rolled identity retires the choice, it never refreshes or commits')
+  assert.equal(h.current(), undefined)
+  assert.deepEqual(h.stopCalls, [])
+  // A same-generation refresh keeps the SAME captured identity and options.
+  const same = exitIntentHarness({ backend: 'daemon', activity: 'working' })
+  same.coordinator.request('slash')
+  same.state.shell = true
+  same.current()!.select('keep-and-disconnect')
+  const refreshed = same.current()
+  assert.deepEqual(refreshed?.options.map(option => option.id), ['keep-and-disconnect', 'stop-and-disconnect', 'stay'])
+  refreshed!.select('keep-and-disconnect')
+  assert.deepEqual(same.commits, [{ workStopped: false }], 'the warned Keep commits once')
+})
+
+test('exit intent: a modal that withdraws the Stopping presentation cancels the Stop dispatch', async () => {
+  // F2: the Stopping model update is SYNCHRONOUS; a Host modal can dismiss the
+  // choice from inside that very update. The Stop must then never dispatch.
+  let seen: AbortSignal | undefined
+  const h = exitIntentHarness({
+    backend: 'daemon',
+    activity: 'working',
+    stop: signal => new Promise(resolve => {
+      seen = signal
+      signal.addEventListener('abort', () => resolve({ kind: 'unconfirmed', detail: 'aborted' }), { once: true })
+    }),
+  })
+  h.state.presenterFault = phase => {
+    if (phase === 'update') {
+      // The modal preemption runs INSIDE the synchronous Stopping update.
+      h.state.presenterFault = undefined
+      h.current()!.dismiss()
+    }
+  }
+  h.coordinator.request('slash')
+  h.current()!.select('stop-and-disconnect')
+  await new Promise<void>(resolve => setImmediate(resolve))
+  await new Promise<void>(resolve => setImmediate(resolve))
+  assert.equal(seen, undefined, 'the official cancel was never dispatched after the modal withdrew the seat')
+  assert.deepEqual(h.stopCalls, [])
+  assert.deepEqual(h.commits, [])
+})
+
+test('exit intent: a committed session switch retires the open choice with zero action', () => {
+  const h = exitIntentHarness({ backend: 'daemon', activity: 'working' })
+  h.coordinator.request('slash')
+  assert.equal(h.current()?.kind, 'daemon-busy')
+  // Subscriber path: the session scope no longer matches the captured owner.
+  h.state.scopeCurrent = false
+  h.coordinator.retireIfStale()
+  assert.equal(h.current(), undefined, 'the stale choice is withdrawn immediately')
+  assert.equal(h.closed(), 1)
+  assert.deepEqual(h.commits, [], 'no Keep/Stop/Stay decision was applied')
+  // An unchanged identity keeps the choice.
+  const stable = exitIntentHarness({ backend: 'daemon', activity: 'working' })
+  stable.coordinator.request('slash')
+  stable.coordinator.retireIfStale()
+  assert.equal(stable.current()?.kind, 'daemon-busy', 'a still-current choice survives')
+})
+
+// --- M6 UX PR1: the live exit facts (the composition seam the keyboard and
+// the choice read) ---
+
+interface ExitFactsHarness {
+  readonly facts: ReturnType<typeof createExitIntentFacts>
+  readonly state: {
+    backend: ExitBackendKind
+    sessionId: string | undefined
+    current: boolean
+    admission: boolean
+    shell: boolean
+    running: boolean | undefined
+    tokenCurrent: boolean
+    agentRunning: boolean | undefined
+    tokenSessionIds: string[]
+  }
+}
+
+function exitFactsHarness(): ExitFactsHarness {
+  const state: ExitFactsHarness['state'] = {
+    backend: 'daemon',
+    sessionId: 'session-a',
+    current: true,
+    admission: false,
+    shell: false,
+    running: false,
+    tokenCurrent: true,
+    agentRunning: false,
+    tokenSessionIds: [],
+  }
+  const facts = createExitIntentFacts({
+    backend: () => state.backend,
+    scopes: {
+      capture: () => ({ sessionId: state.sessionId }) as unknown as SessionScope,
+      captureLive: () => state.sessionId === undefined
+        ? undefined
+        : ({ sessionId: state.sessionId } as unknown as LiveSessionScope),
+      isCurrent: () => state.current,
+    },
+    admissionPending: () => state.admission,
+    shellRunning: () => state.shell,
+    remote: {
+      running: () => state.running,
+      captureTransportToken: (sessionId) => {
+        state.tokenSessionIds.push(sessionId)
+        return { generation: 1, binding: sessionId }
+      },
+      isTransportTokenCurrent: () => state.tokenCurrent,
+    },
+    directAgentRunning: () => state.agentRunning,
+  })
+  return { facts, state }
+}
+
+test('exit facts: a Remote admission/shell working state still captures the transport identity', () => {
+  // RFL-001: the activity shortcut must not skip the identity capture, or the
+  // confirm fence can never pass and Keep/Stop silently do nothing.
+  const h = exitFactsHarness()
+  h.state.admission = true
+  const captured = h.facts.capture()
+  assert.equal(captured.activity, 'working')
+  assert.notEqual(captured.transportToken, undefined, 'the transport token is captured beside the scope')
+  assert.deepEqual(h.state.tokenSessionIds, ['session-a'])
+  assert.equal(h.facts.isScopeCurrent(captured.scope, captured.transportToken), true)
+  h.state.tokenCurrent = false
+  assert.equal(h.facts.isScopeCurrent(captured.scope, captured.transportToken), false,
+    'a Connection/binding rollover invalidates the captured identity')
+
+  const shell = exitFactsHarness()
+  shell.state.shell = true
+  assert.equal(shell.facts.capture().activity, 'working')
+  assert.notEqual(shell.facts.capture().transportToken, undefined)
+})
+
+test('exit facts: the official Remote running bit and its absence decide working/idle/unknown', () => {
+  const h = exitFactsHarness()
+  h.state.running = true
+  assert.equal(h.facts.capture().activity, 'working')
+  h.state.running = false
+  assert.equal(h.facts.capture().activity, 'idle')
+  h.state.running = undefined
+  assert.equal(h.facts.capture().activity, 'unknown', 'a missing running bit is never idle')
+  h.state.running = false
+  h.state.tokenCurrent = false
+  assert.equal(h.facts.capture().activity, 'unknown', 'a rolled transport is never idle')
+})
+
+test('exit facts: a sessionless capture is a real generation and its first Session invalidates it', () => {
+  // RFL-003: a sessionless choice must be retired when the first Session
+  // publishes; otherwise the old choice could exit the new owner.
+  const h = exitFactsHarness()
+  h.state.sessionId = undefined
+  h.state.admission = true
+  const captured = h.facts.capture()
+  assert.deepEqual(captured.scope.sessionId, undefined)
+  assert.equal(captured.activity, 'working')
+  assert.deepEqual(h.state.tokenSessionIds, [''], 'the Connection generation is fenced with the empty-session sentinel')
+  assert.equal(h.facts.isScopeCurrent(captured.scope, captured.transportToken), true)
+  h.state.current = false
+  assert.equal(h.facts.isScopeCurrent(captured.scope, captured.transportToken), false,
+    'the published first Session makes the old sessionless choice stale')
+  h.state.current = true
+  h.state.sessionId = undefined
+  h.state.admission = false
+  assert.equal(h.facts.capture().activity, 'idle')
+})
+
+test('exit facts: Direct uses the attached Agent status, never a cached busy row', () => {
+  const h = exitFactsHarness()
+  h.state.backend = 'direct'
+  h.state.agentRunning = true
+  assert.equal(h.facts.capture().activity, 'working')
+  h.state.agentRunning = false
+  assert.equal(h.facts.capture().activity, 'idle')
+  h.state.agentRunning = undefined
+  assert.equal(h.facts.capture().activity, 'unknown', 'a live scope without an observable Agent is unknown')
+  assert.equal(h.facts.isScopeCurrent(exitScope(), undefined), true, 'Direct currentness is the ownership scope')
+})
+
+test('exit intent: a stale sessionless choice never exits the newly published Session', () => {
+  // RFL-003 end to end through the coordinator: the choice captured the
+  // sessionless generation; the first Session lands; the old Exit must be a
+  // no-op (zero commit, zero cancel).
+  const h = exitIntentHarness({ backend: 'direct', activity: 'working', sessionless: true })
+  h.coordinator.request('slash')
+  assert.equal(h.current()?.kind, 'direct-unknown')
+  h.state.scopeCurrent = false
+  h.coordinator.retireIfStale()
+  assert.equal(h.commits.length, 0)
+  assert.equal(h.stopCalls.length, 0)
+  assert.equal(h.current(), undefined, 'the stale sessionless choice is retired')
+})
+
+test('exit intent: a reentrant focus callback that opens a NEW choice owns the decision', () => {
+  // RFL-007: closing the old choice can synchronously run another owner's
+  // onFocus, which may open a fresh intent. The old confirmation must not
+  // commit after it.
+  const h = exitIntentHarness({ backend: 'daemon', activity: 'working' })
+  h.coordinator.request('slash')
+  h.state.onClose = () => {
+    h.state.onClose = undefined
+    h.coordinator.request('keyboard')
+  }
+  h.current()!.select('keep-and-disconnect')
+  assert.equal(h.opens.length, 2, 'the reentrant callback opened the newer choice')
+  assert.deepEqual(h.commits, [], 'the old Keep never exits the newer owner')
+  assert.equal(h.current()?.kind, 'daemon-busy')
+})
+
+test('exit intent: a Stop proof cannot commit after a newer choice takes over', async () => {
+  const h = exitIntentHarness({ backend: 'daemon', activity: 'working' })
+  h.coordinator.request('slash')
+  h.state.onClose = () => {
+    h.state.onClose = undefined
+    h.state.activity = 'working'
+    h.coordinator.request('slash')
+  }
+  h.current()!.select('stop-and-disconnect')
+  await new Promise<void>(resolve => setImmediate(resolve))
+  assert.equal(h.opens.length, 2, 'the close-time callback opened a newer choice')
+  assert.deepEqual(h.commits, [], 'the stopped proof belongs to the retired intent')
+})
+
+test('exit intent: dismissing the choice during a Stop aborts the wait', async () => {
+  // RFL-005: the choice owns the local wait; dismissing it must end that wait.
+  let seen: AbortSignal | undefined
+  const h = exitIntentHarness({
+    backend: 'daemon',
+    activity: 'working',
+    stop: signal => new Promise(resolve => {
+      seen = signal
+      signal.addEventListener('abort', () => resolve({ kind: 'unconfirmed', detail: 'aborted' }), { once: true })
+    }),
+  })
+  h.coordinator.request('slash')
+  h.current()!.select('stop-and-disconnect')
+  assert.equal(seen?.aborted, false)
+  h.current()!.dismiss()
+  assert.equal(seen?.aborted, true, 'the dismissed choice aborted its own wait')
+  await new Promise<void>(resolve => setImmediate(resolve))
+  assert.deepEqual(h.commits, [])
+})
+
+test('exit intent: a presenter failure is recorded and never becomes an unhandled rejection', async () => {
+  // RFL-004: the WHOLE stop task (presentation included) is owned.
+  const unhandled: unknown[] = []
+  const listener = (reason: unknown): void => { unhandled.push(reason) }
+  process.on('unhandledRejection', listener)
+  try {
+    const h = exitIntentHarness({ backend: 'daemon', activity: 'working' })
+    h.state.presenterFault = (phase) => {
+      if (phase === 'update') throw new Error('presenter-update-failed')
+    }
+    h.coordinator.request('slash')
+    h.current()!.select('stop-and-disconnect')
+    await new Promise<void>(resolve => setImmediate(resolve))
+    await new Promise<void>(resolve => setImmediate(resolve))
+    assert.deepEqual(unhandled, [], 'no rejection escapes the owned task')
+    assert.match(h.diagLines.join('\n'), /presenter-update-failed/, 'the failure is recorded for diagnostics')
+    assert.deepEqual(h.commits, [], 'a broken presentation never claims a stop or an exit')
+  } finally {
+    process.off('unhandledRejection', listener)
+  }
+})
+
+test('exit intent: an old confirmation cannot commit after a newer choice opened AND withdrew', () => {
+  // RFL-007 (reopened): `open === undefined` is not proof that no newer
+  // operation happened; the operation epoch is.
+  const h = exitIntentHarness({ backend: 'daemon', activity: 'working' })
+  h.coordinator.request('slash')
+  h.state.onClose = () => {
+    h.state.onClose = undefined
+    h.coordinator.request('keyboard') // a newer choice opens
+    h.current()!.dismiss() // ... and is withdrawn by a Host modal
+  }
+  h.current()!.select('keep-and-disconnect')
+  assert.deepEqual(h.commits, [], 'the old confirmation loses to the newer operation')
+  assert.equal(h.current(), undefined)
+})
+
+test('exit intent: a dispose from a close-time callback blocks the old commit', () => {
+  const h = exitIntentHarness({ backend: 'daemon', activity: 'working' })
+  h.coordinator.request('slash')
+  h.state.onClose = () => {
+    h.state.onClose = undefined
+    h.coordinator.dispose()
+  }
+  h.current()!.select('keep-and-disconnect')
+  assert.deepEqual(h.commits, [])
+})
+
+test('exit intent: a late Stop failure never rewrites a newer choice', async () => {
+  // RFL-011: the error settlement is bound to the OWN stop controller.
+  const stop = deferred<StopCurrentWorkOutcome>()
+  const h = exitIntentHarness({ backend: 'daemon', activity: 'working', stop: () => stop.promise })
+  h.coordinator.request('slash')
+  h.current()!.select('stop-and-disconnect')
+  h.current()!.dismiss()
+  h.state.activity = 'working'
+  h.coordinator.request('slash')
+  const newer = h.current()!
+  stop.reject(new Error('old-stop-late-failure'))
+  await new Promise<void>(resolve => setImmediate(resolve))
+  await new Promise<void>(resolve => setImmediate(resolve))
+  assert.equal(h.current(), newer, 'the newer choice is not replaced by the retired task')
+  assert.equal(h.current()!.phase, 'choose')
+  assert.deepEqual(h.commits, [], 'a retired Stop can never commit an exit')
+})
+
+test('exit intent: a cancellation-shaped Stop failure still settles the seat', async () => {
+  // RFL-012: only the task's own AbortSignal/typed outcome is a cancellation;
+  // a thrown cancellation-shaped error is an unexpected failure.
+  const h = exitIntentHarness({
+    backend: 'daemon',
+    activity: 'working',
+    stop: async () => { throw cancellationError('stop aborted') },
+  })
+  h.coordinator.request('slash')
+  h.current()!.select('stop-and-disconnect')
+  await new Promise<void>(resolve => setImmediate(resolve))
+  await new Promise<void>(resolve => setImmediate(resolve))
+  assert.equal(h.current()?.phase, 'unconfirmed', 'the seat leaves the Stopping state')
+  assert.deepEqual(h.commits, [])
 })

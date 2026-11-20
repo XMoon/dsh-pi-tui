@@ -93,7 +93,7 @@ const LABELS: Readonly<Partial<Record<AppKeybindingId, string>>> = {
   'app.input.queue': 'Queue draft (deprecated)',
   'app.input.dequeue': 'Recall all queued input',
   'app.agent.interrupt': 'Interrupt active turn',
-  'app.exit.request': 'Quit the TUI',
+  'app.exit.request': 'Exit the TUI',
   'app.queue.open': 'Manage queued messages',
   'app.transcript.search': 'Search full transcript history',
   'app.transcript.search.view': 'Search rendered transcript view',

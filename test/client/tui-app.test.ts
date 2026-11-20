@@ -25,6 +25,12 @@ import type { TranscriptMessage, TurnActivity } from '../../src/transcript.ts'
 import type { JsonValue } from '../../src/domain/transcript/types.ts'
 import type { AssistantLiveChunk, AssistantLiveInput } from '../../src/runtime/assistant-stream-port.ts'
 import { TuiApp, ThinkingCompactComponent, TODO_COMPACT_LIMIT, TODO_SHORT_COMPACT_LIMIT, TODO_SHORT_SCREEN_MAX_ROWS, todoCompactLimit, type OwnedRunner } from '../../src/tui-app.ts'
+import type { ExitSessionActivity as ExitActivity } from '../../src/domain/command/policy.ts'
+import { exitChoiceAsking, exitChoiceUnconfirmed, type ExitChoiceOption } from '../../src/app/surface/exit-choice.ts'
+import { createExitIntentFacts } from '../../src/app/bootstrap/exit-facts.ts'
+import { createExitIntentCoordinator } from '../../src/app/bootstrap/exit-intent.ts'
+import { pituiExitChoiceSeam } from '../../src/app/surface/exit-choice-pitui.ts'
+import type { LiveSessionScope, SessionScope } from '../../src/app/session/scope.ts'
 import { Text, stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
 import { ExtensionLedger } from '../../src/extension/internal/ledger.ts'
 import { SurfaceHost } from '../../src/extension/internal/surface-host.ts'
@@ -6314,4 +6320,365 @@ test('PR2/RFL009: an accepted-while-stopped prompt recalls exactly once after th
   } finally {
     app.stop()
   }
+})
+
+// --- M6 UX PR1: the builtin physical Ctrl+C busy/unknown/idle rule ---
+
+/** Start an app whose sessions report the SCRIPTED authoritative activity, and
+ *  record the existing interrupt path (onCancel) beside the exit count. */
+function startAppWithActivity(activity: () => ExitActivity): {
+  vt: VirtualTerminal
+  app: TuiApp
+  submitted: string[]
+  get exits(): number
+  get cancels(): number
+} {
+  const vt = new VirtualTerminal(80, 24)
+  const submitted: string[] = []
+  let exits = 0
+  let cancels = 0
+  const app = new TuiApp(vt, {
+    onSubmit: (text) => { submitted.push(text) },
+    onExit: () => { exits += 1 },
+    onCancel: () => { cancels += 1 },
+    sessionActivity: activity,
+  })
+  app.start()
+  startedApps.add(app)
+  return {
+    vt,
+    app,
+    submitted,
+    get exits() { return exits },
+    get cancels() { return cancels },
+  }
+}
+
+test('ctrl+c while working cancels ONCE and never arms an exit or clears the draft', async () => {
+  const surface = startAppWithActivity(() => 'working')
+  await surface.vt.waitForRender()
+  surface.app.setDraft('working draft')
+  await surface.vt.waitForRender()
+  surface.vt.sendInput('\x03')
+  await surface.vt.waitForRender()
+  assert.equal(surface.cancels, 1, 'a busy Ctrl+C takes the existing cancel path exactly once')
+  assert.equal(surface.exits, 0, 'a busy Ctrl+C never requests the exit intent')
+  assert.equal(surface.app.getDraft(), 'working draft', 'a busy cancel preserves the draft')
+  // A repeated press is a NEW cancel, still never an exit confirmation.
+  surface.vt.sendInput('\x03')
+  await surface.vt.waitForRender()
+  assert.equal(surface.cancels, 2, 'each busy press re-cancels the live work')
+  assert.equal(surface.exits, 0)
+})
+
+test('ctrl+c while unknown refuses to arm the exit and says the state is unobservable', async () => {
+  const surface = startAppWithActivity(() => 'unknown')
+  await surface.vt.waitForRender()
+  surface.vt.sendInput('\x03')
+  await surface.vt.waitForRender()
+  assert.equal(surface.cancels, 0, 'unknown is not treated as busy')
+  assert.equal(surface.exits, 0, 'unknown is never treated as idle')
+  assert.match(surface.vt.getViewport().join('\n'), /running state cannot be verified/,
+    'the refusal is visible')
+  // A second press within the window still must not exit.
+  surface.vt.sendInput('\x03')
+  await surface.vt.waitForRender()
+  assert.equal(surface.exits, 0, 'a repeated unknown Ctrl+C still cannot exit')
+})
+
+test('ctrl+c while idle keeps the historical clear-then-same-key double press', async () => {
+  const surface = startAppWithActivity(() => 'idle')
+  await surface.vt.waitForRender()
+  surface.app.setDraft('idle draft')
+  await surface.vt.waitForRender()
+  surface.vt.sendInput('\x03')
+  await surface.vt.waitForRender()
+  assert.equal(surface.cancels, 0, 'an idle press never cancels work')
+  assert.equal(surface.exits, 0, 'the first idle press only clears + arms')
+  assert.equal(surface.app.getDraft(), '', 'the historical clear-draft behavior is preserved')
+  surface.vt.sendInput('\x03')
+  await surface.vt.waitForRender()
+  assert.equal(surface.exits, 1, 'the same key confirms the exit')
+})
+
+test('an idle arm cannot be used after the session becomes busy', async () => {
+  let activity: ExitActivity = 'idle'
+  const surface = startAppWithActivity(() => activity)
+  await surface.vt.waitForRender()
+  surface.vt.sendInput('\x03') // idle: arm
+  await surface.vt.waitForRender()
+  assert.equal(surface.exits, 0)
+  activity = 'working'
+  surface.vt.sendInput('\x03') // second press: the live state now wins
+  await surface.vt.waitForRender()
+  assert.equal(surface.cancels, 1, 'the second press cancels the now-working turn')
+  assert.equal(surface.exits, 0, 'a stale idle arm can never confirm a busy exit')
+})
+
+test('a busy cancel never arms the following idle double press by itself', async () => {
+  let activity: ExitActivity = 'working'
+  const surface = startAppWithActivity(() => activity)
+  await surface.vt.waitForRender()
+  surface.vt.sendInput('\x03') // busy: cancel
+  await surface.vt.waitForRender()
+  assert.equal(surface.cancels, 1)
+  activity = 'idle'
+  surface.vt.sendInput('\x03') // idle: first real arm
+  await surface.vt.waitForRender()
+  assert.equal(surface.exits, 0, 'the busy cancel did not count as an idle arm')
+  surface.vt.sendInput('\x03')
+  await surface.vt.waitForRender()
+  assert.equal(surface.exits, 1)
+})
+
+test('a REMAPPED exit key keeps its ordinary double-press semantics while working', async () => {
+  const surface = startAppWithActivity(() => 'working')
+  await surface.vt.waitForRender()
+  surface.app.applyUserKeybindings({ 'app.exit.request': 'ctrl+x' }, () => {})
+  await surface.vt.waitForRender()
+  surface.vt.sendInput('\x18') // Ctrl+X — the effective exit key now
+  await surface.vt.waitForRender()
+  assert.equal(surface.cancels, 0, 'the remapped key is never a busy cancel')
+  assert.equal(surface.exits, 0, 'the first remapped press only arms')
+  surface.vt.sendInput('\x18')
+  await surface.vt.waitForRender()
+  assert.equal(surface.exits, 1, 'the same remapped key confirms the exit intent')
+})
+
+test('ctrl+d while working still requires its own same-key confirmation', async () => {
+  const surface = startAppWithActivity(() => 'working')
+  await surface.vt.waitForRender()
+  surface.vt.sendInput('\x04')
+  await surface.vt.waitForRender()
+  assert.equal(surface.cancels, 0, 'Ctrl+D never becomes a busy cancel')
+  assert.equal(surface.exits, 0, 'the first Ctrl+D only arms')
+  surface.vt.sendInput('\x04')
+  await surface.vt.waitForRender()
+  assert.equal(surface.exits, 1, 'the confirmed Ctrl+D reaches the exit intent')
+})
+
+test('the exit choice never stacks above a live Host approval', async () => {
+  const surface = startApp()
+  await surface.vt.waitForRender()
+  let dismissed = 0
+  const selection: ExitChoiceOption[] = []
+  const pending = surface.app.showApprovalPrompt({ toolName: 'bash', reason: 'needs a shell', arguments: '{}' })
+  await surface.vt.waitForRender()
+  surface.app.openExitChoice({
+    ...exitChoiceAsking('daemon-busy', option => { selection.push(option) }, () => { dismissed += 1 }),
+  })
+  await surface.vt.waitForRender()
+  assert.equal(dismissed, 1, 'a real Host modal refuses the Client choice')
+  assert.deepEqual(selection, [], 'withdrawal is not a decision')
+  const view = surface.vt.getViewport().join('\n')
+  assert.ok(!view.includes('Disconnect from dsh-pi-tui'), `the choice never paints over the modal:\n${view}`)
+  surface.vt.sendInput('n')
+  await surface.vt.waitForRender()
+  assert.equal(await pending, 'rejected')
+})
+
+// --- M6 UX PR1: the Exit Choice physical lifecycle / real terminal budget ---
+
+/** Start an app on an explicit terminal size (the choice is geometry-aware). */
+function startSizedApp(columns: number, rows: number): { vt: VirtualTerminal; app: TuiApp } {
+  const vt = new VirtualTerminal(columns, rows)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  return { vt, app }
+}
+
+test('the exit choice survives a fullscreen screen swap and keeps its model', async () => {
+  const surface = startApp()
+  await surface.vt.waitForRender()
+  const selections: ExitChoiceOption[] = []
+  surface.app.openExitChoice(exitChoiceAsking('daemon-busy', option => { selections.push(option) }, () => {}))
+  await surface.vt.waitForRender()
+  assert.match(surface.vt.getViewport().join('\n'), /Keep working and disconnect/)
+  surface.app.setFullscreen(true)
+  await surface.vt.waitForRender()
+  assert.match(surface.vt.getViewport().join('\n'), /Keep working and disconnect/,
+    'the physical screen swap rebinds the seat instead of destroying the open decision')
+  surface.vt.sendInput('\x1b[B')
+  await surface.vt.waitForRender()
+  surface.vt.sendInput('\r')
+  await surface.vt.waitForRender()
+  assert.deepEqual(selections, ['stop-and-disconnect'], 'the rebound seat drives the SAME model callback')
+})
+
+test('a 20-column terminal makes only Stay actable (no clipped Stop)', async () => {
+  // RFL-009: a narrow real viewport must never leave a clipped destructive
+  // action keyboard-reachable.
+  const surface = startSizedApp(20, 24)
+  await surface.vt.waitForRender()
+  const selections: ExitChoiceOption[] = []
+  surface.app.openExitChoice(exitChoiceAsking('daemon-busy', option => { selections.push(option) }, () => {}))
+  await surface.vt.waitForRender()
+  const view = surface.vt.getViewport().join('\n')
+  assert.ok(!view.includes('Stop'), `no clipped Stop is painted:\n${view}`)
+  assert.match(view, /Stay/u)
+  surface.vt.sendInput('\x1b[B')
+  await surface.vt.waitForRender()
+  surface.vt.sendInput('\r')
+  await surface.vt.waitForRender()
+  assert.deepEqual(selections, ['stay'], 'the only actable option is Stay')
+})
+
+test('a six-row terminal keeps the risk line and only the safe Stay action', async () => {
+  // Four content rows cannot host the risk line plus all three actions; the
+  // destructive Stop is refused and the truthful safe path remains.
+  const surface = startSizedApp(80, 6)
+  await surface.vt.waitForRender()
+  const selections: ExitChoiceOption[] = []
+  surface.app.openExitChoice(exitChoiceAsking('daemon-busy', option => { selections.push(option) }, () => {}))
+  await surface.vt.waitForRender()
+  const view = surface.vt.getViewport().join('\n')
+  assert.match(view, /Session is working\./u, 'the risk line survives')
+  assert.match(view, /Stay in the TUI/u)
+  assert.ok(!view.includes('Stop current work'), `no unhostable destructive action is painted:\n${view}`)
+  surface.vt.sendInput('\x1b[B')
+  await surface.vt.waitForRender()
+  surface.vt.sendInput('\r')
+  await surface.vt.waitForRender()
+  assert.deepEqual(selections, ['stay'], 'the only actable option is Stay')
+})
+
+test('an eight-row terminal keeps the short risk line with all three actions', async () => {
+  const surface = startSizedApp(80, 8)
+  await surface.vt.waitForRender()
+  const selections: ExitChoiceOption[] = []
+  surface.app.openExitChoice(exitChoiceAsking('daemon-busy', option => { selections.push(option) }, () => {}))
+  await surface.vt.waitForRender()
+  const view = surface.vt.getViewport().join('\n')
+  assert.match(view, /Session is working\./u, 'the compact risk line survives')
+  assert.match(view, /Stop current work and disconnect/u)
+  surface.vt.sendInput('\x1b[B')
+  await surface.vt.waitForRender()
+  surface.vt.sendInput('\r')
+  await surface.vt.waitForRender()
+  assert.deepEqual(selections, ['stop-and-disconnect'])
+})
+
+test('a three-row terminal offers only the Escape-Stay fallback', async () => {
+  const surface = startSizedApp(80, 3)
+  await surface.vt.waitForRender()
+  const selections: ExitChoiceOption[] = []
+  surface.app.openExitChoice(exitChoiceAsking('daemon-busy', option => { selections.push(option) }, () => {}))
+  await surface.vt.waitForRender()
+  const view = surface.vt.getViewport().join('\n')
+  assert.ok(!view.includes('Stop current work'), `the box cannot host three actions:\n${view}`)
+  assert.match(view, /Esc Stay/u)
+  surface.vt.sendInput('\x1b[B')
+  await surface.vt.waitForRender()
+  surface.vt.sendInput('\r')
+  await surface.vt.waitForRender()
+  assert.deepEqual(selections, [], 'no action is reachable when the box cannot paint it')
+  surface.vt.sendInput('\x1b')
+  await surface.vt.waitForRender()
+  assert.deepEqual(selections, ['stay'], 'the safe exit path stays operable')
+})
+
+test('a preempted choice never reappears after the Host modal settles', async () => {
+  // RFL-008/§3.6: a real Host Question/Approval withdraws the Client choice
+  // and the choice is NEVER restored automatically afterwards.
+  const surface = startApp()
+  await surface.vt.waitForRender()
+  let dismissed = 0
+  surface.app.openExitChoice(exitChoiceAsking('daemon-busy', () => {}, () => { dismissed += 1 }))
+  await surface.vt.waitForRender()
+  const pending = surface.app.showApprovalPrompt({ toolName: 'bash', reason: 'needs a shell', arguments: '{}' })
+  await surface.vt.waitForRender()
+  assert.equal(dismissed, 1, 'the Host modal withdrew the Client choice')
+  surface.vt.sendInput('n')
+  await surface.vt.waitForRender()
+  assert.equal(await pending, 'rejected')
+  assert.ok(!surface.vt.getViewport().join('\n').includes('Keep working and disconnect'),
+    'the withdrawn choice stays gone after the Host modal settles')
+})
+
+test('the live facts -> coordinator -> real PiTui seat -> ONE commit chain', async () => {
+  // The composition seam (facts) and the renderer seam (the real TuiApp seat)
+  // are exercised together, so this is a source -> decision -> sink path, not
+  // two independently injected conclusions.
+  const surface = startApp()
+  await surface.vt.waitForRender()
+  let live: LiveSessionScope | undefined = { sessionId: 'session-a' } as unknown as LiveSessionScope
+  let running = true
+  let current = true
+  let tokenCurrent = true
+  const facts = createExitIntentFacts({
+    backend: () => 'daemon',
+    scopes: {
+      capture: () => (live ?? ({ sessionId: undefined } as unknown as SessionScope)),
+      captureLive: () => live,
+      isCurrent: () => current,
+    },
+    admissionPending: () => false,
+    shellRunning: () => false,
+    remote: {
+      running: () => running,
+      captureTransportToken: () => ({ generation: 1 }),
+      isTransportTokenCurrent: () => tokenCurrent,
+    },
+  })
+  const commits: Array<{ workStopped: boolean }> = []
+  const coordinator = createExitIntentCoordinator({
+    diag: createDiag({ filePath: undefined, stderrLevel: 'off', sinks: [] }),
+    facts,
+    commit: options => { commits.push(options) },
+    presenter: () => pituiExitChoiceSeam(surface.app),
+    stopCurrentWork: async () => assert.fail('Keep must never reach the Stop operation'),
+  })
+  coordinator.request('slash')
+  await surface.vt.waitForRender()
+  assert.match(surface.vt.getViewport().join('\n'), /Keep working and disconnect/)
+  surface.vt.sendInput('\r')
+  await surface.vt.waitForRender()
+  assert.deepEqual(commits, [{ workStopped: false }], 'Enter on the default Keep is the ONE commit')
+  // The SAME chain detaches immediately once the live authority proves idle.
+  running = false
+  coordinator.request('slash')
+  assert.deepEqual(commits, [{ workStopped: false }, { workStopped: false }])
+  // A rolled transport turns the same input into the truthful unknown choice.
+  tokenCurrent = false
+  running = true
+  coordinator.request('slash')
+  await surface.vt.waitForRender()
+  assert.match(surface.vt.getViewport().join('\n'), /Disconnect without stopping/)
+})
+
+test('a resize before the next paint refuses an old dangerous confirmation', async () => {
+  // RFL-009: the keyboard uses the last painted action set; a geometry change
+  // invalidates it immediately, before the repaint recomputes operability.
+  const surface = startSizedApp(80, 24)
+  await surface.vt.waitForRender()
+  const selections: ExitChoiceOption[] = []
+  surface.app.openExitChoice(exitChoiceAsking('daemon-busy', option => { selections.push(option) }, () => {}))
+  await surface.vt.waitForRender()
+  surface.vt.sendInput('\x1b[B') // focus Stop in the 80-column frame
+  await surface.vt.waitForRender()
+  surface.vt.resize(20, 24) // invalidate before any repaint
+  surface.vt.sendInput('\r')
+  await surface.vt.waitForRender()
+  assert.ok(!selections.includes('stop-and-disconnect'),
+    `a pre-resize dangerous confirmation can never fire: ${JSON.stringify(selections)}`)
+  // After the repaint the 20-column frame makes only Stay actable.
+  surface.vt.sendInput('\r')
+  await surface.vt.waitForRender()
+  assert.deepEqual(selections, ['stay'])
+})
+
+test('a long Host error detail never pushes the actable actions out of the box', async () => {
+  // RFL-009: status rows are the REAL wrapped rows, not a fixed 2-row estimate.
+  const surface = startSizedApp(80, 12)
+  await surface.vt.waitForRender()
+  const selections: ExitChoiceOption[] = []
+  surface.app.openExitChoice(exitChoiceUnconfirmed('host-error: '.repeat(60), option => { selections.push(option) }, () => {}))
+  await surface.vt.waitForRender()
+  const view = surface.vt.getViewport().join('\n')
+  assert.match(view, /Disconnect without stopping/u)
+  assert.match(view, /Stay in the TUI/u)
+  surface.vt.sendInput('\r')
+  await surface.vt.waitForRender()
+  assert.deepEqual(selections, ['disconnect-without-stop'])
 })

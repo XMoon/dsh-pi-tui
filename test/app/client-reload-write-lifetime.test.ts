@@ -34,6 +34,10 @@ import {
 import { preparePrompt } from '../../src/app/submission/prepared-prompt.ts'
 import { mergeDraft } from '../../src/app/submission/steer.ts'
 import { createUserShell } from '../../src/app/submission/user-shell.ts'
+import { createExitIntentFacts } from '../../src/app/bootstrap/exit-facts.ts'
+import { createExitIntentCoordinator } from '../../src/app/bootstrap/exit-intent.ts'
+import type { ExitChoiceModel } from '../../src/app/surface/exit-choice.ts'
+import type { LiveSessionScope, SessionScope } from '../../src/app/session/scope.ts'
 import { createSessionOwnershipCore } from '../../src/app/session/ownership-core.ts'
 import { createSessionScopeAuthority } from '../../src/app/session/scope.ts'
 import { DraftFileStore } from '../../src/client/media/attachment/file-draft.ts'
@@ -302,6 +306,8 @@ interface ShellHarness {
   armEnsureGate(): void
   releaseEnsureGate(): void
   readonly executions: number
+  /** The REAL user-shell owner's in-flight read (the exit facts source). */
+  readonly shellRunning: () => boolean
 }
 
 function shellOk(stdout = ''): HostUserShellResult {
@@ -578,6 +584,7 @@ function startShellHarness(composerOverride?: unknown): ShellHarness {
       ensureGate = undefined
     },
     get executions() { return executions },
+    shellRunning: () => shell.isRunning(),
   }
 }
 
@@ -829,4 +836,78 @@ test('a real TuiApp + controller shell gesture keeps its gesture-time transcript
   } finally {
     app.dispose()
   }
+})
+
+test('an accepted shell that starts AFTER the Busy choice opened supersedes the old Keep', async () => {
+  // RFL-014 reachability: the REAL submission controller accepts a `!!` gesture
+  // whose ensureSession is still gated; the exit choice opens on the accepted
+  // write; only THEN does the real user-shell owner start. The stale Keep must
+  // not commit/abort it — the truthful shell choice replaces the confirmation.
+  const harness = startShellHarness()
+  harness.armEnsureGate()
+  harness.controller.submit('!! sleep 30')
+  await drainMicrotasks()
+  assert.equal(harness.controller.hasUnsettledClientWrite(), true, 'the gesture is accepted before the session exists')
+  assert.equal(harness.executions, 0, 'the shell owner has not started while ensureSession is gated')
+  assert.equal(harness.shellRunning(), false)
+
+  const scope = { sessionId: 'session-a' } as unknown as LiveSessionScope
+  const facts = createExitIntentFacts({
+    backend: () => 'daemon',
+    scopes: {
+      capture: () => scope as unknown as SessionScope,
+      captureLive: () => scope,
+      isCurrent: () => true,
+    },
+    admissionPending: () => harness.controller.hasUnsettledClientWrite(),
+    shellRunning: () => harness.shellRunning(),
+    remote: {
+      running: () => true,
+      captureTransportToken: () => ({ token: true }),
+      isTransportTokenCurrent: () => true,
+    },
+  })
+  const commits: Array<{ workStopped: boolean }> = []
+  const stops: number[] = []
+  let opened: ExitChoiceModel | undefined
+  const coordinator = createExitIntentCoordinator({
+    diag: DIAG,
+    facts,
+    commit: options => { commits.push(options) },
+    presenter: () => ({
+      open: model => { opened = model },
+      update: model => { opened = model },
+      close: () => {},
+    }),
+    stopCurrentWork: async () => {
+      stops.push(1)
+      return { kind: 'stopped' as const }
+    },
+  })
+
+  coordinator.request('slash')
+  assert.equal(opened?.kind, 'daemon-busy', 'the accepted write opens the Busy choice before the shell starts')
+
+  // The previously accepted submission's ensureSession now completes and the
+  // REAL shell owner starts — after the choice was already open.
+  harness.releaseEnsureGate()
+  await drainMicrotasks()
+  assert.equal(harness.executions, 1, 'the real caller started the shell after the choice opened')
+  assert.equal(harness.shellRunning(), true)
+
+  // The un-warned confirmation must first refresh the SAME family with the
+  // shell reminder (options preserved, Owner decision); it cannot commit blind.
+  opened!.select('keep-and-disconnect')
+  assert.deepEqual(commits, [], 'the un-warned Keep refreshes instead of committing')
+  assert.deepEqual(stops, [], 'no Agent Stop stands in for the shell')
+  assert.equal(opened?.kind, 'daemon-busy')
+  assert.equal(opened?.shellRunning, true, 'the refreshed choice carries the shell reminder')
+  assert.ok(opened?.body.some(paragraph => paragraph.includes('user shell')))
+  assert.equal(harness.shellRunning(), true, 'the shell was not aborted by the refresh')
+
+  // With the reminder shown, Keep is preserved and commits without a stopped claim.
+  opened!.select('keep-and-disconnect')
+  assert.deepEqual(commits, [{ workStopped: false }])
+  harness.finishShell(shellOk())
+  await drainMicrotasks()
 })

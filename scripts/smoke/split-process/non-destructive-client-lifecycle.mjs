@@ -55,6 +55,8 @@ export async function runNonDestructiveClientLifecycle(context) {
     stopC1Host,
     startC1Client,
     exitC1Client,
+    takeBusyExitChoiceKeep,
+    takeBusyExitChoiceStop,
     openC1Session,
     hostIdentityFacts,
     assertHostIdentityKept,
@@ -985,6 +987,9 @@ export async function runNonDestructiveClientLifecycle(context) {
     /** The graceful `/exit` inventory: code 0 and every owned Client row 0. */
     const exitClientWithInventory = async (client, label) => {
       client.send('/exit\r')
+      // M6 UX PR1: a working Session shows the Busy Choice first; Keep (the
+      // default focus) is the non-destructive detach this inventory asserts.
+      await takeBusyExitChoiceKeep(client, label)
       const exit = await client.waitForExit(60_000)
       assert(exit.code === 0 && exit.signal === null, `${label} exit was ${JSON.stringify(exit)}`)
       const closed = await client.waitFor(record => record.m4b2s === 'client-closed', `${label} owner inventory`, 30_000)
@@ -2055,6 +2060,84 @@ export async function runNonDestructiveClientLifecycle(context) {
         originalXTurnCompletion: 'completed',
         bOwnReadback: true,
         bOwnTurn: 'completed',
+      })
+    }
+
+    // ── D-09 (M6 UX PR1): explicit daemon Stop+Disconnect ────────────────
+    // The Busy Choice's Stop branch sends ONE official cancel to the EXACT
+    // captured Session, proves that same owner idle, and only then exits the
+    // Client. The sibling Client B and the Host identity are never addressed;
+    // B keeps the SAME Session and can still write it afterwards.
+    {
+      const releaseBarrier = join(workDir, 'm5d9-long-turn.release')
+      const { host, ready: hostReady, workRoot } = await startC1Host('long-turn', 'm5d9-exit-stop', {
+        C1_HOLD_LONG_TURN: releaseBarrier,
+      })
+      const hostBefore = await hostIdentityFacts(host)
+      assert(hostBefore.hostPid === hostReady.pid, 'M5D-09 the Host ready record does not own the Host identity')
+      const { client: clientA, ready: aReady } = await startC1Client('M5D-09 A')
+      const sessionX = await openC1Session(clientA, 'm5d9-x-held', 'M5D-09 A')
+      const held = await waitForC1WorkEvent(workRoot,
+        event => event.kind === 'long-turn-held' && event.sessionId === sessionX, 'M5D-09 X Turn held', 120_000)
+      assert(held.agentStatus === 'running',
+        `M5D-09 the Host Agent was ${JSON.stringify(held.agentStatus)} while X was held`)
+      await waitForHostSessionEvent(dshHome, sessionX, event => event.type === 'turn/start', 'M5D-09 X turn/start', 120_000)
+      const { client: clientB, ready: bReady } = await startC1Client('M5D-09 B', {
+        SPLIT_PROCESS_CLIENT_SESSION: sessionX,
+      })
+      const bOnX = await waitForSurfaceStatus(clientB,
+        record => record.sessionOpen === true && record.openSessionId === sessionX
+          && record.transport === 'connected' && record.surfaceMounted === true,
+        'M5D-09 B retained Session X')
+      assertClientHostFacts(bOnX.host, hostBefore, 'M5D-09 B')
+      assert(aReady.pid !== bReady.pid, 'M5D-09 the two Clients must be two different business PIDs')
+      await clientB.waitForScreen('long-turn started', 'M5D-09 B read the running X stream', 120_000)
+      const bBefore = lastSurfaceStatus(clientB)
+      const bBoundary = clientB.records.length
+      const durableBoundary = durableOf(sessionX).length
+      assert(!existsSync(releaseBarrier), 'M5D-09 the hold barrier existed before the Stop')
+      // A's REAL keyboard `/exit` → the Busy Choice → Stop current work.
+      clientA.send('/exit\r')
+      await takeBusyExitChoiceStop(clientA, 'M5D-09 A')
+      const aExit = await clientA.waitForExit(60_000)
+      assert(aExit.code === 0 && aExit.signal === null, `M5D-09 A exit was ${JSON.stringify(aExit)}`)
+      await clientA.dispose()
+      await waitGone(aReady.pid, 15_000)
+      assert(!alive(aReady.pid), 'M5D-09 Client A survived the Stop+Disconnect')
+      // The captured owner's one cancel settled the ONE held Turn; the hold
+      // barrier was never released, so nothing but the Host cancel can explain
+      // the settlement.
+      const ends = await waitForTurnEnds(sessionX, durableBoundary, 1, 'M5D-09 the captured X Turn ended')
+      assert(ends[0]?.data?.reason?.kind === 'aborted',
+        `M5D-09 the captured Turn settled as ${JSON.stringify(ends[0]?.data?.reason)}`)
+      assert(!existsSync(releaseBarrier), 'M5D-09 the Stop settlement required the release barrier')
+      assert(alive(bReady.pid) && alive(hostBefore.hostPid), 'M5D-09 the Stop+Disconnect killed the Host or Client B')
+      assertSecondClientKept(clientB, bBefore, bBoundary, 'M5D-09 after the Stop+Disconnect')
+      await assertHostIdentityKept(host, hostBefore, 'M5D-09 Host after the Stop+Disconnect')
+      // Only the ONE captured Turn stopped: B still writes the SAME Session.
+      const writeIndex = durableOf(sessionX).length
+      await submitPrompt(clientB, 'm5d9-b-after-stop')
+      await waitForHostSessionEventAfter(dshHome, sessionX, writeIndex,
+        event => event.type === 'user/message' && textOf(event.data) === 'm5d9-b-after-stop',
+        'M5D-09 B committed after A stopped and left', 120_000)
+      writeFileSync(releaseBarrier, 'release\n', { mode: 0o600 })
+      const bEnd = await waitForHostSessionEventAfter(dshHome, sessionX, writeIndex,
+        event => event.type === 'turn/end', 'M5D-09 B\'s own Turn settled', 120_000)
+      assert(bEnd.data?.reason?.kind === 'completed', 'M5D-09 B\'s own Turn did not complete normally')
+      await clientB.waitForScreen('long-turn answer 2', 'M5D-09 B read its own Turn settlement', 120_000)
+      assertSecondClientKept(clientB, bBefore, bBoundary, 'M5D-09 at the end of the scene')
+      await exitC1Client(clientB, 'M5D-09 B')
+      await stopDHost(host, 'M5D-09 Host')
+      trace('m5d-09', {
+        hostPid: hostBefore.hostPid,
+        clientAPid: aReady.pid,
+        clientBPid: bReady.pid,
+        wrapperPids: [clientA.child.pid, clientB.child.pid],
+        sessionX,
+        aExitCode: aExit.code,
+        stopBranch: 'explicit',
+        capturedTurnSettlement: 'aborted',
+        siblingWroteAfterStop: true,
       })
     }
   } finally {

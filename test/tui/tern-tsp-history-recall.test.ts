@@ -584,7 +584,9 @@ test('the arrows never become a submit, a steer or a cancel: the existing gestur
   await h.observeAbsence()
   assert.equal(h.calls.cancels, 1, 'Ctrl+C is still the cancel intent')
   h.pane.key(CTRL_D)
-  await waitUntil('the empty-draft Ctrl+D routed the exit', () => h.calls.exits === 1)
+  assert.equal(h.calls.exits, 0, 'the first empty-draft Ctrl+D only arms the same-key exit')
+  h.pane.key(CTRL_D)
+  await waitUntil('the same-key second Ctrl+D routed the exit', () => h.calls.exits === 1)
 })
 
 test('a modified arrow stays whatever the application already made it, never the recall', async (t) => {

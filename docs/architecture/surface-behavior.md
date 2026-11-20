@@ -17,10 +17,113 @@ quits before session creation. `/exit` remains an explicit command. `exit!`,
 
 The decision runs at the top of submission dispatch
 (`isPlainExitPrompt` in `src/domain/command/policy.ts`), before any session
-creation, history write, viewer gate or busy-Enter steer gate. The exit
-controller then latches, disposes the Client surface, prepares the owned-session
-retirement and requests `appExit` (see
-[concurrency.md](./concurrency.md)).
+creation, history write, viewer gate or busy-Enter steer gate.
+
+**One exit-intent classification.** Every entry — `/exit`, `/quit`, the bare
+`exit` word, an effective exit key and the TSP exit gesture — reaches the ONE
+Client-local coordinator (`src/app/bootstrap/exit-intent.ts`) with the entry
+name only as provenance. The pure classifier
+(`classifyExitIntent` in `src/domain/command/policy.ts`) reads the LIVE
+backend, the exact current Session presence and its authoritative activity on
+every request AND every confirmation; it never treats an unobservable state as
+idle and never keeps a second Host-running cache.
+
+| Intent | Direct | Daemon Client |
+|---|---|---|
+| no Session (no open submission admission) | exit the process | detach this Client |
+| proven `idle` | exit the process | detach this Client |
+| proven `working` | Direct Busy Choice (`Stop current work and exit` / `Stay`, Stay default) | Daemon Busy Choice (`Keep working and disconnect` default / `Stop current work and disconnect` / `Stay`) |
+| `unknown` | Direct Unknown Choice (`Exit and retire local Host` / `Stay`) | Daemon Unknown Choice (`Disconnect without stopping` / `Stay`) |
+
+`working` is the exact current owner's official status (the Direct Agent's
+`running`, the Remote `SessionSnapshot.running === true`) or a live application
+admission that cannot be called idle (an in-flight submission holding the
+composer, a running user shell). A pending submission without a Session is
+`working`; a live owner without an observable status, a missing Remote
+`running` bit or a rolled Connection/binding generation is `unknown`. The
+`CommandSurface.sessionRunning ?? false` projection, the transcript `Working`
+row and any cached busy flag are never the authority.
+
+**Exit is not Host stop.** A daemon Client exit never stops the daemon Host: the
+Keep path sends no Host write at all, and leaving releases only this Client. The
+Direct path keeps its existing exit controller (owned-session retirement inside
+the `appExit` disposal). There is no second exit controller, no new Host RPC,
+and no `/detach`/`/shutdown` command.
+
+**A running user shell is not an Agent Turn.** While a `!` / `!!` Host user
+shell is in flight the choice keeps the normal exit options but adds the
+reminder that leaving aborts the shell and that Agent idle does not prove the
+shell finished (Owner decision: remind, do not remove the exit options).
+`Current work: stopped.` is never derived from the Agent waiter alone while a
+shell runs, and a confirmation made before the shell started refreshes the same
+family with the reminder before it can act. The keyboard's busy Ctrl+C remains
+the existing cancel path, which aborts the shell and the exact live Session
+turn together.
+
+**Daemon Stop terminal proof.** `Stop current work and disconnect` captures the
+Session scope and the exact Remote transport identity once, re-validates both
+before acting, and sends ONE official cancel through the session control
+admission (`SessionRuntime.withControl` → the exact owner's retirement
+`cancel`). The control section is released before the idle wait. Only
+`whenIdleOrAbort === false` for that SAME owner — proven while its generation
+and binding remain current — permits the Client exit, and only that proof may
+print `Current work: stopped.`. The cancel ACK is never a stop proof; a proven
+refusal, a pre-dispatch cancellation, an indeterminate reply, an aborted wait
+and an `'unobservable'` generation all render the same-seat `Stop could not be
+confirmed. The daemon may still be working.` state with Keep/Stay, are never
+retried automatically and never auto-detach. If the captured owner becomes idle
+before confirmation, no cancel is sent and the exit proceeds on the same
+identity. While the wait is in flight the same seat shows the Stopping state and
+accepts no second selection. A running-user-shell reminder can appear on this
+Unconfirmed seat too, but it never rebuilds the seat into a Busy choice: the
+refusal facts and the safe option set stay, and the one safe detach performs
+exactly one final commit.
+
+**Every action must be really actable.** The choice is size-aware: an option is
+keyboard- and pointer-actable only while its complete label is painted AND the
+box can show every actable option. When the terminal cannot host the three
+actions (a very narrow or very low viewport), the seat degrades to the truthful
+safe path — the `Stay` action, or a single `Esc Stay` line when even that row
+cannot fit — rather than leaving a clipped or off-screen destructive action
+reachable. The seat is remountable across a fullscreen screen swap, so an open
+decision can never become an invisible one; a Host Question/Approval withdraws
+it with no business action and it is never restored automatically.
+
+**Choice currentness.** A choice captures the backend, the full Session scope
+(the sessionless generation included) and the Remote transport identity at open. Any confirmation re-reads them first: a
+Session/connection rollover retires the old choice with zero side effects (the
+user re-triggers the intent), an Idle→Working transition re-opens the Busy
+Choice through the normal entry, and a Busy→Idle transition lets Keep proceed
+and lets Stop detach without a cancel. A user shell that starts AFTER the choice
+opened (an already-accepted `!`/`!!` submission whose session creation was still
+pending) refreshes the same family with the shell reminder before any Keep/Stop
+can act. A real Host Question/Approval withdraws
+the Client choice with zero business action. `Esc` and `Ctrl+C` inside the choice
+mean `Stay`; no Host work is cancelled by either. The exit controller is called
+only at the final commit.
+
+**Keyboard rule.** The default effective exit key keeps its same-key 1.5-second
+confirmation and the Ctrl+C clear-draft / Ctrl+D forward-delete editor behavior.
+While the exact current Session is `working`, the DEFAULT physical Ctrl+C is a
+single Busy Cancel through the existing interrupt path (no exit confirmation, no
+draft clear); while `unknown` it refuses to arm the exit and states that the
+running state cannot be verified; while `idle` it keeps the existing
+clear-then-double-press exit. A user remap of the exit action, a leader
+completion, or a remap of the interrupt action onto Ctrl+C keeps its own
+semantics — only the builtin physical Ctrl+C carries the busy exception. TSP
+applies the same rule to its bound raw keys (idle Ctrl+C and empty-draft Ctrl+D
+need the same-key second press), while its pre-bind Ctrl+C remains an emergency
+exit.
+
+**After the terminal restores.** A daemon Client exit prints the fixed
+`Disconnected from dsh-pi-tui (daemon client).` block with the REAL effective
+profile and Session (no Session line without a Session) plus `daemon status`,
+`daemon logs` and `daemon stop` commands; it never claims a Host state, PID or
+Turn outcome it cannot observe. The resume command preserves a temporary
+`DSH_PI_TUI_BACKEND=daemon` override (the Profile may still be Direct) and
+shell-quotes the profile/session arguments so the hint is copy-paste safe. A verified Stop may add the one
+`Current work: stopped.` line. A Direct exit keeps only the existing resume
+line. Fatal/sudden termination never prints the detach block.
 
 ## Pending input and the queue plane
 

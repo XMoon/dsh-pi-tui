@@ -90,7 +90,7 @@ export function registerExitCommand({ runner, registerTuiCommand }: ExitCommandD
 
   registerTuiCommand({
     name: 'exit',
-    description: 'Quit the terminal UI (flush and exit)',
+    description: 'Exit this TUI (the daemon Host keeps running; stop current work only by choosing it)',
     aliases: ['quit'],
     handler: exitHandler,
   })
@@ -120,7 +120,7 @@ export function registerHelpCommand({ runner, registerOne }: HelpCommandDeps): v
       }
       const rows: SettingItem[] = [        { id: 'k-enter', label: keysLabel('app.input.submit'), description: 'Submit the draft; while the agent is busy, delivery follows the "Submit while busy" preference (skill commands steer too, UI commands run locally)', currentValue: '' },
         { id: 'k-queue', label: keysLabel('app.input.submitAccelerated'), description: 'Submit with the OPPOSITE of the "Submit while busy" behavior (the web accelerated-submit chord)', currentValue: '' },
-        { id: 'k-exit', label: keysLabel('app.exit.request'), description: 'Quit the TUI (flushes the session)', currentValue: '' },
+        { id: 'k-exit', label: keysLabel('app.exit.request'), description: 'Exit this TUI (a daemon Host keeps running; while the session is working the default key cancels it once, and an idle exit needs a same-key second press)', currentValue: '' },
         { id: 'k-cancel', label: keysLabel('app.agent.interrupt'), description: 'Cancel the active turn / tool / shell command (one interrupt while the agent is busy; press the interrupt action twice while idle — with an empty editor it opens the rewind picker)', currentValue: '' },
         { id: 'k-fold', label: keysLabel('app.transcript.toggleExpand'), description: `Expand/collapse recent transcript detail; in regular Focus it reveals the recent Thought detail; in fullscreen Focus it controls the Thought-root bulk (per-card detail stays mouse-owned). Thinking detail is separate: ${keysLabel('app.transcript.toggleThinking')}`, currentValue: '' },
         { id: 'k-todo', label: keysLabel('app.todo.toggle'), description: 'Toggle the todo panel', currentValue: '' },

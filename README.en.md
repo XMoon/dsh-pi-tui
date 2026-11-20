@@ -678,8 +678,8 @@ Settings and Plugins pages that TSP cannot host are refused explicitly.
 | `Shift+Enter` | Insert newline                                      |
 | `Esc`         | Cancel current interaction / interrupt running work |
 | `Esc Esc`     | Open Rewind while idle                              |
-| `Ctrl+C`      | Keyboard exit confirmation; clears the draft first |
-| `Ctrl+D`      | Keyboard exit confirmation when empty; forward-delete with draft text |
+| `Ctrl+C`      | Cancel once while working; same-key double-press exit while idle (clears the draft first) |
+| `Ctrl+D`      | Same-key double-press exit when empty; forward-delete with draft text |
 | `Ctrl+S`      | Steer queued messages and the draft into the running turn |
 | `Ctrl+T`      | Toggle the todo panel                               |
 | `Ctrl+R`      | Search input history                                |

@@ -61,6 +61,7 @@ import type {
   SurfaceDisplaySeam,
 } from '../../app/surface/display-seam.ts'
 import type { SubmissionComposerPort } from '../../app/submission/composer-port.ts'
+import type { ExitSessionActivity } from '../../domain/command/policy.ts'
 import type { SubmitPendingDetail } from '../../app/submission/ack.ts'
 import type { SettledQuestionAnswersLookup, SurfaceInteractionPresenter } from '../../app/surface/interaction-presenter.ts'
 import type { SurfaceDraftImageOccurrence, SurfaceImageBinding } from '../../app/surface/runtime.ts'
@@ -268,8 +269,16 @@ const WORK_DETAILS_FEATURE = 'scroll' as const
  * application gesture.
  */
 export interface TspInputHandlers {
-  /** The keyboard exit intent (the empty-draft Ctrl+D through the composer). */
+  /** The keyboard exit intent (the empty-draft Ctrl+D / idle Ctrl+C double press). */
   exit(): void
+  /**
+   * M6 UX PR1: the LIVE authoritative activity fact for the raw exit keys.
+   * Ctrl+C cancels once while `working`, refuses to arm while `unknown`, and
+   * keeps the same-key double press while `idle`. Optional: a mount without it
+   * keeps the historical cancel-only Ctrl+C; the empty-draft Ctrl+D always
+   * keeps the product same-key double press.
+   */
+  sessionActivity?(): ExitSessionActivity
   /**
    * The interrupt/cancel intent — the EXISTING application cancel path
    * (PR3-B §3.4 row 3): aborts a running local shell / interrupts the live
@@ -434,11 +443,18 @@ export interface TspRendererOptions {
    */
   readonly displayState?: DisplayState
   /**
-   * The exit intent: invoked ONCE on the quit key. Routes through the SAME
-   * exit orchestration as `/exit` (surface teardown, Host retirement,
-   * appExit) — never `process.exit`.
+   * The exit INTENT: invoked on a BOUND quit key. Routes through the SAME
+   * exit-intent decision as `/exit` (it may present the in-place choice) —
+   * never `process.exit`. It is NOT a final-exit verdict and never latches.
    */
   readonly requestExit: () => void
+  /**
+   * The FINAL exit commit used by the PRE-BIND emergency Ctrl+C and the fatal
+   * fallback: the existing exit controller directly (surface teardown, Host
+   * retirement, appExit). Absent (standalone/test mounts) keeps
+   * {@link requestExit} as the fallback.
+   */
+  readonly requestImmediateExit?: () => void
   /**
    * The FATAL intent: a mounted renderer failure (the SDK input loop died —
    * the tty owner is gone). Routes through the runner's fatal lifecycle
@@ -535,6 +551,12 @@ export interface TspRenderer extends TspInputBinding {
    * call).
    */
   readonly interaction: SurfaceInteractionPresenter
+  /**
+   * M6 UX PR1: the ONE Client-local Exit Choice seat. It paints the
+   * coordinator's frozen model inside the SAME modal-first keyboard owner as
+   * the official interaction seat; no business decision lives here.
+   */
+  readonly exitChoice: import('../../app/surface/exit-choice.ts').SurfaceExitChoiceSeam
   /**
    * PR-C: install the ONE image binding (the mount's loader and scope
    * sampler) on this renderer. It is SYNCHRONOUS and ONE-TIME: the binding
@@ -792,7 +814,8 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     `)
   }
   let disposed = false
-  let exitRequested = false
+  /** The ONE fatal latch (never a normal exit intent). */
+  let fatalExitRequested = false
   /** Monotonic renderer-local identities (notices; scope epochs). */
   let noticeSeq = 0
   let scopeEpoch = 0
@@ -803,12 +826,15 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
    * lifecycle (error outcome, no resume hint) — never a normal exit and never
    * a second invocation.
    */
+  /** The FINAL exit commit (pre-bind emergency + fatal fallback). */
+  const requestImmediateExit = (): void => (options.requestImmediateExit ?? options.requestExit)()
+
   const routeFatal = (error: unknown): void => {
-    if (exitRequested) return
-    exitRequested = true
+    if (fatalExitRequested) return
+    fatalExitRequested = true
     const fatal = options.onFatal
     if (fatal !== undefined) fatal(error)
-    else options.requestExit()
+    else requestImmediateExit()
   }
 
   // ── Renderer-local presentation state ──
@@ -1130,7 +1156,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     render: () => render(),
     // A frame/focus failure while settling a prompt must reach the runner's
     // fatal lifecycle (the tty owner is broken), never become a silent modal
-    // cancellation; a repeated failure keeps the FIRST fatal (exitRequested).
+    // cancellation; a repeated failure keeps the FIRST fatal (fatalExitRequested).
     onFatal: (error) => { routeFatal(error) },
     notify: (text, kind) => { display.notify(text, kind) },
     setSettledQuestionAnswersLookup: (lookup) => {
@@ -4456,20 +4482,48 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
    * the PR3-A compatibility window) bypass the queue and route the same exit
    * controller; nothing else acts before the binding exists.
    */
-  const heldKeys: Key[] = []
+  const heldKeys: Array<{ readonly key: Key; readonly at: number }> = []
   const HELD_KEYS_LIMIT = 128
   let heldOverflowed = false
+  /** M6 UX PR1: the semantic identity of one armed raw exit key. The two
+   *  physical gestures never confirm each other. */
+  type RawExitIdentity = 'interrupt' | 'exit'
+  /**
+   * M6 UX PR1: the ONE armed raw exit key (Ctrl+C while idle / Ctrl+D on an
+   * empty draft). Only the SAME key inside the 1.5 s window confirms; any
+   * other key disarms, and an expired arm is simply replaced.
+   */
+  let lastExitKey: { readonly identity: RawExitIdentity; readonly at: number } | undefined
+  /** M6 UX PR1: the raw exit-key confirmation window (same as PiTui's). */
+  const RAW_EXIT_CONFIRM_WINDOW_MS = 1500
   let inputBound = false
   /** The bound application input handlers (B1: editor-local + lifecycle). */
   let boundHandlers: TspInputHandlers | undefined
 
-  /** Route one exit-intent decision to the BOUND handler when bound. */
+  /**
+   * Arm or confirm one raw exit key. Returns true only when the SAME key was
+   * pressed within the live window (the ONE exit intent to forward).
+   */
+  const armOrConfirmRawExit = (identity: RawExitIdentity, at: number = Date.now()): boolean => {
+    const now = at
+    const armed = lastExitKey
+    if (armed !== undefined && armed.identity === identity && now - armed.at < RAW_EXIT_CONFIRM_WINDOW_MS) {
+      lastExitKey = undefined
+      return true
+    }
+    lastExitKey = { identity, at: now }
+    return false
+  }
+
+  /**
+   * Route one PRE-BIND emergency exit. It is the FINAL commit, never the
+   * session-aware intent: a busy/unknown startup must not need a choice
+   * surface that does not exist yet, and no terminal latch is set before the
+   * real commit (a later fatal still reaches its own lifecycle).
+   */
   const routeExit = (held: boolean): void => {
-    if (exitRequested) return
-    exitRequested = true
     options.log?.('tsp renderer: exit key', { held })
-    if (boundHandlers !== undefined) boundHandlers.exit()
-    else options.requestExit()
+    requestImmediateExit()
   }
 
   /**
@@ -5419,7 +5473,17 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     })
   }
 
-  const dispatchKey = (key: Key, handlers: TspInputHandlers): boolean => {
+  const dispatchKey = (key: Key, handlers: TspInputHandlers, at: number = Date.now()): boolean => {
+    // M6 UX PR1: only the two exit keys may confirm an armed exit window, and
+    // only the SAME one. Pressing the OTHER exit key is an intervening gesture
+    // even when its own edit action is a no-op (e.g. Ctrl+D on a non-empty
+    // draft), so C→D→C or D→C→D can never confirm across keys. Any other key
+    // (including a modal answer) disarms too.
+    const exitKeyIdentity: RawExitIdentity | undefined = key.ctrl === true
+      ? key.name === 'c' ? 'interrupt' : key.name === 'd' ? 'exit' : undefined
+      : undefined
+    if (exitKeyIdentity === undefined) lastExitKey = undefined
+    else if (lastExitKey !== undefined && lastExitKey.identity !== exitKeyIdentity) lastExitKey = undefined
     // 1. The disposal fence: `disposed` is checked by the loop before this.
     // 2. B3-A2 §6.6: a temporary Screen that is still physically open or
     //    closing covers this pane. While it exists the modal seat's logical
@@ -5430,9 +5494,11 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     //    below resumes for the form that is then really visible.
     const details = detailsSlot
     if (details !== undefined) {
-      if (details.phase === 'closing') return false
+      if (details.phase === 'closing') { lastExitKey = undefined; return false }
       if (!seat.hasModalSeat()) {
         handleDetailsKey(details, key)
+        // The Reader is an intervening owner: an armed exit key never survives.
+        lastExitKey = undefined
         return false
       }
     }
@@ -5444,6 +5510,9 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     //    controller/renderer presentation retirement withdraws it).
     if (seat.hasModalSeat()) {
       seat.handleKey(key, handlers)
+      // Any key the modal seat consumes — the exit keys included — is an
+      // intervening gesture; a prior arm is never reused after it.
+      lastExitKey = undefined
       return false
     }
     // TSP I-E: an open (non-parked) History card owns EVERY key. Its own
@@ -5491,7 +5560,37 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       // once. An open list never turns Ctrl+C into a no-op. The frame is owed
       // only when a list actually went away (the Permission menu's own shape).
       if (completion.retire()) render()
-      handlers.cancel()
+      // M6 UX PR1: the DEFAULT Ctrl+C is the ONE busy-cancel key. Working:
+      // cancel ONCE through the existing application path, never arm an exit.
+      // Unknown: refuse to arm and state the unobservable fact. Idle: keep the
+      // same-key 1.5 s double-press exit (no immediate cancel).
+      const activity = handlers.sessionActivity?.()
+      // A mount without the live fact keeps the historical cancel-only Ctrl+C
+      // (never an unconfirmed exit); the production composition always binds it.
+      if (activity === 'working' || activity === undefined) {
+        lastExitKey = undefined
+        handlers.cancel()
+        return false
+      }
+      if (activity === 'unknown') {
+        lastExitKey = undefined
+        display.notify("The current session's running state cannot be verified.", 'error')
+        return false
+      }
+      // Inspect the CURRENT draft BEFORE confirming: a late paste/clipboard
+      // insert may have filled it after the first press. PiTui's ladder clears
+      // the live draft and re-arms; the same-key window never exits over text
+      // that arrived between the presses.
+      if (composer.state().text !== '') {
+        composer.clearDraftStateOnly()
+        render()
+        lastExitKey = { identity: 'interrupt', at }
+        return false
+      }
+      if (armOrConfirmRawExit('interrupt', at)) {
+        handlers.exit()
+        return false
+      }
       return false
     }
     if (workHub?.handleKey(key)) return false
@@ -5646,7 +5745,12 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     } else if (edit.kind === 'none') {
       dismissOwedFrame()
     }
-    if (edit.kind === 'exit-empty') return true
+    if (edit.kind === 'exit-empty') {
+      // M6 UX PR1: an empty-draft Ctrl+D is a same-key double-press exit, the
+      // same contract as PiTui's effective exit key. Never an immediate exit.
+      if (armOrConfirmRawExit('exit', at)) handlers.exit()
+      return false
+    }
     return false
   }
 
@@ -6039,18 +6143,17 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // emergency semantics and is held like any other key.
     if (key.ctrl === true && key.name === 'c' && !inputBound) return true
     // The empty-draft Ctrl+D exit is ORDER-dependent (the reducer decides it
-    // against the live draft): pre-bind, it may act directly ONLY while the
-    // held queue is EMPTY — with held keys the draft's emptiness is not yet
-    // knowable (the held edits have not applied), so the gesture must wait
-    // and re-decide in arrival order at the bind.
+    // against the live draft): the gesture ALWAYS waits for the bind and is
+    // re-decided in arrival order there. It is not a final emergency exit —
+    // only the pre-bind Ctrl+C is. Holding it also means the same-key 1.5 s
+    // confirmation (not one key) is required after the bind.
     // While the fence is up the composer accepts NO key: the draft (and any
     // submit) would belong to a subject the surface is replacing. Dropped, not
     // held, and the existing draft is preserved.
     if (fencedOut(key)) return false
     if (!inputBound) {
-      if (key.ctrl === true && key.name === 'd' && heldKeys.length === 0 && composer.getDraft() === '') return true
       if (heldKeys.length < HELD_KEYS_LIMIT) {
-        heldKeys.push(key)
+        heldKeys.push({ key, at: Date.now() })
       } else if (!heldOverflowed) {
         // Fail loud ONCE (never a silent drop): the pre-bind window received
         // more input than the bounded queue holds. The dropped tail is
@@ -6197,6 +6300,22 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // the B0 inert one. It is installed with the mount, but the surface only
     // opts into modals once `bindInput` has committed the application wiring.
     interaction: seat.presenter,
+    // M6 UX PR1: the renderer's ONE Client-local Exit Choice seat, in the SAME
+    // modal-first keyboard owner as every official interaction.
+    exitChoice: {
+      open: (model: import('../../app/surface/exit-choice.ts').ExitChoiceModel) => {
+        // A temporary Reader (or one still closing) is a HIGHER modal owner:
+        // the Client choice must never open behind/above it. Withdraw it with
+        // zero business action instead.
+        if (detailsSlot !== undefined || openingDetails) {
+          model.dismiss()
+          return
+        }
+        seat.openExitChoice(model)
+      },
+      update: (model: import('../../app/surface/exit-choice.ts').ExitChoiceModel) => { seat.updateExitChoice(model) },
+      close: () => { seat.closeExitChoice() },
+    },
     // B3-A1: the internal native Work Hub presentation sink, wrapped by the
     // seat's four-way presenter exclusivity. It is always supplied with the
     // mount; the display seam's `supportsTaskCenter` getter above is the ONE
@@ -6436,12 +6555,14 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       // routes the exit through the same bound handler; the caller's
       // handlers now observe every subsequent key.
       const held = heldKeys.splice(0, heldKeys.length)
-      for (const key of held) {
+      for (const entry of held) {
         if (disposed) return
         // The SAME fence as the live path: a key held across a generation bump
         // must not be applied to a subject the surface is replacing.
-        if (fencedOut(key)) continue
-        if (dispatchKey(key, handlers)) routeExit(true)
+        if (fencedOut(entry.key)) continue
+        // Replay with the ORIGINAL arrival time: the held window must not
+        // compress two same-key presses into one 1.5 s confirmation.
+        if (dispatchKey(entry.key, handlers, entry.at)) routeExit(true)
       }
     },
     // B3-A2 §9: the disposal is a STORED promise, not an async wrapper. The

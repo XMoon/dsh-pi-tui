@@ -39,6 +39,7 @@ import type {
   TuiQuestionStatus,
 } from '../../app/surface/interaction-presenter.ts'
 import type { QuestionFlowDraft } from '../../tui-app.ts'
+import type { ExitChoiceModel } from '../../app/surface/exit-choice.ts'
 
 /**
  * The layer region's root node key. The REGION id is the region name (`layer`)
@@ -87,6 +88,10 @@ const FORM_BACK_ACTION = 'form-back'
 const FORM_CANCEL_ACTION = 'form-cancel'
 /** The pointer action of one option of the safe form's own choice list. */
 const FORM_CHOICE_ACTION = 'form-choice'
+/** M6 UX PR1: the pointer action of one Exit Choice option button. */
+const EXIT_CHOICE_ACTION = 'exit-choice'
+/** M6 UX PR1: the Exit Choice overlay key prefix (the epoch scopes its ids). */
+const EXIT_CHOICE_KEY = 'exit-choice'
 /** The safe form's choice-list row key, scoped by the visit like its button row. */
 const FORM_CHOICES_KEY = 'form-choices'
 /** The native page actions the client emits on the Questions form itself. */
@@ -200,6 +205,13 @@ export interface TspInteractionSeat {
   renderEmptyLayer(): Node
   /** The node id that should hold the hardware caret (`null` = none). */
   desiredFocusId(): string | null
+  /** M6 UX PR1: present the ONE Client-local Exit Choice layer. A real Host
+   *  modal in the seat refuses it (the model is dismissed with no action). */
+  openExitChoice(model: ExitChoiceModel): void
+  /** Replace the painted model of the OPEN Exit Choice (a phase transition). */
+  updateExitChoice(model: ExitChoiceModel): void
+  /** Hide the open Exit Choice layer. Never a business action. */
+  closeExitChoice(): void
   /** The parked-Question count projected into the dock (`0` hides the line). */
   attentionCount(): number
   /**
@@ -416,6 +428,12 @@ export function createTspInteractionSeat(options: TspInteractionSeatOptions): Ts
   /** The list's highlighted `(sessionId, callId)` and its last numeric index. */
   let listSelection: { readonly sessionId: string; readonly callId: string } | undefined
   let listIndex = 0
+  /** M6 UX PR1: the ONE Client-local Exit Choice layer (never an official slot). */
+  let exitChoice: ExitChoiceModel | undefined
+  /** The Exit Choice frame epoch: every open/update invalidates old button ids. */
+  let exitChoiceEpoch = 0
+  /** The keyboard-highlighted option index of the Exit Choice. */
+  let exitChoiceFocus = 0
   /** The callbacks the list re-reads the authority through. */
   let listCallbacks: TspInteractionCallbacks | undefined
   /** Scopes the modal node ids and rejects late presentation of an old seat. */
@@ -587,6 +605,15 @@ export function createTspInteractionSeat(options: TspInteractionSeatOptions): Ts
   /** Present the slot that just became active; a failing frame is fatal. */
   const presentActive = (slot: Slot): void => {
     if (active !== slot) return
+    // M6 UX PR1: a real Host modal always outranks the Client-local Exit
+    // Choice. The choice's PRESENTATION is withdrawn with zero business action
+    // (its promise-free model is dismissed, never answered).
+    if (exitChoice !== undefined) {
+      const withdrawnChoice = exitChoice
+      exitChoice = undefined
+      exitChoiceEpoch += 1
+      withdrawnChoice.dismiss()
+    }
     try {
       options.render()
     } catch (error) {
@@ -596,6 +623,8 @@ export function createTspInteractionSeat(options: TspInteractionSeatOptions): Ts
 
   /** Retire every owner slot, settling each pending promise exactly once. */
   const retireAll = (): void => {
+    // M6 UX PR1: the Client-local Exit Choice layer dies with the seat.
+    exitChoice = undefined
     if (disposed) return
     disposed = true
     listOpen = false
@@ -1853,6 +1882,84 @@ export function createTspInteractionSeat(options: TspInteractionSeatOptions): Ts
     return false
   }
 
+  /** Focus the Exit Choice option that the model says should start focused. */
+  const resetExitChoiceFocus = (model: ExitChoiceModel): void => {
+    const index = model.options.findIndex(option => option.id === model.focus)
+    exitChoiceFocus = index < 0 ? 0 : index
+  }
+
+  /** The ONE Exit Choice overlay node of the current epoch. */
+  const exitChoiceOverlay = (model: ExitChoiceModel): Node => {
+    const epoch = exitChoiceEpoch
+    const body: Node[] = model.body.map((paragraph, index) =>
+      ui.text({ key: `body-${index}`, wrap: 'word', text: sanitizedPhysicalLine(paragraph) }))
+    if (model.status !== undefined && model.status !== '') {
+      body.push(ui.text({ key: 'status', wrap: 'word', text: sanitizedPhysicalLine(model.status) }))
+    }
+    const buttons = model.options.map((option, index) => ui.button({
+      key: `opt-${index}`,
+      text: `${index === exitChoiceFocus ? '❯ ' : '  '}${sanitizedPhysicalLine(option.label)}`,
+      ...(index === exitChoiceFocus ? { variant: 'primary' as const } : {}),
+      actions: { click: EXIT_CHOICE_ACTION },
+    }))
+    if (buttons.length > 0) body.push(ui.col({ key: 'options', gap: 'xs' }, ...buttons))
+    body.push(ui.text({
+      key: 'hint',
+      text: model.phase === 'stopping' ? 'Waiting for the Host…' : '↑↓ Select · Enter Confirm · Esc Stay',
+    }))
+    return ui.overlay({ key: `${EXIT_CHOICE_KEY}-${epoch}`, modal: true, head: model.title, anchor: 'center', size: 'md' }, ...body)
+  }
+
+  /** Whether one action event is the CURRENT epoch's option button. */
+  const exitChoiceActionEvent = (event: TspInteractionEvent): boolean => {
+    const model = exitChoice
+    if (model === undefined || event.ev !== 'action') return false
+    if (!('sf' in event) || event.sf !== options.surfaceId) return false
+    if (event.act !== EXIT_CHOICE_ACTION) return false
+    for (const [index, option] of model.options.entries()) {
+      // The options live in their own `options` column of the SAME overlay.
+      if (event.id !== `${LAYER_ID}.${EXIT_CHOICE_KEY}-${exitChoiceEpoch}.options.opt-${index}`) continue
+      // A real button click is the SAME commit intent as Enter: the CURRENT
+      // epoch's button activates through the ONE model callback on the FIRST
+      // click. The old-epoch/foreign-surface identity fence above already
+      // rejects stale events; a button is not a focus-then-confirm list row.
+      exitChoiceFocus = index
+      model.select(option.id)
+      return true
+    }
+    return true
+  }
+
+  /** The modal-first key route of the Exit Choice layer. */
+  const handleExitChoiceKey = (key: Key): boolean => {
+    const model = exitChoice
+    if (model === undefined) return false
+    // A Stop in flight locks the window: no key dispatches a second cancel.
+    if (model.phase === 'stopping') return true
+    if (key.name === 'escape' || (key.ctrl === true && key.name === 'c')) {
+      model.select('stay')
+      return true
+    }
+    const options_ = model.options
+    if (options_.length === 0) return true
+    if (key.name === 'up' || key.name === 'down' || key.name === 'tab') {
+      const forward = key.name !== 'up' && !(key.name === 'tab' && key.shift === true)
+      exitChoiceFocus = forward
+        ? (exitChoiceFocus + 1) % options_.length
+        : (exitChoiceFocus - 1 + options_.length) % options_.length
+      options.render()
+      return true
+    }
+    if (key.name === 'enter' || key.name === 'space') {
+      const option = options_[exitChoiceFocus]
+      if (option !== undefined) model.select(option.id)
+      return true
+    }
+    // The choice owns every key: a stray letter/Enter must never reach the
+    // Composer behind the overlay.
+    return true
+  }
+
   /**
    * Gate one pointer/native event of the active modal.
    *
@@ -1865,6 +1972,16 @@ export function createTspInteractionSeat(options: TspInteractionSeatOptions): Ts
    * keyboard owns the pane.
    */
   const handleEvent = (event: TspInteractionEvent): boolean => {
+    if (exitChoice !== undefined && active === undefined) {
+      // The modal layer owns the pointer: only the CURRENT epoch's option
+      // button acts; a click on a stale button / the covered Composer is
+      // swallowed without business effect.
+      if (event.ev === 'action') {
+        exitChoiceActionEvent(event)
+        return false
+      }
+      return event.ev === 'focus' || event.ev === 'edit' || event.ev === 'undo' || event.ev === 'send'
+    }
     if (active === undefined && !listOpen) return false
     const slot = active
     // `sf` is absent on the events that address no surface at all (theme,
@@ -1916,6 +2033,7 @@ export function createTspInteractionSeat(options: TspInteractionSeatOptions): Ts
     if (active !== undefined) {
       return ui.col({ key: LAYER_KEY }, active.kind === 'approval' ? approvalOverlay(active) : questionOverlay(active))
     }
+    if (exitChoice !== undefined) return ui.col({ key: LAYER_KEY }, exitChoiceOverlay(exitChoice))
     const callbacks = listCallbacks
     if (listOpen && callbacks !== undefined) return ui.col({ key: LAYER_KEY }, listOverlay(callbacks))
     return renderEmptyLayer()
@@ -2052,16 +2170,43 @@ export function createTspInteractionSeat(options: TspInteractionSeatOptions): Ts
 
   return {
     presenter,
-    hasModalSeat: () => active !== undefined || listOpen,
+    hasModalSeat: () => active !== undefined || listOpen || exitChoice !== undefined,
     handleKey(key, callbacks) {
       if (disposed) return false
       const slot = active
       if (slot !== undefined) {
         return slot.kind === 'approval' ? handleApprovalKey(slot, key) : handleQuestionKey(slot, key)
       }
+      if (exitChoice !== undefined) return handleExitChoiceKey(key)
       if (!listOpen) return false
       listCallbacks = callbacks
       return handleListKey(key, callbacks)
+    },
+    openExitChoice(model) {
+      if (disposed) return
+      // A real Host modal owns the seat: the Client choice is withdrawn with
+      // zero business action instead of stacking a second layer.
+      if (active !== undefined || listOpen) {
+        model.dismiss()
+        return
+      }
+      exitChoice = model
+      exitChoiceEpoch += 1
+      resetExitChoiceFocus(model)
+      options.render()
+    },
+    updateExitChoice(model) {
+      if (disposed || exitChoice === undefined) return
+      exitChoice = model
+      exitChoiceEpoch += 1
+      resetExitChoiceFocus(model)
+      options.render()
+    },
+    closeExitChoice() {
+      if (disposed || exitChoice === undefined) return
+      exitChoice = undefined
+      exitChoiceEpoch += 1
+      options.render()
     },
     openContinuedList,
     handleEvent,

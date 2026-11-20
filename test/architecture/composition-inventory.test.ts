@@ -702,6 +702,8 @@ test('the composition zone is enumerated RECURSIVELY (nested helpers included)',
     productionFilesUnder(process.cwd(), 'src/app/bootstrap'),
     [
       'src/app/bootstrap/event-wiring.ts',
+      'src/app/bootstrap/exit-facts.ts',
+      'src/app/bootstrap/exit-intent.ts',
       'src/app/bootstrap/exit.ts',
       'src/app/bootstrap/lifecycle.ts',
       'src/app/bootstrap/presentation-bridge.ts',

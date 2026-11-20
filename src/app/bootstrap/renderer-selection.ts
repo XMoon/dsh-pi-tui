@@ -50,6 +50,8 @@ export interface RendererSelectionDeps {
      *  did not negotiate the kinds the sheet needs). */
     readonly queuePresentation?: import('../queue/manager.ts').QueueManagerPresentation | undefined
     readonly interaction: import('../surface/interaction-presenter.ts').SurfaceInteractionPresenter
+    /** M6 UX PR1: the renderer's ONE Client-local Exit Choice seat. */
+    readonly exitChoice: import('../surface/exit-choice.ts').SurfaceExitChoiceSeam
     readonly bindInput: (handlers: import('../surface/runtime.ts').SurfaceInputBinding) => void
     /**
      * TSP I-C: publish ONE effective slash-command catalog commit onto the
@@ -194,6 +196,7 @@ export async function selectRendererMount(deps: RendererSelectionDeps): Promise<
         sessionBrowserPresentation: tsp.sessionBrowserPresentation,
         queuePresentation: tsp.queuePresentation,
         interaction: tsp.interaction,
+        exitChoice: tsp.exitChoice,
         bindInput: (handlers) => tsp.bindInput(handlers),
         // TSP I-C: the ONE catalog commit forwarded to the renderer's own seat.
         // No catalog, no provider and no candidate list is held here.
@@ -215,7 +218,10 @@ export interface ProductionTspConnectorDeps {
   /** The ONE live display authority the composition root resolved before the
    *  first compose; forwarded as the SAME object, never a boot-time snapshot. */
   readonly displayState: DisplayState
+  /** The session-aware exit INTENT (it may present the in-place choice). */
   readonly requestExit: () => void
+  /** The FINAL exit commit for the pre-bind emergency and the fatal fallback. */
+  readonly requestImmediateExit?: () => void
   readonly onFatal: (error: unknown) => void
   readonly log: (message: string, fields?: Record<string, unknown>) => void
   readonly logError: (message: string, fields?: Record<string, unknown>) => void
@@ -263,6 +269,8 @@ export function productionTspConnector(
   readonly acpPresentation?: import('../command/acp-access-presentation.ts').AcpAccessPresentation | undefined
   readonly sessionBrowserPresentation?: import('../command/session-browser-presentation.ts').SessionBrowserPresentation | undefined
   readonly interaction: import('../surface/interaction-presenter.ts').SurfaceInteractionPresenter
+  /** M6 UX PR1: the renderer's ONE Client-local Exit Choice seat. */
+  readonly exitChoice: import('../surface/exit-choice.ts').SurfaceExitChoiceSeam
   readonly bindInput: (handlers: import('../surface/runtime.ts').SurfaceInputBinding) => void
   /** TSP I-C: the ONE catalog commit forwarded to the renderer's own seat (see
    *  the connector input above). Required: a connected TSP renderer always

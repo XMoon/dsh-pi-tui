@@ -128,6 +128,12 @@ export interface UserShellOwner {
   interrupt(): void
   /** Abort the active Host Shell run only; false means no cancellable run exists. */
   cancelRun(): boolean
+  /**
+   * Whether a Host user-shell run is currently in flight. Read-only: unlike
+   * {@link cancelRun} it never aborts. The exit-intent classifier uses it to
+   * refuse an unconfirmed destructive exit while a user shell is running.
+   */
+  isRunning(): boolean
   /** Abort the active Host Shell run. */
   dispose(): void
 }
@@ -197,6 +203,9 @@ export function createUserShell<ExactAgent extends InterruptAgentLike>(
 ): UserShellOwner {
   // Abort handle for the currently running Host user-shell run.
   let shellController: AbortController | undefined
+
+  /** Read-only view of the one in-flight Host user-shell run. */
+  const isRunning = (): boolean => shellController !== undefined
 
   /** Cancel only an active Host Shell process; idle Escape uses this path. */
   const cancelRun = (): boolean => {
@@ -454,6 +463,7 @@ export function createUserShell<ExactAgent extends InterruptAgentLike>(
     run: runUserShell,
     interrupt,
     cancelRun,
+    isRunning,
     dispose,
   }
 }

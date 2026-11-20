@@ -430,6 +430,7 @@ async function mountTspSurface(
         presetPresentation: renderer.presetPresentation,
         sessionBrowserPresentation: renderer.sessionBrowserPresentation,
         interaction: renderer.interaction,
+        exitChoice: renderer.exitChoice,
         bindInput: handlers => renderer.bindInput(handlers),
         dispose: () => renderer.dispose(),
       }

@@ -107,7 +107,9 @@ import type { ImageLimitsLike } from '../domain/media/types.ts'
 import { consumeDraftAttachments } from '../client/media/draft-attachments.ts'
 import type { DirectPrepareInputDeps } from './submission/direct-message-preparation.ts'
 import { dshVersion } from '../client/launcher/version.ts'
-import { createExitController } from './bootstrap/exit.ts'
+import { createExitController, daemonResumeBackendOverride, formatDaemonDetachHint } from './bootstrap/exit.ts'
+import { createExitIntentCoordinator, type StopCurrentWorkOutcome } from './bootstrap/exit-intent.ts'
+import { createExitIntentFacts } from './bootstrap/exit-facts.ts'
 import { type SessionRetirementReport } from '../app/session/owner-access.ts'
 import { mergeDraft, refuseByTransitionFence, type SteerSubjectLike } from './submission/steer.ts'
 import { createDirectApplicationRuntime, type DirectApplicationRuntime } from '../app/direct/runtime.ts'
@@ -137,7 +139,7 @@ import { createSessionOwnershipCore } from '../app/session/ownership-core.ts'
 import { bindSessionRuntime } from '../app/session/runtime.ts'
 import type { LaunchWorkspaceVerdict } from './remote-process/local-workspace-equivalence.ts'
 import { createWorkspaceNextIntentOwner } from '../app/session/workspace-next-intent.ts'
-import { createSessionScopeAuthority, type LiveSessionScope } from '../app/session/scope.ts'
+import { createSessionScopeAuthority, SessionScopeSupersededError, type LiveSessionScope } from '../app/session/scope.ts'
 import type { NavigationIntent } from '../app/session/transition.ts'
 import { bindSubmissionRuntime, type SubmissionRuntime } from '../app/submission/runtime.ts'
 import type { SessionOwnerRef, SessionSubject } from '../app/session/subject.ts'
@@ -2707,7 +2709,9 @@ export function applyRunnerWithRuntime(
       get agents() { return lifecycleAgents },
       imageLimits: () => directImageLimits(),
       openRewindPicker: () => applicationEvents.openRewindPicker(),
-      requestExit: () => requestExit(),
+      // M6 UX PR1: `/exit` and `/quit` enter the ONE exit-intent classifier
+      // (the exit controller stays the final commit below).
+      requestExit: () => exitIntent.request('slash'),
       // M4 PR4: the ONE `/reload-client` implementation. The Client-local
       // safety facts are read HERE — when the user handler runs, never at
       // registration and never cached — and the process-owned request is
@@ -3148,6 +3152,12 @@ export function applyRunnerWithRuntime(
     // §11/§12): the orchestration is owned by `app/bootstrap/lifecycle.ts`;
     // every released resource is an already-owned callback. The frozen §12
     // relative order is preserved inside that module.
+    /**
+     * M6 UX PR1: late-bound disposal of the exit-intent coordinator (created
+     * beside the exit controller below, after this lifecycle owner). A startup
+     * failure before that assignment has nothing to retire.
+     */
+    let exitIntentDisposeRef: (() => void) | undefined
     const surfaceLifecycle = createSurfaceLifecycle({
       diag,
       isCleanedUp: () => cleanedUp,
@@ -3162,6 +3172,9 @@ export function applyRunnerWithRuntime(
       whenRendererAcquired: () => rendererAcquisition,
       surface,
       abortLifecycle: () => lifecycleController.abort(),
+      // Late-bound: the coordinator is created beside the exit controller
+      // below; a startup failure before that assignment has nothing to retire.
+      disposeExitIntent: () => exitIntentDisposeRef?.(),
       disposeViewer: () => viewerRef?.dispose(),
       clearDraftImages: () => draftImages.clear(),
       clearDraftFiles: () => draftFiles.clear(),
@@ -3182,6 +3195,61 @@ export function applyRunnerWithRuntime(
     // through this ref (M3-6 PR3 D3), assigned now — before `surface.start`
     // and any later startup operation can fail with the surface owner live.
     disposeSurfaceRef = surfaceLifecycle.disposeSurface
+    /**
+     * M6 UX PR1: the EXACT-owner daemon Stop used by the Busy Exit Choice.
+     * The control admission wraps ONLY the official cancel request; the idle
+     * proof then runs OUTSIDE that section on the SAME captured owner. An ACK
+     * alone never means "stopped": only `whenIdleOrAbort === false` (the exact
+     * generation observed idle) does, and every other settlement is reported
+     * as unconfirmed with no automatic retry.
+     */
+    const stopDaemonWorkForExit = async (
+      scope: LiveSessionScope,
+      signal: AbortSignal,
+    ): Promise<StopCurrentWorkOutcome> => {
+      if (selectedRuntime.kind !== 'remote') {
+        throw new Error('the daemon Stop is only reachable on the Remote backend')
+      }
+      const control = await sessionRuntime.withControl(scope, async owner => ({
+        owner,
+        outcome: await selectedRuntime.retirement.cancel(owner),
+      })).then(
+        value => ({ ok: true as const, value }),
+        (error: unknown) => ({ ok: false as const, error }),
+      )
+      if (!control.ok) {
+        if (control.error instanceof SessionScopeSupersededError) {
+          return { kind: 'unconfirmed', detail: 'The captured session is no longer current.' }
+        }
+        throw control.error
+      }
+      const { owner, outcome } = control.value
+      if (outcome.kind !== 'committed') {
+        const detail = outcome.kind === 'rejected'
+          ? outcome.error.message
+          : outcome.kind === 'unsupported'
+            ? outcome.reason
+            : outcome.kind === 'cancelled'
+              ? 'The stop request was cancelled before the session confirmed it.'
+              : 'The stop request was dispatched but its result could not be confirmed.'
+        return { kind: 'unconfirmed', detail }
+      }
+      // The control admission is RELEASED before this wait: holding the
+      // barrier across the idle proof would block the very transition that
+      // settles the captured owner. `whenIdleOrAbort` fences the exact
+      // Connection generation and binding identity internally.
+      const idle = await selectedRuntime.retirement.whenIdleOrAbort(owner, signal)
+      if (idle === false) return { kind: 'stopped' }
+      return {
+        kind: 'unconfirmed',
+        detail: idle === 'unobservable'
+          ? 'The captured session generation is no longer observable.'
+          : 'The wait for the session to become idle was aborted.',
+      }
+    }
+    // M6 UX PR1: whether the committed exit carries a PROVEN "current work
+    // stopped" fact. The daemon detach hint prints the stopped line only then.
+    let exitWorkStopped = false
     // The ONE exit orchestration, shared by every exit entry (the exit keys,
     // /exit, /quit): latch once → dispose/restore the Client surface →
     // synchronously pre-cancel the exact current Direct owner → resume-hint
@@ -3201,11 +3269,81 @@ export function applyRunnerWithRuntime(
         // including the positional `dsh <name>` (see hostRunningProfile): the
         // argv scrape alone would answer the pi-tui fallback there and hand the
         // user a resume command for the wrong profile.
-        const resume = resumeCommand(hostRunningProfile(ctx), agentNow()?.session.id ?? '')
+        const profile = hostRunningProfile(ctx)
+        const sessionId = ownership.currentSessionId() ?? agentNow()?.session.id ?? ''
+        // M6 UX PR1: leaving a daemon Client is NOT stopping the Host. Print
+        // the exact management facts and never claim a Host state or PID the
+        // Client cannot observe. Direct keeps its original resume line.
+        if (selectedRuntime.kind === 'remote') {
+          return formatDaemonDetachHint({
+            profile,
+            sessionId,
+            workStopped: exitWorkStopped,
+            backendOverride: daemonResumeBackendOverride(process.env.SPLIT_PROCESS_CLIENT_LAUNCH_BACKEND),
+          })
+        }
+        const resume = resumeCommand(profile, sessionId)
         return resume === undefined ? undefined : `${color.textDim('To resume this session:')} ${resume}`
       },
       exit,
     })
+    /**
+     * M6 UX PR1: the ONE exit-intent coordinator. It reads the live backend /
+     * exact Session scope / authoritative activity on EVERY request and
+     * confirmation (never a cached Host-running fact), opens the ONE
+     * Client-local choice when needed, and calls the exit controller only at
+     * final commit. Direct `unknown` protects a still-live in-process owner;
+     * Remote `unknown` refuses to pretend the Host is idle.
+     */
+    const exitIntent = createExitIntentCoordinator({
+      diag,
+      // The live facts are their own testable composition seam: the full
+      // Session scope (sessionless generation included), the Remote transport
+      // identity captured on EVERY path, the admission/shell facts and the
+      // official running status. Nothing is cached between calls.
+      facts: createExitIntentFacts({
+        backend: () => selectedRuntime.kind === 'direct' ? 'direct' : 'daemon',
+        scopes: sessionScope,
+        admissionPending: () => submission.composerHoldActive(),
+        shellRunning: () => localShell.isRunning(),
+        ...(selectedRuntime.kind === 'remote'
+          ? {
+            remote: {
+              running: (sessionId: string) => remoteSources?.sessionFacts.running(sessionId),
+              captureTransportToken: (sessionId: string) => remoteSources?.sessionFacts.captureTransportToken(sessionId),
+              isTransportTokenCurrent: (sessionId: string, token: unknown) =>
+                remoteSources?.sessionFacts.isTransportTokenCurrent(sessionId, token) === true,
+            },
+          }
+          : {}),
+        ...(selectedRuntime.kind === 'direct'
+          ? {
+            directAgentRunning: () => {
+              const agent = agentNow()
+              return agent === undefined ? undefined : agent.status === 'running'
+            },
+          }
+          : {}),
+      }),
+      commit: ({ workStopped }) => {
+        exitWorkStopped = workStopped
+        requestExit()
+      },
+      presenter: () => surface.exitChoice,
+      stopCurrentWork: stopDaemonWorkForExit,
+    })
+    exitIntentDisposeRef = () => { exitIntent.dispose() }
+    // M6 UX PR1: a committed Session switch (A→B, A→B→A) retires an open
+    // Client choice immediately with zero business action — the selection can
+    // never act on a subject the surface already left.
+    {
+      const unsubscribeExitIntent = ownership.subscribeScopeInvalidation(() => { exitIntent.retireIfStale() })
+      if (lifecycleController.signal.aborted) {
+        unsubscribeExitIntent()
+      } else {
+        ctx.effect(function* () { yield unsubscribeExitIntent })
+      }
+    }
     // A pre-mount unload can happen during the initial resume/catalog awaits;
     // never register a full effect on the already-disposed fiber or fall into
     // the fatal startup path.
@@ -3462,7 +3600,9 @@ export function applyRunnerWithRuntime(
           return runtime.withPromptAdmission(agent as Agent, hasImages, task)
         },
       },
-      requestExit,
+      // M6 UX PR1: the bare `exit` word uses the `plain` entry of the SAME
+      // exit-intent decision (it can never bypass a Busy Choice).
+      requestExit: () => exitIntent.request('plain'),
       isPlanActive: (agent) => projectedPlanActive(ctx.get('sessionProjections') as PlanProjectionLike | undefined, (agent as Agent).session) === true,
     })
 
@@ -3614,7 +3754,9 @@ export function applyRunnerWithRuntime(
           sessionId: options?.sessionId ?? (() => agentNow()?.session.id),
         }),
         isCleanedUp: () => cleanedUp,
-        requestExit,
+        // M6 UX PR1: the keyboard exit path (`onExit`) is one entry of the SAME
+        // exit-intent decision; the final commit stays `requestExit` below.
+        requestExit: () => exitIntent.request('keyboard'),
         // PR4 §4: the application-event owner's live-agent face is
         // transport-neutral — the Remote branch has no Direct Agent, so the
         // identity falls back to the CURRENT owner's session id (the rewind
@@ -3707,7 +3849,11 @@ export function applyRunnerWithRuntime(
           // TSP renderer owns no keymap; this is the one live read its raw key
           // stream and its Dock label consume.
           queueOpenKeys,
-          requestExit: () => requestExit(),
+          requestExit: () => exitIntent.request('keyboard'),
+          // The pre-bind emergency Ctrl+C and the fatal fallback use the FINAL
+          // exit controller directly: there is no mounted choice surface yet,
+          // and a startup emergency must never wait for one.
+          requestImmediateExit: () => requestExit(),
           onFatal: rendererOnFatal,
           log: (message, fields) => diag.info(message, fields),
           logError: (message, fields) => diag.error(message, fields),
@@ -3792,7 +3938,10 @@ export function applyRunnerWithRuntime(
     // here on.
     try {
       surface.start({
-      events: applicationEvents.events,
+      // M6 UX PR1: the LIVE authoritative activity fact for the renderer-level
+      // exit key rule. It is a read, never a cache, and is shared by PiTui and
+      // the TSP input binding.
+      events: { ...applicationEvents.events, sessionActivity: () => exitIntent.activity() },
       terminalPastedPath: pastedImageIntake,
       ...(rendererMount === undefined ? {} : { renderer: rendererMount }),
       workspaceRoot: cwd,

@@ -698,6 +698,7 @@ function mountLifecycle(options: {
     markCleanedUp: () => { cleaned = true },
     surface,
     abortLifecycle: () => { order.push('abort'); options.onAbort?.() },
+    disposeExitIntent: () => { order.push('disposeExitIntent') },
     disposeViewer: () => {
       if (options.throwInViewer === true) {
         // `viewerFailure` is an EXPLICIT option so that `throw undefined` (a
