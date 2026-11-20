@@ -153,6 +153,37 @@ supported Daemon platform in this contract.
   `stop`/`restart`/`uninstall` never boot it out or replace it; only a
   not-running, PID-less loaded definition is safe to unload.
 
+## Host log emission contract
+
+The Host process owns the bytes written to its stdout/stderr sinks; `daemon
+logs` only selects and sanitizes one proven source (see the logs bullet below)
+and never filters, parses or rewrites record content.
+
+- By default a Host writes a SMALL human-readable production stream: one
+  `dsh-pi-tui host: ready (profile=<profile>, pid=<pid>)` line at Ready, one
+  line for a startup failure, cleanup failure, warning or warning/error
+  diagnostic, one line when Web or ACP autostart becomes enabled, and one line
+  when the Host stopped after a successful cleanup. It never writes the raw
+  qualification entry records (`m4a0` JSONL), the complete
+  `services`/`ownerEntries`/`entries` readiness snapshot or internal control
+  receipts to the user-visible log.
+- `DSH_PI_TUI_ENTRY_RECORDS=1` in the ACTUAL Host process environment restores
+  the complete original JSONL record stream on stdout: one JSON object per
+  line, the original fields and order, no additional human lines. It is read
+  once when the module loads and affects only a newly started process; it is
+  not a Profile setting, management command or runtime toggle, and a `dsh
+  daemon start`/`logs` CLI environment is not automatically the Host
+  environment of a systemd unit or launchd job.
+- A record written through an explicitly provided sink always receives the
+  original record unchanged, regardless of the switch. That channel carries
+  structural tests, the real surface Client's private `0600` record file and
+  business injection probes.
+- The default never silences a real startup or cleanup failure: its concise
+  line carries the existing phase/code/step and bounded single-line error text
+  (never a stack). The log is an explanation only; the Host business owner
+  still decides readiness, the failure exit code and whether to stop or
+  restart.
+
 ## Daemon management commands
 
 `dsh --profile pi-tui daemon status|start|stop|restart|logs|install|uninstall` is the ONE

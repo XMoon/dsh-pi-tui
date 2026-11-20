@@ -196,6 +196,7 @@ export function createSplitProcessScope() {
         cwd: options.cwd,
         env: {
           ...options.env,
+          DSH_PI_TUI_ENTRY_RECORDS: '1',
           SPLIT_PROCESS_DSH_ANCHOR: options.anchor,
           SPLIT_PROCESS_PROFILE: options.profile,
           SPLIT_PROCESS_SCRATCH: effectiveScratch,
