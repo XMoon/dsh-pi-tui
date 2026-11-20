@@ -397,6 +397,9 @@ const OTHER_HOST_SUBSCRIPTIONS: ReadonlyArray<readonly [string, string]> = [
   // event carries no content, so the listener only re-reads the authoritative
   // catalog through the one controller.
   ['schedule/changed', 'src/runtime/direct/schedule-direct.ts'],
+  // M6 PR-C C2: the Direct composition's per-Turn prompt latch reads the
+  // official Session boundary plane through its typed source adapter.
+  ['session/event', 'src/app/bootstrap.ts'],
 ]
 
 /**
@@ -421,6 +424,13 @@ const REMOTE_BRANCH_SUBSCRIPTIONS: ReadonlyArray<readonly [string, string]> = [
   // official workspace indexes stale after a Host tool result. It consumes the
   // EXISTING session/event plane and installs no watcher.
   ['session/event', 'src/app/host/features/file-reference.ts'],
+  // M6 PR-C: the Host prompt-parity owner keeps every live Agent's prompt
+  // sections current: it observes the Agent roster through the official
+  // global lifecycle events and installs one per-Turn latch per Agent on the
+  // EXISTING session/event plane (no second boundary source).
+  ['agent/created', 'src/app/host/features/agent-prompt.ts'],
+  ['agent/disposed', 'src/app/host/features/agent-prompt.ts'],
+  ['session/event', 'src/app/host/features/agent-prompt.ts'],
 ]
 
 /** Dynamic (non-literal event) `ctx.on` bridges: the Direct config port only. */

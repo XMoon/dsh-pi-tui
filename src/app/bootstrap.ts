@@ -975,7 +975,7 @@ export function applyRunnerWithRuntime(
             // Session's or a subagent's view.
             installTurnPolicy: (agentCtx, agent) => {
               const latch = installTuiPromptTurnLatch(
-                { on: (event, listener, listenerOptions) => ctx.on(event, listener, listenerOptions) },
+                { on: (_event, listener, listenerOptions) => ctx.on('session/event', listener, listenerOptions) },
                 agent.session,
                 () => ({
                   eligible: ownership.currentSessionId() === agent.session.id,

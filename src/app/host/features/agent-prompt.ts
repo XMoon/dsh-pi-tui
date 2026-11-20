@@ -121,7 +121,7 @@ export function installHostAgentPrompt(
   const sessionId = agent.session.id
   const latch = installTuiPromptTurnLatch(
     {
-      on: (event, listener, listenerOptions) => options.ctx.on(event, listener, listenerOptions),
+      on: (_event, listener, listenerOptions) => options.ctx.on('session/event', listener, listenerOptions),
     },
     agent.session,
     () => options.voters.snapshotVoters(agent.session),
