@@ -1,0 +1,12 @@
+# R8-E PR-1 native negative control: a plain DSH Host plugin.
+# No dshPiTui metadata, no PiTui config row: the native plugin manager installs,
+# enables and removes it exactly as it would without the PiTui bundle installed.
+- insert:
+    - id: r8-pr1-fixture-plain-host
+      name: '@r8-pr1-fixture/plain/host'
+    # A deliberately NON-opted-in author sample: a Host row that names the
+    # package's own `./tui` module. Native DSH rules decide whether it runs;
+    # PiTui neither inserts nor blocks it, and the Client qualification for this
+    # package stays not-opted-in.
+    - id: r8-pr1-fixture-plain-tui-row
+      name: '@r8-pr1-fixture/plain/tui'

@@ -1,0 +1,13 @@
+# R8-E PR-1 Dual fixture: the package's OWN Config-only profile row plus one
+# real, independent Host row run by the native DSH Loader. The `./host` row is
+# the package's own module; PiTui neither inserts nor intercepts it, and no row
+# here points at the package's `./tui` entry.
+- insert:
+    - id: pi-tui-extcfg-1895fa0847ce6f2ea3ac1e9313b2ebab
+      name: '@xmoon76/dsh-pi-tui/extension-config'
+      config:
+        data:
+          label: delta
+          limit: 11
+    - id: r8-pr1-fixture-dual-host
+      name: '@r8-pr1-fixture/dual/host'

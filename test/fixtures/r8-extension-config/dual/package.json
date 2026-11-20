@@ -1,0 +1,21 @@
+{
+  "name": "@r8-pr1-fixture/dual",
+  "version": "1.0.0",
+  "description": "R8-E PR-1 Dual fixture: one Config-only profile row plus one real independent Host row",
+  "type": "module",
+  "exports": {
+    "./tui": "./dist/tui.mjs",
+    "./host": "./dist/host.mjs"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "dshPiTui": {
+    "manifestVersion": 1,
+    "entrypoints": {
+      "./tui": "tui-local"
+    }
+  }
+}

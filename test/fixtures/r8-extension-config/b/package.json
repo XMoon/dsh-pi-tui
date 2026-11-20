@@ -1,0 +1,20 @@
+{
+  "name": "@r8-pr1-fixture/b",
+  "version": "1.0.0",
+  "description": "R8-E PR-1 UI-only extension-config fixture B (one Config-only profile row)",
+  "type": "module",
+  "exports": {
+    "./tui": "./dist/tui.mjs"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "dshPiTui": {
+    "manifestVersion": 1,
+    "entrypoints": {
+      "./tui": "tui-local"
+    }
+  }
+}

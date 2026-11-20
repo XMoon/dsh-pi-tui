@@ -33,6 +33,40 @@ keybindings, renderers, managed overlays, editor replacement)?
 | Advanced | `@xmoon76/dsh-pi-tui/extensions/advanced` | Experimental higher-freedom interactive APIs: normalized input capture, focused interactive surfaces, editor control, the imperative UI broker, custom UI, host-state overrides. Still Host-mediated — never raw terminal bytes, never private TUI objects. | Minor releases may break; a migration note is required; no long-term shims. |
 | Unstable | `@xmoon76/dsh-pi-tui/extensions/unstable` | NO compatibility guarantee. Raw input interception (observe/consume/rewrite, exclusive ownership), the Host emergency fail-safe (triple-Esc), the low-level surface seam. A broken plugin can disrupt Host behavior. | Anything, anytime. |
 
+## Per-package Host configuration row
+
+An installed npm bundle can get its OWN official profile Settings section
+without shipping executable Host code. The package inserts one row into its
+own `dsh.bundle.patch` and points that row at the trusted carrier subpath:
+
+```yaml
+- insert:
+    - id: pi-tui-extcfg-93457ce1c3d199d03e0628d57954f4f5
+      name: '@xmoon76/dsh-pi-tui/extension-config'
+      config:
+        data:
+          theme: midnight
+          limit: 5
+```
+
+- `insert` is always a LIST: the official patch shape is
+  `PatchOptions.insert?: EntryOptions[]`, and the `id`, `name` and `config` keys
+  belong to the inserted entry.
+- The row id is exactly `pi-tui-extcfg-` followed by the first 32 lowercase hex
+  characters of SHA-256 over the UTF-8 package name — here the package is
+  `example-plugin`:
+  `createHash('sha256').update('example-plugin', 'utf8').digest('hex').slice(0, 32)`.
+  The npm `package.json` name decides it, never a display name, an alias or a
+  directory.
+- Every package uses its own row id with the same carrier module, so two
+  packages mount two independent official Settings namespaces with independent
+  revisions.
+- `data` is ordinary non-secret JSON the package persists for itself. It is not
+  a place for credentials, tokens or API keys, and the carrier declares no
+  default, no business schema and no runtime behavior.
+- The row is a Host configuration carrier only: it performs no work, publishes
+  no service and declares no TUI surface.
+
 ## Rules that never change
 
 - **One service, one runtime.** The tiers are capability facades over the

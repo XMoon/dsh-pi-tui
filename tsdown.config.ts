@@ -47,6 +47,9 @@ const bundleConfig = defineConfig({
     // M6 PR-A: the canonical profile-owned TUI preference row. Same precedent:
     // the canonical nested app/config module under a flat package subpath.
     { preferences: './src/app/config/preferences.ts' },
+    // R8-E PR-1: the ONE trusted Config-only carrier row third-party bundles
+    // name from their own per-package profile rows. Same precedent.
+    { 'extension-config': './src/app/host/extension-config-carrier.ts' },
   ],
   format: ['esm'],
   outDir: 'dist',

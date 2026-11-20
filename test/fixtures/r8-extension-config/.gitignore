@@ -1,0 +1,3 @@
+# The packed fixtures need their real `dist/` entry modules (the repository
+# root ignores build output directories).
+!*/dist/
