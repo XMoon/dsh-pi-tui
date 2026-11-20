@@ -130,6 +130,7 @@ type SettingsCommandRunner = Pick<
   | 'forceContextMeasurementResult'
   | 'gitAttributionState'
   | 'isSessionScopeCurrent'
+  | 'onDisplayPresetMutated'
   | 'progressUpdatesState'
   | 'refreshStatus'
   | 'responseStyleState'
@@ -3576,7 +3577,14 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     if (applied.kind === 'unsupported') {
       return { outcome: 'not-saved', reason: `the display preset "${value}" is not available in this build` }
     }
-    if (applied.kind === 'applied') runner.refreshStatus()
+    if (applied.kind === 'applied') {
+      runner.refreshStatus()
+      // M6 PR-C C3: this commit path applies through the app DIRECTLY (its own
+      // persistence sequence below), bypassing the shared
+      // `settings.setDisplayPreset` seam — notify the Split-Client presence
+      // owner so the new view is re-projected to the Host.
+      runner.onDisplayPresetMutated?.()
+    }
     if (settings === undefined) {
       // The runtime fact really changed (Client-local); the persisted preference
       // has no authority to write to. Both halves are stated, neither is faked.

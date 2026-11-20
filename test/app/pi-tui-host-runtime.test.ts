@@ -28,6 +28,7 @@ import { PI_TUI_SKILLS_NAMESPACE } from '../../src/runtime/remote/pi-tui-skills-
 import { PI_TUI_AUTHORIZATION_NAMESPACE } from '../../src/runtime/remote/pi-tui-authorization-contract.ts'
 import { PI_TUI_CREDENTIAL_RECORDS_NAMESPACE } from '../../src/runtime/remote/pi-tui-credential-records-contract.ts'
 import { PI_TUI_DEFAULT_MODEL_NAMESPACE } from '../../src/runtime/remote/pi-tui-default-model-contract.ts'
+import { PI_TUI_PROMPT_PRESENCE_NAMESPACE } from '../../src/runtime/remote/pi-tui-prompt-presence-contract.ts'
 import type { PiTuiTerminalProgressFrame } from '../../src/runtime/remote/pi-tui-terminal-progress-contract.ts'
 
 /** Cordis `FiberState.ACTIVE` (const enum: no runtime value). */
@@ -58,7 +59,7 @@ async function hostContext(options: HostContextOptions = {}): Promise<Context> {
     ctx.provide('piTuiPreferences', CanonicalPreferencesConfig({ localShellSandbox: options.localShellSandbox ?? 'bypass' } as never))
   }
   if (options.typert !== false) await ctx.plugin(TypertRegistry)
-  if (options.agents !== false) ctx.provide('agents', { get: () => undefined })
+  if (options.agents !== false) ctx.provide('agents', { get: () => undefined, list: () => [] })
   if (options.fileReferences !== false) ctx.provide('fileReferences', { list: async () => [] })
   if (options.workingDirectory !== false) ctx.provide('workingDirectory', { get: () => process.cwd() })
   if (options.sessions !== false) ctx.provide('sessions', { get: () => undefined })
@@ -127,6 +128,14 @@ test('one contribution registers every private service and publishes readiness l
   assert.equal(bindingOf(ctx, PI_TUI_DEFAULT_MODEL_NAMESPACE).namespace, PI_TUI_DEFAULT_MODEL_NAMESPACE)
   assert.equal(ctx.typert.local.get('piTuiDefaultModel/saveSelection')?.id,
     '@xmoon76/dsh-pi-tui#piTuiDefaultModel/saveSelection')
+  // M6 PR-C C3: the authenticated per-Peer session-view presence row, mounted
+  // before the readiness gate.
+  assert.equal(bindingOf(ctx, PI_TUI_PROMPT_PRESENCE_NAMESPACE).serviceKey, PI_TUI_PROMPT_PRESENCE_NAMESPACE)
+  assert.equal(bindingOf(ctx, PI_TUI_PROMPT_PRESENCE_NAMESPACE).namespace, PI_TUI_PROMPT_PRESENCE_NAMESPACE)
+  assert.equal(ctx.typert.local.get('piTuiPromptPresence/syncView')?.id,
+    '@xmoon76/dsh-pi-tui#piTuiPromptPresence/syncView')
+  // The wire has EXACTLY ONE method: the voter roster is never a Client query.
+  assert.equal(ctx.typert.local.get('piTuiPromptPresence/snapshotVoters'), undefined)
   // Every private endpoint is registered by the ONE package contribution.
   assert.equal(
     ctx.typert.local.get('piTuiFileReferences/list')?.id,

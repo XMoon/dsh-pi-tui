@@ -78,8 +78,22 @@ import {
   type SessionLike,
 } from './features/session-policy.ts'
 import { PiTuiDefaultModelHostService } from './features/default-model.ts'
+import {
+  PiTuiPromptPresenceHostService,
+  type PromptPresenceAgentLike,
+  type PromptPresenceSessionLike,
+} from './features/prompt-presence.ts'
+import { HostAgentPromptOwner } from './features/agent-prompt.ts'
+import {
+  parseGitAttributionMode,
+} from '../../domain/communication/git-attribution.ts'
+import {
+  parseProgressUpdates,
+  parseResponseStyle,
+} from '../../domain/communication/policy.ts'
 import { PI_TUI_SESSION_POLICY_NAMESPACE } from '../../runtime/remote/pi-tui-session-policy-contract.ts'
 import { PI_TUI_DEFAULT_MODEL_NAMESPACE } from '../../runtime/remote/pi-tui-default-model-contract.ts'
+import { PI_TUI_PROMPT_PRESENCE_NAMESPACE } from '../../runtime/remote/pi-tui-prompt-presence-contract.ts'
 
 /** Stable Cordis plugin name (the Loader row id in the Host-only overlay). */
 export const name = 'pi-tui-host-runtime'
@@ -118,6 +132,20 @@ export const PI_TUI_HOST_READY_SERVICE = 'piTuiHostReady'
 /** The narrow structural view of the authoritative Host Agent registry. */
 interface AgentRegistryLike {
   get(sessionId: string): unknown
+}
+
+/** The canonical live preference references the prompt sections read. Every
+ * field is a LIVE `.volatile()` reference: reading `.get()` at each assembly
+ * is what makes a Client settings write reach the next Turn. */
+interface CanonicalPreferenceRefs {
+  readonly progressUpdates: { get(): string }
+  readonly responseStyle: { get(): string }
+  readonly gitAttribution: { get(): string }
+}
+
+/** Read the canonical preference references PER CALL (never a snapshot). */
+function preferencesRefs(ctx: Context): CanonicalPreferenceRefs | undefined {
+  return ctx.reflect.get('piTuiPreferences') as CanonicalPreferenceRefs | undefined
 }
 
 /**
@@ -289,6 +317,23 @@ export async function apply(ctx: Context, _config: TuiConfigValue): Promise<void
     })
     fibers.push(defaultModelFiber)
     await defaultModelFiber
+    // M6 PR-C C3: the authenticated per-Peer prompt presence projection. The
+    // Host keys every record by the EXACT `invocation.peer.id`, so a Client can
+    // only speak for itself; the display preset stays Client-local. The
+    // Session/Agent identity validation reads the authoritative registries
+    // PER CALL (a same-id replacement must invalidate the voter).
+    const promptPresenceFiber = ctx.inject(PiTuiPromptPresenceHostService.inject, pluginCtx => {
+      new PiTuiPromptPresenceHostService(pluginCtx, {
+        sessions: () => ctx.reflect.get('sessions') as
+          | { get(sessionId: string): PromptPresenceSessionLike | undefined }
+          | undefined,
+        agents: () => ctx.reflect.get('agents') as
+          | { get(sessionId: string): PromptPresenceAgentLike | undefined }
+          | undefined,
+      })
+    })
+    fibers.push(promptPresenceFiber)
+    await promptPresenceFiber
     assertPrivateBinding(ctx, 'piTuiFileReferences', PI_TUI_FILE_REFERENCES_NAMESPACE)
     assertPrivateBinding(ctx, 'piTuiTerminalProgress', PI_TUI_TERMINAL_PROGRESS_NAMESPACE)
     assertPrivateBinding(ctx, 'piTuiWebAccess', PI_TUI_WEB_ACCESS_NAMESPACE)
@@ -299,6 +344,30 @@ export async function apply(ctx: Context, _config: TuiConfigValue): Promise<void
     assertPrivateBinding(ctx, PI_TUI_CREDENTIAL_RECORDS_NAMESPACE, PI_TUI_CREDENTIAL_RECORDS_NAMESPACE)
     assertPrivateBinding(ctx, PI_TUI_SESSION_POLICY_NAMESPACE, PI_TUI_SESSION_POLICY_NAMESPACE)
     assertPrivateBinding(ctx, PI_TUI_DEFAULT_MODEL_NAMESPACE, PI_TUI_DEFAULT_MODEL_NAMESPACE)
+    assertPrivateBinding(ctx, PI_TUI_PROMPT_PRESENCE_NAMESPACE, PI_TUI_PROMPT_PRESENCE_NAMESPACE)
+    // M6 PR-C C3: install the SAME per-Agent TUI prompt policy the Direct
+    // branch installs, on every Host Agent (and every later one). The sampler
+    // reads the presence service's current fold through the SAME canonical
+    // preference axes; the latch samples it ONCE per Turn.
+    const presenceService = ctx.reflect.get(PI_TUI_PROMPT_PRESENCE_NAMESPACE) as
+      | PiTuiPromptPresenceHostService
+      | undefined
+    if (presenceService === undefined) {
+      throw new Error('pi-tui-host-runtime: the prompt presence service is not readable')
+    }
+    const promptOwner = new HostAgentPromptOwner(ctx, {
+      ctx,
+      voters: { snapshotVoters: session => presenceService.snapshotVoters(session) },
+      preferences: {
+        // The canonical live preference references: the SAME authority the
+        // Client settings wire writes, read on every assembly.
+        progressUpdates: () => ({ mode: parseProgressUpdates(preferencesRefs(ctx)?.progressUpdates.get()) }),
+        responseStyle: () => ({ style: parseResponseStyle(preferencesRefs(ctx)?.responseStyle.get()) }),
+        gitAttribution: () => ({ mode: parseGitAttributionMode(preferencesRefs(ctx)?.gitAttribution.get()) }),
+      },
+    })
+    promptOwner.installLiveAgents()
+    ctx.effect(() => () => promptOwner.dispose(), 'pi-tui-host-agent-prompt-owner')
     ctx.provide(PI_TUI_HOST_READY_SERVICE, {})
   } catch (error) {
     const cleanupErrors: unknown[] = []

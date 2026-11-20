@@ -104,6 +104,19 @@ export interface PromptAttemptHooks {
   onUnknown(): void
 }
 
+/**
+ * M6 PR-C C3: the outcome of the per-Turn presence ACK prerequisite, awaited
+ * BEFORE this Client admits its own new Turn.
+ */
+export type PromptViewAck =
+  /** The current view is Host-ACKed for the exact committed Session. */
+  | { readonly kind: 'confirmed' }
+  /** A definite Host refusal: the prompt must not be sent. */
+  | { readonly kind: 'refused' }
+  /** No ACK evidence (lost answer, stale transport): the prompt must not be
+   *  sent and is never replayed automatically. */
+  | { readonly kind: 'unconfirmed' }
+
 /** The runner-supplied TUI operations the runtime drives. */
 export interface SubmissionRuntimeSurface {
   /** `SessionRuntime.withWriter`: the scope-bound writer admission. */
@@ -111,6 +124,10 @@ export interface SubmissionRuntimeSurface {
   /** The owner-resolved per-Agent prompt/image admission window (reads the
    *  CURRENT Direct attachment inside the held writer section). */
   withPromptAdmission<T>(scope: LiveSessionScope, line: string, task: () => Promise<T>): Promise<T>
+  /** M6 PR-C C3: the Split-Client presence prerequisite — await the Host ACK
+   *  of the CURRENT session view before this Client admits its own new Turn.
+   *  Absent on the Direct branch (the local fold needs no wire ACK). */
+  ackPromptView?(): Promise<PromptViewAck>
   /** Whether the surface is already disposed (`cleanedUp`). */
   isDisposed(): boolean
   /** The scope authority's synchronous currentness read (the ORIGINAL fence). */
@@ -370,7 +387,33 @@ export function bindSubmissionRuntime(deps: SubmissionRuntimeDeps): SubmissionRu
       // The WHOLE write (admission → capability → prepare → write → consume)
       // runs inside the operation barrier and, for an image-bearing draft,
       // inside the SAME per-Agent serialization window as a `/model` selection.
-      await surface.withWriter(scope, () => surface.withPromptAdmission(scope, text, async () => {
+      await surface.withWriter(scope, async () => {
+        // M6 PR-C C3: the presence prerequisite. This Client must hold a
+        // Host-ACKed view of the exact committed Session before it starts its
+        // own new Turn; a refused/unconfirmed presence refuses the submission
+        // truthfully and NEVER replays it. The stale-restore policy of a
+        // superseded scope stays the ordinary fence's business.
+        if (surface.ackPromptView !== undefined) {
+          const ack = await surface.ackPromptView()
+          if (ack.kind !== 'confirmed') {
+            restoreDraft(text, requestId, submission.staleSubject)
+            surface.settleLocalSubmission(requestId)
+            surface.settleSubmitAck(
+              ack.kind === 'refused' ? 'session view refused' : 'session view unconfirmed',
+              { token: ackToken, terminal: true },
+            )
+            surface.notify(
+              ack.kind === 'refused'
+                ? 'the Host refused this Client\'s session view — the prompt was not sent'
+                : 'this Client\'s session view could not be confirmed — the prompt was not sent (do not retry automatically)',
+              'error',
+            )
+            if (ack.kind === 'refused') attempt?.rejected()
+            else attempt?.unknown()
+            return
+          }
+        }
+        return surface.withPromptAdmission(scope, text, async () => {
         // Install the local echo before the first async admission await when
         // the gesture did not already install it synchronously (a deferred
         // start, or a line the final catalog resolved as an ordinary prompt).
@@ -483,7 +526,8 @@ export function bindSubmissionRuntime(deps: SubmissionRuntimeDeps): SubmissionRu
         // that sibling; `consume` removes only genuinely unowned drafts.
         options?.releaseReservation?.()
         surface.consumeDraftAttachments(text)
-      }))
+        })
+      })
     } catch (error) {
       if (surface.isDisposed()) return
       // PR2: once the Host accepted the prompt, a late execution/transport
@@ -1066,6 +1110,10 @@ export interface SteerSubmissionDeps {
     hasImages: boolean,
     task: () => Promise<T>,
   ) => Promise<T>
+  /** M6 PR-C C3: the presence prerequisite (absent on the Direct branch) —
+   *  awaited before the steer/queue admission so this Client never starts its
+   *  own new Turn on an unACKed session view. */
+  readonly ackPromptView?: () => Promise<PromptViewAck>
   readonly prepareMessage: (text: string, requestId: string) => Promise<PreparedMessage>
   readonly markDispatch: (sessionId: string) => void
   readonly restoreSubmissionDraft: (text: string, ownerRequestId?: string, originSubject?: unknown) => void
@@ -1305,6 +1353,30 @@ function steerSubmission(deps: SteerSubmissionDeps, input: SteerSubmissionInput)
         }
       }
       // The draft message is prepared BEFORE the send: admission is async I/O.
+      // M6 PR-C C3: the presence prerequisite, ahead of the admission window —
+      // a refused/unconfirmed session view refuses the steer/queue delivery
+      // truthfully and NEVER replays it.
+      if (deps.ackPromptView !== undefined) {
+        const ack = await deps.ackPromptView()
+        if (ack.kind !== 'confirmed') {
+          deps.restoreSubmissionDraft(text, steerRequestId, steerSubject)
+          steerRestored = true
+          deps.settleLocalSubmission(steerRequestId)
+          deps.settleSubmitAck(
+            ack.kind === 'refused' ? 'steer session view refused' : 'steer session view unconfirmed',
+            { token: steerAckToken, terminal: true },
+          )
+          deps.notify(
+            ack.kind === 'refused'
+              ? 'the Host refused this Client\'s session view — the message was not sent'
+              : 'this Client\'s session view could not be confirmed — the message was not sent (do not retry automatically)',
+            'error',
+          )
+          if (ack.kind === 'refused') attemptRejected()
+          else attemptUnknown()
+          return
+        }
+      }
       const admission = await deps.withPromptAdmission(
         agentForSteer,
         deps.draftHasImages(text),

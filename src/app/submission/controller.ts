@@ -61,7 +61,7 @@ import type { SubmissionComposerPort } from './composer-port.ts'
 import { PASTE_PENDING_NOTICE } from '../surface/pasted-image-intake.ts'
 import { SessionScopeSupersededError, type LiveSessionScope } from '../session/scope.ts'
 import type { SessionSubject } from '../session/subject.ts'
-import { deliverBusy, executeHostCommandSubmission, pullBackQueue, steer, type PendingQueueRecall, type PromptAttemptHooks, type PromptSubmission, type SteerSubmissionAgent, type SteerSubmissionDeps } from '../submission/runtime.ts'
+import { deliverBusy, executeHostCommandSubmission, pullBackQueue, steer, type PendingQueueRecall, type PromptAttemptHooks, type PromptSubmission, type PromptViewAck, type SteerSubmissionAgent, type SteerSubmissionDeps } from '../submission/runtime.ts'
 
 /** The minimal exact-Agent surface the submission path reads. */
 export interface SubmissionAgentLike {
@@ -332,6 +332,10 @@ export interface SubmissionControllerDeps<ExactAgent extends SubmissionAgentLike
   readonly direct: {
     withPromptAdmission<T>(agent: ExactAgent, hasImages: boolean, task: () => Promise<T>): Promise<T>
   }
+  /** M6 PR-C C3: the Split-Client presence prerequisite (absent on Direct) —
+   *  awaited before the steer/queue admission so this Client never starts its
+   *  own new Turn on an unACKed session view. */
+  readonly ackPromptView?: () => Promise<PromptViewAck>
   /** The ONE exit orchestration. */
   readonly requestExit: () => void
   /** Whether the captured agent has an active plan (the bare /plan toggle). */
@@ -2032,6 +2036,7 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
       ensureSession: () => deps.session.ensureSession(),
       withPromptAdmission: (agent, hasImages, task) =>
         deps.direct.withPromptAdmission(agent as unknown as ExactAgent, hasImages, task),
+      ...(deps.ackPromptView === undefined ? {} : { ackPromptView: deps.ackPromptView }),
       prepareMessage: (value, requestId) => prepareMessage(value, requestId),
       markDispatch: (sessionId) => submitLatencyTracker.mark(sessionId, 'dispatch'),
       restoreSubmissionDraft: (value, owner, subject) =>

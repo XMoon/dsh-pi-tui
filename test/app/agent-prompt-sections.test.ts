@@ -245,7 +245,13 @@ test('the latch freezes the snapshot a real Session boundary publishes, and the 
       yield { type: 'finish', reason: { kind: 'stop' } } as never
     }
   }
-  const host = await createRemoteApplicationHostFixture(life, 'c2-turn-latch', { llmAdapter: new CompletedAdapter() })
+  const host = await createRemoteApplicationHostFixture(life, 'c2-turn-latch', {
+    llmAdapter: new CompletedAdapter(),
+    // This case installs its OWN controlled latch + sections on the real
+    // Agent; the Host Runtime row would install the production policy first
+    // and collide on the section names (that installation has its own suites).
+    withoutHostRuntime: true,
+  })
   try {
     const agent = await host.harness.create(
       SessionId('c2-turn-latch-session'),
@@ -306,7 +312,7 @@ test('the latch freezes the snapshot a real Session boundary publishes, and the 
 test('the Direct compatibility adapter installs the SAME four sections from one display state', async () => {
   const mounted = await mountRegistry()
   try {
-    const displayState = { preset: 'full' as const }
+    const displayState: { preset: 'focus' | 'compact' | 'full' } = { preset: 'full' }
     const disposers = installDirectTuiSystemPromptSections(mounted.ctx as never, {
       displayState,
       progressUpdatesState: { mode: 'milestones' },

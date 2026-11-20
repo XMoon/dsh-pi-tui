@@ -31,6 +31,40 @@ import type { Backend, BackendKind } from '../runtime/backend.ts'
 import type { SessionOwnerAccess, SessionOwnerRetirement } from './session/owner-access.ts'
 import type { PiTuiExtensionService } from '../extensions.ts'
 import type { SessionBrowserAnswerEligibility } from './command/session-browser-presentation.ts'
+import type { DisplayPreset } from '../domain/display/preset.ts'
+
+/**
+ * The `syncView` ACK the structural presence capability returns: the typed
+ * applied/refused answer of the private Remote method. Declared STRUCTURALLY
+ * (the refusal vocabulary is the wire contract's closed set, mirrored here)
+ * so this transport-neutral module never imports `runtime/remote/**`. The
+ * owning contract module is
+ * `runtime/remote/pi-tui-prompt-presence-contract.ts`.
+ */
+export type RemotePromptPresenceAck =
+  | { readonly kind: 'applied'; readonly revision: number }
+  | {
+      readonly kind: 'refused'
+      readonly reason: 'owner-required' | 'session-not-live' | 'stale-revision' | 'scope-unavailable'
+    }
+
+/**
+ * The ONE narrow Client Remote presence capability (M6 PR-C C3): the mounted
+ * `piTuiPromptPresence.syncView` method and nothing else. A Client's own
+ * session-view presence is asserted through it and the authoritative Host ACK
+ * is awaited; the Client never speaks for another Peer.
+ */
+export interface RemotePromptPresenceCapability {
+  syncView(
+    viewedSessionId: string | null,
+    displayPreset: DisplayPreset,
+    revision: number,
+    signal?: AbortSignal,
+  ): Promise<
+    | { readonly ok: true; readonly value: RemotePromptPresenceAck }
+    | { readonly ok: false; readonly error: unknown }
+  >
+}
 
 /**
  * The one selected application runtime core: the common inputs the bootstrap
@@ -331,6 +365,9 @@ export interface RemoteApplicationOverride {
   readonly extensionService: PiTuiExtensionService
   /** Split-Client only: the Client-root interaction delivery owner. */
   readonly interactionDelivery?: SplitClientInteractionDeliveryControl
+  /** Split-Client only: the mounted private session-view presence capability
+   *  (M6 PR-C C3). Direct leaves it absent — the local fold needs no wire ACK. */
+  readonly promptPresence?: RemotePromptPresenceCapability
 }
 
 /**

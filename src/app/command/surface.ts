@@ -380,6 +380,10 @@ export interface CommandSurfaceDeps<Selection extends ModelSelectionValue, Exact
   readonly settings: {
     applyFooterSettings: TuiCommandRunner['applyFooterSettings']
     setDisplayPreset: NonNullable<TuiCommandRunner['setDisplayPreset']>
+    /** M6 PR-C C3: fired after a display-preset mutation whose local state
+     *  update bypassed the shared `settings.setDisplayPreset` seam (the
+     *  Settings workspace commit path applies through the app directly). */
+    onDisplayPresetMutated?(): void
   }
   /** The model-selection owner (the generic selection type). */
   readonly model: ModelSelectionOwner<Selection>
@@ -1688,6 +1692,7 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
        * read and mutate the shared DisplayState through one setter. */
       displayPreset: () => deps.displayState.preset,
       setDisplayPreset: (preset) => deps.settings.setDisplayPreset(preset),
+      onDisplayPresetMutated: () => deps.settings.onDisplayPresetMutated?.(),
       /** @deprecated Focus compatibility facade. */
       focusEnabled: () => isFocusDisplayPreset(deps.displayState.preset),
       setFocusMode: (enabled) => { deps.settings.setDisplayPreset(enabled ? 'focus' : 'full') },
