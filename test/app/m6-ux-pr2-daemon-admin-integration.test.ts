@@ -21,6 +21,7 @@ import {
   type ProfileDaemonAdminVerb,
 } from '../../src/app/remote-process/local-profile-daemon-admin.ts'
 import type { DaemonControlProfile, DaemonControlResult } from '../../src/app/remote-process/local-daemon-control.ts'
+import { inspectInstalledProfileScope, darwinHostProfileSeatDir } from '../../src/app/remote-process/local-scope.ts'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
 
 const PROFILE_A: DaemonControlProfile = {
@@ -64,11 +65,13 @@ test('the port forwards each authorized verb to the bound run seam with the SAME
 
 test('the PRODUCTION run seam passes the bound Profile into the real control plane', async t => {
   // Source→sink proof: the SAME `runDaemonControl` the CLI uses is reached by
-  // the production seam with the EXACT bound Profile. Two different profiles
-  // derive two different scope identities inside the control plane, so a wrong
-  // binding cannot pass: each call resolves its own profile-scoped seat and
-  // the two never coincide. The result is the control plane's own stable code.
+  // the production seam, and the scope identity it consumes comes from the
+  // bound Profile. Two distinct bound profiles produce two distinct scope
+  // identities — if the seam bound the WRONG profile the two would coincide
+  // and this test fails. `readRecord` observes the REAL scope the control
+  // plane derived, not the port's own declaration.
   const life = testLifecycle(t)
+  const accountHome = life.tempDir('m62c-acct-')
   const mkProfile = (name: string): DaemonControlProfile => {
     const root = life.tempDir(`m62c-sink-${name}-`)
     const dir = join(root, 'profiles', name)
@@ -76,6 +79,8 @@ test('the PRODUCTION run seam passes the bound Profile into the real control pla
     mkdirSync(join(root, 'anchor'), { recursive: true })
     writeFileSync(join(root, 'anchor', 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh', version: '0.2.2-rc.5' }))
     writeFileSync(join(root, 'package.json'), JSON.stringify({ name: '@xmoon76/dsh-pi-tui', version: '0.5.7' }))
+    mkdirSync(join(root, 'dist'), { recursive: true })
+    writeFileSync(join(root, 'dist', 'local-client.mjs'), 'export {}\n')
     return {
       name,
       dir,
@@ -85,22 +90,36 @@ test('the PRODUCTION run seam passes the bound Profile into the real control pla
       dshVersion: '0.2.2-rc.5',
     }
   }
+  const observed: Array<{ name: string; profileRealpath: string; scopeId: string }> = []
+  const run = (profile: DaemonControlProfile) => profileDaemonAdminRun(profile, {
+    platform: 'darwin',
+    darwinAccountHome: accountHome,
+    readRecord: (scope) => {
+      observed.push({ name: profile.name, profileRealpath: scope.profileRealpath, scopeId: scope.scopeId })
+      return undefined
+    },
+    inspectProcess: () => 'dead',
+  })
   const profileA = mkProfile('profile-a')
   const profileB = mkProfile('profile-b')
-  const runA = profileDaemonAdminRun(profileA, { platform: 'linux', readRecord: () => undefined, inspectProcess: () => 'dead' })
-  const runB = profileDaemonAdminRun(profileB, { platform: 'linux', readRecord: () => undefined, inspectProcess: () => 'dead' })
-  const resultA = await runA('stop')
-  const resultB = await runB('stop')
-  // The real control plane answered BOTH calls with its own stable taxonomy
-  // (a seat/scope refusal is still the control plane consuming the bound
-  // Profile — the point is that the production sink ran, per profile).
-  assert.equal(typeof resultA.code, 'number', 'profile A reached the real control plane')
-  assert.equal(typeof resultB.code, 'number', 'profile B reached the real control plane')
-  // The bound identity is the port's own declaration, kept per-port.
-  const adminA = createProfileDaemonAdmin(profileA, { run: () => Promise.resolve(recorded(0)) })
-  const adminB = createProfileDaemonAdmin(profileB, { run: () => Promise.resolve(recorded(0)) })
-  assert.equal(adminA.profile, 'profile-a')
-  assert.equal(adminB.profile, 'profile-b')
+  // Pre-create each profile's admin seat directory so the real control plane
+  // binds its seat and reaches the profile-scoped record read.
+  for (const profile of [profileA, profileB]) {
+    const scope = inspectInstalledProfileScope({
+      dshHome: profile.home,
+      profileDir: profile.dir,
+      packageRoot: profile.packageRoot,
+      dshVersion: profile.dshVersion,
+    })
+    mkdirSync(darwinHostProfileSeatDir(scope.scopeId, accountHome), { recursive: true })
+  }
+  await run(profileA)('stop')
+  await run(profileB)('stop')
+  assert.equal(observed.length, 2, `the real control plane consumed both bound profiles (got ${JSON.stringify(observed)})`)
+  assert.notEqual(observed[0]!.scopeId, observed[1]!.scopeId,
+    'each bound Profile derives its own scope identity — a wrong binding cannot pass')
+  assert.notEqual(observed[0]!.profileRealpath, observed[1]!.profileRealpath,
+    'the control plane read each bound profile directory — the actual sink identity')
 })
 
 test('the port performs NO manager IO at construction and while idle', async () => {

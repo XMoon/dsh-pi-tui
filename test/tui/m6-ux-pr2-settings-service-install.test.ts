@@ -50,6 +50,7 @@ const SNAPSHOT: SettingsWorkspaceSnapshot = {
 } as SettingsWorkspaceSnapshot
 
 function setup(options: {
+  readonly rows?: number
   readonly installable?: boolean
   readonly onBackendServiceInstall?: (settle: (result: { ok: boolean; detail?: string }) => void) => void
   readonly snapshot?: () => SettingsWorkspaceSnapshot
@@ -64,7 +65,7 @@ function setup(options: {
   const settlements: ((outcome: SettingsWorkspaceCommitOutcome) => void)[] = []
   const intents: SettingsWorkspacePanelIntents = {
     aboutVersionFacts: { tui: '0.5.7', dsh: '0.2.2-rc.5' },
-    rows: () => 40,
+    rows: () => options.rows ?? 40,
     columns: () => 120,
     requestRender: () => { renders += 1 },
     notice: () => undefined,
@@ -185,6 +186,23 @@ test('a failed install reports the truthful refusal and keeps the Daemon save', 
   const text = renderText(panel)
   assert.match(text, /Install could not be verified/u)
   assert.doesNotMatch(text, /Service installed/u, 'a refusal never claims a success')
+})
+
+test('PR2: a short viewport that hides the risk copy refuses the install (RFL-002)', () => {
+  // A tiny detail viewport cannot host the WHOLE follow-up block (risk copy +
+  // both actions); the grant stays false, so Tab/Enter can never install.
+  let installCalls = 0
+  const { panel, settlements } = setup({
+    rows: 8,
+    onBackendServiceInstall: () => { installCalls += 1 },
+  })
+  press(panel, '\r') // rows → detail (choice opens on the Backend row)
+  press(panel, '\x1b[B') // move candidate to Daemon
+  press(panel, '\r') // Confirm
+  settlements[0]!({ outcome: 'verified', followUp: { kind: 'daemon-service-install', installable: true } })
+  press(panel, '\t')
+  press(panel, '\r')
+  assert.equal(installCalls, 0, 'the install is refused while the risk copy is not fully visible')
 })
 
 test('an installable=false follow-up paints the truthful platform line and no actable install', () => {

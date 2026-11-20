@@ -1232,6 +1232,10 @@ export class SettingsWorkspacePanel implements Component {
   private serviceInstallResult: { readonly ok: boolean; readonly detail: string } | undefined
   /** Whether THIS frame really painted the follow-up's actable actions. */
   private paintedServiceInstallActions = false
+  /** The content-index range of the follow-up block of the LAST content
+   *  projection: the grant requires the WHOLE block on screen, not just its
+   *  heading. Reset before each `detailContent` call. */
+  private serviceInstallBlock: { readonly start: number; readonly end: number } | undefined
   /** The lazily built embedded Plugin Manager page (ONE instance per open,
    *  kept across Categories/content focus changes until the category really
    *  changes or this workspace is disposed). */
@@ -3150,16 +3154,19 @@ export class SettingsWorkspacePanel implements Component {
     const lines: string[] = []
     for (let i = 0; i < scrollViewport; i += 1) lines.push(content[offset + i] ?? '')
     // M6 UX PR2: the follow-up's actable rows earn their painted grant ONLY
-    // when THIS frame's granted viewport really shows BOTH the risk copy AND
-    // BOTH candidate rows — a clipped or scrolled-away block never lets
-    // Tab/Enter/pointer commit an install. The check runs on the FINAL painted
-    // rows (after the width fit), never the pre-clip content.
+    // when the WHOLE follow-up block (every risk line AND both complete action
+    // rows) really lands inside the granted viewport — a clipped or
+    // scrolled-away risk copy never lets Tab/Enter/pointer commit an install.
     let serviceInstallActionsVisible = false
-    if (this.serviceInstall !== undefined && this.serviceInstall.installable && this.serviceInstall.phase === 'asking') {
-      const stripped = lines.map(line => line.replace(/\x1b\[[0-9;]*m/gu, ''))
-      serviceInstallActionsVisible = stripped.some(line => /Optional OS supervision/u.test(line))
-        && stripped.some(line => /\bNot now\b/u.test(line))
-        && stripped.some(line => /\bInstall service\b/u.test(line))
+    const block = this.serviceInstallBlock
+    if (this.serviceInstall !== undefined && this.serviceInstall.installable
+      && this.serviceInstall.phase === 'asking' && block !== undefined) {
+      const fullyVisible = block.start >= offset && block.end <= offset + scrollViewport
+      if (fullyVisible) {
+        const shown = lines.map(line => line.replace(/\x1b\[[0-9;]*m/gu, ''))
+        serviceInstallActionsVisible = shown.some(line => /\bNot now\b/u.test(line))
+          && shown.some(line => /\bInstall service\b/u.test(line))
+      }
     }
     const painted = pinned === 1 ? this.layoutButtons(width, buttons) : { text: '', painted: [] }
     if (pinned === 1) {
@@ -3497,6 +3504,8 @@ export class SettingsWorkspacePanel implements Component {
     const labelWidth = width >= 26 ? 12 : 8
     const bodyWidth = Math.max(1, width - labelWidth)
     const lines: string[] = []
+    // The follow-up block range is recomputed per projection (it may be absent).
+    this.serviceInstallBlock = undefined
     const fullFacts: string[] = []
     if (includeTitle) lines.push(color.textStrong(sanitizedPhysicalLine(row.label)))
     // Roles 3/4/5: labels are textDim, the PRIMARY field's value is `text` and
@@ -3596,11 +3605,20 @@ export class SettingsWorkspacePanel implements Component {
     // its asking phase. Installing locks the seat (no second submission), and
     // a settled round keeps its one result line until it is superseded.
     if (this.serviceInstall !== undefined && row.id === 'startup-backend') {
+      // The follow-up's risk copy is wrapped to the pane width (never a
+      // truncated sentence), and the whole block's content range is recorded
+      // so `detailLines` can prove every risk line AND both actions are on
+      // screen before any install may be confirmed.
+      const blockStart = lines.length
+      const wrapLine = (text: string): void => {
+        const parts = wrapTextWithAnsi(escapedPhysicalLine(text), width)
+        for (const part of parts.length === 0 ? [''] : parts) lines.push(part)
+      }
       lines.push('')
       lines.push(color.textStrong('Optional OS supervision'))
-      lines.push(color.textDim('Daemon works without installing a service.'))
-      lines.push(color.textDim("Install creates this Profile's user service only; it does not start,"))
-      lines.push(color.textDim('enable, restart, stop or migrate any running Host.'))
+      wrapLine('Daemon works without installing a service.')
+      wrapLine("Install creates this Profile's user service only; it does not start,")
+      wrapLine('enable, restart, stop or migrate any running Host.')
       if (this.serviceInstall.phase === 'installing') {
         lines.push(fit(color.textDim('Status'), labelWidth) + color.textDim('Installing service…'))
       } else if (this.serviceInstallResult !== undefined) {
@@ -3625,11 +3643,12 @@ export class SettingsWorkspacePanel implements Component {
             : `  ${color.text(label)}`
           lines.push(fit(row, width))
         }
-        // The painted grant is NOT set here: this is only the content
-        // projection, before the viewport clip. The grant is set by
-        // `detailLines` only when the risk copy and both rows really land on
-        // screen WHOLE.
       }
+      this.serviceInstallBlock = { start: blockStart, end: lines.length }
+      // The painted grant is NOT set here: this is only the content
+      // projection, before the viewport clip. The grant is set by
+      // `detailLines` only when the WHOLE block (risk copy + both rows) really
+      // lands on screen.
     }
     return lines
   }
