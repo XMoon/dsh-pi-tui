@@ -107,6 +107,14 @@ export interface InstalledLocalClientTransport extends LocalClientTransport {
   awaitReady(options?: { readonly signal?: AbortSignal }): Promise<LocalClientTransport>
 }
 
+/** Whether one wire frame carries the settings-document invalidation event. */
+function isSettingsDocumentUpdatedFrame(event: { readonly data?: unknown }): boolean {
+  const data = event.data
+  if (typeof data === 'string') return data.includes('settings/document-updated')
+  if (data instanceof Uint8Array) return Buffer.from(data).toString('utf8').includes('settings/document-updated')
+  return false
+}
+
 export interface StartLocalTransportOptions {
   /** Installed `@deepseek-ai/dsh/package.json` anchor. */
   readonly dshAnchor: string
@@ -342,6 +350,7 @@ function lazyWebSocket(
     notify('close', {})
     release()
   }
+  const suppressSettingsEvent = process.env.SPLIT_PROCESS_CLIENT_SUPPRESS_SETTINGS_EVENT === '1'
   const start = async (): Promise<void> => {
     try {
       const socket = await open()
@@ -357,7 +366,14 @@ function lazyWebSocket(
       adopt(socket)
       socket.addEventListener('open', event => { notify('open', event) }, { once: true })
       socket.addEventListener('error', event => { notify('error', event) })
-      socket.addEventListener('message', event => { notify('message', event) })
+      socket.addEventListener('message', event => {
+        // Qualification-only wire boundary: hold back the settings
+        // invalidation event for a deliberately stale Client. The Mirror's own
+        // invalidation rule stays unconditional; this only decides whether the
+        // frame ever reaches it. Production never sets the flag.
+        if (suppressSettingsEvent && isSettingsDocumentUpdatedFrame(event as { readonly data?: unknown })) return
+        notify('message', event)
+      })
       socket.addEventListener('close', event => { closed = true; notify('close', event); release() }, { once: true })
     } catch (error) {
       fail(error instanceof Error ? error : new Error(String(error)))

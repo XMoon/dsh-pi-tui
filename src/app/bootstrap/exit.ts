@@ -62,7 +62,10 @@ export function formatDaemonDetachHint(facts: {
       : facts.hostStop?.confirmed === false
         // An unconfirmed stop (refusal/timeout/unknown) is NOT a proven
         // "not stopped": say exactly that, and never the ordinary detach line.
-        ? [`Daemon Host stop was not confirmed${facts.hostStop.detail === undefined ? '' : `: ${facts.hostStop.detail}`}`]
+        ? [
+            `Daemon Host stop was not confirmed${facts.hostStop.detail === undefined ? '' : `: ${facts.hostStop.detail}`}`,
+            'The daemon Host state is unconfirmed; check it with `daemon status` before resuming.',
+          ]
         : ['The daemon Host was not stopped by this action.']),
     ...(facts.workStopped ? ['Current work: stopped.'] : []),
   ]
@@ -82,32 +85,26 @@ export function formatDaemonDetachHint(facts: {
 }
 
 /**
- * Whether a daemon resume hint must pin `DSH_PI_TUI_BACKEND=daemon`.
+ * Whether the daemon resume hint must pin `DSH_PI_TUI_BACKEND=daemon`.
  *
- * The question is what the NEXT launch will actually pick, NOT why THIS Client
- * started. A verified `daemon → direct` save (this PR's core path) changes the
- * persisted Profile while the old daemon Host keeps running, so the frozen
- * launch envelope can no longer answer it: a plain `dsh --profile …` would
- * cold-launch Direct and never reconnect to the Host that Leave kept alive.
- * Only a CURRENT authoritative `daemon` may be resumed by the plain command;
- * `direct` or an unreadable/unknown backend must carry the explicit override.
- * @param currentBackend - the authoritative persisted Backend at exit time.
- * @param hostConfirmedStopped - whether THIS exit stopped the Profile Host. A
- *   confirmed stop removes the Host a daemon pin could reconnect to, so the
- *   next launch must follow the persisted backend instead of being forced back
- *   to daemon.
+ * The hint answers "how do I get back to the daemon Host this Client left", so
+ * it must NOT be derived from the synced config mirror: that is last-known and
+ * may be stale while another Client's write notification is still in flight.
+ *
+ * - ordinary detach / Leave (no Stop verdict): pin daemon explicitly — the old
+ *   Host is the one this Client was attached to;
+ * - confirmed stop: the Host is proven gone, so the next launch follows the
+ *   persisted Profile and is never forced back to daemon;
+ * - unconfirmed stop: the Host state is UNKNOWN, so the hint must not pretend
+ *   the old Host is resumable; it follows the Profile and points at the real
+ *   `daemon status` check.
+ * @param hostStop - the ONE authoritative Host-stop outcome of this exit.
  * @returns true when the resume command needs `DSH_PI_TUI_BACKEND=daemon`.
  */
 export function daemonResumeBackendOverride(
-  currentBackend: 'direct' | 'daemon' | undefined,
-  hostConfirmedStopped = false,
+  hostStop?: { readonly confirmed: boolean },
 ): boolean {
-  // Only a Host that is still running can be reconnected to; after a confirmed
-  // stop the hint must not contradict the backend the user just chose.
-  if (hostConfirmedStopped) return false
-  // Unknown/unready is never proof that the Profile still selects daemon: a
-  // plain command could silently cold-launch Direct, so fail safe and pin.
-  return currentBackend !== 'daemon'
+  return hostStop === undefined
 }
 
 /** POSIX-safe single-argument quoting for a copy-paste shell hint. */
@@ -280,8 +277,8 @@ export function createExitController(deps: ExitControllerDeps): {
         hostStop = {
           code: 4,
           detail: releaseVerdict === 'failed'
-            ? 'the terminal was not restored, so the Profile Host was left running'
-            : 'the terminal restore was not proven, so the Profile Host was left running',
+            ? 'the terminal was not restored, so this Client did not run the Host stop'
+            : 'the terminal restore was not proven, so this Client did not run the Host stop',
         }
         safeDiag(deps.diag, 'error', 'daemon host stop refused: the terminal restore was not proven', {
           outcome: releaseVerdict ?? 'not-observed',

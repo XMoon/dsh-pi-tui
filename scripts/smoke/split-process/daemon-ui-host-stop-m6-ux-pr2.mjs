@@ -304,9 +304,10 @@ export async function runDaemonUiHostStop(context) {
  * Path 3 (A14) on the REAL wire: a second Client's real Settings write is only
  * observable through the FIRST Client's fresh authoritative read.
  *
- * The first Client's committed config mirror is deliberately held stale (a
- * qualification-only deferred invalidation) so `read()` still reports `direct`
- * while the Host already persists `daemon`. The exit intent therefore opens the
+ * The first Client's committed config mirror is deliberately held stale: a
+ * qualification-only wire filter holds back the settings invalidation FRAME at
+ * this Client's transport, so `read()` still reports `direct` and `readiness()`
+ * stays `ready` while the Host already persists `daemon`. The exit intent therefore opens the
  * whole-Host stop verification with a stale-but-ready mirror, and the REAL
  * `readFresh()` must reject the transition — a plain `read()` would have
  * authorized the Stop. The old Host must keep its exact kernel identity (ZERO
@@ -320,9 +321,10 @@ export async function runDaemonUiHostStopPath3(context) {
   try {
     const { host } = await startC1Host('daemon-control.m6-ux-pr2-ui-host-stop-path3', 'PR3 Host')
     const before = await hostIdentityFacts(host)
-    // A: the Client that will attempt the Stop. Its invalidation is deferred, so
-    // its committed mirror keeps the last value it read.
-    const { client: clientA } = await startC1Client('PR3 A', { SPLIT_PROCESS_CLIENT_DEFER_SETTINGS_INVALIDATION: '1' })
+    // A: the Client that will attempt the Stop. Its transport suppresses the
+    // settings invalidation frame, so its committed mirror keeps the last value
+    // it read.
+    const { client: clientA } = await startC1Client('PR3 A', { SPLIT_PROCESS_CLIENT_SUPPRESS_SETTINGS_EVENT: '1' })
     // A arms the transient daemon→direct transition with two REAL verified saves.
     await saveBackend(clientA, 'Daemon', 'PR3 A')
     await closeSettings(clientA, 'PR3 A')

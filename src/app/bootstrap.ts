@@ -265,10 +265,6 @@ function canonicalPreferenceRefs(ctx: Context): TuiConfigRefs {
  * The control plane already sanitizes its stderr (no argv, cookie, private path
  * or secret), so its first line is the stable reason the terminal may show.
  */
-function adminStopRefusalDetail(result: { readonly stderr: string }): string {
-  const line = result.stderr.split('\n').map(part => part.trim()).find(part => part !== '')
-  return line === undefined || line === '' ? 'the stop could not be confirmed' : line
-}
 
 export function applyRunnerWithRuntime(
   ctx: Context,
@@ -3448,14 +3444,12 @@ export function applyRunnerWithRuntime(
             profile,
             sessionId,
             workStopped: exitWorkStopped,
-            // RFL-016/019: the pin exists to RECONNECT to a Host that is still
-            // running. A confirmed Stop means there is nothing to reconnect to,
-            // so the next launch follows the persisted backend; Leave / ordinary
-            // detach / a refused Stop still pin when the Profile moved.
-            backendOverride: daemonResumeBackendOverride(
-              backend.config.backendStartupPreference.read()?.backend,
-              exitHostStop?.confirmed === true,
-            ),
+            // RFL-016C: the pin answers "how do I get back to the Host this
+            // Client left" and must NOT trust the last-known config mirror.
+            // Leave/ordinary detach pin; a confirmed stop never does; an
+            // unconfirmed stop is UNKNOWN and follows the Profile with a
+            // `daemon status` pointer instead.
+            backendOverride: daemonResumeBackendOverride(exitHostStop),
 
             ...(exitHostStop === undefined ? {} : { hostStop: exitHostStop }),
           })
