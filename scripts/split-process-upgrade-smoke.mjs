@@ -257,6 +257,7 @@ function usage() {
     '       pnpm smoke:split-upgrade -- --old <old.tgz> --new <new.tgz> --case client-reload.production-command',
     '       pnpm smoke:split-upgrade -- --old <old.tgz> --new <new.tgz> --case client-reload.target-source-isolation',
     '       pnpm smoke:split-upgrade -- --old <old.tgz> --new <new.tgz> --case managed-daemon.cross-build-upgrade-rollback',
+    '       pnpm smoke:split-upgrade -- --old <old.tgz> --new <new.tgz> --case launchd-managed-daemon.cross-build-upgrade',
   ].join('\n')
 }
 
@@ -273,17 +274,18 @@ function printSelectableUpgradeCases() {
  *
  * A historical default-lane case reports no explicit status; its successful
  * execution stays the existing `SPLIT_UPGRADE_SELECTED_PASS` expression. An
- * opt-in native case must report `{status:'PASS', scope:'REAL_SYSTEMD_USER_L6'}`
- * to earn that same line; an honest `NOT_VERIFIED` (no real systemd user
- * manager, no isolated account) prints its own line and makes the lane nonzero,
- * so a skipped native qualification can never be mistaken for a PASS.
+ * opt-in native case must report `{status:'PASS', scope:<registry nativeScope>}`
+ * to earn that same line; an honest `NOT_VERIFIED` (no real manager/isolated
+ * account) prints its own line and makes the lane nonzero, so a skipped native
+ * qualification can never be mistaken for a PASS.
  */
 export function projectSelectedUpgradeVerdicts(verdicts) {
   const lines = []
   let failed = false
   for (const verdict of verdicts) {
     const passed = verdict.status === 'PASS'
-      && (verdict.defaultLane !== false || verdict.scope === 'REAL_SYSTEMD_USER_L6')
+      && (verdict.defaultLane !== false
+        || (typeof verdict.nativeScope === 'string' && verdict.scope === verdict.nativeScope))
     if (passed) {
       lines.push(selectedUpgradePassLine(verdict.id))
       continue
@@ -466,6 +468,7 @@ async function runScene(options, oldArtifact, newArtifact, targetDshVersion) {
       verdicts.push({
         id: entry.id,
         defaultLane: entry.defaultLane !== false,
+        ...(entry.nativeScope === undefined ? {} : { nativeScope: entry.nativeScope }),
         status: typeof status === 'string' ? status : 'PASS',
         ...(scope === undefined ? {} : { scope }),
         ...(reason === undefined ? {} : { reason }),
@@ -475,6 +478,7 @@ async function runScene(options, oldArtifact, newArtifact, targetDshVersion) {
       id: verdict.id,
       status: verdict.status,
       ...(verdict.scope === undefined ? {} : { scope: verdict.scope }),
+      ...(verdict.nativeScope === undefined ? {} : { nativeScope: verdict.nativeScope }),
       ...(verdict.reason === undefined ? {} : { reason: verdict.reason }),
     }))
     for (const path of [oldArtifact.path, newArtifact.path]) {

@@ -14,11 +14,11 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, realpathSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import test, { type TestContext } from 'node:test'
 import { testLifecycle, type TestLifecycle } from '../support/temp-lifecycle.ts'
 import {
-  assertLaunchdFileDefinition,
+  assertLaunchdProfileAnchors,
   buildLaunchdLabel,
   inspectLaunchdService,
   inspectOwnedLaunchdUnit,
@@ -27,7 +27,9 @@ import {
   launchdPlistName,
   launchdServiceMatches,
   parseLaunchctlPrint,
+  prepareOwnedLaunchdForCurrentInstall,
   renderLaunchdPlist,
+  resolveNamedLaunchdEntry,
   startLaunchdService,
   stopLaunchdService,
   uninstallLaunchdUnit,
@@ -40,6 +42,7 @@ import {
 } from '../../src/app/remote-process/local-host-launchd.ts'
 import { collectUnitFacts, profileIdentityDigest, startManagedHostCandidate } from '../../src/app/remote-process/local-host-manager.ts'
 import {
+  computeBuildId,
   inspectInstalledProfileScope,
   LocalScopeError,
   scopeFromInstalledProfile,
@@ -80,6 +83,12 @@ function fixture(t: TestContext): Fixture {
   mkdirSync(anchorDir, { recursive: true, mode: 0o700 })
   writeFileSync(join(packageRoot, 'package.json'), `${JSON.stringify({ name: '@xmoon76/dsh-pi-tui', version: '0.5.7' })}\n`)
   writeFileSync(join(packageRoot, 'dist', 'local-host.mjs'), 'process.exit(0)\n')
+  // The official profile layout: the plugin is reachable through
+  // `<profileDir>/node_modules/@xmoon76/dsh-pi-tui` (a real directory or a
+  // package-store symlink). The stable named entry used by FRESH plists lives
+  // at that lexical path.
+  mkdirSync(join(profileDir, 'node_modules', '@xmoon76'), { recursive: true, mode: 0o700 })
+  symlinkSync(packageRoot, join(profileDir, 'node_modules', '@xmoon76', 'dsh-pi-tui'))
   const anchor = join(anchorDir, 'package.json')
   writeFileSync(anchor, `${JSON.stringify({ name: '@deepseek-ai/dsh', version: DSH_VERSION })}\n`, { mode: 0o644 })
   const scope = inspectInstalledProfileScope({ dshHome, profileDir, packageRoot, dshVersion: DSH_VERSION })
@@ -96,6 +105,20 @@ function fixture(t: TestContext): Fixture {
     profileIdentity: profileIdentityDigest(scope.profileRealpath),
   }
   return { lifecycle, root, accountHome, dshHome, profileDir, packageRoot, anchor, scope, facts }
+}
+
+/** The stable named entry the official profile layout exposes. */
+function namedEntryOf(fx: Fixture): string {
+  return join(fx.profileDir, 'node_modules', '@xmoon76', 'dsh-pi-tui', 'dist', 'local-host.mjs')
+}
+
+/** A still-readable historical product package whose computed build identity proves provenance. */
+function writeOldProductPackage(fx: Fixture): { readonly root: string; readonly buildId: string } {
+  const root = join(fx.profileDir, 'node_modules', '.pnpm', '@xmoon76+dsh-pi-tui@0.5.6_probe', 'node_modules', '@xmoon76', 'dsh-pi-tui')
+  mkdirSync(join(root, 'dist'), { recursive: true, mode: 0o700 })
+  writeFileSync(join(root, 'package.json'), `${JSON.stringify({ name: '@xmoon76/dsh-pi-tui', version: '0.5.6' })}\n`)
+  writeFileSync(join(root, 'dist', 'local-host.mjs'), 'process.exit(1)\n')
+  return { root, buildId: computeBuildId(root, DSH_VERSION) }
 }
 
 function depsOf(fx: Fixture, overrides: Partial<LaunchdAdapterDeps> = {}): LaunchdAdapterDeps {
@@ -306,31 +329,66 @@ test('launchctl print parsing fails closed when a required block is missing or a
   assert.equal(parseLaunchctlPrint(nonAgent), undefined)
 })
 
-test('service matching requires the exact file, program, argv, cwd, sinks and anchors', { skip: NATIVE_PLIST_DECODER_SKIP }, t => {
+test('launchctl print parsing accepts an absent user-owned cwd/log sink and extra environment', t => {
+  const fx = fixture(t)
+  const label = buildLaunchdLabel(fx.facts.scopeId)
+  const valid = printOutput(fakeJobOf(fx), label)
+  const withoutSinks = valid
+    .replace(/\tworking directory = .*\n\n/u, '')
+    .replace(/\tstdout path = .*\n/u, '')
+    .replace(/\tstderr path = .*\n/u, '')
+  const parsed = parseLaunchctlPrint(withoutSinks)
+  assert.notEqual(parsed, undefined)
+  assert.equal(parsed?.workingDirectory, undefined)
+  assert.equal(parsed?.stdoutPath, undefined)
+  assert.equal(parsed?.stderrPath, undefined)
+  assert.equal(parsed?.arguments.length, 2)
+
+  const extraEnvironment = valid.replace('\t\tSPLIT_PROCESS_PROFILE => pi-tui\n', '\t\tSPLIT_PROCESS_PROFILE => pi-tui\n\t\tMY_FLAG => 1\n')
+  const withExtra = parseLaunchctlPrint(extraEnvironment)
+  assert.notEqual(withExtra, undefined)
+  assert.equal(withExtra?.environment.MY_FLAG, '1')
+
+  const nonDefaultCwd = valid.replace(/\tworking directory = .*/u, '\tworking directory = /Users/someone/elsewhere')
+  assert.equal(parseLaunchctlPrint(nonDefaultCwd)?.workingDirectory, '/Users/someone/elsewhere')
+  // A relative reported sink is ambiguous and fails closed.
+  assert.equal(parseLaunchctlPrint(valid.replace(/\tstdout path = .*/u, '\tstdout path = relative.log')), undefined)
+})
+
+test('service matching requires the same loaded source and core profile anchors, never the default template', { skip: NATIVE_PLIST_DECODER_SKIP }, t => {
   const fx = fixture(t)
   const deps = depsOf(fx)
   assert.equal(inspectOwnedLaunchdUnit(fx.facts, deps).kind, 'none')
   mkdirSync(join(fx.accountHome, 'Library', 'LaunchAgents'), { recursive: true, mode: 0o700 })
-  writeFileSync(plistPathOf(fx), renderLaunchdPlist(fx.facts), { mode: 0o600 })
+  writeFileSync(plistPathOf(fx), renderLaunchdPlist({ ...fx.facts, hostEntryPath: namedEntryOf(fx) }), { mode: 0o600 })
   const unit = ownedUnitOf(fx, deps)
   const service = parseLaunchctlPrint(printOutput(fakeJobOf(fx), unit.label)) as LaunchdLoadedService
   assert.equal(launchdServiceMatches(fx.facts, unit, service), true)
+  // A legal user launchd configuration: custom argv/cwd/log sinks, extra ENV,
+  // RunAtLoad/KeepAlive are not identity.
+  assert.equal(launchdServiceMatches(fx.facts, unit, {
+    ...service,
+    program: '/opt/wrapper/bin/run-host',
+    arguments: ['/opt/wrapper/bin/run-host', '--custom', 'flag'],
+    workingDirectory: '/Users/someone/elsewhere',
+    stdoutPath: '/Users/someone/elsewhere/out.log',
+    stderrPath: '/Users/someone/elsewhere/err.log',
+    environment: { ...service.environment, NODE_OPTIONS: '--max-old-space-size=4096', MY_FLAG: '1' },
+  }), true, 'user-owned launchd configuration must not be treated as a foreign job')
+  assert.equal(launchdServiceMatches(fx.facts, unit, {
+    ...service,
+    environment: { ...service.environment, OSLogRateLimit: '64', XPC_SERVICE_NAME: unit.label, EXTRA: 'x' },
+  }), true, 'launchd-injected and extra environment keys do not break the anchor match')
   const mismatches: Array<[string, LaunchdLoadedService]> = [
     ['source path', { ...service, path: `${service.path}.other` }],
-    ['program', { ...service, program: `${service.program}-other` }],
-    ['arguments', { ...service, arguments: [service.program] }],
-    ['working directory', { ...service, workingDirectory: `${service.workingDirectory}-other` }],
-    ['stdout path', { ...service, stdoutPath: `${service.stdoutPath}-other` }],
-    ['environment', { ...service, environment: { ...service.environment, SPLIT_PROCESS_PROFILE: 'other' } }],
-    ['extra job environment', { ...service, environment: { ...service.environment, NODE_OPTIONS: '--require /tmp/evil.mjs' } }],
+    ['DSH_HOME anchor', { ...service, environment: { ...service.environment, DSH_HOME: '/other' } }],
+    ['DSH anchor', { ...service, environment: { ...service.environment, SPLIT_PROCESS_DSH_ANCHOR: '/other' } }],
+    ['profile anchor', { ...service, environment: { ...service.environment, SPLIT_PROCESS_PROFILE: 'other' } }],
   ]
   for (const [label, value] of mismatches) {
     assert.equal(launchdServiceMatches(fx.facts, unit, value), false, `${label} mismatch must not match`)
   }
-  assert.equal(launchdServiceMatches(fx.facts, unit, {
-    ...service,
-    environment: { ...service.environment, OSLogRateLimit: '64', XPC_SERVICE_NAME: unit.label },
-  }), true, 'launchd-injected environment keys do not break the exact user-anchor match')
+  assert.equal(launchdServiceMatches(fx.facts, unit, { ...service, type: 'LaunchDaemon' }), false)
 })
 
 // ── file identity and atomic installation ──────────────────────────────────
@@ -342,14 +400,15 @@ test('inspect with no LaunchAgents chain is a side-effect-free none', t => {
   assert.equal(existsSync(join(fx.accountHome, 'Library')), false, 'inspection must not create directories')
 })
 
-test('install writes one 0600 plist without bootstrap, kickstart or bootout', { skip: NATIVE_PLIST_DECODER_SKIP }, async t => {
+test('install writes one 0600 plist with the stable named entry and no bootstrap, kickstart or bootout', { skip: NATIVE_PLIST_DECODER_SKIP }, async t => {
   const fx = fixture(t)
   const launchctl = fakeLaunchctl(fx, { loaded: false })
   const result = await installLaunchdUnit(fx.facts, depsOf(fx, { launchctl: launchctl.run }))
   assert.equal(result.created, true)
   assert.equal(result.filePath, plistPathOf(fx))
   assert.equal(statSync(result.filePath).mode & 0o777, 0o600)
-  assert.equal(readFileSync(result.filePath, 'utf8'), renderLaunchdPlist(fx.facts))
+  assert.equal(readFileSync(result.filePath, 'utf8'), renderLaunchdPlist({ ...fx.facts, hostEntryPath: namedEntryOf(fx) }))
+  assert.equal(resolveNamedLaunchdEntry(fx.facts), namedEntryOf(fx))
   assert.deepEqual(launchctl.calls, [
     ['print', `gui/${String(UID)}`],
     ['print', `gui/${String(UID)}/${buildLaunchdLabel(fx.facts.scopeId)}`],
@@ -369,7 +428,7 @@ test('install is idempotent and never rewrites a same-identity user plist', { sk
   assert.equal(readFileSync(first.filePath, 'utf8'), edited, 'an existing same-owner plist is never rewritten')
 })
 
-test('install refuses a foreign file, a symlink and another installed build without overwriting', { skip: NATIVE_PLIST_DECODER_SKIP }, async t => {
+test('install refuses a foreign file and a symlink without overwriting', { skip: NATIVE_PLIST_DECODER_SKIP }, async t => {
   const fx = fixture(t)
   const dir = join(fx.accountHome, 'Library', 'LaunchAgents')
   mkdirSync(dir, { recursive: true, mode: 0o700 })
@@ -389,11 +448,23 @@ test('install refuses a foreign file, a symlink and another installed build with
   await assert.rejects(installLaunchdUnit(fx.facts, deps), (error: unknown) => error instanceof LocalScopeError && error.code === 'HOST_MANAGER_UNIT_CONFLICT')
   assert.equal(existsSync(path), true, 'a symlink at the profile path is preserved')
   unlinkSync(path)
+})
 
+test('install reuses an owned older-build plist byte-for-byte without bootstrap or kickstart', { skip: NATIVE_PLIST_DECODER_SKIP }, async t => {
+  const fx = fixture(t)
+  const dir = join(fx.accountHome, 'Library', 'LaunchAgents')
+  mkdirSync(dir, { recursive: true, mode: 0o700 })
+  const path = plistPathOf(fx)
+  const launchctl = fakeLaunchctl(fx, { loaded: false })
+  const deps = depsOf(fx, { launchctl: launchctl.run })
   writeFileSync(path, renderLaunchdPlist({ ...fx.facts, buildId: 'e'.repeat(64) }), { mode: 0o600 })
   const otherBuild = readFileSync(path, 'utf8')
-  await assert.rejects(installLaunchdUnit(fx.facts, deps), (error: unknown) => error instanceof LocalScopeError && error.code === 'HOST_MANAGER_UNIT_CONFLICT')
-  assert.equal(readFileSync(path, 'utf8'), otherBuild, 'a plist from another build is never overwritten')
+  launchctl.calls.length = 0
+  const result = await installLaunchdUnit(fx.facts, deps)
+  assert.equal(result.created, false)
+  assert.equal(readFileSync(path, 'utf8'), otherBuild, 'an owned older-build plist is reused byte-for-byte')
+  assert.equal(launchctl.calls.some(args => args[0] === 'bootstrap' || args[0] === 'kickstart' || args[0] === 'bootout'), false,
+    'a repeated install never starts or stops the job')
 })
 
 test('install refuses a same-label job loaded from another source and writes nothing', { skip: NATIVE_PLIST_DECODER_SKIP }, async t => {
@@ -539,7 +610,55 @@ test('start reuses a running job without bootstrap or kickstart', { skip: NATIVE
   assert.deepEqual(launchctl.calls, [['print', `gui/${String(UID)}/${unit.label}`]])
 })
 
-test('start refuses a loaded job whose fixed facts differ from the installed plist', { skip: NATIVE_PLIST_DECODER_SKIP }, async t => {
+test('start reloads a loaded idle job from the edited on-disk plist before kickstart', { skip: NATIVE_PLIST_DECODER_SKIP }, async t => {
+  const fx = fixture(t)
+  const launchctl = fakeLaunchctl(fx, { loaded: false })
+  const deps = depsOf(fx, { launchctl: launchctl.run })
+  const installed = await installLaunchdUnit(fx.facts, deps)
+  // Simulate the reachable state: the job was bootstrapped before, is idle,
+  // and the user edited the plist while launchd still holds the old definition.
+  launchctl.job.loaded = true
+  launchctl.job.state = 'not running'
+  delete launchctl.job.pid
+  const edited = readFileSync(installed.filePath, 'utf8')
+    .replace(fx.facts.hostEntryPath, '/usr/local/bin/my-wrapper')
+    .replace('    <key>SPLIT_PROCESS_PROFILE</key>', '    <key>EDITED_FLAG</key>\n    <string>on</string>\n    <key>SPLIT_PROCESS_PROFILE</key>')
+  writeFileSync(installed.filePath, edited, { mode: 0o600 })
+  const unit = ownedUnitOf(fx, deps)
+  launchctl.calls.length = 0
+  await startLaunchdService(fx.facts, unit, deps)
+  assert.deepEqual(launchctl.calls, [
+    ['print', `gui/${String(UID)}/${unit.label}`],
+    ['print', `gui/${String(UID)}/${unit.label}`],
+    ['bootout', `gui/${String(UID)}/${unit.label}`],
+    ['print', `gui/${String(UID)}/${unit.label}`],
+    ['print', `gui/${String(UID)}/${unit.label}`],
+    ['bootstrap', `gui/${String(UID)}`, installed.filePath],
+    ['print', `gui/${String(UID)}/${unit.label}`],
+    ['kickstart', `gui/${String(UID)}/${unit.label}`],
+  ], 'an idle loaded job is reloaded from the current edited plist before kickstart')
+  assert.equal(readFileSync(installed.filePath, 'utf8'), edited, 'reloading never rewrites the user plist')
+})
+
+test('start refuses an unconfirmed PID-less loaded job without booting it out', { skip: NATIVE_PLIST_DECODER_SKIP }, async t => {
+  const fx = fixture(t)
+  const launchctl = fakeLaunchctl(fx, { loaded: false })
+  const deps = depsOf(fx, { launchctl: launchctl.run })
+  await installLaunchdUnit(fx.facts, deps)
+  launchctl.job.loaded = true
+  launchctl.job.state = 'spawn scheduled'
+  delete launchctl.job.pid
+  const unit = ownedUnitOf(fx, deps)
+  launchctl.calls.length = 0
+  await assert.rejects(
+    startLaunchdService(fx.facts, unit, deps),
+    (error: unknown) => error instanceof LocalScopeError && error.code === 'HOST_MANAGER_START_FAILED',
+  )
+  assert.equal(launchctl.calls.some(args => args[0] === 'bootout' || args[0] === 'bootstrap' || args[0] === 'kickstart'), false,
+    'a transition that is not provably idle is never touched')
+})
+
+test('start refuses a loaded job from a foreign source plist even with matching anchors', { skip: NATIVE_PLIST_DECODER_SKIP }, async t => {
   const fx = fixture(t)
   const launchctl = fakeLaunchctl(fx, { loaded: false })
   const deps = depsOf(fx, { launchctl: launchctl.run })
@@ -547,14 +666,30 @@ test('start refuses a loaded job whose fixed facts differ from the installed pli
   launchctl.job.loaded = true
   launchctl.job.state = 'not running'
   delete launchctl.job.pid
-  launchctl.job.program = '/usr/bin/other'
+  launchctl.job.path = join(fx.root, 'foreign', 'other.plist')
   const unit = ownedUnitOf(fx, deps)
   launchctl.calls.length = 0
   await assert.rejects(
     startLaunchdService(fx.facts, unit, deps),
     (error: unknown) => error instanceof LocalScopeError && error.code === 'HOST_MANAGER_UNIT_CONFLICT',
   )
-  assert.deepEqual(launchctl.calls, [['print', `gui/${String(UID)}/${unit.label}`]], 'a stale definition is never kickstarted')
+  assert.deepEqual(launchctl.calls, [['print', `gui/${String(UID)}/${unit.label}`]], 'a foreign loaded source is never kickstarted')
+})
+
+test('start reuses a loaded job whose program was customized but whose source and anchors match', { skip: NATIVE_PLIST_DECODER_SKIP }, async t => {
+  const fx = fixture(t)
+  const launchctl = fakeLaunchctl(fx, { loaded: false })
+  const deps = depsOf(fx, { launchctl: launchctl.run })
+  await installLaunchdUnit(fx.facts, deps)
+  launchctl.job.loaded = true
+  launchctl.job.state = 'running'
+  launchctl.job.pid = 4242
+  launchctl.job.program = '/opt/my-wrapper'
+  launchctl.job.arguments = ['/opt/my-wrapper', '--legacy']
+  const unit = ownedUnitOf(fx, deps)
+  launchctl.calls.length = 0
+  await startLaunchdService(fx.facts, unit, deps)
+  assert.deepEqual(launchctl.calls, [['print', `gui/${String(UID)}/${unit.label}`]], 'a user-customized running job is reused, not treated as foreign')
 })
 
 test('start re-proves the plist identity after the async inspection and before bootstrap', { skip: NATIVE_PLIST_DECODER_SKIP }, async t => {
@@ -599,7 +734,7 @@ test('start allows a comment-only plist edit and never rewrites the user bytes',
   assert.equal(readFileSync(installed.filePath, 'utf8'), edited, 'starting never rewrites the user file')
 })
 
-test('start refuses a RunAtLoad=true edit before any launchctl call', { skip: NATIVE_PLIST_DECODER_SKIP }, async t => {
+test('start executes a legal RunAtLoad=true user edit through launchd instead of rejecting it', { skip: NATIVE_PLIST_DECODER_SKIP }, async t => {
   const fx = fixture(t)
   const launchctl = fakeLaunchctl(fx, { loaded: false })
   const deps = depsOf(fx, { launchctl: launchctl.run })
@@ -610,75 +745,200 @@ test('start refuses a RunAtLoad=true edit before any launchctl call', { skip: NA
   writeFileSync(installed.filePath, changed, { mode: 0o600 })
   const unit = ownedUnitOf(fx, deps)
   launchctl.calls.length = 0
-  await assert.rejects(
-    startLaunchdService(fx.facts, unit, deps),
-    (error: unknown) => error instanceof LocalScopeError && error.code === 'HOST_MANAGER_UNIT_CONFLICT',
-  )
-  assert.deepEqual(launchctl.calls, [], 'a bootstrap trigger edit is refused before launchctl can execute it')
+  await startLaunchdService(fx.facts, unit, deps)
+  assert.deepEqual(launchctl.calls, [
+    ['print', `gui/${String(UID)}/${unit.label}`],
+    ['bootstrap', `gui/${String(UID)}`, installed.filePath],
+    ['print', `gui/${String(UID)}/${unit.label}`],
+    ['kickstart', `gui/${String(UID)}/${unit.label}`],
+  ], 'the user launchd policy is executed, not silently defaulted or refused')
+  assert.equal(readFileSync(installed.filePath, 'utf8'), changed, 'starting never rewrites the user plist')
 })
 
-test('start refuses a changed ProgramArguments before any launchctl call', { skip: NATIVE_PLIST_DECODER_SKIP }, async t => {
+test('start executes a user-customized ProgramArguments/cwd/log sinks through launchd', { skip: NATIVE_PLIST_DECODER_SKIP }, async t => {
   const fx = fixture(t)
   const launchctl = fakeLaunchctl(fx, { loaded: false })
   const deps = depsOf(fx, { launchctl: launchctl.run })
   const installed = await installLaunchdUnit(fx.facts, deps)
   const canonical = readFileSync(installed.filePath, 'utf8')
-  const changed = canonical.replace(fx.facts.hostEntryPath, '/usr/bin/true')
+  const changed = canonical
+    .replace(namedEntryOf(fx), '/usr/local/bin/my-wrapper')
+    .replace(`<string>${fx.facts.profileRealpath}</string>`, '<string>/Users/someone/elsewhere</string>')
+    .replace(launchdLogPaths(fx.facts.scopeDir).stdout, '/Users/someone/elsewhere/out.log')
+    .replace(launchdLogPaths(fx.facts.scopeDir).stderr, '/Users/someone/elsewhere/err.log')
   assert.notEqual(changed, canonical)
   writeFileSync(installed.filePath, changed, { mode: 0o600 })
   const unit = ownedUnitOf(fx, deps)
   launchctl.calls.length = 0
-  await assert.rejects(
-    startLaunchdService(fx.facts, unit, deps),
-    (error: unknown) => error instanceof LocalScopeError && error.code === 'HOST_MANAGER_UNIT_CONFLICT',
-  )
-  assert.deepEqual(launchctl.calls, [], 'a changed program is refused before launchctl can execute it')
+  await startLaunchdService(fx.facts, unit, deps)
+  assert.deepEqual(launchctl.calls.filter(args => args[0] === 'bootstrap').length, 1,
+    'a legal user configuration is bootstrapped rather than replaced with the default template')
+  assert.equal(readFileSync(installed.filePath, 'utf8'), changed, 'the user plist bytes are preserved')
 })
 
-test('the fixed-definition reader keeps harmless edits and rejects execution triggers', { skip: NATIVE_PLIST_DECODER_SKIP }, t => {
+test('the profile-anchor reader keeps harmless edits and rejects only wrong identity anchors', { skip: NATIVE_PLIST_DECODER_SKIP }, t => {
   const fx = fixture(t)
-  const canonical = renderLaunchdPlist(fx.facts)
-  assert.doesNotThrow(() => assertLaunchdFileDefinition(fx.facts, `${canonical}\n<!-- comment -->\n`))
-  assert.doesNotThrow(() => assertLaunchdFileDefinition(
+  const canonical = renderLaunchdPlist({ ...fx.facts, hostEntryPath: namedEntryOf(fx) })
+  assert.doesNotThrow(() => assertLaunchdProfileAnchors(fx.facts, `${canonical}\n<!-- comment -->\n`))
+  assert.doesNotThrow(() => assertLaunchdProfileAnchors(
     fx.facts,
-    canonical.replace('\n</dict>\n</plist>', '\n  <key>ThrottleInterval</key>\n  <integer>10</integer>\n</dict>\n</plist>'),
-  ))
+    canonical
+      .replace('<key>RunAtLoad</key>\n  <false/>', '<key>RunAtLoad</key>\n  <true/>')
+      .replace('<key>KeepAlive</key>\n  <false/>', '<key>KeepAlive</key>\n  <true/>')
+      .replace(namedEntryOf(fx), '/usr/local/bin/my-wrapper')
+      .replace('\n  </dict>\n</plist>', '\n  <key>WatchPaths</key>\n  <array><string>/tmp</string></array>\n  <key>ThrottleInterval</key>\n  <integer>10</integer>\n</dict>\n</plist>'),
+  ), 'user-owned launchd directives are never identity requirements')
   assert.throws(
-    () => assertLaunchdFileDefinition(
+    () => assertLaunchdProfileAnchors(
       fx.facts,
-      canonical.replace('\n</dict>\n</plist>', '\n  <key>WatchPaths</key>\n  <array><string>/tmp</string></array>\n</dict>\n</plist>'),
+      canonical.replace('<key>DSH_HOME</key>\n    <string>', '<key>DSH_HOME</key>\n    <string>/other'),
     ),
     (error: unknown) => error instanceof LocalScopeError && error.code === 'HOST_MANAGER_UNIT_CONFLICT',
   )
   assert.throws(
-    () => assertLaunchdFileDefinition(
+    () => assertLaunchdProfileAnchors(
       fx.facts,
-      canonical.replace('\n</dict>\n</plist>', '\n  <key>EnableGlobbing</key>\n  <true/>\n</dict>\n</plist>'),
+      canonical.replace('<key>SPLIT_PROCESS_PROFILE</key>\n    <string>pi-tui', '<key>SPLIT_PROCESS_PROFILE</key>\n    <string>other'),
     ),
     (error: unknown) => error instanceof LocalScopeError && error.code === 'HOST_MANAGER_UNIT_CONFLICT',
-    'EnableGlobbing can rewrite argv before invocation and must never be accepted',
   )
   assert.throws(
-    () => assertLaunchdFileDefinition(
-      fx.facts,
-      canonical.replace('<key>RunAtLoad</key>\n  <false/>', '<key>RunAtLoad</key>\n  <true/>'),
-    ),
+    () => assertLaunchdProfileAnchors(fx.facts, canonical.replace(buildLaunchdLabel(fx.facts.scopeId), 'com.xmoon.dsh-pi-tui.other')),
     (error: unknown) => error instanceof LocalScopeError && error.code === 'HOST_MANAGER_UNIT_CONFLICT',
   )
-  for (const [shape, key] of [
-    ['numeric character reference', '<key>RunAtL&#111;ad</key>'],
-    ['whitespace in the key tag', '<key >RunAtLoad</key>'],
-    ['CDATA key text', '<key><![CDATA[RunAtLoad]]></key>'],
-  ] as const) {
-    assert.throws(
-      () => assertLaunchdFileDefinition(
-        fx.facts,
-        canonical.replace('<key>RunAtLoad</key>\n  <false/>', `${key}\n  <true/>`),
-      ),
-      (error: unknown) => error instanceof LocalScopeError && error.code === 'HOST_MANAGER_UNIT_CONFLICT',
-      `${shape} must be decoded by the native parser and rejected as a launch trigger`,
-    )
-  }
+})
+
+test('migration patches only the proven generated ProgramArguments and build metadata', { skip: NATIVE_PLIST_DECODER_SKIP }, async t => {
+  const fx = fixture(t)
+  mkdirSync(join(fx.accountHome, 'Library', 'LaunchAgents'), { recursive: true, mode: 0o700 })
+  const path = plistPathOf(fx)
+  const old = writeOldProductPackage(fx)
+  const oldBuild = old.buildId
+  const oldEntry = join(old.root, 'dist', 'local-host.mjs')
+  let oldPlist = renderLaunchdPlist({ ...fx.facts, hostEntryPath: oldEntry, buildId: oldBuild })
+  // Legal user-owned additions OUTSIDE the generated spans.
+  oldPlist = oldPlist
+    .replace('<key>RunAtLoad</key>\n  <false/>', '<key>RunAtLoad</key>\n  <true/>')
+    .replace('    <key>SPLIT_PROCESS_PROFILE</key>', '    <key>MY_FLAG</key>\n    <string>1</string>\n    <key>SPLIT_PROCESS_PROFILE</key>')
+    .replace('</dict>\n</plist>', '</dict>\n<!-- user comment -->\n</plist>')
+  writeFileSync(path, oldPlist, { mode: 0o600 })
+  const deps = depsOf(fx)
+  const unit = ownedUnitOf(fx, deps)
+  const inspected = prepareOwnedLaunchdForCurrentInstall(fx.facts, unit, deps, 'inspect')
+  assert.equal(inspected.plan.kind, 'migrate')
+  assert.equal(readFileSync(path, 'utf8'), oldPlist, 'inspect is strictly read-only')
+  const applied = prepareOwnedLaunchdForCurrentInstall(fx.facts, unit, deps, 'apply')
+  assert.equal(applied.plan.kind, 'migrate')
+  assert.notEqual(applied.unit, undefined)
+  const next = readFileSync(path, 'utf8')
+  const expected = oldPlist
+    .replace(`<string>${oldEntry}</string>`, `<string>${namedEntryOf(fx)}</string>`)
+    .replace(`<string>${oldBuild}</string>`, `<string>${fx.facts.buildId}</string>`)
+  assert.equal(next, expected, 'only the generated argv path and build metadata changed; user comments/env/RunAtLoad bytes are identical')
+  assert.equal(statSync(path).mode & 0o777, 0o600)
+  // A second apply is an idempotent no-op on the already-current entry.
+  const again = prepareOwnedLaunchdForCurrentInstall(fx.facts, applied.unit as OwnedLaunchdUnit, deps, 'apply')
+  assert.deepEqual(again, { plan: { kind: 'no-op', reason: 'current' } })
+  assert.equal(readFileSync(path, 'utf8'), next)
+})
+
+test('migration preserves a pruned old package path as user-managed (no provenance authority)', { skip: NATIVE_PLIST_DECODER_SKIP }, t => {
+  const fx = fixture(t)
+  mkdirSync(join(fx.accountHome, 'Library', 'LaunchAgents'), { recursive: true, mode: 0o700 })
+  const path = plistPathOf(fx)
+  // The old physical package was pruned by the official upgrade: the record
+  // cannot prove this argv was product-generated for THIS Profile, so it must
+  // stay byte-for-byte user-managed rather than be invented into a migration.
+  const prunedEntry = join(fx.profileDir, 'node_modules', '.pnpm', '@xmoon76+dsh-pi-tui@0.5.7_abc123', 'node_modules', '@xmoon76', 'dsh-pi-tui', 'dist', 'local-host.mjs')
+  writeFileSync(path, renderLaunchdPlist({ ...fx.facts, hostEntryPath: prunedEntry, buildId: 'e'.repeat(64) }), { mode: 0o600 })
+  const deps = depsOf(fx)
+  const inspected = prepareOwnedLaunchdForCurrentInstall(fx.facts, ownedUnitOf(fx, deps), deps, 'inspect')
+  assert.deepEqual(inspected, { plan: { kind: 'no-op', reason: 'user-managed' } })
+})
+
+test('migration preserves an exact-shaped argv pinned to another Profile', { skip: NATIVE_PLIST_DECODER_SKIP }, t => {
+  const fx = fixture(t)
+  mkdirSync(join(fx.accountHome, 'Library', 'LaunchAgents'), { recursive: true, mode: 0o700 })
+  const path = plistPathOf(fx)
+  const old = writeOldProductPackage(fx)
+  const otherProfileDir = join(fx.root, 'profiles', 'other', 'node_modules', '@xmoon76', 'dsh-pi-tui')
+  mkdirSync(join(fx.root, 'profiles', 'other', 'node_modules', '@xmoon76'), { recursive: true, mode: 0o700 })
+  symlinkSync(old.root, otherProfileDir)
+  const pinnedEntry = join(otherProfileDir, 'dist', 'local-host.mjs')
+  writeFileSync(path, renderLaunchdPlist({ ...fx.facts, hostEntryPath: pinnedEntry, buildId: old.buildId }), { mode: 0o600 })
+  const deps = depsOf(fx)
+  const unit = ownedUnitOf(fx, deps)
+  assert.deepEqual(prepareOwnedLaunchdForCurrentInstall(fx.facts, unit, deps, 'inspect'), { plan: { kind: 'no-op', reason: 'user-managed' } })
+  assert.equal(readFileSync(path, 'utf8').includes(pinnedEntry), true, 'a user pin to another Profile is preserved')
+})
+
+test('migration preserves a readable external same-build package outside the Profile', { skip: NATIVE_PLIST_DECODER_SKIP }, t => {
+  const fx = fixture(t)
+  mkdirSync(join(fx.accountHome, 'Library', 'LaunchAgents'), { recursive: true, mode: 0o700 })
+  const path = plistPathOf(fx)
+  const old = writeOldProductPackage(fx)
+  const externalRoot = join(fx.root, 'external', 'node_modules', '@xmoon76', 'dsh-pi-tui')
+  mkdirSync(dirname(externalRoot), { recursive: true, mode: 0o700 })
+  symlinkSync(old.root, externalRoot)
+  const externalEntry = join(externalRoot, 'dist', 'local-host.mjs')
+  writeFileSync(path, renderLaunchdPlist({ ...fx.facts, hostEntryPath: externalEntry, buildId: old.buildId }), { mode: 0o600 })
+  const deps = depsOf(fx)
+  const unit = ownedUnitOf(fx, deps)
+  assert.deepEqual(prepareOwnedLaunchdForCurrentInstall(fx.facts, unit, deps, 'inspect'), { plan: { kind: 'no-op', reason: 'user-managed' } },
+    'a readable external package with a matching build is still a user pin, not Profile provenance')
+  assert.equal(readFileSync(path, 'utf8').includes(externalEntry), true, 'the external pin is preserved')
+})
+
+test('migration preserves an exact-shaped argv whose recorded build identity does not match', { skip: NATIVE_PLIST_DECODER_SKIP }, t => {
+  const fx = fixture(t)
+  mkdirSync(join(fx.accountHome, 'Library', 'LaunchAgents'), { recursive: true, mode: 0o700 })
+  const path = plistPathOf(fx)
+  const old = writeOldProductPackage(fx)
+  const oldEntry = join(old.root, 'dist', 'local-host.mjs')
+  writeFileSync(path, renderLaunchdPlist({ ...fx.facts, hostEntryPath: oldEntry, buildId: 'f'.repeat(64) }), { mode: 0o600 })
+  const deps = depsOf(fx)
+  const unit = ownedUnitOf(fx, deps)
+  assert.deepEqual(prepareOwnedLaunchdForCurrentInstall(fx.facts, unit, deps, 'inspect'), { plan: { kind: 'no-op', reason: 'user-managed' } })
+})
+
+test('migration preserves a user-customized argv byte-for-byte and reports user-managed', { skip: NATIVE_PLIST_DECODER_SKIP }, async t => {
+  const fx = fixture(t)
+  mkdirSync(join(fx.accountHome, 'Library', 'LaunchAgents'), { recursive: true, mode: 0o700 })
+  const path = plistPathOf(fx)
+  const oldEntry = join(fx.root, 'store', 'node_modules', '.pnpm', '@xmoon76+dsh-pi-tui@0.5.7_oldbuild', 'node_modules', '@xmoon76', 'dsh-pi-tui', 'dist', 'local-host.mjs')
+  const oldPlist = renderLaunchdPlist({ ...fx.facts, hostEntryPath: oldEntry, buildId: 'e'.repeat(64) })
+    .replace('<key>ProgramArguments</key>\n  <array>\n', '<key>ProgramArguments</key>\n  <array>\n    <string>--user-wrapper-flag</string>\n')
+  writeFileSync(path, oldPlist, { mode: 0o600 })
+  const deps = depsOf(fx)
+  const unit = ownedUnitOf(fx, deps)
+  assert.deepEqual(prepareOwnedLaunchdForCurrentInstall(fx.facts, unit, deps, 'inspect'), { plan: { kind: 'no-op', reason: 'user-managed' } })
+  assert.deepEqual(prepareOwnedLaunchdForCurrentInstall(fx.facts, unit, deps, 'apply'), { plan: { kind: 'no-op', reason: 'user-managed' } })
+  assert.equal(readFileSync(path, 'utf8'), oldPlist, 'a user-customized argv is never rewritten')
+})
+
+test('migration never patches a restructured generated block or a changed file', { skip: NATIVE_PLIST_DECODER_SKIP }, async t => {
+  const fx = fixture(t)
+  mkdirSync(join(fx.accountHome, 'Library', 'LaunchAgents'), { recursive: true, mode: 0o700 })
+  const path = plistPathOf(fx)
+  const old = writeOldProductPackage(fx)
+  const oldEntry = join(old.root, 'dist', 'local-host.mjs')
+  const canonical = renderLaunchdPlist({ ...fx.facts, hostEntryPath: oldEntry, buildId: old.buildId })
+  // A comment inside the generated block breaks its exact lexical structure.
+  const restructured = canonical.replace('  <array>\n', '  <array>\n    <!-- user note -->\n')
+  writeFileSync(path, restructured, { mode: 0o600 })
+  const deps = depsOf(fx)
+  let unit = ownedUnitOf(fx, deps)
+  assert.deepEqual(prepareOwnedLaunchdForCurrentInstall(fx.facts, unit, deps, 'inspect'), { plan: { kind: 'no-op', reason: 'user-managed' } })
+  // A file changed between inspect and apply is refused, never blindly
+  // overwritten from the earlier snapshot.
+  writeFileSync(path, canonical, { mode: 0o600 })
+  unit = ownedUnitOf(fx, deps)
+  assert.equal(prepareOwnedLaunchdForCurrentInstall(fx.facts, unit, deps, 'inspect').plan.kind, 'migrate')
+  writeFileSync(path, `${readFileSync(path, 'utf8')}\n<!-- concurrent edit -->\n`, { mode: 0o600 })
+  assert.throws(
+    () => prepareOwnedLaunchdForCurrentInstall(fx.facts, unit, deps, 'apply'),
+    (error: unknown) => error instanceof LocalScopeError && error.code === 'HOST_MANAGER_UNIT_CONFLICT',
+  )
 })
 
 test('owner metadata in XML comments does not make a plist owned', { skip: NATIVE_PLIST_DECODER_SKIP }, t => {
@@ -997,6 +1257,50 @@ test('a public managed start uses the installed LaunchAgent instead of the detac
   assert.equal(existsSync(join(scope.dir, 'host.log')), false, 'the managed public start must never spawn the detached Host fallback')
 })
 
+test('the public managed start reloads an edited idle LaunchAgent before starting', { skip: process.platform !== 'darwin' ? 'the launchd public-start route requires macOS' : false }, async t => {
+  const fx = fixture(t)
+  const launchctl = fakeLaunchctl(fx, { loaded: false })
+  const deps = depsOf(fx, { launchctl: launchctl.run })
+  const installed = await installLaunchdUnit(fx.facts, deps)
+  const scope = scopeFromInstalledProfile({
+    dshHome: fx.dshHome,
+    profileDir: fx.profileDir,
+    packageRoot: fx.packageRoot,
+    dshVersion: DSH_VERSION,
+  })
+  // launchd still holds an older cached definition while the user edited the
+  // on-disk plist; a public cold start must load the CURRENT user definition.
+  launchctl.job.loaded = true
+  launchctl.job.state = 'not running'
+  delete launchctl.job.pid
+  const edited = readFileSync(installed.filePath, 'utf8')
+    .replace('    <key>SPLIT_PROCESS_PROFILE</key>', '    <key>PUBLIC_EDIT_FLAG</key>\n    <string>on</string>\n    <key>SPLIT_PROCESS_PROFILE</key>')
+  writeFileSync(installed.filePath, edited, { mode: 0o600 })
+  launchctl.calls.length = 0
+  const observation = await startManagedHostCandidate(
+    {
+      scope,
+      hostEntryPath: join(fx.packageRoot, 'dist', 'local-host.mjs'),
+      dshAnchor: realpathSync(fx.anchor),
+      profile: 'pi-tui',
+      hostStartPolicy: 'public',
+    },
+    { launchd: deps },
+  )
+  assert.equal(observation(), undefined)
+  assert.deepEqual(launchctl.calls, [
+    ['print', `gui/${String(UID)}/${buildLaunchdLabel(scope.scopeId)}`],
+    ['print', `gui/${String(UID)}/${buildLaunchdLabel(scope.scopeId)}`],
+    ['bootout', `gui/${String(UID)}/${buildLaunchdLabel(scope.scopeId)}`],
+    ['print', `gui/${String(UID)}/${buildLaunchdLabel(scope.scopeId)}`],
+    ['print', `gui/${String(UID)}/${buildLaunchdLabel(scope.scopeId)}`],
+    ['bootstrap', `gui/${String(UID)}`, installed.filePath],
+    ['print', `gui/${String(UID)}/${buildLaunchdLabel(scope.scopeId)}`],
+    ['kickstart', `gui/${String(UID)}/${buildLaunchdLabel(scope.scopeId)}`],
+  ])
+  assert.equal(readFileSync(installed.filePath, 'utf8'), edited, 'the public route never rewrites the user plist')
+})
+
 /** Remove only this test run's verified plist/job. A loaded process is
  *  stopped only when its current PID and fixed facts match the captured
  *  child; a changed/unproven identity is preserved, never raw-signalled. */
@@ -1102,7 +1406,12 @@ test('native launchd bootstrap/kickstart/bootout runs the real foreground entry'
   const fx = fixture(t)
   fx.lifecycle.retainOnCleanupFailure()
   const marker = join(fx.root, 'native-child.marker')
-  const child = join(fx.root, 'native-child.mjs')
+  // A private "installed package" shape for the real foreground child: the
+  // stable named entry must resolve to the same physical `dist/local-host.mjs`.
+  const nativePackage = join(fx.root, 'native-package')
+  mkdirSync(join(nativePackage, 'dist'), { recursive: true, mode: 0o700 })
+  writeFileSync(join(nativePackage, 'package.json'), `${JSON.stringify({ name: '@xmoon76/dsh-pi-tui', version: '0.5.7' })}\n`)
+  const child = join(nativePackage, 'dist', 'local-host.mjs')
   writeFileSync(child, [
     "import { appendFileSync } from 'node:fs'",
     `appendFileSync(${JSON.stringify(marker)}, String(process.pid) + '\\n', { mode: 0o600 })`,
@@ -1111,6 +1420,9 @@ test('native launchd bootstrap/kickstart/bootout runs the real foreground entry'
     'setInterval(() => {}, 60_000)',
     '',
   ].join('\n'), { mode: 0o600 })
+  // Repoint the official-profile layout at the private package for this test.
+  unlinkSync(join(fx.profileDir, 'node_modules', '@xmoon76', 'dsh-pi-tui'))
+  symlinkSync(nativePackage, join(fx.profileDir, 'node_modules', '@xmoon76', 'dsh-pi-tui'))
   const facts: LaunchdUnitFacts = { ...fx.facts, hostEntryPath: child }
   const deps = depsOf(fx)
   let cleanupPid: number | undefined

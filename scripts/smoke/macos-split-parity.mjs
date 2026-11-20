@@ -2400,6 +2400,8 @@ async function runD4LaunchdScene({ installation, workRoot, report, start, projec
   const plistEntry = /<key>ProgramArguments<\/key>\s*<array>\s*<string>[^<]+<\/string>\s*<string>([^<]+)<\/string>/u.exec(plistText)
   assert(plistEntry !== null && existsSync(plistEntry[1]) && plistEntry[1].endsWith('/dist/local-host.mjs'),
     'L02: ProgramArguments must name an existing installed dist/local-host.mjs')
+  assert(plistEntry[1] === join(realpathSync(profileDir), 'node_modules', '@xmoon76', 'dsh-pi-tui', 'dist', 'local-host.mjs'),
+    `L02: a FRESH plist must name the stable profile package entry, saw ${plistEntry[1]}`)
   assert(!/daemonize|--daemon|<string>\/bin\/sh<\/string>/u.test(plistText), 'L02: the job must not wrap the Host in a shell or daemonize flag')
   assert(plistText.includes(`<string>${realpathSync(profileDir)}</string>`), 'L02: WorkingDirectory must be the canonical profile')
   assert(plistText.includes('<key>X-DshPiTuiOwner</key>\n  <string>local-host-launchd-v1</string>'), 'L02: missing owner metadata')
@@ -2432,9 +2434,10 @@ async function runD4LaunchdScene({ installation, workRoot, report, start, projec
   assert(otherBuild !== plistText && otherBuild.includes('e'.repeat(64)), 'L02-NEG: could not build the other-build plist fixture')
   writeFileSync(plistPath, otherBuild, { mode: 0o600 })
   const otherBuildInstall = daemon(['install'])
-  assert(otherBuildInstall.status === 3 && /IDENTITY_OR_OWNERSHIP_REFUSED/u.test(otherBuildInstall.stderr),
-    `L02-NEG other build: expected exit 3, saw ${String(otherBuildInstall.status)}: ${otherBuildInstall.stderr.slice(-500)}`)
-  assert(readFileSync(plistPath, 'utf8') === otherBuild, 'L02-NEG: an other-build plist must never be overwritten')
+  assert(otherBuildInstall.status === 0,
+    `L02-NEG old build: a same-profile old-build plist must be reused, saw exit ${String(otherBuildInstall.status)}: ${otherBuildInstall.stderr.slice(-500)}`)
+  assert(readFileSync(plistPath, 'utf8') === otherBuild, 'L02-NEG: a same-profile old-build plist is preserved byte-for-byte')
+  assert(!otherBuildInstall.stdout.includes('error'), 'L02-NEG: the old-build reinstall must not claim a manager failure')
   const symlinkTarget = join(workRoot, 'd4l-symlink-target.plist')
   writeFileSync(symlinkTarget, plistText, { mode: 0o600 })
   unlinkSync(plistPath)
@@ -2500,6 +2503,53 @@ async function runD4LaunchdScene({ installation, workRoot, report, start, projec
   assert(existsSync(plistPath), 'L05 independent: stop must not remove the installed plist')
   assertNoLoadedJob(label, 'L05 independent stop')
   report.rows.push({ id: 'L05-INDEPENDENT', status: 'PASS', hostPid: initialHost.record.hostPid, plistKept: true })
+
+  // ── L02-CUSTOM: a legal user launchd configuration is really executed ────
+  // Independent of the default no-auto-start job: an extra environment key and
+  // a legal RunAtLoad=true must reach launchd and still produce the real
+  // foreground Host. The default plist bytes are restored afterwards so the
+  // L04-NEG2/L03 lifecycle keeps its original premise.
+  const customStdout = join(workRoot, 'd4l-custom.stdout.log')
+  const customStderr = join(workRoot, 'd4l-custom.stderr.log')
+  const customPlist = plistText
+    .replace('    <key>SPLIT_PROCESS_PROFILE</key>', '    <key>D4L_CUSTOM_FLAG</key>\n    <string>on</string>\n    <key>SPLIT_PROCESS_PROFILE</key>')
+    .replace('<key>RunAtLoad</key>\n  <false/>', '<key>RunAtLoad</key>\n  <true/>')
+    .replace(/<key>StandardOutPath<\/key>\n  <string>[^<]*<\/string>/u, `<key>StandardOutPath</key>\n  <string>${customStdout}</string>`)
+    .replace(/<key>StandardErrorPath<\/key>\n  <string>[^<]*<\/string>/u, `<key>StandardErrorPath</key>\n  <string>${customStderr}</string>`)
+    .replace('</dict>\n</plist>', '</dict>\n<!-- D4L user runtime comment -->\n</plist>')
+  assert(customPlist !== plistText, 'L02-CUSTOM: could not build the user-customized plist fixture')
+  // F1 freshness proof: launchd first holds the DEFAULT definition (loaded,
+  // not running). The user then edits the on-disk plist; `daemon start` must
+  // load the CURRENT user definition instead of kickstarting the cached one.
+  writeFileSync(plistPath, plistText, { mode: 0o600 })
+  recordPlistIdentity(label, plistPath)
+  const cachedBootstrap = runLaunchctlCommand(['bootstrap', `gui/${String(uid)}`, plistPath])
+  assert(cachedBootstrap.status === 0, 'L02-CUSTOM: bootstrapping the default plist failed')
+  const cachedPrint = launchctlJobPrint(label)
+  assert(cachedPrint.status === 0 && !cachedPrint.stdout.includes('D4L_CUSTOM_FLAG => on'),
+    'L02-CUSTOM: the cached default job must not already carry the user edit')
+  writeFileSync(plistPath, customPlist, { mode: 0o600 })
+  recordPlistIdentity(label, plistPath)
+  const customStart = daemonOk(['start'], 'L02-CUSTOM start')
+  assert(customStart.fields.host === 'ready' && customStart.fields.manager === 'launchd',
+    `L02-CUSTOM: the user launchd configuration did not produce a ready launchd Host: ${JSON.stringify(customStart.fields)}`)
+  const customHost = requireLiveHost('L02-CUSTOM host')
+  const customPrint = launchctlJobPrint(label)
+  assert(customPrint.status === 0 && customPrint.stdout.includes('D4L_CUSTOM_FLAG => on'),
+    'L02-CUSTOM: the extra user environment key did not reach the real loaded job')
+  const customPid = parseLaunchctlJobPid(customPrint.stdout)
+  assert(customPid !== undefined && customPid === customHost.record.hostPid,
+    'L02-CUSTOM: the launchd job PID is not the authenticated Host')
+  const customStop = daemonOk(['stop'], 'L02-CUSTOM stop')
+  assert(/^host=stopped$/mu.test(customStop.result.stdout), 'L02-CUSTOM: the customized job did not stop through the verified path')
+  await waitFor(() => (alive(customHost.record.hostPid) ? undefined : true), 'L02-CUSTOM host exit', TIMEOUTS.process)
+  for (const customLog of [customStdout, customStderr]) {
+    if (existsSync(customLog)) unlinkSync(customLog)
+  }
+  writeFileSync(plistPath, plistText, { mode: 0o600 })
+  recordPlistIdentity(label, plistPath)
+  report.rows.push({ id: 'L02-CUSTOM', status: 'PASS', extraEnv: 'D4L_CUSTOM_FLAG', runAtLoad: true,
+    manager: customStart.fields.manager, hostPid: customHost.record.hostPid, reloadedEditedIdle: true })
 
   // ── L04 negative: loaded but NOT started is never Ready/launchd ─────────
   const ownBootstrap = runLaunchctlCommand(['bootstrap', `gui/${String(uid)}`, plistPath])

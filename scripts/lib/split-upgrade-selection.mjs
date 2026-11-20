@@ -21,6 +21,7 @@
  */
 
 import { runCrossBuildCompatibility } from '../smoke/split-upgrade/cross-build-compatibility.mjs'
+import { runLaunchdManagedDaemonUpgrade } from '../smoke/split-upgrade/launchd-managed-daemon-upgrade.mjs'
 import { runManagedDaemonUpgrade } from '../smoke/split-upgrade/managed-daemon-upgrade.mjs'
 import { runManualClientReload } from '../smoke/split-upgrade/manual-client-reload.mjs'
 import { runReloadSourceIsolation } from '../smoke/split-upgrade/reload-source-isolation.mjs'
@@ -62,7 +63,16 @@ const CASE_REGISTRY = Object.freeze([
     id: 'managed-daemon.cross-build-upgrade-rollback',
     title: 'two packed builds of one profile move old-to-new-to-old through the public daemon verbs, refusing a foreign install build before any stop',
     defaultLane: false,
+    nativeScope: 'REAL_SYSTEMD_USER_L6',
     run: runManagedDaemonUpgrade,
+  }),
+  Object.freeze({
+    suite: 'launchd-managed-daemon',
+    id: 'launchd-managed-daemon.cross-build-upgrade',
+    title: 'a real macOS user LaunchAgent adopts the updated profile build through explicit daemon restart without overwriting user settings',
+    defaultLane: false,
+    nativeScope: 'REAL_MACOS_GUI_L6',
+    run: runLaunchdManagedDaemonUpgrade,
   }),
 ])
 
