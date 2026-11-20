@@ -72,6 +72,9 @@ const EVIDENCE_ROOT = join(PACKAGE_ROOT, 'temp', 'r8', 'pr1')
 const PROFILE = 'pi-tui'
 const CARRIER_MODULE = '@xmoon76/dsh-pi-tui/extension-config'
 const FIXTURES = ['a', 'b', 'dual', 'plain']
+/** Test-only perturbation used to prove a gate rejects its false-positive
+ * condition; never set by the normal qualification run. */
+const PROBE = process.env.R8_PR1_PROBE ?? ''
 const rowId = name => extensionConfigRowId(`@r8-pr1-fixture/${name}`)
 
 /* ------------------------------------------------------------------ *
@@ -445,7 +448,7 @@ function preparePackedConsumer(candidate, stampDir) {
  * P1-10: the same chain on the old published DSH floor (rc.3)
  * ------------------------------------------------------------------ */
 
-function rc3Qualification({ stampDir, candidate, tarballs }) {
+function rc3Qualification({ stampDir, candidate, tarballs, evidence }) {
   const rc3Root = join(stampDir, 'rc3')
   const harnessDir = join(rc3Root, 'harness')
   const rc3Env = isolatedEnv(join(rc3Root, 'run'), join(rc3Root, 'run', 'home'))
@@ -461,10 +464,13 @@ function rc3Qualification({ stampDir, candidate, tarballs }) {
     version = readJson(anchor).version
     if (version !== '0.2.2-rc.3') throw new Error(`installed rc.3 harness reports ${String(version)}`)
   } catch (error) {
+    // NOT_VERIFIED is reserved for an unavailable rc.3 ENVIRONMENT.
+    evidence.rc3 = { phase: 'provision', status: 'NOT_VERIFIED', error: error instanceof Error ? error.message : String(error) }
     notVerified('P1-10', 'official DSH rc.3 installs and boots the two Config rows',
       `rc.3 installation could not be provisioned: ${error instanceof Error ? error.message : String(error)}`)
     return
   }
+  evidence.rc3 = { version, phase: 'install', status: 'RUNNING' }
   const rc3Install = spec => {
     seedProfileBuildPolicy(rc3Env.DSH_HOME, PROFILE)
     run(process.execPath, [cli, 'plugin', '--profile', PROFILE, 'add', spec], { cwd: harnessDir, env: rc3Env })
@@ -472,9 +478,11 @@ function rc3Qualification({ stampDir, candidate, tarballs }) {
   try {
     rc3Install(candidate.path)
     rc3Install(tarballs.a)
-    rc3Install(tarballs.b)
+    // Probe only: prove a genuine rc.3 install failure is a FAIL, not NOT_VERIFIED.
+    rc3Install(PROBE === 'rc3-install-fail' ? join(stampDir, 'missing-fixture.tgz') : tarballs.b)
   } catch (error) {
-    notVerified('P1-10', 'official DSH rc.3 installs and boots the two Config rows',
+    evidence.rc3 = { version, phase: 'install', status: 'FAIL', error: error instanceof Error ? error.message : String(error) }
+    gate('P1-10', 'FAIL', 'official DSH rc.3 installs and boots the two Config rows',
       `rc.3 official plugin install failed: ${error instanceof Error ? error.message : String(error)}`)
     return
   }
@@ -498,6 +506,11 @@ function rc3Qualification({ stampDir, candidate, tarballs }) {
     const bEntry = rowOf(boot, bRow)
     const afterSave = snapshotOf(report, 'rc3-save-a')
     const stale = report.snapshots.find(entry => entry.name === 'rc3-stale-a')
+    evidence.rc3 = {
+      version,
+      phase: 'settings-chain',
+      status: aEntry?.state === 2 && bEntry?.state === 2 && afterSave !== undefined && stale?.errorName === 'SettingsConflictError' ? 'PASS' : 'FAIL',
+    }
     check('P1-10', aEntry?.state === 2 && bEntry?.state === 2 && aEntry.fiberUid !== bEntry.fiberUid
       && describeRow(boot, aRow)?.value.data.label === 'alpha'
       && describeRow(boot, bRow)?.value.data.label === 'bravo'
@@ -506,7 +519,8 @@ function rc3Qualification({ stampDir, candidate, tarballs }) {
     'official DSH rc.3 profile mounts two Config rows and Settings reads/writes them independently',
     JSON.stringify({ version, a: aEntry, b: bEntry, afterSave: describeRow(afterSave, aRow)?.value, stale: stale?.errorName }))
   } catch (error) {
-    notVerified('P1-10', 'official DSH rc.3 profile mounts two Config rows and Settings reads/writes them independently',
+    evidence.rc3 = { version, phase: 'boot', status: 'FAIL', error: error instanceof Error ? error.message : String(error) }
+    gate('P1-10', 'FAIL', 'official DSH rc.3 profile mounts two Config rows and Settings reads/writes them independently',
       `rc.3 Host boot failed: ${error instanceof Error ? error.message : String(error)}`)
   }
 }
@@ -527,7 +541,10 @@ function main() {
   const sentinel = join(stampDir, 'sentinel.jsonl')
   bootAudit.sentinelEvents = []
   bootAudit.fixtureTuiRows = []
-  const evidence = { schemaVersion: 1, status: 'FAIL', gateVersion: 'r8-e-pr1', gates, log: logLines, runRoot }
+  const evidence = {
+    schemaVersion: 1, status: 'FAIL', gateVersion: 'r8-e-pr1', gates, log: logLines, runRoot,
+    ...(PROBE === '' ? {} : { probe: PROBE }),
+  }
   try {
     const sourcePackage = readJson(join(PACKAGE_ROOT, 'package.json'))
     const candidate = candidateTarball(process.argv[2], stampDir)
@@ -674,27 +691,45 @@ function main() {
     const homePatch = join(env.DSH_HOME, 'cordis.patch.yml')
     writeFileSync(homePatch, `- id: ${aRow}\n  config:\n    data:\n      label: alpha-home\n`)
     const coveredBoot = runHost({ env, runRoot, stampDir, sentinel, label: 'home-patch' })
-    const aCovered = describeRow(coveredBoot.snapshots[0], aRow)
+    const coveredInitial = coveredBoot.snapshots[0]
+    const aCovered = describeRow(coveredInitial, aRow)
+    const prefsCovered = describeRow(coveredInitial, 'pi-tui-preferences')
     check('P1-05a', aCovered?.value.data.label === 'alpha-home',
       'home patch wins the effective A value', JSON.stringify(aCovered?.value))
-    const covered = runHost({
-      env, runRoot, stampDir, sentinel, label: 'home-write',
-      steps: [
-        { kind: 'mutate', name: 'write-covered-a', ns: aRow, ops: [{ op: 'set', path: ['data', 'label'], value: 'home-write' }], revision: 0 },
-        { kind: 'mutate', name: 'write-b-under-home', ns: bRow, ops: [{ op: 'set', path: ['data', 'limit'], value: 8 }], revision: 0 },
-      ],
-    })
+    const coveredSteps = [
+      { kind: 'mutate', name: 'write-covered-a', ns: aRow, ops: [{ op: 'set', path: ['data', 'label'], value: 'home-write' }], revision: 0 },
+    ]
+    if (PROBE === 'prefs-mutation') {
+      // Probe only: a prefs mutation during the covered window must be caught
+      // by P1-05e instead of passing on a stale pre-write snapshot.
+      coveredSteps.push({ kind: 'mutate', name: 'probe-prefs', ns: 'pi-tui-preferences', ops: [{ op: 'set', path: ['theme'], value: 'dark' }], revision: 0 })
+    }
+    coveredSteps.push({ kind: 'mutate', name: 'write-b-under-home', ns: bRow, ops: [{ op: 'set', path: ['data', 'limit'], value: 8 }], revision: 0 })
+    const covered = runHost({ env, runRoot, stampDir, sentinel, label: 'home-write', steps: coveredSteps })
+    const afterCoveredA = snapshotOf(covered, 'write-covered-a')
+    const afterCoveredB = snapshotOf(covered, 'write-b-under-home')
     const coveredWrite = covered.snapshots.find(entry => entry.name === 'write-covered-a')
+    const aAfterRefusal = afterCoveredA === undefined ? undefined : describeRow(afterCoveredA, aRow)
     check('P1-05b', coveredWrite?.outcome === 'error'
-      && /overridden by a home patch or command-line overlay/u.test(coveredWrite.errorMessage ?? ''),
-    'home-patched A refuses the write', JSON.stringify(coveredWrite))
+      && /overridden by a home patch or command-line overlay/u.test(coveredWrite.errorMessage ?? '')
+      && aAfterRefusal !== undefined
+      && aAfterRefusal.value.data.label === 'alpha-home'
+      && aAfterRefusal.user.data.label === 'alpha-user'
+      && aAfterRefusal.revision === aCovered?.revision,
+    'home-patched A refuses the write and its effective/user configuration is unchanged',
+    JSON.stringify({ outcome: coveredWrite?.errorMessage, after: aAfterRefusal }))
     const bUnderHome = snapshotOf(covered, 'write-b-under-home')
     check('P1-05c', covered.snapshots.find(entry => entry.name === 'write-b-under-home')?.outcome === 'ok'
       && bUnderHome !== undefined && describeRow(bUnderHome, bRow)?.value.data.limit === 8,
     'B stays writable under the A home override', JSON.stringify(bUnderHome?.settings?.find(row => row.ns === bRow)?.value))
-    const prefsCovered = describeRow(covered.snapshots[0], 'pi-tui-preferences')
-    check('P1-05e', prefsCovered !== undefined && sameJson(settingsShape(prefsCovered), settingsShape(prefsBefore)),
-      'pi-tui-preferences untouched by the covered A write', JSON.stringify(prefsCovered?.value))
+    // P1-05e reads the AUTHORITATIVE post-write descriptors, not the boot snapshot.
+    const prefsAfterCoveredA = afterCoveredA === undefined ? undefined : describeRow(afterCoveredA, 'pi-tui-preferences')
+    const prefsAfterCoveredB = afterCoveredB === undefined ? undefined : describeRow(afterCoveredB, 'pi-tui-preferences')
+    check('P1-05e', prefsCovered !== undefined && prefsAfterCoveredA !== undefined && prefsAfterCoveredB !== undefined
+      && sameJson(settingsShape(prefsAfterCoveredA), settingsShape(prefsCovered))
+      && sameJson(settingsShape(prefsAfterCoveredB), settingsShape(prefsCovered)),
+    'pi-tui-preferences untouched after both the refused A write and the B write',
+    JSON.stringify({ before: prefsCovered?.revision, afterA: prefsAfterCoveredA?.revision, afterB: prefsAfterCoveredB?.revision }))
     rmSync(homePatch, { force: true })
     const restored = runHost({
       env, runRoot, stampDir, sentinel, label: 'home-restored',
@@ -725,13 +760,16 @@ function main() {
     const p16 = runHost({
       env, runRoot, stampDir, sentinel, label: 'p1-06',
       steps: [
-        { kind: 'mutate', name: 'save-a-live', ns: aRow, ops: [{ op: 'set', path: ['data', 'label'], value: 'alpha-live' }], revision: 0 },
+        // Probe only: a refused save must make P1-06a fail rather than pass on
+        // unchanged Host identity.
+        { kind: 'mutate', name: 'save-a-live', ns: aRow, ops: [{ op: 'set', path: ['data', 'label'], value: 'alpha-live' }], revision: PROBE === 'stale-save' ? 99 : 0 },
         { kind: 'remount-oracle', name: 'host-remount', sessionId: 'oracle-remount' },
       ],
     })
     const live = p16.snapshots[0]
     const afterLive = snapshotOf(p16, 'save-a-live')
-    evidence.liveSave = { before: live, after: afterLive }
+    const liveSaveOutcome = p16.snapshots.find(entry => entry.name === 'save-a-live' && entry.outcome !== undefined)
+    evidence.liveSave = { before: live, after: afterLive, outcome: liveSaveOutcome }
     const liveFacts = snapshot => snapshot === undefined ? undefined : {
       pid: snapshot.pid,
       hostRuntimeUid: snapshot.hostRuntimeUid,
@@ -740,10 +778,24 @@ function main() {
       rowFibers: [...snapshot.rows].sort((left, right) => left.id < right.id ? -1 : 1)
         .map(row => `${row.id}:${String(row.fiberUid)}`),
     }
-    check('P1-06a', afterLive !== undefined
-      && sameJson(liveFacts(afterLive), liveFacts(live)),
-    'Host PID, runtime/preferences service instances and every sampled row fiber unchanged by the save',
-    `${JSON.stringify(liveFacts(live))} -> ${JSON.stringify(liveFacts(afterLive))}`)
+    const liveA = afterLive === undefined ? undefined : describeRow(afterLive, aRow)
+    const liveB = afterLive === undefined ? undefined : describeRow(afterLive, bRow)
+    const livePrefs = afterLive === undefined ? undefined : describeRow(afterLive, 'pi-tui-preferences')
+    const liveA0 = describeRow(live, aRow)
+    const liveB0 = describeRow(live, bRow)
+    check('P1-06a', liveSaveOutcome?.outcome === 'ok'
+      && liveA !== undefined && liveA.value.data.label === 'alpha-live' && liveA.user.data.label === 'alpha-live'
+      && liveA0 !== undefined && liveA.revision === liveA0.revision + 1
+      && liveB !== undefined && liveB0 !== undefined && sameJson(settingsShape(liveB), settingsShape(liveB0))
+      && livePrefs !== undefined && sameJson(settingsShape(livePrefs), settingsShape(prefsBefore))
+      && afterLive !== undefined && sameJson(liveFacts(afterLive), liveFacts(live)),
+    'a SUCCESSFUL volatile save (A reread alpha-live at revision+1) leaves B/prefs and the Host identity unchanged',
+    JSON.stringify({
+      outcome: liveSaveOutcome?.outcome,
+      beforeA: liveA0 === undefined ? undefined : { value: liveA0.value, revision: liveA0.revision },
+      afterA: liveA === undefined ? undefined : { value: liveA.value, revision: liveA.revision },
+      identity: [liveFacts(live), liveFacts(afterLive)],
+    }))
     // A settings save legitimately runs the official ConfigEditor reconciliation,
     // which emits `loader/partial-dispose` for every row WITHOUT restarting it
     // (the row fiber uids above prove that). Record the fact so the evidence does
@@ -812,6 +864,19 @@ function main() {
     'official PM disable/enable controls the A Config row',
     JSON.stringify({ disabled: afterDisableA?.rows.filter(row => row.id === aRow), enabled: afterEnableA?.rows.filter(row => row.id === aRow) }))
 
+    // P1-09f: the official CLI REMOVE path (not merely PM enable/disable).
+    run('dsh', ['plugin', '--profile', PROFILE, 'remove', '@r8-pr1-fixture/plain'], { cwd: runRoot, env })
+    const removedBoot = runHost({ env, runRoot, stampDir, sentinel, label: 'plain-removed' })
+    const removedSnapshot = removedBoot.snapshots[0]
+    const bundlesAfterRemove = readJson(join(profileDir, 'package.json')).dsh.profile.bundles
+    check('P1-09f', !bundlesAfterRemove.includes('@r8-pr1-fixture/plain')
+      && !removedSnapshot.rows.some(row => row.id === 'r8-pr1-fixture-plain-host')
+      && !removedSnapshot.rows.some(row => row.id === 'r8-pr1-fixture-plain-tui-row')
+      && removedSnapshot.rows.some(row => row.id === aRow && row.state === 2)
+      && removedSnapshot.settings.some(row => row.ns === aRow),
+    'official dsh plugin remove uninstalls the plain plugin while both Config rows stay',
+    JSON.stringify({ bundles: bundlesAfterRemove, plainRows: removedSnapshot.rows.filter(row => row.id.includes('plain')) }))
+
     // P1-08: the PACKED public export.
     const packedDir = join(candidate.extractDir, 'package')
     const packedManifest = readJson(join(packedDir, 'package.json'))
@@ -848,7 +913,11 @@ function main() {
     check('P1-02c', fixtureTuiEvents.length === 0 && rogueTuiRows.length === 0,
       'every Host boot imported/applied no A/B/Dual ./tui entry and mounted no ./tui Host row',
       JSON.stringify({ fixtureTuiEvents, rogueTuiRows }))
-    rc3Qualification({ stampDir, candidate, tarballs })
+    if (process.env.R8_PR1_SKIP_RC3 === '1') {
+      evidence.rc3 = { phase: 'skipped', status: 'SKIPPED_FOR_PROBE' }
+    } else {
+      rc3Qualification({ stampDir, candidate, tarballs, evidence })
+    }
   } catch (error) {
     gate('INFRA', 'FAIL', 'the runner completes', error instanceof Error ? `${error.name}: ${error.message}` : String(error))
   } finally {
