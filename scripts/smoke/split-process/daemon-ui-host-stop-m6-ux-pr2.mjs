@@ -6,14 +6,16 @@
  * `/exit`s and takes the ONE whole-Host stop confirm:
  *   - `Leave daemon Host running and exit` keeps the old Host (and a sibling
  *     Client) alive, performs ZERO manager stop, and exits 0;
- *   - a second Client's `Stop daemon Host and exit` runs the ONE authenticated
- *     `daemon stop` AFTER the terminal restore: the old Host is verified gone,
- *     the sibling Client loses that instance, and the exit code is 0.
+ *   - a second Client's `Stop daemon Host and exit` releases its B1 transport
+ *     before the ONE authenticated `daemon stop` runs AFTER the terminal
+ *     restore: the old Host process exits and is verified gone, the sibling
+ *     Client loses that instance and fails closed, and the stopping Client
+ *     exits 0 with NO terminal transport failure of its own.
  *
  * This is the A09/A11 process-lifecycle proof that unit tests cannot give (the
- * Remote transport disconnect races the Client exit lifecycle). It references
- * the Linux/macOS manager lanes for the OS install/stop fact; it does NOT
- * re-run them.
+ * Remote transport disconnect races the Client exit lifecycle, and a signal
+ * stop must actually end the Host process). It references the Linux/macOS
+ * manager lanes for the OS install/stop fact; it does NOT re-run them.
  *
  * @module split-process/daemon-ui-host-stop-m6-ux-pr2
  */
@@ -149,7 +151,9 @@ async function exitStop(client, label) {
   const exit = await client.waitForExit(90_000)
   // The explicit Stop hands the ONE authorization to the final exit root, which
   // runs the authenticated admin stop AFTER the terminal restore. The exit code
-  // is that control-plane verdict (0 = confirmed stop).
+  // is that control-plane verdict, so a confirmed stop is 0 and every refusal or
+  // unconfirmed transition keeps its own non-zero class.
+  assert(exit.code === 0 && exit.signal === null, `${label} Stop exit was ${JSON.stringify(exit)}`)
   return exit
 }
 
@@ -215,6 +219,14 @@ export async function runDaemonUiHostStop(context) {
     await closeSettings(clientA2, 'PR2 A2')
     const stopExit = await exitStop(clientA2, 'PR2 A2')
     trace('pr2.stop-exit', { exitCode: stopExit.code })
+    // F3 negative control (committed Stop): the EXPECTED disconnect that follows
+    // this Client's own whole-Host stop must never reach it as a terminal
+    // transport identity failure. The confirmed exit released the B1 transport
+    // BEFORE the control plane ran, so the ONE exit controller owns the code.
+    const stopFailures = clientA2.records.filter(record => record.m4a0 === 'failure')
+    assert(stopFailures.length === 0,
+      `the confirmed Stop must not turn the expected disconnect into a Client failure: ${JSON.stringify(stopFailures)}`)
+    trace('pr2.stop-no-failure', { failureRecords: 0 })
 
     // The old Host is verified gone; the sibling Client lost that instance.
     await waitForCondition(async () => {
@@ -226,9 +238,20 @@ export async function runDaemonUiHostStop(context) {
     // clean connection to it (its transport drops), so its exit is NOT a clean
     // detach of a live Host. That is exactly the A11 sibling-isolation fact.
     if (!clientB.exited) await clientB.waitForExit(60_000).catch(() => undefined)
-    trace('pr2.sibling-after-stop', { exited: clientB.exited, exit: clientB.exitResult ?? null })
+    // F3 negative control (NO Stop commit): the same Host disappearance is a
+    // REAL terminal failure for a Client that never confirmed a stop. It must
+    // still fail closed through the recorded transport scope error, never exit
+    // as if the Host were still serving it.
+    const siblingFailure = clientB.records.find(record => record.m4a0 === 'failure')
+    trace('pr2.sibling-after-stop', {
+      exited: clientB.exited,
+      exit: clientB.exitResult ?? null,
+      failureCode: siblingFailure?.code ?? null,
+    })
     assert(clientB.exited && clientB.exitResult?.code !== 0,
       `the sibling Client cannot keep the stopped Host instance (exited=${String(clientB.exited)}, exit=${JSON.stringify(clientB.exitResult)})`)
+    assert(typeof siblingFailure?.code === 'string',
+      `the sibling Client must fail through a real terminal transport failure: ${JSON.stringify(clientB.records.filter(record => record.m4a0 === 'failure' || record.m4a0 === 'cleanup-failure'))}`)
     await clientB.dispose().catch(() => {})
   } finally {
     await dispose()
@@ -237,7 +260,7 @@ export async function runDaemonUiHostStop(context) {
     status: 'PASS',
     scope: 'REAL_SPLIT_PROCESS_L6',
     leave: { hostKept: true, siblingKept: true },
-    stop: { hostVerifiedGone: true, siblingLostInstance: true },
+    stop: { hostVerifiedGone: true, noTerminalTransportFailure: true, siblingLostInstance: true },
   }
 }
 
