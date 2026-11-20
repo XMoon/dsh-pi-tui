@@ -96,6 +96,12 @@ export interface ExitIntentFacts {
    */
   hostStopIntentCurrent(): boolean
   /**
+   * M6 UX PR2: the close-time freshness re-check — the config's current
+   * readiness. It never replaces the fresh read (hostStopEligible); it only
+   * prevents committing a verdict that a close-time invalidation made stale.
+   */
+  hostStopReadinessCurrent(): boolean
+  /**
    * M6 UX PR2: whether THIS Client may ask, at exit, about stopping the old
    * Profile Host. It re-reads the LIVE facts on every check: the process must
    * still run the daemon backend, the process-lifetime transient
@@ -254,11 +260,12 @@ export function createExitIntentCoordinator(deps: ExitIntentCoordinatorDeps): Ex
     if (operationEpoch !== epoch) return
     if (!identityCurrent(identity)) return
     // A Host-stop verdict must ALSO survive the close-time re-read: a close
-    // callback can change the local intent, and an unproven transition must
-    // never execute the stop (the FRESH authoritative read already ran just
-    // before this commit; this catches a synchronous close-time revert).
-    if (hostStopRequested && !deps.facts.hostStopIntentCurrent()) {
-      safeDiag('info', 'host stop declined: the transition intent is no longer current at commit')
+    // callback can change the local intent OR invalidate the config freshness,
+    // and an unproven transition must never execute the stop (the FRESH
+    // authoritative read already ran just before this commit; this catches a
+    // synchronous close-time revert).
+    if (hostStopRequested && (!deps.facts.hostStopIntentCurrent() || !deps.facts.hostStopReadinessCurrent())) {
+      safeDiag('info', 'host stop declined: the transition intent or config freshness is no longer current at commit')
       deps.commit({ workStopped })
       return
     }

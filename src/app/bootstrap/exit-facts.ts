@@ -61,6 +61,12 @@ export interface ExitIntentFactSources {
    */
   hostStopIntentCurrent?(): boolean
   /**
+   * M6 UX PR2: the close-time freshness re-check (config readiness). Absent
+   * means the composition cannot prove it — the close-time commit then refuses
+   * a Host stop (conservative).
+   */
+  hostStopReadinessCurrent?(): boolean
+  /**
    * M6 UX PR2: the FULL eligibility including a FRESH authoritative Profile
    * Backend read. Absent means the composition cannot prove it (never asks).
    */
@@ -150,6 +156,7 @@ export function createExitIntentFacts(sources: ExitIntentFactSources): ExitInten
       return facts.isTransportTokenCurrent(scope.sessionId ?? SESSIONLESS_TRANSPORT_SENTINEL, transportToken)
     },
     hostStopIntentCurrent: sources.hostStopIntentCurrent ?? (() => false),
+    hostStopReadinessCurrent: sources.hostStopReadinessCurrent ?? (() => false),
     hostStopEligible: sources.hostStopEligible ?? (async () => false),
   }
 }

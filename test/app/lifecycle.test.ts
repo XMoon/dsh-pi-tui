@@ -1051,6 +1051,7 @@ function exitIntentHarness(options: {
       }),
       isScopeCurrent: () => state.scopeCurrent,
       hostStopIntentCurrent: () => state.hostStopEligible === true,
+      hostStopReadinessCurrent: () => state.hostStopEligible === true,
       hostStopEligible: async () => {
         // Optional pending gate so a test can hold the fresh read open while a
         // newer operation starts (RFL-011 ownership).

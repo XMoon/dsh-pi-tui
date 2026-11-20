@@ -3510,20 +3510,18 @@ export function applyRunnerWithRuntime(
           : {}),
         // M6 UX PR2: the whole-Host stop eligibility. The SYNC intent check decides
         // whether to intercept at all (transient daemon→direct intent + daemon
-        // backend + the admin capability to actually run the stop). The FULL
-        // check additionally forces a FRESH authoritative Profile Backend read
-        // (never a stale mirror snapshot) before the dangerous option is shown
-        // or accepted: a concurrent revert by another Client is observed even
-        // before its invalidation event arrives. A permission to ASK, never a
-        // command to stop.
+        // backend + the admin capability to actually run the stop). It is
+        // deliberately PERMISSIVE about readiness: a transiently stale mirror at
+        // exit must still reach the fresh read, which re-earns readiness.
         hostStopIntentCurrent: () => selectedRuntime.kind === 'remote'
           && backendExitTransition === 'daemon-to-direct'
-          && profileDaemonAdmin !== undefined
-          // The close-time freshness re-check: it does NOT replace the fresh
-          // read (hostStopEligible does that before the verdict), but it catches
-          // the fresh result being invalidated DURING the close (a
-          // settings/document-updated or disconnect that leaves the config
-          // stale): an unready config must never commit the Host stop.
+          && profileDaemonAdmin !== undefined,
+        // The close-time freshness re-check: it does NOT replace the fresh read
+        // (hostStopEligible does that before the verdict), but it catches the
+        // fresh result being invalidated DURING the close (a
+        // settings/document-updated or disconnect that leaves the config stale).
+        // An unready config must never COMMIT the Host stop.
+        hostStopReadinessCurrent: () => selectedRuntime.kind === 'remote'
           && backend.config.configReadiness() === 'ready',
         hostStopEligible: async () => {
           if (selectedRuntime.kind !== 'remote') return false
