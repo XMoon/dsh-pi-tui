@@ -129,6 +129,7 @@ function runClientFinder(
     // to a directory as a directory without traversing it.
     '--type', 'l',
     '--hidden',
+    '--no-ignore',
     '--exclude', '.git',
     '--exclude', '.git/*',
     '--exclude', '.git/**',
