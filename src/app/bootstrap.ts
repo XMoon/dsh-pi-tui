@@ -3428,6 +3428,10 @@ export function applyRunnerWithRuntime(
       // the explicit whole-Host Stop path, after the TTY restore and before the
       // control plane runs. Idempotent: the Client root teardown reuses it.
       ...(override?.releaseTransport === undefined ? {} : { releaseTransport: override.releaseTransport }),
+      // M6 UX PR2 (N1): the destructive Host stop requires the PROVEN terminal
+      // restore, so the exit root asks the SAME teardown transaction the TTY
+      // release settled on — never a second teardown owner.
+      rendererReleased: surfaceLifecycle.surfaceReleased,
       hint: (message) => process.stdout.write(`\n${message}\n`),
       resumeHint: () => {
         // The Host's profileContext names the profile for EVERY launch form,

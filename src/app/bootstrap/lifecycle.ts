@@ -136,6 +136,14 @@ export interface SurfaceLifecycle {
   disposeSurface(): Promise<void> | void
   /** Register the fiber disposer: surface teardown, retirement, transport. */
   registerRunnerDisposal(): void
+  /**
+   * The TTY-release half of the ONE teardown: `'released'` only when the
+   * renderer release (and the acquisition stage) really settled, `'failed'`
+   * when it rejected, `undefined` before the teardown ran. A destructive Host
+   * stop reads this instead of inferring "the terminal is back" from the
+   * absence of an exception.
+   */
+  surfaceReleased(): 'released' | 'failed' | undefined
 }
 
 /**
@@ -182,6 +190,13 @@ export function createSurfaceLifecycle(deps: SurfaceLifecycleDeps): SurfaceLifec
    * AND the batch failure that follows it.
    */
   let disposeRelease: Promise<void> | undefined
+  /**
+   * The TTY-release half of the teardown, tracked SEPARATELY from the batch
+   * failure: the confirmed whole-Host Stop is a destructive admin action that
+   * may only run after the terminal is proven restored, and a surface disposer
+   * that failed must not be confused with an unreleased terminal.
+   */
+  let rendererReleaseOutcome: 'released' | 'failed' | undefined
   const disposeSurface = (): Promise<void> | void => {
     // Already torn down: hand back the SAME transaction (never `void` — a
     // second caller must still await the tty restore and the batch failure).
@@ -309,6 +324,10 @@ export function createSurfaceLifecycle(deps: SurfaceLifecycleDeps): SurfaceLifec
       surface.whenRendererReleased(),
       whenRendererAcquired(),
     ]).then(() => undefined)
+    void release.then(
+      () => { rendererReleaseOutcome = 'released' },
+      () => { rendererReleaseOutcome = 'failed' },
+    ) // allowlist: the outcome slot only mirrors the published transaction, which every caller awaits
     const composed = !batchFailed
       ? release
       : release.then(
@@ -380,7 +399,10 @@ export function createSurfaceLifecycle(deps: SurfaceLifecycleDeps): SurfaceLifec
     })
   }
 
-  return { disposeSurface, registerRunnerDisposal }
+  /** The TTY-release outcome of the ONE teardown, or `undefined` before it ran. */
+  const surfaceReleased = (): 'released' | 'failed' | undefined => rendererReleaseOutcome
+
+  return { disposeSurface, registerRunnerDisposal, surfaceReleased }
 }
 
 /**

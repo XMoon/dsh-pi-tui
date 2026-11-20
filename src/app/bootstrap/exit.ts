@@ -155,6 +155,15 @@ export interface ExitControllerDeps {
    */
   releaseTransport?(): Promise<void>
   /**
+   * M6 UX PR2 (N1): whether the ONE teardown PROVED the terminal restored.
+   * The confirmed whole-Host Stop is a destructive admin action, so it runs
+   * only when the TTY-release half of the teardown succeeded; an unproven or
+   * failed release refuses the stop and keeps the exit non-zero instead of
+   * driving a Host stop behind a renderer that still owns the terminal.
+   * `undefined` means the composition could not observe the release at all.
+   */
+  rendererReleased?(): 'released' | 'failed' | undefined
+  /**
    * M6 UX PR2: the ONE explicit whole-Host stop, run ONLY when the exit
    * carries the confirmed `hostStopRequested` verdict. It runs AFTER the
    * terminal restore and BEFORE the hint/`appExit`, exactly once, and it owns
@@ -247,7 +256,21 @@ export function createExitController(deps: ExitControllerDeps): {
       // plane's own result. An unexpected throw is the manager/OS failure
       // class (4): the Client still exits, never claiming success.
       let hostStop: { readonly code: number; readonly detail?: string } | undefined
-      if (hostStopRequested) {
+      // N1: a destructive Host stop may only follow a PROVEN terminal restore.
+      // A teardown whose TTY-release half failed or never settled is not a
+      // permission to stop a shared Host, and it must not be reported as one.
+      const releaseVerdict = hostStopRequested ? deps.rendererReleased?.() : undefined
+      if (hostStopRequested && deps.rendererReleased !== undefined && releaseVerdict !== 'released') {
+        hostStop = {
+          code: 4,
+          detail: releaseVerdict === 'failed'
+            ? 'the terminal was not restored, so the Profile Host was left running'
+            : 'the terminal restore was not proven, so the Profile Host was left running',
+        }
+        safeDiag(deps.diag, 'error', 'daemon host stop refused: the terminal restore was not proven', {
+          outcome: releaseVerdict ?? 'not-observed',
+        })
+      } else if (hostStopRequested) {
         if (deps.adminStop === undefined) {
           // A confirmed Stop verdict with no admin capability is NOT a success:
           // report the unconfirmed result and a non-zero exit (the manager/OS

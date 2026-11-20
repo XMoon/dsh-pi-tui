@@ -781,6 +781,10 @@ function exitHarness(options: {
   releaseTransport?: () => Promise<void>
   /** The ONE admin stop result, or a thrown error. */
   adminStop?: () => Promise<{ code: number; stdout: string; stderr: string }>
+  /** N1: the teardown's TTY-release verdict the exit root observes. */
+  rendererReleased?: 'released' | 'failed' | undefined
+  /** Whether the surface teardown itself rejects (the renderer release failed). */
+  cleanupRejects?: boolean
 } = {}) {
   const { diag, lines } = captureDiag()
   const calls = {
@@ -796,7 +800,14 @@ function exitHarness(options: {
   const exitDone = new Promise<number>(resolve => { resolveExit = resolve })
   const { requestExit } = createExitController({
     diag,
-    cleanup: () => { calls.cleanup += 1; calls.order.push('cleanup') },
+    cleanup: async () => {
+      calls.cleanup += 1
+      calls.order.push('cleanup')
+      if (options.cleanupRejects === true) throw new Error('the renderer still owns the tty')
+    },
+    ...(options.rendererReleased === undefined && !('rendererReleased' in options)
+      ? {}
+      : { rendererReleased: () => options.rendererReleased }),
     ...options.prepareRetirement === undefined ? {} : {
       prepareRetirement: () => { calls.prepare += 1; calls.order.push('prepare'); options.prepareRetirement?.() },
     },
@@ -2069,4 +2080,39 @@ test('a late verification read never closes a newer exit seat', async () => {
   await tick()
   // The late old settlement must never close the newer seat (RFL-011).
   assert.equal(h.current()?.kind, 'daemon-host-stop', 'the newer seat survives the late old read')
+})
+
+// ── N1: a destructive Host stop requires a PROVEN terminal restore ──────────
+
+test('the confirmed Host stop is REFUSED when the renderer still owns the terminal', async () => {
+  const { requestExit, calls, exitDone, lines } = exitHarness({
+    rendererReleased: 'failed',
+    cleanupRejects: true,
+    adminStop: async () => ({ code: 0, stdout: '', stderr: '' }),
+  })
+  requestExit({ hostStopRequested: true })
+  assert.equal(await exitDone, 4, 'the refusal keeps a non-zero management/OS failure class')
+  assert.equal(calls.adminStop, 0, 'NO admin stop may run behind an unreleased terminal')
+  assert.match(lines.join('\n'), /daemon host stop refused: the terminal restore was not proven/u,
+    'the refusal is recorded as the stable reason')
+})
+
+test('an unobserved terminal release is not a permission to stop the Host either', async () => {
+  const { requestExit, calls, exitDone } = exitHarness({
+    rendererReleased: undefined,
+    adminStop: async () => ({ code: 0, stdout: '', stderr: '' }),
+  })
+  requestExit({ hostStopRequested: true })
+  assert.equal(await exitDone, 4)
+  assert.equal(calls.adminStop, 0)
+})
+
+test('the proven terminal restore is what admits the ONE admin stop', async () => {
+  const { requestExit, calls, exitDone } = exitHarness({
+    rendererReleased: 'released',
+    adminStop: async () => ({ code: 0, stdout: '', stderr: '' }),
+  })
+  requestExit({ hostStopRequested: true })
+  assert.equal(await exitDone, 0)
+  assert.equal(calls.adminStop, 1)
 })
