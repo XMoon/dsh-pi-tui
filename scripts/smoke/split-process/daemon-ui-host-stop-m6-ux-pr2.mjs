@@ -38,6 +38,35 @@ async function frameOf(client) {
   return (await client.viewport().catch(() => [])).join('\n')
 }
 
+/**
+ * The ONE Host process identity this run must prove gone: the PID and kernel
+ * starttime the Host itself published. A later PID owner with a DIFFERENT
+ * starttime is a reused PID, not the old Host.
+ */
+function recordedHostProcess(identity) {
+  assert(Number.isInteger(identity?.hostPid) && typeof identity?.hostStarttime === 'string',
+    `the Host identity carries no kernel process fact: ${JSON.stringify(identity)}`)
+  return { pid: identity.hostPid, starttime: identity.hostStarttime }
+}
+
+/**
+ * The recorded Host process REALLY exited. The authority is the OS fact, not a
+ * control-channel answer: an unreachable Host must never be read as a stopped
+ * one, which is exactly what a `status` probe failure would do.
+ */
+async function waitHostProcessGone(recorded, label, timeoutMs = 60_000) {
+  const started = Date.now()
+  for (;;) {
+    const current = readStartIdentity(recorded.pid)
+    if (!alive(recorded.pid) || current === undefined || current !== recorded.starttime) {
+      return { pid: recorded.pid, starttime: recorded.starttime, observed: current ?? null }
+    }
+    assert(Date.now() - started < timeoutMs,
+      `${label}: the recorded Host process is still alive (pid=${String(recorded.pid)} starttime=${String(current)})`)
+    await sleep(100)
+  }
+}
+
 async function waitForText(client, text, label, timeoutMs = 90_000) {
   const started = Date.now()
   while (Date.now() - started < timeoutMs) {
