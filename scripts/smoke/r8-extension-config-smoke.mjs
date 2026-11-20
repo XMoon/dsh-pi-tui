@@ -264,6 +264,9 @@ async function hostChild() {
         hostRuntimeServiceIdentity: identityOf(ctx.get('piTuiHostReady')),
         preferencesServiceIdentity: identityOf(ctx.get('piTuiPreferences')),
         disposeEvents: [...disposeEvents],
+        fixtureTuiRows: [...ctx.loader.entries()]
+          .filter(entry => entry.options.name.startsWith('@r8-pr1-fixture/') && entry.options.name.endsWith('/tui'))
+          .map(entry => ({ id: entry.options.id, name: entry.options.name, state: entry.fiber?.state })),
         rows: [...ctx.loader.entries()].filter(relevant).map(entry => ({
           id: entry.options.id,
           name: entry.options.name,
@@ -388,8 +391,14 @@ function runHost({ env, runRoot, stampDir, sentinel, label, steps = [], extraPat
   }
   const report = readJson(reportPath)
   if (report.status !== 'PASS') throw new Error(`host child failed: ${String(report.error)}`)
+  for (const snapshot of report.snapshots) {
+    bootAudit.sentinelEvents.push(...(snapshot.sentinel ?? []))
+    bootAudit.fixtureTuiRows.push(...(snapshot.fixtureTuiRows ?? []))
+  }
   return report
 }
+
+const bootAudit = { sentinelEvents: [], fixtureTuiRows: [] }
 
 const snapshotOf = (report, name) => report.snapshots.find(entry => entry.name === name && entry.settings !== undefined)
 
@@ -516,6 +525,8 @@ function main() {
   }
   const env = isolatedEnv(runRoot, home)
   const sentinel = join(stampDir, 'sentinel.jsonl')
+  bootAudit.sentinelEvents = []
+  bootAudit.fixtureTuiRows = []
   const evidence = { schemaVersion: 1, status: 'FAIL', gateVersion: 'r8-e-pr1', gates, log: logLines, runRoot }
   try {
     const sourcePackage = readJson(join(PACKAGE_ROOT, 'package.json'))
@@ -571,8 +582,7 @@ function main() {
     const rowNames = boot.rows.filter(row => row.id === aRow || row.id === bRow).map(row => row.name)
     check('P1-02b', rowNames.length === 2 && rowNames.every(name => name === CARRIER_MODULE),
       `both rows name ${CARRIER_MODULE}`, `names=${rowNames.join(',')}`)
-    const tuiImports = boot.sentinel.filter(line => line.event === 'tui-import' || line.event === 'tui-apply')
-    check('P1-02c', tuiImports.length === 0, 'Host imported/applied no A/B ./tui entry', JSON.stringify(tuiImports))
+    // P1-02c is asserted again at the END over EVERY Host boot (below).
 
     // P1-02 discovery uses the REAL installed manifests and the REAL mounted
     // rows through the real pure function, never a copy of the hash rule.
@@ -682,7 +692,21 @@ function main() {
     check('P1-05c', covered.snapshots.find(entry => entry.name === 'write-b-under-home')?.outcome === 'ok'
       && bUnderHome !== undefined && describeRow(bUnderHome, bRow)?.value.data.limit === 8,
     'B stays writable under the A home override', JSON.stringify(bUnderHome?.settings?.find(row => row.ns === bRow)?.value))
+    const prefsCovered = describeRow(covered.snapshots[0], 'pi-tui-preferences')
+    check('P1-05e', prefsCovered !== undefined && sameJson(settingsShape(prefsCovered), settingsShape(prefsBefore)),
+      'pi-tui-preferences untouched by the covered A write', JSON.stringify(prefsCovered?.value))
     rmSync(homePatch, { force: true })
+    const restored = runHost({
+      env, runRoot, stampDir, sentinel, label: 'home-restored',
+      steps: [
+        { kind: 'mutate', name: 'write-restored-a', ns: aRow, ops: [{ op: 'set', path: ['data', 'label'], value: 'alpha-restored' }], revision: 0 },
+      ],
+    })
+    const restoredWrite = restored.snapshots.find(entry => entry.name === 'write-restored-a')
+    const restoredSnapshot = snapshotOf(restored, 'write-restored-a')
+    check('P1-05f', restoredWrite?.outcome === 'ok'
+      && describeRow(restoredSnapshot, aRow)?.value.data.label === 'alpha-restored',
+    'removing the home override restores A writability', JSON.stringify(restoredWrite?.errorMessage ?? restoredWrite?.outcome))
     const overlay = join(stampDir, 'a-config-overlay.yml')
     writeFileSync(overlay, `- id: ${aRow}\n  config:\n    data:\n      label: alpha-cli\n`)
     const overlayBoot = runHost({
@@ -816,6 +840,14 @@ function main() {
       tsc.status === 0 ? 'tsc --noEmit exit 0' : `${String(tsc.status)}: ${tsc.stdout ?? ''}${tsc.stderr ?? ''}`)
 
     evidence.packedConsumerDir = consumerDir
+    const fixtureTuiEvents = bootAudit.sentinelEvents
+      .filter(line => (line.event === 'tui-import' || line.event === 'tui-apply')
+        && line.package !== '@r8-pr1-fixture/plain')
+    const rogueTuiRows = bootAudit.fixtureTuiRows
+      .filter(row => row.name !== '@r8-pr1-fixture/plain/tui')
+    check('P1-02c', fixtureTuiEvents.length === 0 && rogueTuiRows.length === 0,
+      'every Host boot imported/applied no A/B/Dual ./tui entry and mounted no ./tui Host row',
+      JSON.stringify({ fixtureTuiEvents, rogueTuiRows }))
     rc3Qualification({ stampDir, candidate, tarballs })
   } catch (error) {
     gate('INFRA', 'FAIL', 'the runner completes', error instanceof Error ? `${error.name}: ${error.message}` : String(error))
@@ -823,7 +855,10 @@ function main() {
     evidence.gates = gates
     evidence.log = logLines
     const failed = gates.filter(entry => entry.status === 'FAIL')
-    evidence.status = failed.length === 0 ? 'PASS' : 'FAIL'
+    const unverified = gates.filter(entry => entry.status === 'NOT_VERIFIED')
+    // A gate that could not run is never folded into a bare PASS.
+    evidence.status = failed.length > 0 ? 'FAIL' : unverified.length > 0 ? 'PASS_WITH_NOT_VERIFIED' : 'PASS'
+    evidence.notVerified = unverified.map(entry => entry.id)
     evidence.pruned = process.env.R8_PR1_KEEP !== '1'
     writeFileSync(join(stampDir, 'evidence.json'), `${JSON.stringify(evidence, undefined, 2)}\n`)
     // The evidence is the JSON/reports/log; the installed profiles, pnpm stores
@@ -835,7 +870,7 @@ function main() {
       }
     }
     for (const entry of gates) process.stdout.write(`${entry.status.padEnd(12)} ${entry.id}: ${entry.actual}\n`)
-    process.stdout.write(`${evidence.status} ${failed.length} failed / ${gates.length} gates; evidence ${join(stampDir, 'evidence.json')}\n`)
+    process.stdout.write(`${evidence.status} ${String(failed.length)} failed / ${String(unverified.length)} not-verified / ${String(gates.length)} gates; evidence ${join(stampDir, 'evidence.json')}\n`)
     process.exitCode = failed.length === 0 ? 0 : 1
   }
 }
