@@ -97,12 +97,14 @@ export type PromptPresenceAckOutcome =
 
 /**
  * The transport identity probe (the existing `sessionFacts` capture/compare
- * pair): an ACK carried by a superseded Connection generation or a replaced
- * binding must never confirm presence.
+ * pair): a view has NO authority until its Session's official retained
+ * main-view binding EXISTS on the current Connection generation, and an ACK
+ * carried by a superseded generation/binding must never confirm presence.
  */
 export interface PromptPresenceTransportProbe {
-  /** The transport identity of the CURRENT connection for one Session. */
-  capture(sessionId: string): unknown
+  /** The current retained binding + Connection generation for one Session
+   *  (the capture pair's token shape); both parts must exist. */
+  capture(sessionId: string): { readonly generation: unknown; readonly binding: unknown } | undefined
   /** Whether the captured identity is still the current one. */
   isCurrent(sessionId: string, token: unknown): boolean
 }
@@ -165,6 +167,8 @@ export function createPromptPresenceClient(options: PromptPresenceClientOptions)
   const lifetime = new AbortController()
   let nextRevision = 1
   let committed: (PromptPresenceLocalView & { revision: number }) | undefined
+  /** The transport identity the committed ACK rode on (retired with it). */
+  let committedToken: unknown
   /** The coalesced desired view; `undefined` = nothing pending. */
   let desired: PromptPresenceLocalView | undefined
   /** One chain step awaiting its start; concurrent enqueues coalesce into it. */
@@ -175,9 +179,10 @@ export function createPromptPresenceClient(options: PromptPresenceClientOptions)
   let active = 0
 
   /** The transport identity of one view's connection (absent when sessionless). */
-  const tokenFor = (view: PromptPresenceLocalView): { sessionId: string; token: unknown } | undefined => {
+  const tokenFor = (view: PromptPresenceLocalView): { sessionId: string; token: { readonly generation: unknown; readonly binding: unknown } } | undefined => {
     if (transport === undefined || view.viewedSessionId === null) return undefined
-    return { sessionId: view.viewedSessionId, token: transport.capture(view.viewedSessionId) }
+    const token = transport.capture(view.viewedSessionId)
+    return token === undefined ? undefined : { sessionId: view.viewedSessionId, token }
   }
 
   /** Make ONE dispatch for one exact view (never throws). */
@@ -186,6 +191,14 @@ export function createPromptPresenceClient(options: PromptPresenceClientOptions)
     nextRevision += 1
     active += 1
     const captured = tokenFor(view)
+    // BEFORE any projection: a view has no authority until its Session's
+    // official retained main-view binding exists on the current generation.
+    // An absent generation or binding is never a vacuous match.
+    if (view.viewedSessionId !== null && transport !== undefined
+      && (captured === undefined || captured.token.generation === undefined || captured.token.binding === undefined)) {
+      committed = undefined
+      return { kind: 'unconfirmed' }
+    }
     try {
       let answer: Awaited<ReturnType<RemotePromptPresenceCapability['syncView']>>
       try {
@@ -194,10 +207,12 @@ export function createPromptPresenceClient(options: PromptPresenceClientOptions)
         // A transport failure, cancellation or thrown boundary validation:
         // no ACK evidence exists, so the outcome is the truthful UNKNOWN.
         committed = undefined
+        committedToken = undefined
         return { kind: 'unconfirmed' }
       }
       if (answer.ok === false) {
         committed = undefined
+        committedToken = undefined
         return { kind: 'unconfirmed' }
       }
       const value = answer.value
@@ -207,15 +222,18 @@ export function createPromptPresenceClient(options: PromptPresenceClientOptions)
       // ACK must never mark the current revision accepted).
       if (value.revision !== revision) {
         committed = undefined
+        committedToken = undefined
         return { kind: 'unconfirmed' }
       }
       // The record lives on the connection that acknowledged it: an ACK carried
       // by a superseded Connection generation or a replaced binding is UNKNOWN.
       if (captured !== undefined && transport !== undefined && !transport.isCurrent(captured.sessionId, captured.token)) {
         committed = undefined
+        committedToken = undefined
         return { kind: 'unconfirmed' }
       }
       committed = { viewedSessionId: view.viewedSessionId, displayPreset: view.displayPreset, revision }
+      committedToken = captured?.token
       return { kind: 'applied', revision }
     } finally {
       active -= 1
@@ -273,6 +291,18 @@ export function createPromptPresenceClient(options: PromptPresenceClientOptions)
     sync: () => enqueue(localView()),
     withdraw: () => enqueue({ viewedSessionId: null, displayPreset: localView().displayPreset }),
     ackCurrentView: async (): Promise<PromptPresenceAckOutcome> => {
+      // Fast path: the committed view IS the current local view on the SAME
+      // transport identity — nothing to re-sync, so the send-boundary
+      // re-checks stay local. A superseded generation or a released binding
+      // falls through to the settle loop and re-projects on the current
+      // connection (the record lives on the connection that acknowledged it).
+      const view = localView()
+      const committedCurrent = committed !== undefined
+        && committed.viewedSessionId === view.viewedSessionId
+        && committed.displayPreset === view.displayPreset
+      const tokenStillCurrent = transport === undefined || view.viewedSessionId === null
+        || (committedToken !== undefined && transport.isCurrent(view.viewedSessionId, committedToken))
+      if (committedCurrent && tokenStillCurrent) return { kind: 'confirmed' }
       for (let round = 0; round < ACK_SETTLE_ROUNDS; round += 1) {
         const outcome = await enqueue(localView())
         if (outcome.kind === 'refused') return { kind: 'refused' }

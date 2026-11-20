@@ -127,7 +127,7 @@ test('an ACK carried by a superseded transport is unconfirmed and retires the co
     localView: () => view,
     signal: new AbortController().signal,
     transport: {
-      capture: () => ({ generation: 1 }),
+      capture: () => ({ generation: 1, binding: {} }),
       isCurrent: () => current,
     },
     diag: DIAG,
@@ -220,6 +220,59 @@ test('an unconfirmed presence refuses the gate without any automatic retry', asy
   try {
     assert.deepEqual(await owner.ackCurrentView(), { kind: 'unconfirmed' })
     assert.equal(calls.length, 1, 'a lost ACK is never replayed')
+  } finally {
+    owner.dispose()
+  }
+})
+
+test('ackCurrentView is local (no wire call) while the committed view is still current', async () => {
+  const view: PromptPresenceLocalView = { viewedSessionId: 'session-x', displayPreset: 'focus' }
+  const { calls, capability } = fakeCapability(ackOf)
+  const owner = createPromptPresenceClient({
+    capability,
+    localView: () => view,
+    signal: new AbortController().signal,
+    transport: {
+      capture: () => ({ generation: 1, binding: {} }),
+      isCurrent: () => true,
+    },
+    diag: DIAG,
+  })
+  try {
+    assert.deepEqual(await owner.sync(), { kind: 'applied', revision: 1 })
+    const before = calls.length
+    assert.deepEqual(await owner.ackCurrentView(), { kind: 'confirmed' },
+      'the send-boundary re-check is local while the committed view is current')
+    assert.equal(calls.length, before, 'no wire call for an already-ACKed current view')
+  } finally {
+    owner.dispose()
+  }
+})
+
+test('a transport reconnect self-heals: the stale committed view re-projects on the new generation', async () => {
+  const view: PromptPresenceLocalView = { viewedSessionId: 'session-x', displayPreset: 'focus' }
+  const { calls, capability } = fakeCapability(ackOf)
+  let generation = 1
+  const owner = createPromptPresenceClient({
+    capability,
+    localView: () => view,
+    signal: new AbortController().signal,
+    transport: {
+      capture: () => ({ generation, binding: {} }),
+      isCurrent: (_sessionId, token) => (token as { generation: number }).generation === generation,
+    },
+    diag: DIAG,
+  })
+  try {
+    assert.deepEqual(await owner.sync(), { kind: 'applied', revision: 1 })
+    // The Connection generation rolls over silently (the old Peer's record is
+    // gone on the Host); the committed view's transport identity is stale.
+    generation = 2
+    const before = calls.length
+    assert.deepEqual(await owner.ackCurrentView(), { kind: 'confirmed' },
+      'the gate re-projects the view on the CURRENT connection and confirms')
+    assert.equal(calls.length, before + 1, 'the stale committed view is never trusted across generations')
+    assert.equal(calls.at(-1)?.revision, 2)
   } finally {
     owner.dispose()
   }

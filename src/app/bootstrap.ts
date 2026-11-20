@@ -677,7 +677,9 @@ export function applyRunnerWithRuntime(
         // by a superseded Connection generation or a replaced binding must
         // never confirm this Client's presence.
         transport: {
-          capture: (sessionId) => override.presentation.sessionFacts.captureTransportToken(sessionId),
+          capture: (sessionId) => override.presentation.sessionFacts.captureTransportToken(sessionId) as
+            | { readonly generation: unknown; readonly binding: unknown }
+            | undefined,
           isCurrent: (sessionId, token) => override.presentation.sessionFacts.isTransportTokenCurrent(sessionId, token),
         },
         diag,

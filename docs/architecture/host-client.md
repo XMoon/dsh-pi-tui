@@ -282,7 +282,7 @@ the kernel seat where one is required.
 - **Identity is authenticated, never registry-only.** The registry
   (`instance.json`; a newly written file is 0600) is an unauthenticated hint
   containing the scope, canonical profile path, `instanceId`, Host PID,
-  loopback origin, protocol `dsh-pi-tui/local/1`, installed bundle/DSH versions
+  loopback origin, the local protocol identity, installed bundle/DSH versions
   and the installed-build fingerprint. Its identity material is versioned by
   schema: Linux schema 1 carries the `/proc/<pid>/stat` starttime, while macOS
   schema 2 carries the complete PR-1 Darwin kernel identity (boot session,
@@ -457,7 +457,7 @@ two builds that both name `local/2` interoperate across versions. Both sides
 must name exactly this protocol and the same DSH runtime version; the exact
 paired DSH version is owned by the package manifest, compatibility matrix and
 release data, not by this document. `local/2` is the protocol baseline of the
-first Split-mode opening (package 0.5.7); `local/1` pairs are refused at
+first Split-mode opening; `local/1` pairs are refused at
 connect with `HOST_PROTOCOL_INCOMPATIBLE`, and a refusal never stops, replaces
 or mutates the live Host or its running Turns.
 

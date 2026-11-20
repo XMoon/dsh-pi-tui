@@ -384,6 +384,25 @@ export function bindSubmissionRuntime(deps: SubmissionRuntimeDeps): SubmissionRu
       }
     })()
     try {
+      // M6 PR-C C3: the presence refusal settlement, shared by the admission
+      // gate and the send-boundary re-check: the draft stays editable, the
+      // ack/echo rows settle truthfully, and nothing is dispatched or replayed.
+      const refuseForPresence = (ack: Exclude<PromptViewAck, { readonly kind: 'confirmed' }>): void => {
+        restoreDraft(text, requestId, submission.staleSubject)
+        surface.settleLocalSubmission(requestId)
+        surface.settleSubmitAck(
+          ack.kind === 'refused' ? 'session view refused' : 'session view unconfirmed',
+          { token: ackToken, terminal: true },
+        )
+        surface.notify(
+          ack.kind === 'refused'
+            ? 'the Host refused this Client\'s session view — the prompt was not sent'
+            : 'this Client\'s session view could not be confirmed — the prompt was not sent (do not retry automatically)',
+          'error',
+        )
+        if (ack.kind === 'refused') attempt?.rejected()
+        else attempt?.unknown()
+      }
       // The WHOLE write (admission → capability → prepare → write → consume)
       // runs inside the operation barrier and, for an image-bearing draft,
       // inside the SAME per-Agent serialization window as a `/model` selection.
@@ -396,20 +415,7 @@ export function bindSubmissionRuntime(deps: SubmissionRuntimeDeps): SubmissionRu
         if (surface.ackPromptView !== undefined) {
           const ack = await surface.ackPromptView()
           if (ack.kind !== 'confirmed') {
-            restoreDraft(text, requestId, submission.staleSubject)
-            surface.settleLocalSubmission(requestId)
-            surface.settleSubmitAck(
-              ack.kind === 'refused' ? 'session view refused' : 'session view unconfirmed',
-              { token: ackToken, terminal: true },
-            )
-            surface.notify(
-              ack.kind === 'refused'
-                ? 'the Host refused this Client\'s session view — the prompt was not sent'
-                : 'this Client\'s session view could not be confirmed — the prompt was not sent (do not retry automatically)',
-              'error',
-            )
-            if (ack.kind === 'refused') attempt?.rejected()
-            else attempt?.unknown()
+            refuseForPresence(ack)
             return
           }
         }
@@ -429,6 +435,18 @@ export function bindSubmissionRuntime(deps: SubmissionRuntimeDeps): SubmissionRu
         if (!surface.isScopeCurrent(scope)) {
           settleStaleSubmission(submission, attempt)
           return
+        }
+        // M6 PR-C C3: the presence currentness re-check AT the send boundary.
+        // The async admission window (prepare, capability admission) may have
+        // carried a display change or a transport rollover: the prompt may
+        // only start its Turn on the CURRENT ACKed view. The fast path is
+        // local (no wire call) while the committed view is still current.
+        if (surface.ackPromptView !== undefined) {
+          const ack = await surface.ackPromptView()
+          if (ack.kind !== 'confirmed') {
+            refuseForPresence(ack)
+            return
+          }
         }
         // T1 BEFORE the write call: a synchronously-emitted inbox/turn event
         // (Direct in-process) must never log ahead of dispatch.
@@ -1356,24 +1374,30 @@ function steerSubmission(deps: SteerSubmissionDeps, input: SteerSubmissionInput)
       // M6 PR-C C3: the presence prerequisite, ahead of the admission window —
       // a refused/unconfirmed session view refuses the steer/queue delivery
       // truthfully and NEVER replays it.
+      // The presence refusal settlement, shared by the admission gate and the
+      // send-boundary re-check: the draft stays editable, the ack/echo rows
+      // settle truthfully, and nothing is dispatched or replayed.
+      const refuseSteerForPresence = (ack: Exclude<PromptViewAck, { readonly kind: 'confirmed' }>): void => {
+        deps.restoreSubmissionDraft(text, steerRequestId, steerSubject)
+        steerRestored = true
+        deps.settleLocalSubmission(steerRequestId)
+        deps.settleSubmitAck(
+          ack.kind === 'refused' ? 'steer session view refused' : 'steer session view unconfirmed',
+          { token: steerAckToken, terminal: true },
+        )
+        deps.notify(
+          ack.kind === 'refused'
+            ? 'the Host refused this Client\'s session view — the message was not sent'
+            : 'this Client\'s session view could not be confirmed — the message was not sent (do not retry automatically)',
+          'error',
+        )
+        if (ack.kind === 'refused') attemptRejected()
+        else attemptUnknown()
+      }
       if (deps.ackPromptView !== undefined) {
         const ack = await deps.ackPromptView()
         if (ack.kind !== 'confirmed') {
-          deps.restoreSubmissionDraft(text, steerRequestId, steerSubject)
-          steerRestored = true
-          deps.settleLocalSubmission(steerRequestId)
-          deps.settleSubmitAck(
-            ack.kind === 'refused' ? 'steer session view refused' : 'steer session view unconfirmed',
-            { token: steerAckToken, terminal: true },
-          )
-          deps.notify(
-            ack.kind === 'refused'
-              ? 'the Host refused this Client\'s session view — the message was not sent'
-              : 'this Client\'s session view could not be confirmed — the message was not sent (do not retry automatically)',
-            'error',
-          )
-          if (ack.kind === 'refused') attemptRejected()
-          else attemptUnknown()
+          refuseSteerForPresence(ack)
           return
         }
       }
@@ -1400,6 +1424,17 @@ function steerSubmission(deps: SteerSubmissionDeps, input: SteerSubmissionInput)
                 : 'the session changed while sending — the draft was cleared by the switch', 'error')
             attemptRejected()
             return { kind: 'stale' }
+          }
+          // M6 PR-C C3: the presence currentness re-check AT the send
+          // boundary — the async admission window may have carried a display
+          // change or a transport rollover. The fast path is local while the
+          // committed view is still current.
+          if (deps.ackPromptView !== undefined) {
+            const ack = await deps.ackPromptView()
+            if (ack.kind !== 'confirmed') {
+              refuseSteerForPresence(ack)
+              return { kind: 'stale' }
+            }
           }
           // T1 BEFORE the dispatch.
           deps.markDispatch(agentForSteer.session.id)

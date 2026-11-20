@@ -206,6 +206,37 @@ test('a confirmed presence admits the ordinary submission exactly once', async (
   assert.deepEqual(harness.dispatched, ['session-gate'], 'a confirmed presence admits the prompt')
 })
 
+test('the send-boundary re-check refuses when the view changed during the async admission', async () => {
+  // The admission gate confirms; the async admission window carries a display
+  // change; the send-boundary re-check refuses and the prompt is never sent.
+  let calls = 0
+  const harness = gateHarness({
+    ack: () => {
+      calls += 1
+      return Promise.resolve(calls === 1 ? { kind: 'confirmed' } : { kind: 'unconfirmed' })
+    },
+  })
+  await harness.submit('please run')
+  assert.deepEqual(harness.dispatched, [], 'a stale presence at the send boundary must never dispatch')
+  assert.equal(harness.draft(), 'please run', 'the editable draft is retained')
+  assert.ok(harness.notices.some(message => message.includes('could not be confirmed')),
+    'the truthful unconfirmed notice is shown')
+})
+
+test('the steer send-boundary re-check refuses a stale presence before the dispatch', async () => {
+  let calls = 0
+  const harness = gateHarness({
+    ack: () => {
+      calls += 1
+      return Promise.resolve(calls === 1 ? { kind: 'confirmed' } : { kind: 'refused' })
+    },
+  })
+  const events = await harness.steerText('steer me')
+  assert.deepEqual(events, ['rejected'], 'the steer attempt settles as the proven pre-dispatch refusal')
+  assert.ok(harness.settledAcks.some(reason => reason.includes('steer session view refused')),
+    'the steer ack row settles with the truthful refusal reason')
+})
+
 test('a refused presence refuses the steer/queue admission and never dispatches', async () => {
   const harness = gateHarness({ ack: () => Promise.resolve({ kind: 'refused' }) })
   const events = await harness.steerText('steer me')

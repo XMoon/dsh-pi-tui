@@ -29,8 +29,8 @@ import { fileURLToPath } from 'node:url'
  * The required local Host/Client wire contract, independent of package builds.
  * Both sides must name exactly this value and the same DSH runtime version.
  *
- * `local/2` is the protocol baseline of the first Split-mode opening (package
- * 0.5.7): a v2 peer guarantees the v1 semantics plus the required
+ * `local/2` is the protocol baseline of the first Split-mode opening: a v2
+ * peer guarantees the v1 semantics plus the required
  * `piTuiPromptPresence/syncView` Remote the prompt admission gate depends on.
  * A different protocol is refused at connect (`HOST_PROTOCOL_INCOMPATIBLE`);
  * two builds that both name `local/2` still interoperate across versions.
