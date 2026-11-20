@@ -75,6 +75,8 @@ const FIXTURES = ['a', 'b', 'dual', 'plain']
 /** Test-only perturbation used to prove a gate rejects its false-positive
  * condition; never set by the normal qualification run. */
 const PROBE = process.env.R8_PR1_PROBE ?? ''
+/** The ONLY probes allowed to skip the rc.3 chain: they never exercise it. */
+const RC3_SKIP_PROBES = new Set(['stale-save', 'prefs-mutation'])
 const rowId = name => extensionConfigRowId(`@r8-pr1-fixture/${name}`)
 
 /* ------------------------------------------------------------------ *
@@ -873,9 +875,15 @@ function main() {
       && !removedSnapshot.rows.some(row => row.id === 'r8-pr1-fixture-plain-host')
       && !removedSnapshot.rows.some(row => row.id === 'r8-pr1-fixture-plain-tui-row')
       && removedSnapshot.rows.some(row => row.id === aRow && row.state === 2)
-      && removedSnapshot.settings.some(row => row.ns === aRow),
-    'official dsh plugin remove uninstalls the plain plugin while both Config rows stay',
-    JSON.stringify({ bundles: bundlesAfterRemove, plainRows: removedSnapshot.rows.filter(row => row.id.includes('plain')) }))
+      && removedSnapshot.rows.some(row => row.id === bRow && row.state === 2)
+      && removedSnapshot.settings.some(row => row.ns === aRow)
+      && removedSnapshot.settings.some(row => row.ns === bRow),
+    'official dsh plugin remove uninstalls the plain plugin while BOTH Config rows stay ACTIVE',
+    JSON.stringify({
+      bundles: bundlesAfterRemove,
+      plainRows: removedSnapshot.rows.filter(row => row.id.includes('plain')),
+      configRows: removedSnapshot.rows.filter(row => row.id === aRow || row.id === bRow),
+    }))
 
     // P1-08: the PACKED public export.
     const packedDir = join(candidate.extractDir, 'package')
@@ -913,10 +921,28 @@ function main() {
     check('P1-02c', fixtureTuiEvents.length === 0 && rogueTuiRows.length === 0,
       'every Host boot imported/applied no A/B/Dual ./tui entry and mounted no ./tui Host row',
       JSON.stringify({ fixtureTuiEvents, rogueTuiRows }))
-    if (process.env.R8_PR1_SKIP_RC3 === '1') {
-      evidence.rc3 = { phase: 'skipped', status: 'SKIPPED_FOR_PROBE' }
+    const rc3SkipRequested = process.env.R8_PR1_SKIP_RC3 === '1'
+    if (rc3SkipRequested && !RC3_SKIP_PROBES.has(PROBE)) {
+      // A skipped rc.3 environment can NEVER produce a successful qualification
+      // verdict: only the two negative-control probes that do not exercise rc.3
+      // may skip it, and an ordinary run must execute the real official chain.
+      evidence.rc3 = { phase: 'skipped', status: 'REFUSED', probe: PROBE === '' ? undefined : PROBE }
+      gate('P1-10', 'FAIL', 'official DSH rc.3 profile mounts two Config rows and Settings reads/writes them independently',
+        `R8_PR1_SKIP_RC3=1 is only allowed for the ${[...RC3_SKIP_PROBES].join('/')} probes; this run had probe=${PROBE === '' ? '<none>' : PROBE}`)
+    } else if (rc3SkipRequested) {
+      evidence.rc3 = { phase: 'skipped-for-probe', status: 'SKIPPED_FOR_PROBE', probe: PROBE }
+      // Never silently omit the mandatory P1-10 row: the probe did not exercise it.
+      notVerified('P1-10', 'official DSH rc.3 profile mounts two Config rows and Settings reads/writes them independently',
+        `not exercised by the ${PROBE} negative-control probe`)
     } else {
       rc3Qualification({ stampDir, candidate, tarballs, evidence })
+    }
+    // Deterministic guard: a refused skip must always leave a P1-10 FAIL row and
+    // therefore a FAILED run, independent of the branch above.
+    if (rc3SkipRequested && !RC3_SKIP_PROBES.has(PROBE)
+      && !gates.some(entry => entry.id === 'P1-10' && entry.status === 'FAIL')) {
+      gate('P1-10', 'FAIL', 'a skipped rc.3 environment can never produce a successful qualification verdict',
+        'internal guard: the refusal gate was not recorded')
     }
   } catch (error) {
     gate('INFRA', 'FAIL', 'the runner completes', error instanceof Error ? `${error.name}: ${error.message}` : String(error))
