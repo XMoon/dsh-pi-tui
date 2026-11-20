@@ -146,6 +146,18 @@
         host: 127.0.0.1
         port: 0
 
+    # The canonical profile-owned TUI preferences (M6 PR-A): the ONE hidden,
+    # profile-persisted Config carrier every backend reads — Direct, the Split
+    # Host and, through the Host settings wire, every Remote Client. It is a
+    # CONFIG-ONLY row: no TUI, Agent, Session, Gateway, timer or watcher. It is
+    # NOT gated on `tuiStartup` (a profile that runs `--help` still needs the
+    # canonical authority settled), and it is disabled only in the daemon
+    # supervisor, which owns no Host state. Its auto-generated settings page is
+    # hidden by the row itself; the TUI's own /settings drives it.
+    - id: pi-tui-preferences
+      name: '@xmoon76/dsh-pi-tui/preferences'
+      disabled: !!js "ctx.get('tuiDaemonStartup') !== undefined"
+
     - id: tui-app
       name: '@xmoon76/dsh-pi-tui'
       # `workspaceRegistry` is injected, not merely looked up: D2.4 Direct fork

@@ -75,6 +75,10 @@ function candidateFiles() {
     'dist/acp-preferences.mjs': "export const name = 'pi-tui-acp-preferences'\n"
       + "export const Config = () => {}\n"
       + "export const apply = () => {}\n",
+    // M6 PR-A: the canonical profile-owned TUI preference row.
+    'dist/preferences.mjs': "export const name = 'pi-tui-preferences'\n"
+      + "export const Config = () => {}\n"
+      + "export const apply = () => {}\n",
     'dist/index.d.mts': 'export declare const SOURCE_PROBE: boolean\n',
     'dist/startup.d.mts': 'export declare const STARTUP_PROBE: boolean\n',
     'dist/extensions.d.mts': 'export declare const EXTENSIONS_PROBE: boolean\n',
@@ -99,6 +103,10 @@ function candidateFiles() {
     'dist/acp-preferences.d.mts': 'export declare const name: string\n'
       + 'export declare const Config: unknown\n'
       + 'export declare const apply: () => void\n',
+    'dist/preferences.d.mts': 'export declare const name: string\n'
+      + 'export declare const Config: unknown\n'
+      + 'export declare const apply: () => void\n',
+    'generated/web-access/cordis.patch.yml': '- insert: []\n',
     'cordis.patch.yml': 'patch: []\n',
     // The smoke also asserts the pinned Darwin native payload; a synthetic
     // candidate must therefore mirror the REAL published asset tree instead
@@ -171,6 +179,7 @@ function makeFixture(life, { includePresets = true, candidatePeers = { [DSH_CLI]
       './acp-preferences': './dist/acp-preferences.mjs',
       './host-runtime': './dist/host-runtime.mjs',
       './daemon-launcher': './dist/daemon-launcher.mjs',
+      './preferences': './dist/preferences.mjs',
     },
     peerDependencies: candidatePeers,
     // The smoke asserts the packed manifest restates the repo matrix floor, so

@@ -613,12 +613,27 @@ const DIRECT_SCHEDULE_PREREQUISITE_IDS: readonly string[] = [
   'pi-tui-direct-session-controller',
 ]
 
-/** The overlay's LAST insert group is the Web composition declaration. */
-function webInsertGroup(entries: readonly OverlayEntry[]): readonly OverlayRow[] {
+/** The generated bundle-layer declaration of the official Web roster. It is a
+ * tracked artifact; `test/tooling/web-access-patch.test.mjs` keeps it in sync. */
+const WEB_ENTRIES = parseYaml(
+  readFileSync(new URL('../../generated/web-access/cordis.patch.yml', import.meta.url), 'utf8'),
+  {
+    // office-kit's official `!!js` output-directory macro stays a verbatim
+    // expression string, exactly like the same row in the Host-only overlay.
+    customTags: [{ tag: 'tag:yaml.org,2002:js', resolve: (value: string) => value }],
+  },
+) as OverlayEntry[]
+
+/** The generated Web roster rows (the ONE bundle declaration the toggle drives). */
+function webRosterGroup(entries: readonly { readonly insert?: readonly OverlayRow[] }[] = WEB_ENTRIES): readonly OverlayRow[] {
   const groups = entries.filter(entry => entry.insert !== undefined)
-  assert.ok(groups.length >= 2, 'the overlay must keep the Host execution insert and add ONE Web insert')
-  return groups[groups.length - 1].insert ?? []
+  assert.equal(groups.length, 1, 'the generated Web patch must declare exactly ONE insert group')
+  return groups[0].insert ?? []
 }
+
+/** The roster rows whose official non-desktop values the Host-only overlay
+ * fixes in place (no volatile Settings form in the pinned family). */
+const WEB_FIXED_OVERRIDE_IDS = ['web-runtime', 'office-kit', 'skill-office'] as const
 
 /**
  * The S5-PR5 official additions: each is an ONE-owner row of the shared
@@ -642,7 +657,7 @@ function assertWebRoster(
   expected: readonly { readonly id: string; readonly name: string }[] = WEB_ROWS,
 ): void {
   assert.deepEqual(web.map(candidate => candidate.id), expected.map(row => row.id),
-    'the Web insert must declare exactly the official Web rows in order')
+    'the Web declaration must list exactly the official Web rows in order')
   assert.deepEqual(web.map(candidate => candidate.name), expected.map(row => row.name),
     'every Web row id must keep its exact official package')
   for (const candidate of web) {
@@ -673,16 +688,11 @@ function assertWebRoster(
   }
   const ids = web.map(candidate => candidate.id)
   assert.equal(new Set(ids).size, ids.length, 'a duplicated Web row would activate one package twice')
-  // S5-PR5 required closure: every added official capability is owned by
-  // exactly ONE row loading its exact official package.
   for (const required of PR5_REQUIRED_WEB_ROWS) {
     const owners = web.filter(candidate => candidate.name === required.name)
     assert.equal(owners.length, 1, `exactly ONE Web row must load "${required.name}", found ${String(owners.length)}`)
     assert.equal(owners[0].id, required.id, `"${required.name}" must be owned by the "${required.id}" row`)
   }
-  // The changed-files provider is enabled before its consumer: the toggle
-  // activates one awaited row at a time, so a consumer that mounts first would
-  // stay PENDING and roll the whole Web composition back.
   const providerIndex = ids.indexOf('workspace-changes')
   const consumerIndex = ids.indexOf('ui-deliverables')
   assert.ok(providerIndex >= 0 && consumerIndex >= 0 && providerIndex < consumerIndex,
@@ -690,28 +700,28 @@ function assertWebRoster(
   assert.equal(ids.includes('ui-deliverables'), true, 'the official deliverables UI row belongs to the roster')
   assert.equal(ids.includes('terminal-controller'), true, 'the ONE official Host row on top of the roster is terminal-controller')
   assert.equal(ids.includes('workspace-controller'), false,
-    'the Workspace Controller authority already exists: the Web group must not insert a second one')
+    'the Workspace Controller authority already exists: the Web declaration must not add a second one')
 }
 
 /**
- * Group 2 — Host owner de-duplication: the Web composition adds rows, never a
- * second owner of an authority this Host already publishes.
+ * Group 2 — Host owner de-duplication: the Web declaration adds rows, never a
+ * second owner of an authority this Host already publishes, and the Host-only
+ * overlay never re-declares a Web row (that would block the official
+ * ConfigEditor from persisting it).
  */
 function assertWebOwnerDedupe(
   bundleEntries: readonly OverlayEntry[],
+  webEntries: readonly { readonly insert?: readonly OverlayRow[] }[],
   overlayEntries: readonly OverlayEntry[],
 ): void {
-  const web = webInsertGroup(overlayEntries)
+  const web = webRosterGroup(webEntries)
   const webPackages = new Set(web.map(candidate => candidate.name))
   for (const name of DUPLICATED_HOST_AUTHORITY_PACKAGES) {
-    assert.equal(webPackages.has(name), false, `the Web group must not re-declare the existing "${name}" authority`)
+    assert.equal(webPackages.has(name), false, `the Web declaration must not re-declare the existing "${name}" authority`)
   }
-  // Each existing Host authority keeps exactly ONE owning row across the whole
-  // composed declaration, on the row that owned it before this PR.
-  const composed = [
-    ...bundleEntries.flatMap(entry => entry.insert ?? [entry]),
-    ...overlayEntries.flatMap(entry => entry.insert ?? [entry]),
-  ]
+  const bundle = bundleEntries.flatMap(entry => entry.insert ?? [entry])
+  const overlayRows = overlayEntries.flatMap(entry => entry.insert ?? [entry])
+  const composed = [...bundle, ...web, ...overlayRows]
   // Rows the overlay disables are DECLARED but never mount in a Host-only PID.
   // The one-owner property is therefore about ENABLED rows: the bundle's
   // Direct-only Schedule activation prerequisites exist statically and are
@@ -724,53 +734,78 @@ function assertWebOwnerDedupe(
       `exactly ONE "${pkg}" enabled row must own the Host authority; found ${owners.map(row => row.id).join(',')}`)
     assert.equal(owners[0].id, id, `the "${pkg}" authority must stay on the enabled "${id}" row`)
   }
-  // The Direct-only prerequisites stay declared in the bundle for a Direct
-  // Host, and the overlay disables every one of them.
   for (const direct of DIRECT_SCHEDULE_PREREQUISITE_IDS) {
     assert.equal(composed.some(row => row.id === direct), true, `the bundle keeps the "${direct}" declaration`)
     assert.equal(overlayDisabled.has(direct), true, `the Host-only overlay must disable "${direct}"`)
   }
-  // The whole overlay keeps ONE row per id: a second owner is an added row, not
-  // a renamed one. The three in-place overrides appear once each.
-  const overlayRows = overlayEntries.flatMap(entry => entry.insert ?? [entry])
   const overlayIds = overlayRows.map(candidate => candidate.id)
   assert.equal(new Set(overlayIds).size, overlayIds.length, 'the Host-only overlay must own exactly one row per id')
+  // The generated bundle owns every Web row; the Host overlay owns only the
+  // three fixed non-user overrides and must not re-declare a roster row.
+  for (const row of web) {
+    if (!(WEB_FIXED_OVERRIDE_IDS as readonly string[]).includes(row.id)) {
+      assert.equal(overlayIds.includes(row.id), false,
+        `the Host-only overlay must not re-declare the Web row "${row.id}"`)
+    }
+  }
+  for (const id of WEB_FIXED_OVERRIDE_IDS) {
+    const overrides = overlayRows.filter(row => row.id === id)
+    assert.equal(overrides.length, 1, `the Host-only overlay must own exactly one fixed "${id}" override`)
+    assert.equal(overrides[0].name, undefined, `the "${id}" override must not re-declare its package`)
+    assert.equal(overrides[0].inject, undefined, `the "${id}" override must not re-declare injects`)
+    assert.equal(overrides[0].disabled, undefined, `the "${id}" override must not change the toggle default`)
+  }
   for (const name of [WEB_RUNTIME_PACKAGE, CLIENT_MODULES_PACKAGE]) {
-    assert.equal(overlayRows.filter(candidate => candidate.name === name).length, 1,
-      `exactly ONE "${name}" row may exist in the Host-only overlay`)
+    assert.equal(composed.filter(candidate => candidate.name === name).length, 1,
+      `exactly ONE "${name}" row may exist across the composed declaration`)
   }
   // The fallback owns the only SPA seat, so it arrives through web-runtime
   // alone; a declared row would be a second static owner.
-  const bundle = bundleEntries.flatMap(entry => entry.insert ?? [entry])
   assert.equal(bundle.some(candidate => candidate.name === '@deepseek-ai/dsh-host-frontend-static'), false,
     'the Direct bundle must not mount the Web static owner')
-  assert.equal(overlayRows.some(candidate => candidate.name === '@deepseek-ai/dsh-host-frontend-static'), false,
+  assert.equal(composed.some(candidate => candidate.name === '@deepseek-ai/dsh-host-frontend-static'), false,
     'the fallback is web-runtime-owned: no separate frontend-static row may be declared')
 }
 
-test('the Host-only overlay declares the official Web rows DEFAULT-DISABLED on ONE insert', () => {
-  assertWebRoster(webInsertGroup(OVERLAY_ENTRIES))
+test('the bundle declares the official Web rows DEFAULT-DISABLED and the Host overlay only fixes three non-user values', () => {
+  assertWebRoster(webRosterGroup())
+  // The main Direct patch file never re-declares a Web row; the generated
+  // layer is the ONE Loader source.
+  for (const { id } of WEB_ROWS) {
+    assert.equal(BUNDLE_ROWS.some(row => row.id === id), false,
+      `the main bundle patch must not declare the Web row "${id}"`)
+  }
+  const expectedFixedConfig: Readonly<Record<typeof WEB_FIXED_OVERRIDE_IDS[number], Record<string, unknown>>> = {
+    'web-runtime': { openBrowser: false, printUrl: false, surfaceContext: false },
+    'office-kit': { outputDirectory: "dshHomePath('office-kit', 'outputs')" },
+    'skill-office': { pythonEnvironment: 'user' },
+  }
+  for (const id of WEB_FIXED_OVERRIDE_IDS) {
+    const fixed = row(id)
+    assert.deepEqual(fixed.config, expectedFixedConfig[id],
+      `the Host-only "${id}" override must keep the roster's exact official value`)
+  }
   // The composition is static: no production switch selects these rows.
   assert.doesNotMatch(HOST_ONLY_PATCH, /WEB_ENABLED|M5_WEB_MODE|--web\b/u,
     'the overlay must not introduce a user-facing Web switch')
 })
 
 test('the Web composition reuses the existing Host authorities instead of declaring a second owner', () => {
-  assertWebOwnerDedupe(BUNDLE_ENTRIES, OVERLAY_ENTRIES)
+  assertWebOwnerDedupe(BUNDLE_ENTRIES, WEB_ENTRIES, OVERLAY_ENTRIES)
 })
 
 /**
- * M5-W PR-B — the runtime toggle's roster must BE the overlay's roster.
+ * M5-W PR-B — the runtime toggle's roster must BE the bundle declaration.
  *
  * The service owns a frozen table of official Web rows (id + package) because it
  * flips those exact rows at runtime. This assertion compares that table with
- * the real `HOST_ONLY_PATCH` insert, so a silently added, dropped, renamed or
- * reordered declaration cannot leave the toggle driving a different graph than
- * the Host booted.
+ * the real generated `generated/web-access/cordis.patch.yml` insert, so a
+ * silently added, dropped, renamed or reordered declaration cannot leave the
+ * toggle driving a different graph than the Host booted.
  */
 function assertWebAccessRoster(web: readonly OverlayRow[]): void {
   assert.deepEqual(PI_TUI_WEB_ACCESS_ROWS.map(row => row.id), web.map(row => row.id),
-    'the toggle roster must be the overlay roster: same ids, same order')
+    'the toggle roster must be the bundle roster: same ids, same order')
   assert.deepEqual(PI_TUI_WEB_ACCESS_ROWS.map(row => row.name), web.map(row => row.name),
     'the toggle roster must keep every row`s official package')
   const ids = PI_TUI_WEB_ACCESS_ROWS.map(row => row.id)
@@ -780,17 +815,20 @@ function assertWebAccessRoster(web: readonly OverlayRow[]): void {
   }
 }
 
-test('the runtime toggle owns exactly the overlay Web roster', () => {
-  assertWebAccessRoster(webInsertGroup(OVERLAY_ENTRIES))
+test('the runtime toggle owns exactly the bundle Web roster', () => {
+  assertWebAccessRoster(webRosterGroup())
 })
 
+/** Build a generated-web patch layer from a mutated roster (negative control). */
+function webEntriesOf(rows: readonly OverlayRow[]): readonly { readonly insert: readonly OverlayRow[] }[] {
+  return [{ insert: rows }]
+}
+
 test('the toggle roster assertion rejects a missing, renamed, duplicated or foreign row', () => {
-  const webGroups = OVERLAY_ENTRIES.filter(entry => entry.insert !== undefined)
-  const webGroup = webGroups[webGroups.length - 1]
-  assert.ok(webGroup.insert !== undefined, 'the negative controls need the real Web insert group')
+  const web = webRosterGroup()
   const mutateWeb = (
     mutate: (rows: readonly OverlayRow[]) => readonly OverlayRow[],
-  ): readonly OverlayRow[] => mutate(webGroup.insert ?? [])
+  ): readonly OverlayRow[] => mutate(web)
   // Drift 1: a removed declaration row would make the toggle's table name
   // a row this Host never mounts.
   assert.throws(
@@ -812,42 +850,40 @@ test('the toggle roster assertion rejects a missing, renamed, duplicated or fore
   // Drift 4: a protected Host owner inside the roster would be disposed by the
   // toggle. The exactly-one-owner rule rejects it before the toggle can.
   assert.throws(
-    () => assertWebOwnerDedupe(BUNDLE_ENTRIES, OVERLAY_ENTRIES.map(entry => entry === webGroup
-      ? { ...entry, insert: [...(entry.insert ?? []), { id: 'workspace-controller-copy', name: WORKSPACE_CONTROLLER_PACKAGE, disabled: true }] }
-      : entry)),
+    () => assertWebOwnerDedupe(BUNDLE_ENTRIES, webEntriesOf([...web, {
+      id: 'workspace-controller-copy', name: WORKSPACE_CONTROLLER_PACKAGE, disabled: true,
+    }]), OVERLAY_ENTRIES),
     /must not re-declare the existing "@deepseek-ai\/dsh-api-workspace-controller"|exactly ONE "@deepseek-ai\/dsh-api-workspace-controller"/u,
   )
 })
 
 test('the Web composition assertion rejects a re-enabled row, a browser launch and duplicate owners', () => {
-  const webGroups = OVERLAY_ENTRIES.filter(entry => entry.insert !== undefined)
-  const webGroup = webGroups[webGroups.length - 1]
-  assert.ok(webGroup.insert !== undefined, 'the negative controls need the real Web insert group')
+  const web = webRosterGroup()
   const mutateWeb = (
     mutate: (rows: readonly OverlayRow[]) => readonly OverlayRow[],
-  ): OverlayEntry[] => OVERLAY_ENTRIES.map(entry => entry === webGroup ? { ...entry, insert: mutate(entry.insert ?? []) } : entry)
+  ): readonly { readonly insert: readonly OverlayRow[] }[] => webEntriesOf(mutate(web))
   // Drift 1: the runtime row enabled by default would open a Web surface the
   // product has not shipped.
   assert.throws(
-    () => assertWebRoster(webInsertGroup(mutateWeb(rows =>
+    () => assertWebRoster(webRosterGroup(mutateWeb(rows =>
       rows.map(row => row.id === WEB_RUNTIME_ID ? { ...row, disabled: false } : row)))),
     /web-runtime.*disabled by default/u,
   )
   // Drift 2: the official runtime defaults would launch a browser and print a
   // token-bearing URL from the Host log.
   assert.throws(
-    () => assertWebRoster(webInsertGroup(mutateWeb(rows =>
+    () => assertWebRoster(webRosterGroup(mutateWeb(rows =>
       rows.map(row => row.id === WEB_RUNTIME_ID
         ? { ...row, config: { ...WEB_RUNTIME_CONFIG, openBrowser: true } }
         : row)))),
     /web-runtime must stay silent/u,
   )
-  // Drift 3: a second Workspace Controller inside the Web insert is the second
-  // owner the plan forbids (it already exists as an in-place override).
+  // Drift 3: a second Workspace Controller inside the Web declaration is the
+  // second owner the plan forbids (it already exists as an in-place override).
   assert.throws(
     () => assertWebOwnerDedupe(BUNDLE_ENTRIES, mutateWeb(rows => [...rows, {
       id: 'workspace-controller', name: WORKSPACE_CONTROLLER_PACKAGE, disabled: true,
-    }])),
+    }]), OVERLAY_ENTRIES),
     /exactly one row per id|re-declare the existing "@deepseek-ai\/dsh-api-workspace-controller"/u,
   )
   // Drift 4: a duplicated graph composer registers the browser module table
@@ -855,22 +891,23 @@ test('the Web composition assertion rejects a re-enabled row, a browser launch a
   assert.throws(
     () => assertWebOwnerDedupe(BUNDLE_ENTRIES, mutateWeb(rows => [...rows, {
       id: 'modules-again', name: CLIENT_MODULES_PACKAGE, disabled: true,
-    }])),
+    }]), OVERLAY_ENTRIES),
     /exactly ONE "@deepseek-ai\/dsh-client-modules"/u,
   )
   // Drift 5/6: the two mandatory Client dependencies the shipped official UIs
-  // inject may not be missing from the REAL overlay. The expectations are
-  // mutated here (not the overlay), so the control proves the comparison catches
-  // a roster that no longer satisfies the official inject closure.
+  // inject may not be missing from the REAL declaration. The expectations are
+  // mutated here (not the declaration), so the control proves the comparison
+  // catches a roster that no longer satisfies the official inject closure.
   for (const dependency of MANDATORY_CLIENT_DEPENDENCY_PACKAGES) {
     assert.throws(
-      () => assertWebRoster(webInsertGroup(OVERLAY_ENTRIES), WEB_ROWS.filter(row => row.name !== dependency)),
-      /must declare exactly the official Web rows in order/u,
+      () => assertWebRoster(web, WEB_ROWS.filter(row => row.name !== dependency)),
+      /must list exactly the official Web rows in order/u,
       `dropping "${dependency}" from the frozen roster must fail the composition assertion`,
     )
   }
-  // Drift 7/8: a second `connection`/`api-remotes` owner in the Web insert (or at
-  // the top level) is the duplicate Host authority this composition forbids.
+  // Drift 7/8: a second `connection`/`api-remotes` owner in the Web declaration
+  // (or at the top level) is the duplicate Host authority this composition
+  // forbids.
   for (const [suffix, authority] of [
     ['connection-copy', '@deepseek-ai/dsh-client-connection'],
     ['api-remotes-copy', '@deepseek-ai/dsh-api-remotes'],
@@ -878,13 +915,13 @@ test('the Web composition assertion rejects a re-enabled row, a browser launch a
     assert.throws(
       () => assertWebOwnerDedupe(BUNDLE_ENTRIES, mutateWeb(rows => [...rows, {
         id: suffix, name: authority, disabled: true,
-      }])),
+      }]), OVERLAY_ENTRIES),
       /must not re-declare the existing|exactly ONE/u,
       `a second "${authority}" row must fail the owner de-duplication`,
     )
   }
   assert.throws(
-    () => assertWebOwnerDedupe(BUNDLE_ENTRIES, [...OVERLAY_ENTRIES, {
+    () => assertWebOwnerDedupe(BUNDLE_ENTRIES, WEB_ENTRIES, [...OVERLAY_ENTRIES, {
       id: 'api-remotes-copy', name: '@deepseek-ai/dsh-api-remotes',
     }]),
     /exactly ONE "@deepseek-ai\/dsh-api-remotes"/u,
@@ -999,7 +1036,7 @@ test('the Web roster satisfies the official Client inject closure of the pinned 
       `the official "${pkg}" must come from the same pinned DSH family as the Web bundle`)
     manifests.set(pkg, manifest.inject)
   }
-  const web = webInsertGroup(OVERLAY_ENTRIES)
+  const web = webRosterGroup()
   assertMandatoryClientInjectClosure(web, manifests)
   // The two mandatory rows own their package exactly once and are plain rows:
   // no local inject/config override, no feature configuration.
@@ -1020,10 +1057,12 @@ test('the Web roster satisfies the official Client inject closure of the pinned 
   }
 })
 
-test('the Direct bundle keeps no Web-only row and its own listener/startup gates', () => {
+test('the main Direct patch keeps no Web-only row and its own listener/startup gates', () => {
   const bundleIds = new Set(BUNDLE_ROWS.map(row => row.id))
+  const generatedIds = new Set(webRosterGroup().map(row => row.id))
   for (const { id } of WEB_ROWS) {
-    assert.equal(bundleIds.has(id), false, `the Direct bundle must not declare the Web-only row "${id}"`)
+    assert.equal(bundleIds.has(id), false, `the main Direct patch must not declare the Web row "${id}"`)
+    assert.equal(generatedIds.has(id), true, `the generated bundle layer must declare the Web row "${id}"`)
   }
   const webserver = BUNDLE_ROWS.find(row => row.id === 'webserver')
   assert.deepEqual(webserver?.config, { host: '127.0.0.1', port: 0 },
@@ -1031,7 +1070,8 @@ test('the Direct bundle keeps no Web-only row and its own listener/startup gates
   assert.deepEqual(webserver?.inject, ['tuiStartup'], 'Direct keeps its own command-line startup gate')
   assert.deepEqual(BUNDLE_ROWS.find(row => row.id === 'workspace-controller')?.inject, ['tuiStartup'],
     'Direct keeps the Workspace Controller behind the TUI startup admission')
-  assert.equal(BUNDLE_ROWS.some(row => row.name === WEB_RUNTIME_PACKAGE), false, 'Direct mounts no Web runtime')
+  assert.equal(BUNDLE_ROWS.some(row => row.name === WEB_RUNTIME_PACKAGE), false,
+    'the main Direct patch declares no Web runtime row')
 })
 
 interface FixtureRow {

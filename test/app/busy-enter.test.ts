@@ -170,7 +170,7 @@ function setup(options: { busyEnter?: string; localShellSandbox?: string; extens
   startedApps.add(app)
   const commands = fakeCommands()
   ctx.provide('commands', commands.service as never)
-  ctx.provide('settings', { describe: () => [{ ns: 'tui-app', user: {} }] } as never)
+  ctx.provide('settings', { describe: () => [{ ns: 'pi-tui-preferences', user: {} }] } as never)
   const settings = fakeTuiSettings(options.busyEnter ?? 'queue', options.localShellSandbox ?? 'bypass')
   const runner: TuiCommandRunner = {
     webAccess: unavailableWebAccess(),

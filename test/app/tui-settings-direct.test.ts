@@ -79,7 +79,7 @@ function formsOf(
     typeof value === 'function' ? value() : (value ?? { ...user })
   const forms: SettingsFormsLike = {
     describe: () => [{
-      ns: 'tui-app',
+      ns: 'pi-tui-preferences',
       value: effective(),
       user,
       revision,
@@ -146,7 +146,7 @@ test('a whole-document replace writes ONLY the changed fields as path-scoped set
   const settings = new DirectTuiSettings(refs, forms.forms)
   await settings.replace({ ...settings.get(), theme: 'dark', displayPreset: 'focus' } as TuiSettingsDoc)
   assert.deepEqual(forms.calls, [{
-    ns: 'tui-app',
+    ns: 'pi-tui-preferences',
     ops: [
       { op: 'set', path: ['theme'], value: 'dark' },
       { op: 'set', path: ['displayPreset'], value: 'focus' },
@@ -166,7 +166,7 @@ test('a gitAttribution change crosses the DIFF_FIELDS mapping as its own path-sc
   assert.equal(settings.get().gitAttribution, 'off')
   await settings.replace({ ...settings.get(), gitAttribution: 'product-model' } as TuiSettingsDoc)
   assert.deepEqual(forms.calls, [{
-    ns: 'tui-app',
+    ns: 'pi-tui-preferences',
     ops: [{ op: 'set', path: ['gitAttribution'], value: 'product-model' }],
     revision: 2,
   }], 'the attribution mode change crosses as exactly one path-scoped set')
@@ -199,7 +199,7 @@ test('a terminalProgress change crosses the DIFF_FIELDS mapping as its own path-
   refs.write('terminalProgress', '9;4+7501')
   await settings.replace({ ...settings.get(), terminalProgress: '7501' } as TuiSettingsDoc)
   assert.deepEqual(forms.calls, [{
-    ns: 'tui-app',
+    ns: 'pi-tui-preferences',
     ops: [{ op: 'set', path: ['terminalProgress'], value: '7501' }],
     revision: 2,
   }], 'the mode change crosses as exactly one path-scoped set')
@@ -409,7 +409,7 @@ test('ops derivation and the revision fence come from ONE descriptor snapshot', 
     describe: () => {
       describeCalls += 1
       return [{
-        ns: 'tui-app',
+        ns: 'pi-tui-preferences',
         // First describe (the replace's decision read): no overrides, rev 4.
         // Later describes (the conflict check's re-read): the user edit, rev 5.
         ...(describeCalls === 1

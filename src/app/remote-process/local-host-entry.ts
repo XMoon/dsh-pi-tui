@@ -48,6 +48,8 @@ import {
   type ProcessSeat,
 } from './local-scope.ts'
 import { runDetached } from '../../runtime/process/tasks.ts'
+import type { ProfileConfigEditorLike } from '../config/profile-preferences-migration.ts'
+import type { SettingsFormsLike } from '../../runtime/config-port.ts'
 import {
   PI_TUI_WEB_ACCESS_NAMESPACE,
   type PiTuiWebAccessStatus,
@@ -87,22 +89,34 @@ import {
 } from './local-acp-session-view.ts'
 import type { AcpAccessStatus } from '../../runtime/acp-access-port.ts'
 
-/** The official Web-only rows of the Host overlay, rendered from the ONE
- * production roster (`host/features/web-roster.ts`). Pure template data: no
- * parser, no discovery and no state — the same table the `piTuiWebAccess`
- * service verifies the live Loader against. `inject`/`config` come from that
- * same row record; `yaml` is the fixed official macro fragment for the ONE
- * `!!js`-configured row (office-kit's Host data output directory). */
-const WEB_ONLY_ROWS_YAML = PI_TUI_WEB_ACCESS_ROWS.flatMap(row => [
-  `    - id: ${row.id}`,
-  `      name: '${row.name}'`,
-  '      disabled: true',
-  ...(row.inject === undefined ? [] : [`      inject: [${row.inject.join(', ')}]`]),
-  ...(row.config === undefined
-    ? []
-    : ['      config:', ...Object.entries(row.config).map(([key, value]) => `        ${key}: ${String(value)}`)]),
-  ...(row.yaml ?? []),
-]).join('\n')
+/** The three Web roster rows whose official non-desktop values must stay fixed
+ * at the Host-only layer, read from the ONE production roster
+ * (`host/features/web-roster.ts`). These rows carry NO volatile Settings form
+ * (pinned rc.5), so an in-place command-line override cannot block a user
+ * save; the generated bundle patch declares the complete roster. A writable UI
+ * row (`ui-settings-general`, `ui-theme`, …) must NEVER appear here: a
+ * command-line config override would make the official ConfigEditor refuse
+ * every user write. */
+const WEB_FIXED_OVERRIDE_IDS = ['web-runtime', 'office-kit', 'skill-office'] as const
+
+/** The Host-only in-place fixes for the three non-user Web values. `config`
+ * comes from the SAME roster record that generates the bundle declaration;
+ * `yaml` is the fixed official macro fragment for the ONE `!!js`-configured
+ * row (office-kit's Host data output directory). No `name`, no `insert`, no
+ * `inject` and no `disabled`: those belong to the bundle declaration. */
+const WEB_FIXED_OVERRIDES_YAML = WEB_FIXED_OVERRIDE_IDS.map(id => {
+  const row = PI_TUI_WEB_ACCESS_ROWS.find(candidate => candidate.id === id)
+  if (row === undefined) throw new Error(`local host entry: the Web roster lost its "${id}" row`)
+  return [
+    `- id: ${row.id}`,
+    ...(row.config === undefined
+      ? []
+      : ['  config:', ...Object.entries(row.config).map(([key, value]) => `    ${key}: ${String(value)}`)]),
+    // The roster `yaml` fragment is indented for the bundle's `- insert:`
+    // block; an in-place top-level override is four columns shallower.
+    ...(row.yaml ?? []).map(line => line.replace(/^ {4}/u, '')),
+  ].join('\n')
+}).join('\n')
 
 /**
  * The Host-only overlay applied over the profile's own patch stack. It keeps
@@ -128,8 +142,9 @@ export const HOST_ONLY_PATCH = `# M4-B1 Host-only profile overlay: production Ho
 # default); this overlay only ENABLES it. Keeping the declaration — and its
 # config — out of this command-line overlay is required: the official
 # ConfigEditor refuses to persist an entry whose config a home patch or
-# command-line overlay overrides, and this row is the Split Host's ONE live TUI
-# settings authority.
+# command-line overlay overrides. The row owns the Split Host's private
+# business services; the profile-owned TUI preferences it reads live in the
+# canonical 'pi-tui-preferences' row.
 - id: split-host-pi-tui-runtime
   disabled: false
 
@@ -226,42 +241,30 @@ export const HOST_ONLY_PATCH = `# M4-B1 Host-only profile overlay: production Ho
     # The row itself is DECLARED by the bundle patch (disabled by default), so
     # its config stays USER-profile owned. This overlay only ENABLES it: the
     # official ConfigEditor refuses to persist an entry whose config a home
-    # patch or command-line overlay overrides, and this row is the Split Host's
-    # ONE live TUI settings authority.
+    # patch or command-line overlay overrides. Its legacy TUI preference fields
+    # are a migration source only; runtime behavior reads the canonical
+    # 'piTuiPreferences' service.
 
-# ── Official Web composition (M5-W PR-A/PR-B/PR-C) ──────────────────────────
-# The official Browser Web rows, declared here ONCE and DISABLED BY DEFAULT.
-# This declaration is the ONE roster the private 'piTuiWebAccess' Host service
-# toggles at runtime: it flips 'disabled' on exactly these rows through
-# 'Entry.update', never a second declaration, never a profile patch write, and
-# never a separate Web process. The toggle is per Host lifetime; a cold boot
-# starts from this default-off state UNLESS the profile's own
-# 'pi-tui-web-preferences.autoStart' preference is on, in which case the boot
-# sequence below enables the same roster before Ready ('/web' remains the
-# immediate control of a running Host).
-# Only the isolated qualification runs additionally override rows through
-# SPLIT_PROCESS_EXTRA_PATCH; that internal test channel is not a user API.
+# ── Official Web composition (M5-W PR-A/PR-B/PR-C, PR-A profile-writable) ──
+# The complete Browser Web roster is declared in the BUNDLE
+# (generated/web-access/cordis.patch.yml, generated from the ONE production
+# table). It is NOT inserted here: a command-line overlay config override makes
+# the official ConfigEditor refuse that entry's user writes, which is exactly
+# why the official Web pages could not persist their volatile settings.
+# Every roster row arrives DISABLED from the bundle. The private
+# 'piTuiWebAccess' Host service flips exactly those rows through
+# 'Entry.update'; a cold boot starts from the default-off bundle state UNLESS
+# the profile's own 'pi-tui-web-preferences.autoStart' is on, in which case the
+# boot sequence below enables the same roster before Ready ('/web' remains the
+# immediate control of a running Host). Only the isolated qualification runs
+# additionally override rows through SPLIT_PROCESS_EXTRA_PATCH; that internal
+# test channel is not a user API.
 #
-# The roster is the official browser graph of the installed DSH family minus
-# every row whose authority ALREADY exists in this Host: the second
-# 'connection', 'api-remotes', 'file-upload', 'workspace'/'workspace-controller',
-# 'session-controller', 'settings-controller', 'webserver', 'frontend-static'
-# fallback, 'web-startup' parser and the shared Host 'mcp-manager' row are NOT
-# declared here (the manager belongs to the Host composition, so the toggle
-# must never mount or unload it). The mandatory
-# client-dependency closure of the official UIs ('ui-context-menu',
-# 'ui-file-drag'), the official Client file-actions / message-quotes features
-# and the 'workspace-changes' Host recorder that 'ui-deliverables' injects are
-# part of it. 'workspace-changes' is declared BEFORE its consumer because the
-# toggle activates one row at a time and awaits each fiber.
-# 'terminal-controller' is the ONE official Host row added on top of the
-# browser roster (the real Browser x TUI composition needs it).
-#
-# 'web-runtime' owns the single 'frontend-static' fallback over the official
-# dist and is explicitly told to stay silent: no browser launch, no printed
-# token URL and no DSH_WEB_URL shell variable.
-- insert:
-${WEB_ONLY_ROWS_YAML}
+# The three rows below keep their official non-desktop safety values at this
+# layer so a profile patch cannot relax them. They carry NO volatile Settings
+# form in the pinned DSH family, so the in-place override cannot block a user
+# save, and no writable UI row is overridden here.
+${WEB_FIXED_OVERRIDES_YAML}
 `
 
 interface OfficialDshModules {
@@ -1305,6 +1308,42 @@ async function runLocalHostEntryOwned(options: LocalHostEntryOptions, scratchOwn
       })
       const { settleHostEntries, collectHostEntryStatus } = await import('./host-bootstrap.ts')
       await settleHostEntries(handle.ctx)
+      // M6 PR-A: the HOST-OWNED canonical TUI preference migration. It runs
+      // after the profile settled (the canonical row and ConfigEditor exist)
+      // and BEFORE the Web/ACP startup preferences or Ready publication, so no
+      // Host business can read an unmigrated preference and a failed migration
+      // never publishes Ready. A Split Client never runs this barrier.
+      const settled = handle
+      if (settled === undefined) throw new Error('local host entry: the profile handle disappeared before migration')
+      const profileContext = settled.ctx.get('profileContext') as {
+        readonly home: string
+        readonly patchPath: string
+      } | undefined
+      if (profileContext === undefined) {
+        throw new Error('local host entry: the Host profile context is missing')
+      }
+      // Loaded LAZILY: this entry is a standalone Node program whose static
+      // graph must not import the Schemastery-backed preference schema before
+      // the launcher installed the official package resolution. The same
+      // reason `host-bootstrap.ts` is a dynamic import above.
+      const { migrateProfileTuiPreferences } = await import('../config/profile-preferences-migration.ts')
+      await migrateProfileTuiPreferences({
+        patchPath: profileContext.patchPath,
+        configEditor: settled.ctx.get('configEditor') as ProfileConfigEditorLike | undefined,
+        forms: settled.ctx.get('settings') as SettingsFormsLike | undefined,
+        home: profileContext.home,
+        resolvePreset: async (id) => {
+          const presets = settled.ctx.get('agentPresets') as {
+            resolve(id?: string): Promise<{ broken?: string }>
+          } | undefined
+          if (presets === undefined) throw new Error('agent presets unavailable in this deployment')
+          const resolved = await presets.resolve(id)
+          if (resolved.broken !== undefined) {
+            throw Object.assign(new Error(resolved.broken), { code: 'agent-preset/invalid' })
+          }
+        },
+        diag: createEntryDiag('host'),
+      })
       // M5-W PR-C: the profile-owned Web startup preference is consumed HERE —
       // after the profile settled, before the readiness audit and Ready.
       await applyWebStartupPreference(handle.ctx)

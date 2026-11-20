@@ -39,8 +39,10 @@ import { composeDirectAgent, recordedDirectPreset } from './app/direct/compositi
 /** Stable Cordis plugin name. */
 export const name = 'tui-runner'
 
-/** Core services required before the TUI can mount. */
-export const inject = ['agentDefaultModel', 'agents', 'sessions', TUI_STARTUP_SERVICE]
+/** Core services required before the TUI can mount. `piTuiPreferences` is the
+ * canonical profile-owned preference authority: the TUI must not start from a
+ * missing/default schema while the real user document has not settled. */
+export const inject = ['agentDefaultModel', 'agents', 'sessions', TUI_STARTUP_SERVICE, 'piTuiPreferences']
 
 import type { Config } from './app/config/schema.ts'
 export { Config } from './app/config/schema.ts'

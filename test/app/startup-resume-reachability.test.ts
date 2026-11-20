@@ -156,9 +156,9 @@ test('a REAL Direct resume of an interrupted-turn session mounts without waiting
   context.provide('loader', { await: async () => {} } as never)
   await mountAgentLoopTestHarness(context)
 
-  const fiber = await context.plugin(pluginCtx => {
-    applyRunner(pluginCtx, TuiConfigSchema({ fullscreen: 'off', sessionId: String(sessionId) } as never))
-  })
+  const tuiConfig = TuiConfigSchema({ fullscreen: 'off', sessionId: String(sessionId) } as never)
+  context.provide('piTuiPreferences', tuiConfig)
+  const fiber = await context.plugin(pluginCtx => applyRunner(pluginCtx, tuiConfig))
   life.defer(() => fiber.dispose())
 
   // The pre-mount quiesce resolved: the real runner painted its first frame.

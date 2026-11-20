@@ -703,7 +703,6 @@ test('the composition zone is enumerated RECURSIVELY (nested helpers included)',
     [
       'src/app/bootstrap/event-wiring.ts',
       'src/app/bootstrap/exit.ts',
-      'src/app/bootstrap/legacy-settings-migration.ts',
       'src/app/bootstrap/lifecycle.ts',
       'src/app/bootstrap/presentation-bridge.ts',
       'src/app/bootstrap/profile.ts',

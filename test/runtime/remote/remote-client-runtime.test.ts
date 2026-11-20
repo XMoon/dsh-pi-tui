@@ -55,6 +55,7 @@ import { JobId, type JobHandle } from '@deepseek-ai/dsh-jobs'
 import * as toolJobs from '@deepseek-ai/dsh-tool-jobs'
 import { LlmAdapter } from '@deepseek-ai/dsh-llm'
 import * as piTuiHostRuntime from '../../../src/app/host/pi-tui-host-runtime.ts'
+import { PreferencesConfig as CanonicalPreferencesConfig } from '../../../src/app/config/schema.ts'
 import SkillRegistry from '@deepseek-ai/dsh-skill'
 import * as performanceHost from '../../../src/app/host/performance-host.ts'
 import { createExperimentalRemoteRuntime } from '../../support/m3-inprocess/runtime.ts'
@@ -227,6 +228,7 @@ async function createHostFixture(
     await ctx.plugin(StorageDomain, { backend: 'json' })
     await ctx.plugin(WorkspaceRegistry)
     await ctx.plugin(SkillRegistry)
+    ctx.provide('piTuiPreferences', CanonicalPreferencesConfig({} as never))
     await ctx.plugin(piTuiHostRuntime, { sessionId: '' } as never)
     await ctx.plugin(performanceHost)
     // The rc.2 credentials service ships one concrete provider whose

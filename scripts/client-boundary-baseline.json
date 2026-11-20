@@ -36,6 +36,10 @@
     "sessions",
     "subagents"
   ],
+  "app/remote-process/local-host-entry.ts": [
+    "agentPresets",
+    "settings"
+  ],
   "commands.ts": [
     "import:dsh-agent",
     "import:dsh-session"
@@ -74,6 +78,9 @@
     "permissionPresets",
     "settings"
   ],
+  "runtime/direct/cua-access-direct.ts": [
+    "cuaAccess"
+  ],
   "runtime/direct/deliverables-direct.ts": [
     "sandboxPolicy",
     "sessionPersistence",
@@ -81,9 +88,6 @@
   ],
   "runtime/direct/host-command-direct.ts": [
     "commands"
-  ],
-  "runtime/direct/cua-access-direct.ts": [
-    "cuaAccess"
   ],
   "runtime/direct/host-file-direct.ts": [
     "fileReferences"

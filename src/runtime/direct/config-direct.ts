@@ -125,6 +125,7 @@ import type {
   McpServerConfigurationConfig,
   McpConfigWriteOutcome,
 } from '../config-port.ts'
+import { CANONICAL_TUI_SETTINGS_NS } from '../config-port.ts'
 import {
   baseDictKeysOf,
   classifyMcpServerProvenance,
@@ -378,9 +379,10 @@ function readDirectShellExecutionSection(ctx: HostContextLike): SectionRead<Shel
   return projectDirectDescriptor(read.settings, descriptor, projectShellExecutionSettings(active.executor))
 }
 
-/** The Direct M5 footer-command trust read: the USER layer of the `tui-app`
- * settings descriptor decides BOTH the command mode and the command (plan
- * §17.4 — a project layer can never silently trigger the user's command).
+/** The Direct M5 footer-command trust read: the USER layer of the canonical
+ * `pi-tui-preferences` settings descriptor decides BOTH the command mode and
+ * the command (plan §17.4 — a project layer can never silently trigger the
+ * user's command).
  * The adapter owns the descriptor access; a Remote adapter replays the same
  * facts from the wire. */
 class DirectFooterCommandTrust implements FooterCommandTrust {
@@ -396,13 +398,13 @@ class DirectFooterCommandTrust implements FooterCommandTrust {
   get userFooterMode(): string | undefined {
     const descriptor = this.readDescriptor()
     if (descriptor === undefined) return undefined
-    return resolveUserLayerFooterMode([descriptor], 'tui-app')
+    return resolveUserLayerFooterMode([descriptor], CANONICAL_TUI_SETTINGS_NS)
   }
 
   get command() {
     const descriptor = this.readDescriptor()
     if (descriptor === undefined) return undefined
-    return resolveTrustedFooterCommand([descriptor], 'tui-app')
+    return resolveTrustedFooterCommand([descriptor], CANONICAL_TUI_SETTINGS_NS)
   }
 
   /** The ids the USER layer authorizes for custom command item execution
@@ -414,7 +416,7 @@ class DirectFooterCommandTrust implements FooterCommandTrust {
   get userCommandItemActivationIds() {
     const descriptor = this.readDescriptor()
     if (descriptor === undefined) return new Set<string>()
-    return resolveUserCommandItemActivationIds([descriptor], 'tui-app')
+    return resolveUserCommandItemActivationIds([descriptor], CANONICAL_TUI_SETTINGS_NS)
   }
 
   /** The ids authorized for the native FALLBACK surface (the USER's own
@@ -422,7 +424,7 @@ class DirectFooterCommandTrust implements FooterCommandTrust {
   get userCommandItemFallbackActivationIds() {
     const descriptor = this.readDescriptor()
     if (descriptor === undefined) return new Set<string>()
-    return resolveUserCommandItemFallbackActivationIds([descriptor], 'tui-app')
+    return resolveUserCommandItemFallbackActivationIds([descriptor], CANONICAL_TUI_SETTINGS_NS)
   }
 
   /** One describe() read per synchronous evaluation: the two getters are
@@ -431,7 +433,7 @@ class DirectFooterCommandTrust implements FooterCommandTrust {
   private readDescriptor(): SettingsDescriptorLike | undefined {
     if (this.descriptorCache !== null) return this.descriptorCache
     const settings = this.ctx.get('settings') as SettingsServiceLike | undefined
-    const found = readSettingsDescriptor(settings, 'tui-app')
+    const found = readSettingsDescriptor(settings, CANONICAL_TUI_SETTINGS_NS)
     this.descriptorCache = found
     // The cache is per-synchronous-evaluation only: reset on the next
     // macrotask so a settings change is picked up.
@@ -473,7 +475,7 @@ class DirectFooterCustomItems implements FooterCustomItemsConfig {
   private readConfigRaw(): { value: unknown; failed: boolean } {
     try {
       const settings = this.ctx.get('settings') as SettingsServiceLike | undefined
-      const descriptor = readSettingsDescriptor(settings, 'tui-app')
+      const descriptor = readSettingsDescriptor(settings, CANONICAL_TUI_SETTINGS_NS)
       if (descriptor === undefined) return { value: undefined, failed: true }
       const user = descriptor.user
       if (user === undefined) return { value: undefined, failed: false }

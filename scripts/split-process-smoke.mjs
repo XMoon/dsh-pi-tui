@@ -860,6 +860,16 @@ export function assertSelectedVerdict(caseId, result) {
     `selected ${caseId}: the Host/Client Browser callback verdict ended as ${String(result?.browser ?? 'missing')}/${String(result?.status ?? 'missing')}`)
     return
   }
+  if (caseId === 'profile.preferences') {
+    assert(result?.status === 'PASS'
+      && result?.scope === 'REAL_SPLIT_PROCESS_L6'
+      && result?.canonicalActive === true
+      && result?.persistedAcrossColdHost === true
+      && result?.staleRevisionRefused === true
+      && result?.twoClientConflictResolved === true,
+    `selected ${caseId}: the canonical preferences verdict ended as ${String(result?.status ?? 'missing')}/${String(result?.scope ?? 'missing')}${result?.message === undefined ? '' : `: ${String(result.message)}`}`)
+    return
+  }
   if (caseId === 'web.startup-preference') {
     assert(result?.verified === true, `selected ${caseId}: the settings/cold-Host verdict was not verified`)
     return

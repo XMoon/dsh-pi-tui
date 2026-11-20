@@ -5,6 +5,8 @@
  * refresh. */
 
 import assert from 'node:assert/strict'
+import { readFileSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 import test from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import { createToolResultMessage, MessageId, type ToolCallId } from '@deepseek-ai/dsh-llm'
@@ -86,6 +88,82 @@ async function pickSecondModel(app: TuiApp, harness: RunnerHarness): Promise<voi
   input('\r')
   await settle()
 }
+
+test('a Direct bootstrap with a missing Settings surface and a surviving legacy value refuses to mount', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('direct-prefs-barrier-')
+  const patchPath = join(home, 'cordis.patch.yml')
+  writeFileSync(patchPath, [
+    '- id: tui-app',
+    "  name: '@xmoon76/dsh-pi-tui'",
+    '  config:',
+    '    theme: dark',
+    '',
+  ].join('\n'))
+  const ctx = new Context()
+  ctx.provide('profileContext', { home, patchPath })
+  const harness = makeHarness(home)
+  let exited = false
+  try {
+    await mountRunner(ctx, home, harness, {}, {}, () => { exited = true })
+    assert.equal(exited, true,
+      'the missing migration surface must terminate the Direct bootstrap before a surface is admitted')
+    assert.equal(readFileSync(patchPath, 'utf8').includes('pi-tui-preferences'), false,
+      'the failed barrier must not create a canonical row')
+    assert.match(readFileSync(patchPath, 'utf8'), /theme: dark/u,
+      'the raw legacy value must be preserved')
+  } finally {
+    await disposeContext(ctx)
+  }
+})
+
+test('a completed canonical marker lets a settings-less Direct bootstrap start with preserved legacy rows', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('direct-prefs-current-')
+  const patchPath = join(home, 'cordis.patch.yml')
+  writeFileSync(patchPath, [
+    '- id: pi-tui-preferences',
+    "  name: '@xmoon76/dsh-pi-tui/preferences'",
+    '  config:',
+    '    theme: dark',
+    '    legacySettingsMigrationVersion: 2',
+    '- id: tui-app',
+    "  name: '@xmoon76/dsh-pi-tui'",
+    '  config:',
+    '    theme: dark',
+    '',
+  ].join('\n'))
+  const ctx = new Context()
+  ctx.provide('profileContext', { home, patchPath })
+  const harness = makeHarness(home)
+  let exited = false
+  try {
+    await mountRunner(ctx, home, harness, {}, {}, () => { exited = true })
+    assert.equal(exited, false,
+      'marker 2 proves the migration completed; preserved legacy rows must not block startup')
+  } finally {
+    await disposeContext(ctx)
+  }
+})
+
+test('a settings-less Direct bootstrap refuses an un-migrated legacy preset default', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('direct-prefs-preset-')
+  const patchPath = join(home, 'cordis.patch.yml')
+  writeFileSync(patchPath, '[]\n')
+  writeFileSync(join(home, 'settings.yaml'), ['agent-presets:', '  default: minimal', ''].join('\n'))
+  const ctx = new Context()
+  ctx.provide('profileContext', { home, patchPath })
+  const harness = makeHarness(home)
+  let exited = false
+  try {
+    await mountRunner(ctx, home, harness, {}, {}, () => { exited = true })
+    assert.equal(exited, true,
+      'the legacy preset default cannot be committed without a write surface; startup must not admit a wrong default')
+  } finally {
+    await disposeContext(ctx)
+  }
+})
 
 test('the real runner hydrates resume, deferred create, and switch exactly once each', async (t) => {
   const life = testLifecycle(t)
@@ -845,7 +923,7 @@ test('startup restores a persisted Compact preset unchanged and /display compact
   const mutations: Array<{ ns: string; ops: readonly { op: string; path: readonly string[]; value?: unknown }[] }> = []
   const settings = {
     describe: () => [{
-      ns: 'tui-app',
+      ns: 'pi-tui-preferences',
       value: effectiveConfigView({
         fullscreen: 'off',
         displayPreset: 'compact',
@@ -873,12 +951,10 @@ test('startup restores a persisted Compact preset unchanged and /display compact
   const app = probe.apps.at(-1)
   assert.ok(app !== undefined, 'the production runner must create a TuiApp')
   assert.equal(app.displayPreset(), 'compact', 'a persisted Compact must restore as Compact, never fall back to Full')
-  // The boot completes exactly the one-shot legacy-migration marker (no
-  // legacy document exists anywhere): NO preference field is pinned and the
-  // USER footer definitions are not copied over the project-layer value.
-  assert.deepEqual(mutations, [
-    { ns: 'tui-app', ops: [{ op: 'set', path: ['legacySettingsMigrationVersion'], value: 1 }] },
-  ], 'a canonical preset must not trigger a preference write')
+  // The runner pins NO preference field and never copies the USER footer
+  // definitions over the project-layer value. The one-shot migration marker is
+  // the Host-owned profile barrier's write, not a runner write.
+  assert.equal(mutations.length, 0, 'a canonical preset must not trigger a preference write')
 
   const displayHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('display')
   assert.ok(displayHandler !== undefined, 'the production runner must register /display')
@@ -886,12 +962,12 @@ test('startup restores a persisted Compact preset unchanged and /display compact
   assert.deepEqual(compactResult, { kind: 'success', text: 'Display: compact.' })
   await settle()
   assert.equal(app.displayPreset(), 'compact', 'Compact stays the live preset')
-  assert.equal(mutations.length, 1, 'an unchanged value emits no write (no pinning; only the boot marker)')
+  assert.equal(mutations.length, 0, 'an unchanged value emits no write (no pinning)')
   const focusResult = await (displayHandler as unknown as (invocation: { rawInput: string }) => Promise<{ kind: string; text?: string }>)({ rawInput: 'focus' })
   assert.deepEqual(focusResult, { kind: 'success', text: 'Display: focus.' })
   await settle()
-  assert.equal(mutations.length, 2, 'a changed value persists through one more path-scoped mutation')
-  assert.deepEqual(mutations[1]!.ops, [
+  assert.equal(mutations.length, 1, 'a changed value persists through one path-scoped mutation')
+  assert.deepEqual(mutations[0]!.ops, [
     { op: 'set', path: ['displayPreset'], value: 'focus' },
   ], 'only the changed field is written; the user footer items are not re-pinned')
   await fiber.dispose()
@@ -925,7 +1001,7 @@ test('startup canonicalizes an invalid display preset, preserves raw fields, and
   let failFirstWrite = true
   const settings = {
     describe: () => [{
-      ns: 'tui-app',
+      ns: 'pi-tui-preferences',
       value: effectiveConfigView({
         fullscreen: 'off',
         displayPreset: 'garbage',
@@ -962,10 +1038,9 @@ test('startup canonicalizes an invalid display preset, preserves raw fields, and
 
   const first = await mount()
   assert.equal(first.app.displayPreset(), 'full', 'an invalid canonical value resolves to Full before the first frame')
-  // The boot writes: the one-shot marker completion, then the canonicalizing
-  // displayPreset set — raw fields are never re-pinned.
+  // The boot writes only the canonicalizing displayPreset set — raw fields are
+  // never re-pinned and the migration marker belongs to the Host barrier.
   assert.deepEqual(written, [
-    { op: 'set', path: ['legacySettingsMigrationVersion'], value: 1 },
     { op: 'set', path: ['displayPreset'], value: 'full' },
   ])
   await first.fiber.dispose()
@@ -973,8 +1048,7 @@ test('startup canonicalizes an invalid display preset, preserves raw fields, and
 
   const second = await mount()
   assert.equal(second.app.displayPreset(), 'full')
-  // The retry boot: the marker batch is now a no-op (the fake never commits
-  // the reference), so the canonicalizing write retries alone.
+  // The retry boot retries the canonicalizing write alone.
   assert.deepEqual(written.at(-1), { op: 'set', path: ['displayPreset'], value: 'full' },
     'a later boot must retry the failed canonicalization')
   await second.fiber.dispose()

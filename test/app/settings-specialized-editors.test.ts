@@ -227,7 +227,7 @@ function setup(options: {
   ctx.provide('commands', commands.service as never)
   ctx.provide('settings', {
     describe: () => [{
-      ns: 'tui-app',
+      ns: 'pi-tui-preferences',
       value: options.fixture?.document() ?? { footer: 'default' },
       user: {},
       revision: options.fixture?.revision() ?? 1,

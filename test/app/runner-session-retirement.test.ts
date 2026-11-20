@@ -876,7 +876,9 @@ test('a pre-mount unload while the resume whenIdle is pending cancels the agent 
   context.provide('commands', harness.commands as never)
   context.provide('subagents', harness.subagents as never)
   context.provide('loader', { await: async () => {} } as never)
-  const fiber = context.plugin((pluginCtx) => applyRunner(pluginCtx, TuiConfigSchema({ sessionId: resumed.id } as never)))
+  const tuiConfig = TuiConfigSchema({ sessionId: resumed.id } as never)
+  context.provide('piTuiPreferences', tuiConfig)
+  const fiber = context.plugin((pluginCtx) => applyRunner(pluginCtx, tuiConfig))
   await fiber
   await whenIdleStartedPromise
   await disposeContext(context)

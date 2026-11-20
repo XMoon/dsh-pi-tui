@@ -91,7 +91,7 @@ function setupSettings(options: { terminalProgress?: string; failWrite?: boolean
     find: () => undefined,
     execute: async () => undefined,
   } as never)
-  ctx.provide('settings', { describe: () => [{ ns: 'tui-app', user: {} }] } as never)
+  ctx.provide('settings', { describe: () => [{ ns: 'pi-tui-preferences', user: {} }] } as never)
   const settings = fakeSettings({
     theme: 'auto',
     footer: 'full',

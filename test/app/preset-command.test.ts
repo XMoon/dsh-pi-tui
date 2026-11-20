@@ -474,7 +474,7 @@ function setup(options: {
   startedApps.add(app)
   const commands = fakeCommands(options.commandsListRegistered === true, options.commandsPresetOverride)
   ctx.provide('commands', commands.service as never)
-  if (options.settings === undefined) ctx.provide('settings', { describe: () => [{ ns: 'tui-app', user: {} }] } as never)
+  if (options.settings === undefined) ctx.provide('settings', { describe: () => [{ ns: 'pi-tui-preferences', user: {} }] } as never)
   const presets = presetService(options.rows ?? SHIPPED_ROWS, options.defaultPresetId, options.selectFailure, options.selectLocked, options.roster, options.resolve, options.selectHook)
   if (options.noPresets !== true) ctx.provide('agentPresets', presets.service as never)
   if (options.settings !== undefined) ctx.provide('settings', options.settings as never)

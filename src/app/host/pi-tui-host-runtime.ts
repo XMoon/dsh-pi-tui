@@ -31,6 +31,7 @@
 
 import type { Context, Fiber } from '@deepseek-ai/cordis'
 import { Config as TuiConfig, type Config as TuiConfigValue } from '../config/schema.ts'
+import { CANONICAL_TUI_SETTINGS_NS } from '../../runtime/config-port.ts'
 import { PI_TUI_HOST_CONTRIBUTION } from '../../runtime/remote/pi-tui-remote-contribution.ts'
 import { PI_TUI_FILE_REFERENCES_NAMESPACE } from '../../runtime/remote/pi-tui-file-reference-contract.ts'
 import { PI_TUI_TERMINAL_PROGRESS_NAMESPACE } from '../../runtime/remote/pi-tui-terminal-progress-contract.ts'
@@ -83,7 +84,10 @@ import { PI_TUI_DEFAULT_MODEL_NAMESPACE } from '../../runtime/remote/pi-tui-defa
 /** Stable Cordis plugin name (the Loader row id in the Host-only overlay). */
 export const name = 'pi-tui-host-runtime'
 
-/** The Host-only row reuses the same TUI settings schema as the Direct row. */
+/** The legacy Split Host TUI settings schema. It is kept ONLY for installed
+ * profile compatibility and as a migration source: the runtime reads the
+ * canonical `piTuiPreferences` service, and this row's auto-generated page is
+ * hidden so users cannot edit a namespace that no longer drives behavior. */
 export const Config = TuiConfig
 
 /**
@@ -95,6 +99,10 @@ export const Config = TuiConfig
  * without a Loader fails closed (`unavailable`) instead of pending forever.
  */
 export const inject = [
+  // The canonical profile preference authority. Injecting (not a per-call
+  // lookup) makes Host business wait for the row that owns the real user
+  // choice; the legacy Split Config is never a runtime fallback.
+  'piTuiPreferences',
   'typert', 'agents', 'fileReferences', 'workingDirectory', 'sessions',
   // `sandboxPolicy`/`sandbox` are deliberately NOT hard injects (M6-1 F8):
   // every feature resolves them PER CALL through `ctx.reflect.get`, so a Host
@@ -160,7 +168,19 @@ function assertPrivateBinding(ctx: Context, serviceKey: string, namespace: strin
  * keeping the original error primary and attaching cleanup failures to its
  * cause chain.
  */
-export async function apply(ctx: Context, config: TuiConfigValue): Promise<void> {
+export async function apply(ctx: Context, _config: TuiConfigValue): Promise<void> {
+  const preferences = ctx.get('piTuiPreferences') as {
+    readonly localShellSandbox: { get(): string }
+  } | undefined
+  if (preferences === undefined) {
+    throw new Error(`pi-tui-host-runtime: the canonical "${CANONICAL_TUI_SETTINGS_NS}" preferences are missing`)
+  }
+  // The retired Split row keeps a schema for installed profiles, but its
+  // auto-generated Settings page is hidden: runtime behavior reads the
+  // canonical row, and two editable TUI pages would present one stale copy.
+  ctx.inject(['settings'], child => {
+    child.effect(() => child.settings.configure({ auto: false }, ctx.fiber))
+  })
   const fibers: Fiber[] = []
   let disposeContribution: (() => Promise<void>) | undefined
   try {
@@ -211,7 +231,7 @@ export async function apply(ctx: Context, config: TuiConfigValue): Promise<void>
         sandbox: () => ctx.reflect.get('sandbox') as import('./features/host-user-shell.ts').SandboxServiceLike | undefined,
         subprocess: () => ctx.reflect.get('subprocess') as import('./features/host-user-shell.ts').SubprocessServiceLike | undefined,
         pathCompletion: createHostShellPathCompletionBridge(),
-        shellPolicy: () => config.localShellSandbox.get() === 'sandbox' ? 'sandbox' : 'bypass',
+        shellPolicy: () => preferences.localShellSandbox.get() === 'sandbox' ? 'sandbox' : 'bypass',
         workspaces: () => ctx.reflect.get('workspaceRegistry') as WorkspaceRegistryPort | undefined,
       })
     })

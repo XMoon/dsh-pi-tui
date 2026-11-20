@@ -262,7 +262,7 @@ async function mountSandboxRunner(
     }
   }
   context.provide('settings', {
-    describe: () => [{ ns: 'tui-app', value: settingsValues(), user: {}, revision: settingsRevision }],
+    describe: () => [{ ns: 'pi-tui-preferences', value: settingsValues(), user: {}, revision: settingsRevision }],
     mutate: async (ns: string, ops: readonly { op: string; path: readonly string[]; value?: unknown }[]) => {
       settingsWrites.push({ ns, ops })
       for (const op of ops) {
@@ -521,7 +521,7 @@ test('a REAL Settings Confirm of the shell policy is what the next `!` executes 
     () => mounted.settleSurface(),
     'the real Settings Confirm must settle as Verified',
   )
-  const writes = mounted.settingsWrites().filter(write => write.ns === 'tui-app')
+  const writes = mounted.settingsWrites().filter(write => write.ns === 'pi-tui-preferences')
   assert.ok(writes.some(write => write.ops.some(op => op.path[0] === 'localShellSandbox' && op.value === 'sandbox')),
     `the confirm really mutated localShellSandbox:\n${JSON.stringify(writes)}`)
   assert.equal(mounted.policy(), 'sandbox', 'the persisted document really changed')

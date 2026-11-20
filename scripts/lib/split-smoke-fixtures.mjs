@@ -12,7 +12,7 @@
 import { appendFileSync, chmodSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { parse as parseYaml } from 'yaml'
+import { parse as parseYaml, stringify as yamlStringify } from 'yaml'
 
 import { SplitSmokeAssertionError, SplitSmokeWaitError } from './split-smoke-diagnostics.mjs'
 
@@ -138,14 +138,14 @@ export function writeC1WorkFixture(profileDir, workDir, options = {}) {
     const path = join(workDir, `m6-f1-host-${policy}.patch.yml`)
     const policyRows = [...rows]
     policyRows.splice(-1, 0,
-      '- id: split-host-pi-tui-runtime',
+      '- id: pi-tui-preferences',
       '  config:',
       `    localShellSandbox: ${policy}`,
     )
     policyRows.splice(-1, 0,
       '- id: split-process-host-work',
       '  config:',
-      '    f1SettingsNamespace: split-host-pi-tui-runtime',
+      '    f1SettingsNamespace: pi-tui-preferences',
     )
     writeFileSync(path, policyRows.join('\n'), { mode: 0o600 })
     chmodSync(path, 0o600)
@@ -172,10 +172,33 @@ export function writeC1WorkFixture(profileDir, workDir, options = {}) {
     { id: 'preset-standard', config: { ...presetRow.config, plugins } },
   ], null, 2), { mode: 0o600 })
   chmodSync(timedPatchPath, 0o600)
+  // Mark the isolated profile as already migrated so the F1 policy overlay
+  // (a command-line config override on the canonical row) is not refused by
+  // the Host migration barrier: a real migrated user profile carries marker 2.
+  const seedMigratedPreferences = () => {
+    const userPatch = join(profileDir, 'cordis.patch.yml')
+    let rows = []
+    if (existsSync(userPatch)) {
+      try {
+        const parsed = parseYaml(readFileSync(userPatch, 'utf8'))
+        rows = Array.isArray(parsed) ? parsed : []
+      } catch {
+        rows = []
+      }
+    }
+    if (rows.some(row => row !== null && typeof row === 'object' && row.id === 'pi-tui-preferences')) return
+    rows.push({
+      id: 'pi-tui-preferences',
+      name: '@xmoon76/dsh-pi-tui/preferences',
+      config: { legacySettingsMigrationVersion: 2 },
+    })
+    writeFileSync(userPatch, yamlStringify(rows), { mode: 0o600 })
+  }
   return {
     fixturePath,
     patchPath,
     timedPatchPath,
+    seedMigratedPreferences,
     ...policyPatches,
   }
 }

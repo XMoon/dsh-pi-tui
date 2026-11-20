@@ -395,7 +395,7 @@ test('the Appearance Theme row reaches Rows → Detail → Choice with REAL mous
     ctx.provide('commands', services.commands as never)
     const userFooterCustomItems = [{ schemaVersion: 1, id: 'user:prod', kind: 'text', text: 'PROD' }]
     ctx.provide('settings', {
-      describe: () => [{ ns: 'tui-app', value: {}, user: { footerCustomItems: userFooterCustomItems } }],
+      describe: () => [{ ns: 'pi-tui-preferences', value: {}, user: { footerCustomItems: userFooterCustomItems } }],
     } as never)
     const doc: Record<string, unknown> = {
       theme: 'dark', iconStyle: 'emoji', footer: 'default', fullscreen: 'off',
@@ -497,7 +497,7 @@ test('a Theme candidate whose source unloaded before the Confirm is refused with
     const services = fakeServices()
     ctx.provide('commands', services.commands as never)
     ctx.provide('settings', {
-      describe: () => [{ ns: 'tui-app', value: {}, user: { footerCustomItems: [] } }],
+      describe: () => [{ ns: 'pi-tui-preferences', value: {}, user: { footerCustomItems: [] } }],
     } as never)
     const doc: Record<string, unknown> = {
       theme: 'auto', iconStyle: 'emoji', footer: 'default', fullscreen: 'off',

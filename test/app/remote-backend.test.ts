@@ -132,7 +132,7 @@ function fakeRuntime(settingsDescribe: () => Promise<unknown>): {
 test('the assembly performs the config FIRST mirror read as its readiness barrier', async () => {
   const fake = fakeRuntime(async () => ({
     ok: true,
-    value: { writable: true, hasDocument: true, namespaces: [{ ns: 'tui-app', value: { theme: 'auto' }, revision: 1, applies: 'live', secrets: [], autoGenerate: false, schema: {} }] },
+    value: { writable: true, hasDocument: true, namespaces: [{ ns: 'pi-tui-preferences', value: { theme: 'auto' }, revision: 1, applies: 'live', secrets: [], autoGenerate: false, schema: {} }] },
   }))
   const runtime = await createRemoteBackendRuntime({
     runtime: fake.runtime,
@@ -236,7 +236,7 @@ test('a post-adapter construction failure reverse-unwinds every constructed part
   // observable proof that the config port's subscriptions did not survive.
   const fake = fakeRuntime(async () => ({
     ok: true,
-    value: { writable: true, hasDocument: true, namespaces: [{ ns: 'tui-app', value: { theme: 'auto' }, revision: 1, applies: 'live', secrets: [], autoGenerate: false, schema: {} }] },
+    value: { writable: true, hasDocument: true, namespaces: [{ ns: 'pi-tui-preferences', value: { theme: 'auto' }, revision: 1, applies: 'live', secrets: [], autoGenerate: false, schema: {} }] },
   }))
   const induced = new Error('induced post-adapter construction failure')
   let activeSubscriptions = 0

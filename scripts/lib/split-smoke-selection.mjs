@@ -56,6 +56,7 @@ import { runMcpServersFr4 } from '../smoke/split-process/mcp-servers-fr4.mjs'
 import { runSubagentSettingsFr5A } from '../smoke/split-process/subagent-settings-fr5a.mjs'
 import { runHostNumericSettingsFr5B } from '../smoke/split-process/host-numeric-settings-fr5b.mjs'
 import { runWebStartupPreference } from '../smoke/split-process/web-startup-preference.mjs'
+import { runProfilePreferencesQualification } from '../smoke/split-process/profile-preferences.mjs'
 import { runF2AccountComposition } from '../smoke/split-process/account-composition.mjs'
 import { runF7AProviderAuthorization } from '../smoke/split-process/provider-authorization-f7a.mjs'
 import { runF7BCredentialRecords } from '../smoke/split-process/provider-credential-records-f7b.mjs'
@@ -342,6 +343,13 @@ const CASE_REGISTRY = Object.freeze([
     id: 'host-settings.fr5b',
     title: 'two authenticated Split Clients save the migrated General preferences, the session-log switch, the Agent-loop page and the active-shell caps, and refuse a stale two-Client revision',
     run: runHostNumericSettingsFr5B,
+  }),
+  Object.freeze({
+    suite: 'host-settings',
+    id: 'profile.preferences',
+    title: 'the canonical pi-tui-preferences row persists through the real Split Host settings wire, a stale revision and a cold Host',
+    platforms: LINUX_DARWIN,
+    run: runProfilePreferencesQualification,
   }),
   Object.freeze({
     suite: 'web',

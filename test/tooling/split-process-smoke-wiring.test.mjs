@@ -294,15 +294,28 @@ test('the frozen Web roster matches the Host-only overlay exactly and stays defa
   for (const id of ['ui-context-menu', 'ui-file-drag', 'ui-file-actions', 'message-quotes', 'workspace-changes', 'ui-deliverables']) {
     assert.equal(ids.includes(id), true, `the frozen roster must include the official "${id}" row`)
   }
-  const overlay = parseYaml(HOST_ONLY_PATCH)
-  const inserts = overlay.filter(entry => Array.isArray(entry.insert))
-  const declared = inserts.map(entry => entry.insert)
-    .find(rows => rows.some(row => row.id === ids[0]))
-  assert.ok(declared, 'the Host-only overlay must declare the exported Web roster')
-  assert.deepEqual(declared.map(row => row.id), ids, 'the overlay Web ids drifted from the frozen roster')
+  const generated = parseYaml(readFileSync(join(ROOT, 'generated', 'web-access', 'cordis.patch.yml'), 'utf8'))
+  const inserts = generated.filter(entry => Array.isArray(entry.insert))
+  assert.equal(inserts.length, 1, 'the generated Web layer must hold ONE insert group')
+  const declared = inserts[0].insert
+  assert.deepEqual(declared.map(row => row.id), ids, 'the generated Web ids drifted from the frozen roster')
   assert.deepEqual(declared.map(row => row.name), PR_A_WEB_ROWS.map(row => row.name),
-    'the overlay Web packages drifted from the frozen roster')
+    'the generated Web packages drifted from the frozen roster')
   assert.ok(declared.every(row => row.disabled === true), 'every Web row stays disabled by default')
+  // The Host-only overlay must NOT re-declare a Web row: a command-line config
+  // override blocks the official ConfigEditor from persisting that entry.
+  const overlay = parseYaml(HOST_ONLY_PATCH)
+  const overlayRows = overlay.flatMap(entry => entry.insert ?? [entry])
+  for (const id of ids) {
+    if (id === 'web-runtime' || id === 'office-kit' || id === 'skill-office') continue
+    assert.equal(overlayRows.some(row => row.id === id), false,
+      `the Host-only overlay must not re-declare the Web row "${id}"`)
+  }
+  // The three non-user safety values stay fixed at the Host layer.
+  for (const id of ['web-runtime', 'office-kit', 'skill-office']) {
+    assert.equal(overlayRows.filter(row => row.id === id).length, 1,
+      `the Host-only overlay must keep exactly one fixed "${id}" override`)
+  }
 })
 
 test('account callback failures redact state, code, PKCE and cookie from reports', () => {
@@ -442,6 +455,10 @@ test('every registry entry declares a conservative platform list and the nine sh
     // platform seam (Linux /proc, Darwin lsof+ps) and drives the Browser from
     // the pinned Playwright install, so it is qualified on both platforms.
     'web.product-browser-tui',
+    // The canonical preference case drives only the official settings wire,
+    // the profile file and cold Host boots; there is no platform-specific
+    // process/seat primitive beyond the shared Split harness.
+    'profile.preferences',
   ]
   const cases = listSelectableCases()
   for (const entry of cases) {

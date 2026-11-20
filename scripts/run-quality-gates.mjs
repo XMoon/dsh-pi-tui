@@ -62,6 +62,7 @@ export const QUALITY_GATES = Object.freeze([
   { id: 'gate:temp-hygiene', classification: 'on-demand', runner: 'pnpm', script: 'gate:temp-hygiene' },
   { id: 'gate:raw-persistence', classification: 'on-demand', runner: 'pnpm', script: 'gate:raw-persistence' },
   { id: 'gate:dsh-preset-parity', classification: 'on-demand', runner: 'pnpm', script: 'gate:dsh-preset-parity' },
+  { id: 'gate:web-access-patch', classification: 'on-demand', runner: 'pnpm', script: 'gate:web-access-patch' },
 ])
 
 /** The gates the shared preflight entry runs, in execution order. */

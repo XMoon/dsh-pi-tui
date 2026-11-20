@@ -584,6 +584,10 @@ export async function mountRunner(
   else await ctx.plugin(LocalSubprocessRuntime)
   ctx.provide('loader', loader as never)
   const resolved = TuiConfigSchema({ fullscreen: 'off', ...config } as never)
+  // The canonical preferences row publishes the live references the Direct
+  // runner consumes. Tests that used to drive only the legacy `tui-app` schema
+  // now provide the SAME resolved references under the canonical service key.
+  ctx.provide('piTuiPreferences', resolved)
   onResolvedConfig?.(resolved)
   const fiber = ctx.plugin((pluginCtx) => applyRunner(pluginCtx, resolved))
   await fiber

@@ -80,7 +80,11 @@ import { sessionStatsFactsOf } from '../domain/status/stats.ts'
 import { derivePerformance } from '../domain/status/performance-view.ts'
 import { isAssistantTokenDelta } from '../domain/transcript/usage.ts'
 import { projectedPlanActive, type PlanProjectionLike } from '../domain/status/derive-plan.ts'
-import { migrateLegacySettings } from './bootstrap/legacy-settings-migration.ts'
+import {
+  migrateProfileTuiPreferences,
+  type ProfileConfigEditorLike,
+} from './config/profile-preferences-migration.ts'
+import type { TuiConfigRefs } from '../runtime/direct/tui-settings-direct.ts'
 import { color } from '../tui/theme/runtime.ts'
 import type { TuiApp } from '../tui-app.ts'
 import { PI_TUI_EXTENSIONS_SERVICE, type PiTuiExtensionService } from '../extensions.ts'
@@ -238,6 +242,18 @@ export function applyRunner(ctx: Context, config: Config): void {
  * public/config/env selector: this parameter is reachable only from
  * process-internal composition code and tests.
  */
+/** The canonical live preference references the Direct runner consumes. The
+ * `tui-app` Loader row hard-injects `piTuiPreferences`, so an absent service is
+ * a broken composition, never a reason to fall back to the legacy row or to
+ * schema defaults. */
+function canonicalPreferenceRefs(ctx: Context): TuiConfigRefs {
+  const refs = ctx.get('piTuiPreferences') as TuiConfigRefs | undefined
+  if (refs === undefined) {
+    throw new Error('tui-runner: the canonical "piTuiPreferences" service is missing from the Direct composition')
+  }
+  return refs
+}
+
 export function applyRunnerWithRuntime(
   ctx: Context,
   config: Config,
@@ -567,16 +583,15 @@ export function applyRunnerWithRuntime(
     // The abort-aware quiesce mechanism lives in the Direct owner retirement;
     // the runner only decides WHEN to quiesce.
 
-    // Persisted TUI preferences: the `tui-app` plugin's profile-owned
-    // volatile Config references are the ONE runtime authority (DSH 0.1.7
-    // PR A) — the Direct facade unwraps them into the settings document the
-    // runner surface already consumes, and converts whole-document
-    // get→modify→replace cycles into path-scoped SettingsForms mutations.
-    // The legacy settings.yaml(.imported) migration runs FIRST — before any
-    // display/progress/response/notification startup state resolution and
-    // before any agent compose/resume — so the first model prompt assembly
-    // already sees the migrated Focus/display state (plan §8.4: this
-    // barrier is P0). Reads always work off the plugin references; without
+    // Persisted TUI preferences: the canonical `pi-tui-preferences` row's
+    // profile-owned volatile Config references are the ONE runtime authority —
+    // the Direct facade unwraps them into the settings document the runner
+    // surface already consumes, and converts whole-document get→modify→replace
+    // cycles into path-scoped SettingsForms mutations. The Host-owned canonical
+    // migration (legacy profile rows + settings.yaml(.imported)) runs FIRST —
+    // before any display/progress/response/notification startup state
+    // resolution and before any agent compose/resume — so the first model
+    // prompt assembly already sees the migrated Focus/display state. Reads always work off the plugin references; without
     // the Settings service there is no persistence surface, and a write
     // attempt fails explicitly instead of silently skipping.
     const settingsForms = ctx.get('settings') as SettingsFormsLike | undefined
@@ -584,25 +599,32 @@ export function applyRunnerWithRuntime(
     // no Host Settings service of its own; a Direct writer here would read
     // schema defaults and reject every preference save.
     const tuiSettings = override === undefined
-      ? new DirectTuiSettings(config, settingsForms)
+      ? new DirectTuiSettings(canonicalPreferenceRefs(ctx), settingsForms)
       : override.selected.backend.config.tuiSettings
     // The TUI ships its own /settings surface: keep the Settings service's
-    // auto-generated page off this entry (it would also expose the internal
-    // legacy-migration marker). The optional-inject child names the tui-app
-    // fiber the presentation policy belongs to; the TUI runs without the
-    // Settings service mounted.
+    // auto-generated page off the legacy `tui-app` entry (it would also expose
+    // the internal legacy-migration marker). The canonical row hides its own
+    // page in `app/config/preferences.ts`, and the Host Runtime row hides the
+    // retired Split entry in `app/host/pi-tui-host-runtime.ts`.
     ctx.inject(['settings'], (child) => {
       child.effect(() => child.settings.configure({ auto: false }, ctx.fiber))
     })
-    // The retired settings.yaml migration is a HOST-profile concern: it reads
-    // the Host profile home and writes the Host Settings service. The split
-    // Client has neither (its config plane is the Remote ConfigPort), so this
-    // step is Direct-only; running it there would report a missing Host
-    // service on every Client start and read a Host-profile path Client-side.
+    // The Host-owned migration into the canonical preference row: it reads
+    // the Host Profile / legacy settings document and writes the Host Settings
+    // service. The split Client has neither (its config plane is the Remote
+    // ConfigPort), so this step is Direct-only; running it there would report
+    // a missing Host service on every Client start and read a Host-profile
+    // path Client-side. MUST settle before the first display/Agent read.
     if (override === undefined) {
-      await migrateLegacySettings({
-        home: (ctx.get('profileContext') as { readonly home: string } | undefined)?.home ?? dshHome(process.env),
+      const profileContext = ctx.get('profileContext') as {
+        readonly home?: string
+        readonly patchPath?: string
+      } | undefined
+      await migrateProfileTuiPreferences({
+        patchPath: profileContext?.patchPath ?? '',
+        configEditor: ctx.get('configEditor') as ProfileConfigEditorLike | undefined,
         forms: settingsForms,
+        home: profileContext?.home ?? dshHome(process.env),
         resolvePreset: async (id) => {
           const presets = ctx.get('agentPresets') as { resolve(id?: string): Promise<{ broken?: string }> } | undefined
           if (presets === undefined) throw new Error('agent presets unavailable in this deployment')
@@ -614,7 +636,6 @@ export function applyRunnerWithRuntime(
             throw Object.assign(new Error(resolved.broken), { code: 'agent-preset/invalid' })
           }
         },
-        migrationMarker: config.legacySettingsMigrationVersion,
         diag,
       })
     }

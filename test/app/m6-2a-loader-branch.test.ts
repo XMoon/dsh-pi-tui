@@ -69,6 +69,14 @@ test('the shared MCP manager row is declared exactly once with its official inje
   assert.ok(!/^ {6}config:/mu.test(block), 'the row must not declare a config block')
 })
 
+test('the canonical preferences row is a config-only carrier disabled only in the daemon supervisor', () => {
+  const block = rowBlock('pi-tui-preferences')
+  assert.match(block, /name: '@xmoon76\/dsh-pi-tui\/preferences'/u)
+  assert.ok(block.includes(DAEMON_DISABLED), 'the supervisor PID must own no canonical preference authority')
+  assert.ok(!block.includes('tuiStartup'), 'the row must NOT be gated on tuiStartup (--help and a Host-only graph still need it)')
+  assert.ok(!/^ {6}config:/mu.test(block), 'the row must not pin a default config into every profile')
+})
+
 test('the web-preferences schema row is NOT disabled (it only projects Config)', () => {
   const block = rowBlock('pi-tui-web-preferences')
   assert.ok(!block.includes('disabled:'), 'the schema-only row stays mounted for Profile Config projection')

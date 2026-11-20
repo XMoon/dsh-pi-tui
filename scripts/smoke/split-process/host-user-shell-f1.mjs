@@ -130,11 +130,12 @@ export async function runHostUserShellF1(context) {
   chmodSync(clientCommand, 0o700)
 
   try {
+    scene.c1Work.seedMigratedPreferences()
     const { host, ready, workRoot: hostWorkRoot } = await scene.startC1Host('f1-shell', 'f1-host-shell', {
       C1_F1_SESSION_ID: sessionId,
       C1_F1_SESSION_CWD: canonicalHostDir,
       C1_F1_OTHER_SESSION_ID: otherSessionId,
-      C1_F1_SETTINGS_NAMESPACE: 'split-host-pi-tui-runtime',
+      C1_F1_SETTINGS_NAMESPACE: 'pi-tui-preferences',
       SPLIT_PROCESS_EXTRA_PATCH: scene.c1Work.bypassPatchPath,
       HOME: hostHome,
       PATH: hostPath,
@@ -541,7 +542,7 @@ export async function runHostUserShellF1(context) {
     const sandboxHostEnv = {
       C1_F1_SESSION_ID: sandboxSessionId,
       C1_F1_SESSION_CWD: canonicalHostDir,
-      C1_F1_SETTINGS_NAMESPACE: 'split-host-pi-tui-runtime',
+      C1_F1_SETTINGS_NAMESPACE: 'pi-tui-preferences',
       SPLIT_PROCESS_EXTRA_PATCH: scene.c1Work.sandboxPatchPath,
       HOME: hostHome,
       PATH: hostPath,

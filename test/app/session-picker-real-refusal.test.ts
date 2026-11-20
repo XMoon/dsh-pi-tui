@@ -219,7 +219,9 @@ for (const { columns, rows, cardVisible } of SIZES) test(`the REAL Session Works
   // needs); the testkit mounts it after its prerequisites are in place.
   await mountAgentLoopTestHarness(context)
   context.provide('agentDefaultModel', peripherals.defaultModel as never)
-  const fiber = await context.plugin(pluginCtx => applyRunner(pluginCtx, TuiConfigSchema({ sessionId: String(READABLE) } as never)))
+  const tuiConfig = TuiConfigSchema({ sessionId: String(READABLE) } as never)
+  context.provide('piTuiPreferences', tuiConfig)
+  const fiber = await context.plugin(pluginCtx => applyRunner(pluginCtx, tuiConfig))
   life.defer(() => fiber.dispose())
   const view = (): string => vt.getViewport().map(line => line.replace(/\u001b\[[0-9;]*m/g, '')).join('\n')
   // The REAL agent loop resumes the stored Session: wait (bounded) for the

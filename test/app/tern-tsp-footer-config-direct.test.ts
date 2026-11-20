@@ -86,7 +86,7 @@ function hostContext(doc: TestDoc, options: {
 } = {}): HostContextLike {
   const settings: SettingsServiceLike = {
     describe: () => [{
-      ns: 'tui-app',
+      ns: 'pi-tui-preferences',
       value: {
         ...doc,
         ...(options.projectItems === undefined ? {} : { footerCustomItems: [...options.projectItems] }),
