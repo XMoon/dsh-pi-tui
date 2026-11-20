@@ -130,9 +130,9 @@ import type {
 } from '../config-port.ts'
 import { extensionConfigRowId } from '../../domain/extension-config/row-id.ts'
 import {
-  extensionConfigDataOpsRejection,
   extensionConfigUserDataPresent,
   projectExtensionConfigData,
+  snapshotExtensionConfigOps,
 } from '../../domain/extension-config/data.ts'
 import { CANONICAL_TUI_SETTINGS_NS } from '../config-port.ts'
 import {
@@ -2828,8 +2828,8 @@ export class DirectExtensionConfigsConfig implements ExtensionConfigsConfig {
       return { kind: 'rejected', reason: 'the Host settings authority changed; refresh before saving' }
     }
     if (ops.length === 0) return { kind: 'rejected', reason: 'no settings fields were staged' }
-    const invalidValue = extensionConfigDataOpsRejection(ops)
-    if (invalidValue !== undefined) return { kind: 'rejected', reason: invalidValue }
+    const snapshot = snapshotExtensionConfigOps(ops)
+    if (snapshot.kind === 'invalid') return { kind: 'rejected', reason: snapshot.reason }
     const read = readDirectDescriptors(this.ctx)
     if (read.kind !== 'ready') return { kind: 'rejected', reason: read.reason }
     const namespace = extensionConfigRowId(packageName)
@@ -2843,7 +2843,7 @@ export class DirectExtensionConfigsConfig implements ExtensionConfigsConfig {
     if (descriptor.revision !== expectedRevision) {
       return { kind: 'conflict', reason: 'the Host settings section changed since it was read' }
     }
-    const wireOps: readonly SettingsMutationOp[] = ops.map(op => op.op === 'set'
+    const wireOps: readonly SettingsMutationOp[] = snapshot.ops.map(op => op.op === 'set'
       ? { op: 'set' as const, path: ['data', ...op.path], value: op.value }
       : { op: 'unset' as const, path: ['data', ...op.path] })
     try {

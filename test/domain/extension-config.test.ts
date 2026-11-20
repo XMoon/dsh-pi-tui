@@ -5,6 +5,7 @@ import { extensionConfigRowId } from '../../src/domain/extension-config/row-id.t
 import {
   extensionConfigUserDataPresent,
   projectExtensionConfigData,
+  snapshotExtensionConfigOps,
 } from '../../src/domain/extension-config/data.ts'
 
 test('the single row-id rule hashes the exact UTF-8 package name into 32 lowercase hex characters', () => {
@@ -48,4 +49,29 @@ test('userDataPresent is own-field presence at data, never value inequality', ()
   assert.equal(extensionConfigUserDataPresent({}), false)
   assert.equal(extensionConfigUserDataPresent(undefined), false)
   assert.equal(extensionConfigUserDataPresent([]), false)
+})
+
+test('a write snapshot rejects undefined sets and captures detached values and paths', () => {
+  assert.deepEqual(snapshotExtensionConfigOps([{ op: 'set', path: ['label'], value: undefined }]), {
+    kind: 'invalid',
+    reason: 'the extension configuration set value must not be undefined; use unset',
+  })
+  assert.deepEqual(snapshotExtensionConfigOps([{ op: 'set', path: [], value: undefined }]), {
+    kind: 'invalid',
+    reason: 'the extension configuration set value must not be undefined; use unset',
+  })
+  const path = ['nested', 'label']
+  const value = { nested: { limit: 3 } }
+  const snapshot = snapshotExtensionConfigOps([
+    { op: 'set', path, value },
+    { op: 'unset', path: ['old'] },
+  ])
+  assert.equal(snapshot.kind, 'ok')
+  if (snapshot.kind !== 'ok') return
+  path[0] = 'changed'
+  value.nested.limit = 99
+  assert.deepEqual(snapshot.ops, [
+    { op: 'set', path: ['nested', 'label'], value: { nested: { limit: 3 } } },
+    { op: 'unset', path: ['old'] },
+  ])
 })

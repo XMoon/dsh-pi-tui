@@ -126,9 +126,9 @@ import type {
 } from '../config-port.ts'
 import { extensionConfigRowId } from '../../domain/extension-config/row-id.ts'
 import {
-  extensionConfigDataOpsRejection,
   extensionConfigUserDataPresent,
   projectExtensionConfigData,
+  snapshotExtensionConfigOps,
 } from '../../domain/extension-config/data.ts'
 import {
   baseDictKeysOf,
@@ -3354,8 +3354,8 @@ class RemoteExtensionConfigsConfig implements ExtensionConfigsConfig {
       return { kind: 'rejected', reason: 'the Host authority changed; refresh before saving' }
     }
     if (ops.length === 0) return { kind: 'rejected', reason: 'no settings fields were staged' }
-    const invalidValue = extensionConfigDataOpsRejection(ops)
-    if (invalidValue !== undefined) return { kind: 'rejected', reason: invalidValue }
+    const snapshot = snapshotExtensionConfigOps(ops)
+    if (snapshot.kind === 'invalid') return { kind: 'rejected', reason: snapshot.reason }
     const namespace = extensionConfigRowId(packageName)
     const current = this.mirror.namespace(namespace)
     if (current === undefined) {
@@ -3367,7 +3367,7 @@ class RemoteExtensionConfigsConfig implements ExtensionConfigsConfig {
     if (current.revision !== expectedRevision) {
       return { kind: 'conflict', reason: 'the Host settings section changed since it was read' }
     }
-    const wireOps: readonly RemoteSettingsPathOp[] = ops.map(op => op.op === 'set'
+    const wireOps: readonly RemoteSettingsPathOp[] = snapshot.ops.map(op => op.op === 'set'
       ? { op: 'set' as const, path: ['data', ...op.path], value: op.value }
       : { op: 'unset' as const, path: ['data', ...op.path] })
     let dispatchAdmitted = false

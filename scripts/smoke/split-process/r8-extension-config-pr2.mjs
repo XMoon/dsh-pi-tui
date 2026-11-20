@@ -29,8 +29,23 @@ import { createC1Scene } from './c1-scene.mjs'
 const PACKAGE_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..')
 const FIXTURE_ROOT = join(PACKAGE_ROOT, 'test', 'fixtures', 'r8-extension-config')
 const PROFILE = 'pi-tui'
-const PACKAGE_A = '@r8-pr1-fixture/a'
-const PACKAGE_B = '@r8-pr1-fixture/b'
+const FIXTURE_NAMES = Object.freeze({ a: 'a', b: 'b' })
+
+function readJson(path) {
+  return JSON.parse(readFileSync(path, 'utf8'))
+}
+
+/** Official installed package manifest under the isolated profile. */
+function installedManifest(profileDir, packageName) {
+  return readJson(join(profileDir, 'node_modules', packageName, 'package.json'))
+}
+
+/** The insert rows declared by one installed package's shipped bundle patch. */
+function insertedRows(profileDir, packageName) {
+  const patch = parseYaml(readFileSync(join(profileDir, 'node_modules', packageName, 'cordis.patch.yml'), 'utf8')) ?? []
+  assert(Array.isArray(patch), `installed package ${packageName} must ship a patch row list`)
+  return patch.flatMap(row => Array.isArray(row?.insert) ? row.insert : [])
+}
 
 function assert(condition, message) {
   if (!condition) throw new SplitSmokeAssertionError(message)
@@ -41,7 +56,7 @@ function packFixture(name, candidateVersion, workDir) {
   const directory = join(workDir, 'fixtures', name)
   cpSync(join(FIXTURE_ROOT, name), directory, { recursive: true })
   const manifestPath = join(directory, 'package.json')
-  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
+  const manifest = readJson(manifestPath)
   manifest.peerDependencies = { '@xmoon76/dsh-pi-tui': `^${candidateVersion}` }
   writeFileSync(manifestPath, `${JSON.stringify(manifest, undefined, 2)}\n`)
   const packed = spawnSync('npm', ['pack', '--ignore-scripts', '--json', '--pack-destination', workDir], {
@@ -72,28 +87,53 @@ export async function runExtensionConfigPr2(context) {
   const patchPath = join(installation.profileDir, 'cordis.patch.yml')
   let host
   let client
-  let installedA = false
-  let installedB = false
+  let installedFixtureA = false
+  let installedFixtureB = false
+  const sourceNames = {
+    a: readJson(join(FIXTURE_ROOT, FIXTURE_NAMES.a, 'package.json')).name,
+    b: readJson(join(FIXTURE_ROOT, FIXTURE_NAMES.b, 'package.json')).name,
+  }
   try {
-    const tarballA = packFixture('a', installation.manifest.version, workDir)
-    const tarballB = packFixture('b', installation.manifest.version, workDir)
+    const tarballA = packFixture(FIXTURE_NAMES.a, installation.manifest.version, workDir)
+    const tarballB = packFixture(FIXTURE_NAMES.b, installation.manifest.version, workDir)
     installPlugin(installation.dshInvocation, tarballA, context.workDir, context.env)
-    installedA = true
+    installedFixtureA = true
     installPlugin(installation.dshInvocation, tarballB, context.workDir, context.env)
-    installedB = true
+    installedFixtureB = true
+    // The official installed manifests are the package identity authority; the
+    // probe receives their names and the shipped row ids must be derived from
+    // those same names. The negative name has no mounted row.
+    const installedManifestA = installedManifest(installation.profileDir, sourceNames.a)
+    const installedManifestB = installedManifest(installation.profileDir, sourceNames.b)
+    assert(installedManifestA.name === sourceNames.a && installedManifestB.name === sourceNames.b,
+      `installed fixture identities diverged: ${JSON.stringify({ sourceNames, installedA: installedManifestA.name, installedB: installedManifestB.name })}`)
+    const expectedRowA = extensionConfigRowId(installedManifestA.name)
+    const expectedRowB = extensionConfigRowId(installedManifestB.name)
+    const rowA = insertedRows(installation.profileDir, sourceNames.a).find(row => row?.id === expectedRowA)
+    const rowB = insertedRows(installation.profileDir, sourceNames.b).find(row => row?.id === expectedRowB)
+    assert(rowA?.name === '@xmoon76/dsh-pi-tui/extension-config' && rowB?.name === '@xmoon76/dsh-pi-tui/extension-config',
+      `installed patch rows do not match the manifest-derived ids: ${JSON.stringify({ expectedRowA, expectedRowB })}`)
+    assert(extensionConfigRowId(`${installedManifestA.name}-renamed`) !== expectedRowA,
+      'the renamed-manifest negative control must not reuse the installed row id')
     const preferencesBefore = preferencesRows(patchPath)
 
     const startedHost = await scene.startC1Host('r8-extension-config-pr2', 'R8-E PR-2 Host')
     host = startedHost.host
     const startedClient = await scene.startC1Client('R8-E PR-2 Client', {
       SPLIT_PROCESS_CLIENT_EXTENSION_CONFIG_PROBE: '1',
+      SPLIT_PROCESS_CLIENT_EXTENSION_CONFIG_PACKAGES: JSON.stringify({
+        a: installedManifestA.name,
+        b: installedManifestB.name,
+        negative: `${installedManifestA.name}-renamed`,
+      }),
     })
     client = startedClient.client
     assert(client.child.pid !== startedClient.ready.pid, 'the Client wrapper and business process must be distinct PIDs')
 
     const proof = client.records.find(record => record.op === 'extension-config-probe')
     assert(proof !== undefined, `the Client emitted no extension-config probe record: ${JSON.stringify(client.records.slice(-12))}`)
-    assert(proof.packageA === PACKAGE_A && proof.packageB === PACKAGE_B, 'the probe targeted the installed fixture package names')
+    assert(proof.packageA === installedManifestA.name && proof.packageB === installedManifestB.name, 'the probe targeted the installed fixture package names')
+    assert(proof.negative === 'unavailable', `a renamed manifest with no derived row must be unavailable: ${JSON.stringify(proof.negative)}`)
     assert(proof.a0?.kind === 'ready' && proof.a0.effective?.label === 'alpha' && proof.a0.effective?.limit === 3,
       `A must start from its inherited document: ${JSON.stringify(proof.a0)}`)
     assert(proof.b0?.kind === 'ready' && proof.b0.effective?.label === 'bravo' && proof.b0.effective?.limit === 7,
@@ -110,10 +150,10 @@ export async function runExtensionConfigPr2(context) {
     assert(proof.a3?.effective?.label === 'probe-a', 'the stale loser must not overwrite the accepted A value')
     assert(proof.hasUnsettledWrites === false, 'the port must have no unsettled write after settlement')
 
-    const rowA = userRow(patchPath, extensionConfigRowId(PACKAGE_A))
-    const rowB = userRow(patchPath, extensionConfigRowId(PACKAGE_B))
-    assert(rowA?.data?.label === 'probe-a', `the official USER patch must hold A's committed data: ${JSON.stringify(rowA)}`)
-    assert(rowB?.data?.limit === 11, `the official USER patch must hold B's committed data: ${JSON.stringify(rowB)}`)
+    const userRowA = userRow(patchPath, expectedRowA)
+    const userRowB = userRow(patchPath, expectedRowB)
+    assert(userRowA?.data?.label === 'probe-a', `the official USER patch must hold A's committed data: ${JSON.stringify(userRowA)}`)
+    assert(userRowB?.data?.limit === 11, `the official USER patch must hold B's committed data: ${JSON.stringify(userRowB)}`)
     assert(JSON.stringify(preferencesRows(patchPath)) === JSON.stringify(preferencesBefore),
       'the canonical pi-tui-preferences row must stay unchanged')
 
@@ -121,7 +161,7 @@ export async function runExtensionConfigPr2(context) {
     trace('r8epr2.extension-config', {
       hostPid: identity?.hostPid ?? host.child.pid,
       clientPid: startedClient.ready.pid,
-      packages: [PACKAGE_A, PACKAGE_B],
+      packages: [installedManifestA.name, installedManifestB.name],
       writeA: proof.writeA,
       writeB: proof.writeB,
       stale: proof.stale,
@@ -131,8 +171,8 @@ export async function runExtensionConfigPr2(context) {
       scope: 'REAL_SPLIT_PROCESS_L6',
       hostPid: identity?.hostPid ?? host.child.pid,
       clientPid: startedClient.ready.pid,
-      packageA: PACKAGE_A,
-      packageB: PACKAGE_B,
+      packageA: installedManifestA.name,
+      packageB: installedManifestB.name,
       writeA: proof.writeA,
       writeB: proof.writeB,
       staleConflict: proof.stale === 'conflict',
@@ -142,7 +182,7 @@ export async function runExtensionConfigPr2(context) {
     try { if (client !== undefined) await scene.exitC1Client(client, 'R8-E PR-2 Client') } catch { /* runner owns the process backstop */ }
     try { if (host !== undefined) await scene.stopC1Host(host) } catch { /* runner owns the process backstop */ }
     try { await scene.dispose() } catch { /* runner owns the process backstop */ }
-    for (const [name, installed] of [[PACKAGE_A, installedA], [PACKAGE_B, installedB]]) {
+    for (const [name, installed] of [[sourceNames.a, installedFixtureA], [sourceNames.b, installedFixtureB]]) {
       if (!installed) continue
       const removal = runDsh(installation.dshInvocation, ['plugin', '--profile', PROFILE, 'remove', name], context.workDir, context.env)
       assert(removal.status === 0, `removing fixture ${name} from the shared qualification profile failed: ${removal.stderr ?? ''}`)

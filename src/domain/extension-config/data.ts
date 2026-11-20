@@ -72,24 +72,44 @@ export function projectExtensionConfigData(layer: unknown): ExtensionConfigDataP
   return detachExtensionConfigValue(Reflect.get(layer, 'data'))
 }
 
+/** One owned write operation captured before any asynchronous dispatch. */
+export type ExtensionConfigWriteOp =
+  | { readonly op: 'set'; readonly path: readonly string[]; readonly value: unknown }
+  | { readonly op: 'unset'; readonly path: readonly string[] }
+
+export type ExtensionConfigWriteSnapshot =
+  | { readonly kind: 'ok'; readonly ops: readonly ExtensionConfigWriteOp[] }
+  | { readonly kind: 'invalid'; readonly reason: string }
+
 /**
- * The first non-JSON `set` value in one write batch, or undefined when every
- * caller value can cross the official Settings JSON boundary unchanged.
+ * Materialize ONE owned, JSON-validated operation snapshot before any
+ * asynchronous/queued work: every path is copied and every `set` value is
+ * detached into a JSON-only tree. `set(undefined)` is a caller error — deletion
+ * is the explicit `unset` intent, never an absent set payload.
  *
  * This is a transport-boundary check, not a second schema: field names,
  * paths and volatility remain the official Settings validator's authority.
- * It exists so the Remote wire's JSON encoding cannot silently turn a Date,
- * Map, BigInt or cycle into a different stored value while Direct rejects it.
+ * It exists so a delayed Remote dispatch cannot observe a caller-mutated
+ * object (or a later non-JSON value) instead of the admitted input.
  */
-export function extensionConfigDataOpsRejection(
+export function snapshotExtensionConfigOps(
   ops: readonly { readonly op: 'set' | 'unset'; readonly path: readonly string[]; readonly value?: unknown }[],
-): string | undefined {
+): ExtensionConfigWriteSnapshot {
+  const snapshot: ExtensionConfigWriteOp[] = []
   for (const op of ops) {
-    if (op.op !== 'set') continue
+    const path = [...op.path]
+    if (op.op === 'unset') {
+      snapshot.push({ op: 'unset', path })
+      continue
+    }
+    if (op.value === undefined) {
+      return { kind: 'invalid', reason: 'the extension configuration set value must not be undefined; use unset' }
+    }
     const detached = detachExtensionConfigValue(op.value)
-    if (detached.kind === 'invalid') return detached.reason
+    if (detached.kind === 'invalid') return { kind: 'invalid', reason: detached.reason }
+    snapshot.push({ op: 'set', path, value: detached.value })
   }
-  return undefined
+  return { kind: 'ok', ops: snapshot }
 }
 
 /** Whether one descriptor layer owns the `data` field (own-property presence,

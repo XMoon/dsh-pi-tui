@@ -12,7 +12,7 @@
  */
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { mkdirSync, symlinkSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import type { Context } from '@deepseek-ai/cordis'
@@ -30,8 +30,10 @@ import {
 import { testLifecycle } from '../support/temp-lifecycle.ts'
 import { extensionConfigRowId } from '../../src/domain/extension-config/row-id.ts'
 
-const PACKAGE_A = '@r8-pr1-fixture/a'
-const PACKAGE_B = '@r8-pr1-fixture/b'
+const FIXTURE_A = JSON.parse(readFileSync(join(process.cwd(), 'test/fixtures/r8-extension-config/a/package.json'), 'utf8')) as { name: string }
+const FIXTURE_B = JSON.parse(readFileSync(join(process.cwd(), 'test/fixtures/r8-extension-config/b/package.json'), 'utf8')) as { name: string }
+const PACKAGE_A = FIXTURE_A.name
+const PACKAGE_B = FIXTURE_B.name
 const NS_A = extensionConfigRowId(PACKAGE_A)
 const NS_B = extensionConfigRowId(PACKAGE_B)
 const BUNDLE = 'r8-pr2-extension-config-bundle'

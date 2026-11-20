@@ -75,9 +75,19 @@ class SettingsFixture implements SettingsServiceLike {
   describeFailure: Error | undefined
   mutateFailureAfterApply: Error | undefined
   mutateFailureBeforeApply: Error | undefined
+  private mutationHold: { readonly entered: () => void; readonly released: Promise<void> } | undefined
 
   constructor(descriptors: Descriptor[]) {
     this.descriptors = clone(descriptors)
+  }
+
+  holdNextMutation() {
+    let enter!: () => void
+    let release!: () => void
+    const entered = new Promise<void>(resolve => { enter = resolve })
+    const released = new Promise<void>(resolve => { release = resolve })
+    this.mutationHold = { entered: enter, released }
+    return { entered, release }
   }
 
   describe(): readonly Descriptor[] {
@@ -87,6 +97,12 @@ class SettingsFixture implements SettingsServiceLike {
   }
 
   async mutate(ns: string, ops: readonly SettingsMutationOp[], revision?: number): Promise<void> {
+    if (this.mutationHold !== undefined) {
+      const held = this.mutationHold
+      this.mutationHold = undefined
+      held.entered()
+      await held.released
+    }
     this.mutations.push({ ns, ops: clone(ops), revision })
     if (this.mutateFailureBeforeApply !== undefined) throw this.mutateFailureBeforeApply
     const descriptor = this.descriptors.find(item => item.ns === ns)
@@ -336,6 +352,40 @@ test('missing service, missing row and malformed projections are honest non-read
   assert.equal(read.kind, 'ready')
   if (read.kind !== 'ready') return
   assert.equal((await config.mutate(PACKAGE_A, [], read.revision, read.generation)).kind, 'rejected')
+})
+
+test('set(undefined) is rejected and the existing USER value stays intact', async () => {
+  const settings = new SettingsFixture(defaultDescriptors())
+  const config = new DirectExtensionConfigsConfig(contextWith(settings))
+  const opened = config.read(PACKAGE_A)
+  assert.equal(opened.kind, 'ready')
+  if (opened.kind !== 'ready') return
+  assert.equal((await config.mutate(PACKAGE_A, [
+    { op: 'set', path: ['label'], value: undefined },
+  ], opened.revision, opened.generation)).kind, 'rejected')
+  assert.equal(settings.mutations.length, 0)
+  const after = config.read(PACKAGE_A)
+  assert.equal(after.kind, 'ready')
+  if (after.kind !== 'ready') return
+  assert.deepEqual(after.effective, opened.effective)
+  assert.equal(after.revision, opened.revision)
+})
+
+test('an asynchronous dispatch uses the admitted value snapshot, not later caller mutation', async () => {
+  const settings = new SettingsFixture(defaultDescriptors())
+  const config = new DirectExtensionConfigsConfig(contextWith(settings))
+  const opened = config.read(PACKAGE_A)
+  assert.equal(opened.kind, 'ready')
+  if (opened.kind !== 'ready') return
+  const held = settings.holdNextMutation()
+  const value: Record<string, unknown> = { limit: 8 }
+  const pending = config.mutate(PACKAGE_A, [{ op: 'set', path: [], value }], opened.revision, opened.generation)
+  await held.entered
+  value.limit = 99
+  value.bad = new Date()
+  held.release()
+  assert.equal((await pending).kind, 'accepted')
+  assert.deepEqual(settings.mutations[0]?.ops, [{ op: 'set', path: ['data'], value: { limit: 8 } }])
 })
 
 test('a non-JSON set value is rejected before any official dispatch', async () => {

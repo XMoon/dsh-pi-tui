@@ -273,6 +273,40 @@ test('an old generation write queued behind another write is rejected before dis
   assert.equal(fixture.port.hasUnsettledWrites(), false)
 })
 
+test('set(undefined) is rejected and the existing USER value stays intact', async () => {
+  const fixture = makePort()
+  await fixture.port.describe()
+  const opened = fixture.port.extensionConfigs.read(PACKAGE_A)
+  assert.equal(opened.kind, 'ready')
+  if (opened.kind !== 'ready') return
+  assert.equal((await fixture.port.extensionConfigs.mutate(PACKAGE_A, [
+    { op: 'set', path: ['label'], value: undefined },
+  ], opened.revision, opened.generation)).kind, 'rejected')
+  assert.equal(fixture.calls.length, 0)
+  const after = fixture.port.extensionConfigs.read(PACKAGE_A)
+  assert.equal(after.kind, 'ready')
+  if (after.kind !== 'ready') return
+  assert.deepEqual(after.effective, opened.effective)
+  assert.equal(after.revision, opened.revision)
+})
+
+test('a queued dispatch uses the admitted value snapshot, not later caller mutation', async () => {
+  const fixture = makePort()
+  await fixture.port.describe()
+  const opened = fixture.port.extensionConfigs.read(PACKAGE_B)
+  assert.equal(opened.kind, 'ready')
+  if (opened.kind !== 'ready') return
+  const held = fixture.holdNextMutation()
+  const value: Record<string, unknown> = { limit: 8 }
+  const pending = fixture.port.extensionConfigs.mutate(PACKAGE_B, [{ op: 'set', path: [], value }], opened.revision, opened.generation)
+  await held.entered
+  value.limit = 99
+  value.bad = new Date()
+  held.release()
+  assert.equal((await pending).kind, 'accepted')
+  assert.deepEqual(fixture.calls[0]?.ops, [{ op: 'set', path: ['data'], value: { limit: 8 } }])
+})
+
 test('a stale revision conflicts before dispatch', async () => {
   const fixture = makePort()
   await fixture.port.describe()
