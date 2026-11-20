@@ -166,6 +166,13 @@ export interface LocalClientRunnerMountInput {
   readonly config: ReturnType<typeof TuiConfigSchema>
   /** The pre-built Remote selection the runner adopts by identity. */
   readonly override: RemoteApplicationOverride
+  /**
+   * Which physical Surface mount this runner is: the first mount of the OS
+   * Client or a same-process HMR replacement. The compatible-cross-build
+   * notice is projected only from the initial mount; the runner itself owns
+   * no "already shown" latch.
+   */
+  readonly mountKind: 'initial' | 'hmr'
 }
 
 /** The Client composition inputs that are not startup facts. */
@@ -891,7 +898,7 @@ async function startSurfaceLocalClient(
       ...(activeSessionId === undefined ? {} : { sessionId: activeSessionId }),
     } as never)
     signal?.throwIfAborted()
-    revision.runner = await mountRunner({ context, config, override })
+    revision.runner = await mountRunner({ context, config, override, mountKind: kind })
     composition.onQualification?.({ op: 'startup-stage', stage: 'runner-fiber-mounted', revision: revision.id })
     // T59 mid-HMR hold: a replacement-only barrier between the new runner
     // fiber mount and its physical surface readiness. Production never sets it.

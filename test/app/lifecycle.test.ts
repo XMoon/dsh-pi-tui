@@ -1388,6 +1388,72 @@ test('daemon detach hint: the pin answers how to get back to the Host this Clien
   assert.equal(daemonResumeBackendOverride({ confirmed: false }), false, 'an unknown Host state never pins')
 })
 
+test('daemon detach hint: a compatible different-build Host adds one past-tense note before Resume/Manage', () => {
+  const hint = formatDaemonDetachHint({
+    profile: "team's profile",
+    sessionId: 'session-42',
+    workStopped: true,
+    compatibleOtherBuild: true,
+    backendOverride: true,
+  })
+  const lines = hint.split('\n')
+  const note = lines.filter(line => line.startsWith('Note: This Client used a compatible Host with a different PiTui build.'))
+  assert.equal(note.length, 1, 'exactly one adoption note line')
+  assert.equal(
+    note[0],
+    "Note: This Client used a compatible Host with a different PiTui build. To adopt the installed Host build when work is idle: dsh --profile 'team'\\''s profile' daemon restart",
+    'the real profile is shell-quoted with the existing quoting policy',
+  )
+  const noteIndex = lines.indexOf(note[0]!)
+  assert.ok(noteIndex > lines.indexOf('The daemon Host was not stopped by this action.'), 'after the detach summary')
+  assert.ok(noteIndex > lines.indexOf('Current work: stopped.'), 'after the proven work-stopped line')
+  assert.ok(noteIndex < lines.indexOf('Resume this session:'), 'before the resume block')
+  assert.match(hint, /DSH_PI_TUI_BACKEND=daemon dsh --profile 'team'\\''s profile' --session session-42/u,
+    'the existing resume command is unchanged')
+})
+
+test('daemon detach hint: the compatible-build fact is opt-in and same/absent output stays byte-identical', () => {
+  const base = formatDaemonDetachHint({ profile: 'pi-tui-dev', sessionId: 'session-42', workStopped: false })
+  const same = formatDaemonDetachHint({ profile: 'pi-tui-dev', sessionId: 'session-42', workStopped: false, compatibleOtherBuild: false })
+  assert.equal(same, base, 'a same-build connection keeps the legacy block verbatim')
+  assert.doesNotMatch(base, /Note: This Client used a compatible Host/u)
+})
+
+test('daemon detach hint: a sessionless compatible build keeps the note without fabricating a Resume command', () => {
+  const hint = formatDaemonDetachHint({
+    profile: 'pi-tui-dev',
+    sessionId: '',
+    workStopped: false,
+    compatibleOtherBuild: true,
+  })
+  assert.match(hint, /^Note: This Client used a compatible Host with a different PiTui build\./mu)
+  assert.ok(!hint.includes('Resume this session:'), 'a sessionless detach prints no resume line')
+  assert.ok(hint.includes('Manage the daemon:'), 'the existing management block is unchanged')
+})
+
+test('daemon detach hint: a whole-Host Stop (confirmed or unconfirmed) never adds the adoption note', () => {
+  for (const hostStop of [
+    { confirmed: true },
+    { confirmed: false, detail: 'the terminal was not restored, so this Client did not run the Host stop' },
+  ] as const) {
+    const withFact = formatDaemonDetachHint({
+      profile: 'pi-tui-dev',
+      sessionId: 'session-42',
+      workStopped: false,
+      compatibleOtherBuild: true,
+      hostStop,
+    })
+    const withoutFact = formatDaemonDetachHint({
+      profile: 'pi-tui-dev',
+      sessionId: 'session-42',
+      workStopped: false,
+      hostStop,
+    })
+    assert.equal(withFact, withoutFact, `a Host Stop (${String(hostStop.confirmed)}) keeps the existing output`)
+    assert.doesNotMatch(withFact, /Note: This Client used a compatible Host/u)
+  }
+})
+
 test('classifyExitIntent: the frozen decision matrix, unknown never idle', () => {
   const decide = classifyExitIntent
   const base = {} as const

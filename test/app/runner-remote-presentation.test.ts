@@ -271,6 +271,10 @@ export async function mountRemoteRunner(
      *  ONE process-owned manual-reload capability). Absent keeps the Direct
      *  pending behavior. */
     startupSettlement?: RunnerStartupSettlement
+    /** M6 compatible-cross-build UX: the process-local daemon administration
+     *  port. A pure connection notice must never call it; a counting fake can
+     *  witness that. */
+    profileDaemonAdmin?: RemoteApplicationOverride['profileDaemonAdmin']
     /** PR2: the public CLI Session launch intent carried by `tuiStartup`. */
     sessionLaunch?: { readonly kind: 'lookup' | 'browse' | 'continue'; readonly query?: string }
   } = {},
@@ -313,6 +317,11 @@ export async function mountRemoteRunner(
 
   const vt = new VirtualTerminal(100, 30)
   let pane: TspPane | undefined
+  const previousRenderer = process.env.DSH_PI_TUI_RENDERER
+  life.defer(() => {
+    if (previousRenderer === undefined) delete process.env.DSH_PI_TUI_RENDERER
+    else process.env.DSH_PI_TUI_RENDERER = previousRenderer
+  })
   if (options.renderer === 'tsp') {
     pane = installTspPane({
       nativeImages: options.nativeImages,
@@ -349,6 +358,7 @@ export async function mountRemoteRunner(
     selected: aggregate.selected,
     presentation: aggregate.presentation,
     extensionService: aggregate.clientUi.extensionService,
+    ...(options.profileDaemonAdmin === undefined ? {} : { profileDaemonAdmin: options.profileDaemonAdmin }),
   }
   const aggregateRef = aggregate
   // The mounted TuiApp instance, captured exactly like the Direct runner
@@ -3791,4 +3801,186 @@ test('a preselected Remote runner continues the confirmed Workspace member selec
   const frame = fixture.vt.getViewport().join('\n')
   assert.ok(!frame.includes('No readable sessions in this Host workspace'), 'the official membership contains the seeded Session')
   assert.ok(!frame.includes('Back [Esc]'), '-c never opens the Session Browser')
+})
+
+// --- M6 compatible-cross-build client UX -----------------------------------
+
+const COMPATIBLE_OTHER_BUILD_NOTICE =
+  'Connected to a compatible Host with a different PiTui build. To use the installed Host build, run `daemon restart` when work is idle.'
+
+/** A counting daemon-administration port: a pure connection notice must never
+ *  invoke a Host management verb. */
+function countingDaemonAdmin(): {
+  readonly port: NonNullable<RemoteApplicationOverride['profileDaemonAdmin']>
+  readonly calls: string[]
+} {
+  const calls: string[] = []
+  return {
+    calls,
+    port: {
+      profile: 'pi-tui',
+      async run(verb) {
+        calls.push(verb)
+        return { code: 0, stdout: '', stderr: '' }
+      },
+    },
+  }
+}
+
+/** The visible viewport with line wraps normalized to single spaces. */
+function viewportText(fixture: RemoteRunnerFixture): string {
+  return fixture.vt.getViewport().join(' ').replace(/\s+/gu, ' ')
+}
+
+test('M6 compatible cross-build: the initial PiTui surface shows ONE info notice and never touches Host management', async (t) => {
+  const life = testLifecycle(t)
+  const admin = countingDaemonAdmin()
+  const fixture = await mountRemoteRunner(life, {
+    profileDaemonAdmin: admin.port,
+    startupSettlement: {
+      surfaceReady: () => {},
+      surfaceFailed: () => {},
+      authenticatedBuilds: {
+        clientBuildId: 'client-build-a',
+        hostBuildId: 'host-build-b',
+        initialSurface: true,
+      },
+    },
+  })
+  try {
+    await waitFor('compatible-build info notice', () => viewportText(fixture).includes(COMPATIBLE_OTHER_BUILD_NOTICE), 20_000)
+    const app = fixture.runnerApp() as unknown as { notifyTextForTest(): string }
+    assert.equal(app.notifyTextForTest(), COMPATIBLE_OTHER_BUILD_NOTICE, 'the ONE existing notify slot carries the fixed text')
+    const wide = fixture.vt.getViewport().join('\n')
+    assert.match(wide, /ℹ Connected to a compatible Host/u, 'the notice paints in the existing info role')
+    assert.doesNotMatch(wide, /✗ Connected to a compatible Host/u, 'it is never an error notice')
+    // Narrow 72x24 keeps the same non-blocking notice readable.
+    fixture.vt.resize(72, 24)
+    await waitFor('narrow compatible-build repaint', () => viewportText(fixture).includes(COMPATIBLE_OTHER_BUILD_NOTICE), 20_000)
+    assert.deepEqual(admin.calls, [], 'a pure connection notice never invokes a Host management verb')
+  } finally {
+    await fixture.dispose()
+  }
+})
+
+test('M6 compatible cross-build: the TSP Dock shows the same info notice and never touches Host management', async (t) => {
+  const life = testLifecycle(t)
+  const admin = countingDaemonAdmin()
+  const fixture = await mountRemoteRunner(life, {
+    renderer: 'tsp',
+    profileDaemonAdmin: admin.port,
+    startupSettlement: {
+      surfaceReady: () => {},
+      surfaceFailed: () => {},
+      authenticatedBuilds: {
+        clientBuildId: 'client-build-a',
+        hostBuildId: 'host-build-b',
+        initialSurface: true,
+      },
+    },
+  })
+  try {
+    const pane = fixture.pane
+    assert.ok(pane, 'the Remote TSP pane must be mounted')
+    await waitFor('TSP dock compatible-build notice',
+      () => wireNodes(pane).some(node => node.p.text === COMPATIBLE_OTHER_BUILD_NOTICE), 20_000)
+    const notices = wireNodes(pane).filter(node => node.k === 'text' && String(node.p.text ?? '') === COMPATIBLE_OTHER_BUILD_NOTICE)
+    assert.equal(notices.length, 1, 'the existing dock notice queue carries the message exactly once')
+    assert.ok(notices.every(node => !String(node.p.text ?? '').startsWith('! ')), 'it is an info notice, never an error')
+    assert.deepEqual(admin.calls, [], 'a pure connection notice never invokes a Host management verb')
+  } finally {
+    await fixture.dispose()
+  }
+})
+
+test('M6 compatible cross-build: the same build keeps the surface quiet', async (t) => {
+  const life = testLifecycle(t)
+  const fixture = await mountRemoteRunner(life, {
+    // A real resume failure is emitted AFTER the compatibility slot, so this
+    // proves the startup reached the notice stage without painting it.
+    resumeSessionId: 'missing-compatible-same-build',
+    startupSettlement: {
+      surfaceReady: () => {},
+      surfaceFailed: () => {},
+      authenticatedBuilds: {
+        clientBuildId: 'same-build-id',
+        hostBuildId: 'same-build-id',
+        initialSurface: true,
+      },
+    },
+  })
+  try {
+    await waitFor('the real resume error notice', () => fixture.vt.getViewport().join('\n').includes('could not be resumed'), 20_000)
+    const app = fixture.runnerApp() as unknown as { notifyTextForTest(): string }
+    assert.match(app.notifyTextForTest(), /could not be resumed/u)
+    assert.ok(!fixture.vt.writes.join('').includes(COMPATIBLE_OTHER_BUILD_NOTICE),
+      'a same-build connection never paints the compatible-build notice')
+  } finally {
+    await fixture.dispose()
+  }
+})
+
+test('M6 compatible cross-build: absent identity facts keep the surface quiet', async (t) => {
+  const life = testLifecycle(t)
+  const fixture = await mountRemoteRunner(life, {
+    resumeSessionId: 'missing-compatible-no-facts',
+  })
+  try {
+    await waitFor('the real resume error notice', () => fixture.vt.getViewport().join('\n').includes('could not be resumed'), 20_000)
+    const app = fixture.runnerApp() as unknown as { notifyTextForTest(): string }
+    assert.match(app.notifyTextForTest(), /could not be resumed/u)
+    assert.ok(!fixture.vt.writes.join('').includes(COMPATIBLE_OTHER_BUILD_NOTICE),
+      'a composition without the authenticated pair never paints the compatible-build notice')
+  } finally {
+    await fixture.dispose()
+  }
+})
+
+test('M6 compatible cross-build: an HMR replacement Surface does not repeat the notice', async (t) => {
+  const life = testLifecycle(t)
+  const fixture = await mountRemoteRunner(life, {
+    resumeSessionId: 'missing-compatible-hmr',
+    startupSettlement: {
+      surfaceReady: () => {},
+      surfaceFailed: () => {},
+      authenticatedBuilds: {
+        clientBuildId: 'client-build-a',
+        hostBuildId: 'host-build-b',
+        initialSurface: false,
+      },
+    },
+  })
+  try {
+    await waitFor('the real resume error notice', () => fixture.vt.getViewport().join('\n').includes('could not be resumed'), 20_000)
+    assert.ok(!fixture.vt.writes.join('').includes(COMPATIBLE_OTHER_BUILD_NOTICE),
+      'only the initial physical Surface mount may project the notice')
+  } finally {
+    await fixture.dispose()
+  }
+})
+
+test('M6 compatible cross-build: a real startup resume failure keeps priority over the info notice', async (t) => {
+  const life = testLifecycle(t)
+  const fixture = await mountRemoteRunner(life, {
+    resumeSessionId: 'missing-compatible-priority',
+    startupSettlement: {
+      surfaceReady: () => {},
+      surfaceFailed: () => {},
+      authenticatedBuilds: {
+        clientBuildId: 'client-build-a',
+        hostBuildId: 'host-build-b',
+        initialSurface: true,
+      },
+    },
+  })
+  try {
+    await waitFor('the real resume error notice', () => fixture.vt.getViewport().join('\n').includes('could not be resumed'), 20_000)
+    const app = fixture.runnerApp() as unknown as { notifyTextForTest(): string }
+    assert.match(app.notifyTextForTest(), /could not be resumed/u,
+      'the later real startup error owns the visible notify line')
+    assert.match(fixture.vt.getViewport().join('\n'), /✗ session missing-compatible-priority could not be resumed/u,
+      'the error paints in the error role')
+  } finally {
+    await fixture.dispose()
+  }
 })

@@ -194,6 +194,15 @@ interface AppExit {
   (code: number): void
 }
 
+/**
+ * M6 compatible-cross-build UX: the ONE non-blocking notice shown when this
+ * Client authenticated a Host under the same protocol/DSH runtime but a
+ * different PiTui build. It never claims the Host is older, never blocks and
+ * never changes the connection or Host lifecycle.
+ */
+const COMPATIBLE_OTHER_BUILD_NOTICE =
+  'Connected to a compatible Host with a different PiTui build. To use the installed Host build, run `daemon restart` when work is idle.'
+
 /** Read the official `RemoteError` code off a refused preset switch. */
 function presetErrorCode(error: unknown): string | undefined {
   if (typeof error !== 'object' || error === null) return undefined
@@ -290,6 +299,15 @@ export function applyRunnerWithRuntime(
     }
     return
   }
+  // M6 compatible-cross-build UX: ONE derived constant over the two
+  // AUTHENTICATED build identities supplied by the real Client composition.
+  // Direct and every composition without the pair stay silent, and two equal
+  // builds are not a "different build". This is a pure derived fact, never
+  // persistent state and never a second compatibility authority: the existing
+  // protocol/DSH/Cookie/kernel admission already completed before this mount.
+  const compatibleOtherBuild = override !== undefined
+    && startupSettlement?.authenticatedBuilds !== undefined
+    && startupSettlement.authenticatedBuilds.clientBuildId !== startupSettlement.authenticatedBuilds.hostBuildId
   const configuredExactSessionId = config.sessionId !== undefined && config.sessionId !== '' ? config.sessionId : startup.sessionId
   // Two startup Session targets are mutually exclusive. The exact
   // `config.sessionId` / internal split-Client `startup.sessionId` identity and
@@ -3471,6 +3489,10 @@ export function applyRunnerWithRuntime(
             profile,
             sessionId,
             workStopped: exitWorkStopped,
+            // M6 compatible-cross-build UX: the SAME derived fact that produced
+            // the initial notice; a whole-Host Stop (verified or unknown) never
+            // carries the adoption suggestion.
+            compatibleOtherBuild,
             // RFL-016C: the pin answers "how do I get back to the Host this
             // Client left" and must NOT trust the last-known config mirror.
             // Leave/ordinary detach pin; a confirmed stop never does; an
@@ -5132,6 +5154,14 @@ export function applyRunnerWithRuntime(
       if (refusal !== undefined && refusal !== '') {
         surface.display.notify(`session browser unavailable: ${refusal}`, 'error')
       }
+    }
+    // M6 compatible-cross-build UX: ONE non-blocking info notice on the
+    // INITIAL physical Surface mount of a Client that authenticated a Host
+    // with a different PiTui build. It runs BEFORE the ordinary startup
+    // notices below, so a real launch/resume failure keeps its priority (the
+    // PiTui notify line is replaced by the later error).
+    if (compatibleOtherBuild && startupSettlement?.authenticatedBuilds?.initialSurface === true) {
+      surface.display.notify(COMPATIBLE_OTHER_BUILD_NOTICE, 'info')
     }
     if (surfaceNotice !== undefined) {
       surface.display.notify(surfaceNotice, 'error')

@@ -452,6 +452,20 @@ export interface RunnerStartupSettlement {
   surfaceReady(): void
   surfaceFailed(error: unknown): void
   /**
+   * M6 compatible-cross-build UX: the two AUTHENTICATED build identities this
+   * Client process connected under, plus which physical Surface mount this
+   * runner is. `clientBuildId` is the running Client's own `scope.buildId`
+   * (never the installed Profile package) and `hostBuildId` is the Host
+   * identity the existing protocol/DSH/Cookie/kernel authentication chain
+   * verified. Present only on the real split-Client composition; Direct and
+   * every composition without the pair stay silent.
+   */
+  readonly authenticatedBuilds?: {
+    readonly clientBuildId: string
+    readonly hostBuildId: string
+    readonly initialSurface: boolean
+  }
+  /**
    * M6 PR-C C3: the presence revision scope identity owned by the Client
    * CONNECTION root (the client Context). The Host stores one strictly
    * increasing revision per authenticated Peer, so the counter must SURVIVE
