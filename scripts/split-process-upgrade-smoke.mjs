@@ -16,7 +16,7 @@
  * re-authenticates the SAME Host A and reopens the SAME Session. The old PID
  * remains only as the waiting parent that forwards the replacement exit code.
  *
- * Both packages name the same `dsh-pi-tui/local/1` wire protocol and the same
+ * Both packages name the same `dsh-pi-tui/local/2` wire protocol and the same
  * exact DSH runtime, but carry different package versions, bundles and
  * buildIds. The new Client B must authenticate the SAME Host A, call the real
  * official `session/list`, private PiFile RPC and private terminal-progress
