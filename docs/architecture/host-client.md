@@ -1065,6 +1065,42 @@ dispatched failure whose settlement cannot be observed is
 write counter or Client-side optimistic value, and no namespace, path or
 secret crosses the port.
 
+### Client-local external `./tui` loading
+
+An opted-in npm package's `./tui` entry is loaded ONLY by the CURRENT Client,
+through that Client's EXISTING official Cordis Loader. The semantic owner is
+`src/app/client-extensions/**`, shared by Direct and Split:
+
+- Inputs are ONE committed official Host `PluginManagerPort.snapshot()`
+  (`bundles[].enabled` plus the live `plugins[].patchId/moduleName/enabled/
+  fiberPhase` rows), the current process's official `PluginPackages.packageOf`
+  identity/manifest, and the existing pure Client-extension qualification.
+  A Client-local `package.json` scan, a profile path read or a second npm
+  resolver is never an authority.
+- `ConfigPort.extensionConfigs` supplies the package's effective `data` value
+  verbatim. An unavailable/stale/unreadable read is an explicit Client-local
+  state; it never becomes `{}`, a stale value or an ACTIVE entry.
+- The Loader entry id is `pi-tui-client-` + the validated 32-char
+  `extensionConfigRowId` suffix. `loader.create()` returning is not activation:
+  the entry's real Fiber must exist, settle and be ACTIVE.
+- Unload captures the real Fiber, removes the entry from the Loader tree
+  first, then awaits that Fiber's terminal disposal before the id may be
+  reused. A same-PID byte change is never re-imported; the old entry stays
+  active and the package becomes `reload-required`.
+- Direct mounts these entries in its own Host-process Loader as ephemeral
+  Client runtime entries — never as profile `cordis.patch.yml` rows. A Split
+  Client mounts them in its own Client Context/Loader; closing one Client
+  releases only that Client's entries.
+- The Plugin Manager's committed-explicit-refresh callback drives an
+  incremental reconcile. It is a process-local method pointing at the CURRENT
+  surface revision; there is no polling, Gateway callback or cross-process
+  callback, and a superseded revision never publishes a stale observation.
+
+The live Entry/Fiber and per-package `active`/`error`/`reload-required`
+observation is the only Client runtime status. Official Plugin Manager
+`enabled` is install/selection truth and is never re-labelled as Client
+ACTIVE.
+
 ### MCP server management (ONE Host manager)
 
 The ONE official Host MCP manager (`@deepseek-ai/dsh-mcp-manager`,

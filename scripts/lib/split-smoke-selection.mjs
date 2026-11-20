@@ -59,6 +59,7 @@ import { runMcpServersFr4 } from '../smoke/split-process/mcp-servers-fr4.mjs'
 import { runSubagentSettingsFr5A } from '../smoke/split-process/subagent-settings-fr5a.mjs'
 import { runHostNumericSettingsFr5B } from '../smoke/split-process/host-numeric-settings-fr5b.mjs'
 import { runExtensionConfigPr2 } from '../smoke/split-process/r8-extension-config-pr2.mjs'
+import { runClientExtensionLoaderPr3 } from '../smoke/split-process/r8-extension-client-loader-pr3.mjs'
 import { runWebStartupPreference } from '../smoke/split-process/web-startup-preference.mjs'
 import { runProfilePreferencesQualification } from '../smoke/split-process/profile-preferences.mjs'
 import { runF2AccountComposition } from '../smoke/split-process/account-composition.mjs'
@@ -383,6 +384,14 @@ const CASE_REGISTRY = Object.freeze([
     id: 'host-settings.r8-extension-config-pr2',
     title: 'two packed third-party packages installed by the official plugin command read/write independent per-package extension Config rows through the production Remote ConfigPort on a real Host and surface Client, refuse a stale revision and leave the canonical preferences row untouched',
     run: runExtensionConfigPr2,
+  }),
+  Object.freeze({
+    suite: 'host-settings',
+    defaultLane: false,
+    id: 'host-settings.r8-extension-client-loader-pr3',
+    title: 'two real Split Clients mount the same packed third-party ./tui packages through the Client-local Loader owner, render each Footer and run each own Command while the plain Host bundle stays native and Client A exit keeps Client B and the Host identity',
+    platforms: LINUX_DARWIN,
+    run: runClientExtensionLoaderPr3,
   }),
   Object.freeze({
     suite: 'host-settings',
