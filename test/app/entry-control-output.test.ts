@@ -35,6 +35,9 @@ const RECORDS: ReadonlyArray<Record<string, unknown>> = [
   { m4b2hf: 'host-rpc-proof', processRole: 'host', path: '/private/fake' },
   { m4a0: 'diag', processRole: 'host', level: 'debug', message: 'debug only' },
   { m4a0: 'diag', processRole: 'host', level: 'warn', message: 'warning for user' },
+  { m4a0: 'web-autostart', processRole: 'host', pid: 111, phase: 'pre-ready', status: 'enabled' },
+  { m4a0: 'acp-autostart', processRole: 'host', pid: 111, phase: 'pre-ready', status: 'enabled' },
+  { m4a0: 'cleanup', processRole: 'host', phase: 'shutdown', pid: 111, status: 'completed' },
 ]
 
 interface SinkResult {
@@ -65,6 +68,9 @@ test('the default Host output is concise production text without qualification J
   const { stdout, stderr } = runDefaultSink()
   assert.deepEqual(stdout.trim().split('\n'), [
     'dsh-pi-tui host: ready (profile=pi-tui-test, pid=111)',
+    'dsh-pi-tui host: web autostart enabled',
+    'dsh-pi-tui host: ACP autostart enabled',
+    'dsh-pi-tui host: stopped',
   ])
   assert.deepEqual(stderr.trim().split('\n'), [
     'dsh-pi-tui host: warning acp-autostart-unavailable (mutation-failed)',

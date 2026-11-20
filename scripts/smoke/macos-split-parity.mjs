@@ -1076,7 +1076,7 @@ async function runScene({ installation, workRoot, report }) {
   assert(daemonLogs.stdout.trim() !== '', 'P06: daemon logs returned no Host log output')
   assert(!/connectUrl=\S|token=\S/iu.test(daemonLogs.stdout), 'P06: log output leaked unsanitized token material')
   assert(/dsh-pi-tui host: ready/u.test(daemonLogs.stdout), 'P06: the default Host log must carry the readable ready line')
-  assert(!/"m4a0"|ownerEntries|profile-booted/u.test(daemonLogs.stdout), 'P06: the default Host log must not carry qualification JSON')
+  assert(!/"m4a0"|ownerEntries|profile-booted|services/u.test(daemonLogs.stdout), 'P06: the default Host log must not carry qualification JSON')
   report.rows.push(
     { id: 'P02-WARM', status: 'PASS', hostPid: original.hostPid, instance: original.instanceId, reused: true },
     { id: 'P06', status: 'PASS', source: 'scope/host.log', lines: 20, sanitized: true },
@@ -2561,11 +2561,10 @@ async function runD4LaunchdScene({ installation, workRoot, report, start, projec
   const stdoutLog = join(scopeDirPath, 'launchd.stdout.log')
   const stderrLog = join(scopeDirPath, 'launchd.stderr.log')
   await waitFor(() => (
-    (existsSync(stdoutLog) && statSync(stdoutLog).size > 0)
-      || (existsSync(stderrLog) && statSync(stderrLog).size > 0)
+    existsSync(stdoutLog) && readFileSync(stdoutLog, 'utf8').includes('dsh-pi-tui host: ready')
       ? true
       : undefined
-  ), 'D4L launchd log output', TIMEOUTS.daemon)
+  ), 'D4L launchd default ready log line', TIMEOUTS.daemon)
   assert(stdoutLog !== stderrLog && existsSync(stderrLog), 'L03: the two launchd log sinks must be independent files')
   const stdoutStat = lstatSync(stdoutLog)
   const stderrStat = lstatSync(stderrLog)
@@ -2576,7 +2575,7 @@ async function runD4LaunchdScene({ installation, workRoot, report, start, projec
     && !/token=\S|connectUrl=\S/iu.test(launchdLogs.result.stdout),
   'L08: managed logs must identify the launchd source and stay sanitized')
   assert(/dsh-pi-tui host: ready/u.test(launchdLogs.result.stdout), 'L08: the default launchd Host log must carry the readable ready line')
-  assert(!/"m4a0"|ownerEntries|profile-booted/u.test(launchdLogs.result.stdout), 'L08: the default launchd Host log must not carry qualification JSON')
+  assert(!/"m4a0"|ownerEntries|profile-booted|services/u.test(launchdLogs.result.stdout), 'L08: the default launchd Host log must not carry qualification JSON')
   report.rows.push({ id: 'L03', status: 'PASS', label, launchdPid, hostPid: startedHost.record.hostPid,
     instanceId: startedHost.record.instanceId, foregroundEntry: true, ppid: psRow.ppid })
   report.rows.push({ id: 'L04', status: 'PASS', unit: label, unitState: startedStatus.fields['unit-state'],
