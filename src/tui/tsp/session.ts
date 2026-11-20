@@ -433,7 +433,14 @@ export interface TspInputBinding {
 
 /** What the TSP renderer needs from the composition root. */
 export interface TspRendererOptions {
-  /** The workspace root for tool-args path relativization in the mapper. */
+  /**
+   * The workspace root for tool-args path relativization in the mapper — the
+   * STANDALONE SDK mount / no-status-reader compatibility input ONLY. It is
+   * never the production Session's path authority: a renderer whose mount
+   * bound a status reader derives its tool-path root exclusively from the
+   * FORMALLY COMMITTED `StatusSnapshot.workspace` (see `transcriptCwd()`),
+   * even before that snapshot ever arrived.
+   */
   readonly cwd?: string
   /**
    * The ONE live display authority. Optional ONLY at this renderer boundary so
@@ -1562,6 +1569,24 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
    * status can never paint beside the incoming one's transcript.
    */
   let presentedStatus: StatusSnapshot | undefined
+  /**
+   * R13: the ONE tool-path relativization root for the CURRENT displayed
+   * transcript — the formally committed display-subject workspace. A mount
+   * with a bound status reader NEVER falls back to `options.cwd`: before the
+   * first formal commit (and after hydration retired the old snapshot) the
+   * root is `undefined`, so paths stay unabridged instead of borrowing the
+   * Client launch directory. Stateless and read-only: no store read, no cache,
+   * no `process.cwd()`; the only input is `presentedStatus`, sampled at the
+   * formal display commit. A standalone SDK fixture without a reader keeps
+   * the mount-time `options.cwd` compatibility input.
+   */
+  const transcriptCwd = (): string | undefined => {
+    if (!statusReaderInstalled) return options.cwd
+    const workspace = presentedStatus?.workspace
+    return workspace === undefined || workspace.cwdUnavailable === true || workspace.cwd === ''
+      ? undefined
+      : workspace.cwd
+  }
   /**
    * PR-C (external review r3): the busy-LIFETIME identity of the current
    * display subject — a renderer-local presentation serial advanced at every
@@ -3606,8 +3631,11 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // ONE admission fact for this descriptor pass: the painted Workflow button
     // and the click route must both consume it.
     const workflowBrowseAdmitted = scopedBrowseAdmitted()
+    // R13: ONE effective root for the whole descriptor pass — sampled exactly
+    // once here, so every block stamps/materializes from the same value.
+    const currentCwd = transcriptCwd()
     const viewOptions = {
-      ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
+      ...(currentCwd === undefined ? {} : { cwd: currentCwd }),
       scopePrefix,
       ...(settledQuestionAnswers === undefined ? {} : { settledQuestionAnswersLookup: settledQuestionAnswers }),
       settledQuestionAnswersRevision,
@@ -4214,8 +4242,13 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       if (statusReader === undefined) {
         throw new Error('the TSP renderer has no status reader: the mount must bind one')
       }
+      // R13: capture the effective root of the ALREADY PAINTED transcript
+      // BEFORE the new formal snapshot replaces it — `transcriptCwd()` reads
+      // `presentedStatus`, which this commit is about to re-sample.
+      const priorCwd = transcriptCwd()
       const previous = presentedStatus
       presentedStatus = statusReader.snapshot()
+      const nextCwd = transcriptCwd()
       const now = Date.now()
       focusTiming.notePhase(presentedStatus.activity.phase, now)
       if (lastTurnActivities !== undefined) {
@@ -4234,7 +4267,15 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
         && presentedStatus.activity.busy === true) {
         busyEpoch += 1
       }
-      if (options.displayState?.preset === 'focus' && !hydrating && lastMessages.length > 0) {
+      // R13: ONE status-driven refresh condition. A status-only effective-root
+      // change re-derives the descriptors ONCE (Full, Compact and Focus — the
+      // path text lives in all three), the Focus preset keeps its historical
+      // phase/elapsed refresh, and a transcript that only carries live
+      // Preparing rows (`lastStreamingToolPreviews`) refreshes too. One
+      // rebuild, one `render()` below — never a second rebuild or loop.
+      if (!hydrating
+        && (lastMessages.length > 0 || lastStreamingToolPreviews.length > 0)
+        && (priorCwd !== nextCwd || options.displayState?.preset === 'focus')) {
         if (!rebuildLastMain()) return
       }
       render()

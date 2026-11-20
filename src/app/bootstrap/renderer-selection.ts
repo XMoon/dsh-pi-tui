@@ -214,7 +214,6 @@ export async function selectRendererMount(deps: RendererSelectionDeps): Promise<
 
 /** The PRODUCTION connector inputs: lazy import + the official SDK connect. */
 export interface ProductionTspConnectorDeps {
-  readonly cwd: string
   /** The ONE live display authority the composition root resolved before the
    *  first compose; forwarded as the SAME object, never a boot-time snapshot. */
   readonly displayState: DisplayState

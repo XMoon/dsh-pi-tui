@@ -298,6 +298,10 @@ async function mountTspHarness(options: {
   /** Advertise the native `image` kind + `blobs` feature so a ready Tool SVG
    *  really carries its own collapsible disclosure. */
   nativeImages?: boolean
+  /** R13: the standalone SDK mount cwd (`TspRendererOptions.cwd`). In a case
+   *  that binds a status reader it is a DELIBERATE counter-example: the mount
+   *  root must never become the displayed tool-path root. */
+  legacyCwd?: string
 } = {}): Promise<Harness & { session: Session }> {
   const kinds = new Set(HELLO.kinds)
   const features = new Set(HELLO.features)
@@ -400,6 +404,7 @@ async function mountTspHarness(options: {
   const renderer: SurfaceRendererMount = {
     mount: (binding, statusReader) => {
       mountedRenderer = mountTspRenderer(session, { copyVisual,
+        ...(options.legacyCwd === undefined ? {} : { cwd: options.legacyCwd }),
         requestExit: () => {
           exitCount += 1
           options.requestExit?.()
@@ -1492,7 +1497,7 @@ test('the PRODUCTION connector handshake releases a mount a REAL surface.start r
     env: { DSH_PI_TUI_RENDERER: 'tsp' },
     resolveFooterConfig: () => resolveTspNativeFooterConfig({ doc: { footer: 'default' }, readiness: 'ready', userItems: { items: [], invalidCount: 0 } }),
     connectTsp: productionTspConnector({ copyVisual: async () => false,
-      cwd: '/tmp', displayState: { preset: 'full' }, requestExit, onFatal: () => {}, log: () => {}, logError: () => {},
+      displayState: { preset: 'full' }, requestExit, onFatal: () => {}, log: () => {}, logError: () => {},
       connect: async () => session,
     }),
   })
@@ -4982,6 +4987,218 @@ test('the Workflow scoped button follows the Work Hub pane floor across resize r
     assert.equal(browseButton()!.id, wideId, 'the same Workflow root keeps its presentation identity')
   } finally {
     await harness.dispose()
+    await harness.session.close()
+  }
+})
+
+// ── R13: the display-subject workspace owns the tool-path root ─────────────
+
+/** The standalone mount root: the deliberate counter-example. It must never
+ *  become the displayed tool-path root while a status reader is bound. */
+const R13_LAUNCH_ROOT = '/r13/launch-A'
+const R13_WORKSPACE_B = '/r13/workspace-B'
+const R13_WORKSPACE_C = '/r13/workspace-C'
+const R13_ABS_B = `${R13_WORKSPACE_B}/src/a.ts`
+
+const r13Targets = (harness: Harness): string[] => mountedNodes(harness)
+  .filter(node => node.k === 'tool')
+  .map(node => String(node.p['target'] ?? ''))
+
+const r13ActionLine = (harness: Harness): string | undefined =>
+  mountedNodes(harness)
+    .map(node => node.p['text'])
+    .find((text): text is string => typeof text === 'string' && text.startsWith('Action: '))
+
+const r13FooterCwd = (harness: Harness): string | undefined => {
+  const node = mountedNodes(harness).find(candidate => candidate.p['key'] === 'status-r1-cwd')
+  return node === undefined ? undefined : nodeText(node)
+}
+
+/** One FORMAL display commit of a workspace fact (the production
+ *  `SurfaceRuntime.commitStatus` path: store write + display commit). */
+async function r13CommitWorkspace(
+  harness: Harness,
+  workspace: { readonly cwd: string; readonly cwdUnavailable?: boolean },
+): Promise<void> {
+  harness.surface.commitStatus({ workspace } as never, {}, undefined)
+  // Bounded window for the async SDK frame delivery; `awaitWireFact` is the claim.
+  await settle()
+}
+
+/** One durable Read tool with an absolute B path (with a settled result). */
+function r13DurableRead(harness: Harness, callId: string): void {
+  harness.route(ev('turn/start', { turn: 1 }, 0))
+  harness.route(userMessage(1, 'r13 committed workspace', `user-${callId}`))
+  harness.route(ev('tool/call', {
+    turn: 1, step: 0, callId: ToolCallId(callId), name: 'read',
+    arguments: JSON.stringify({ file_path: R13_ABS_B }),
+  }, 2))
+  harness.route(toolResult(3, callId, 'r13 file body'))
+}
+
+/** One STILL-RUNNING Read tool (an open Work/Activity with a live Action). */
+function r13RunningRead(harness: Harness, callId: string): void {
+  harness.route(ev('turn/start', { turn: 1 }, 0))
+  harness.route(ev('step/start', { turn: 1, step: 0 }, 1))
+  harness.route(userMessage(2, 'r13 live workspace', `user-${callId}`))
+  harness.route(ev('tool/call', {
+    turn: 1, step: 0, callId: ToolCallId(callId), name: 'read',
+    arguments: JSON.stringify({ file_path: R13_ABS_B }),
+  }, 3))
+}
+
+test('R13 L4-A: the committed workspace root, not the mount cwd, owns the durable tool target', async () => {
+  const harness = await mountTspHarness({ displayState: { preset: 'full' }, legacyCwd: R13_LAUNCH_ROOT })
+  try {
+    await r13CommitWorkspace(harness, { cwd: R13_WORKSPACE_B })
+    r13DurableRead(harness, 'r13-durable')
+    harness.surface.paintNow()
+    await awaitWireFact(() => r13Targets(harness).includes('src/a.ts'), 'the committed workspace tool target')
+    assert.deepEqual(r13Targets(harness), ['src/a.ts'],
+      'the durable Read target is B-relative — never launch-A, never the raw absolute path')
+    const footer = r13FooterCwd(harness)
+    assert.ok(footer?.includes('workspace-B') === true, `the Footer states workspace B (got ${String(footer)})`)
+    assert.ok(footer?.includes('launch-A') !== true, 'the Footer never shows the launch directory')
+  } finally {
+    await harness.dispose()
+    await harness.session.close()
+  }
+})
+
+test('R13 L4-B: a status-only workspace change repaints the SAME tool card without a transcript event', async () => {
+  const harness = await mountTspHarness({ displayState: { preset: 'full' }, legacyCwd: R13_LAUNCH_ROOT })
+  try {
+    await r13CommitWorkspace(harness, { cwd: R13_WORKSPACE_B })
+    r13DurableRead(harness, 'r13-status-only')
+    harness.surface.paintNow()
+    await awaitWireFact(() => r13Targets(harness).includes('src/a.ts'), 'the B-relative tool target')
+    const before = mountedNodes(harness)
+    const userBefore = before.find(node => node.k === 'message' && node.p['role'] === 'dsh.transcript.user')
+    const toolBefore = before.find(node => node.k === 'tool')
+    assert.ok(userBefore !== undefined && toolBefore !== undefined)
+
+    // B → C: NO tool/call, NO tool/result, NO Folder rebuild, NO scope change.
+    await r13CommitWorkspace(harness, { cwd: R13_WORKSPACE_C })
+    const afterC = mountedNodes(harness)
+    const toolC = afterC.find(node => node.k === 'tool')
+    const userC = afterC.find(node => node.k === 'message' && node.p['role'] === 'dsh.transcript.user')
+    assert.ok(toolC !== undefined && userC !== undefined)
+    assert.equal(toolC.id, toolBefore.id, 'the tool card keeps its node identity')
+    assert.equal(String(toolC.p['target']), R13_ABS_B, 'the C root keeps B\'s absolute path')
+    assert.equal(userC.id, userBefore.id, 'the unrelated User node identity is untouched')
+    assert.deepEqual(userC.p, userBefore.p, 'the unrelated User node content is untouched')
+
+    // C → B: the SAME card re-states the relative path.
+    await r13CommitWorkspace(harness, { cwd: R13_WORKSPACE_B })
+    assert.deepEqual(r13Targets(harness), ['src/a.ts'], 'B re-relativizes the same card')
+
+    // B → unavailable: a stated unknown root keeps the absolute path.
+    await r13CommitWorkspace(harness, { cwd: '', cwdUnavailable: true })
+    assert.deepEqual(r13Targets(harness), [R13_ABS_B], 'an unknown root keeps the absolute path')
+    const footer = r13FooterCwd(harness)
+    assert.ok(footer?.includes('Unavailable') === true, `the Footer states the unknown workspace (got ${String(footer)})`)
+  } finally {
+    await harness.dispose()
+    await harness.session.close()
+  }
+})
+
+test('R13 L4-C: status-only root changes repaint Compact and Focus heads with no new tool event', async () => {
+  // ── Compact: the collapsed Activity Action + the expanded durable member ──
+  const compact = await mountTspHarness({ displayState: { preset: 'compact' }, legacyCwd: R13_LAUNCH_ROOT })
+  try {
+    compact.surface.bindRendererInput()
+    await r13CommitWorkspace(compact, { cwd: R13_WORKSPACE_B })
+    r13RunningRead(compact, 'r13-compact-live')
+    compact.surface.paintNow()
+    await awaitWireFact(() => r13ActionLine(compact) === 'Action: Read src/a.ts', 'the Compact Activity Action at B')
+    const sectionBefore = mountedSections(compact).find(node => String(node.p['key']).includes('work-'))
+    assert.ok(sectionBefore !== undefined)
+    await r13CommitWorkspace(compact, { cwd: R13_WORKSPACE_C })
+    assert.equal(r13ActionLine(compact), `Action: Read ${R13_ABS_B}`,
+      'the Compact Activity Action follows C with the exact absolute path')
+    assert.equal(mountedSections(compact).find(node => String(node.p['key']).includes('work-'))?.id, sectionBefore.id,
+      'the Compact Activity section keeps its identity')
+
+    // Open the SAME Work section (control-injected toggle of an EXISTING head):
+    // the expanded durable member must follow later status-only commits too.
+    const workId = sectionBefore.id
+    if (mountedSections(compact).find(node => node.id === workId)?.p['collapsed'] === true) {
+      harnessFreeInput(compact.tern, { ev: 'toggle', sf: compact.tern.frames.at(-1)!.sf, id: workId, collapsed: false, raw: {} })
+    }
+    await awaitWireFact(() => r13Targets(compact).length > 0, 'the expanded durable member')
+    assert.deepEqual(r13Targets(compact), [R13_ABS_B], 'the expanded member uses the current root C')
+    await r13CommitWorkspace(compact, { cwd: R13_WORKSPACE_B })
+    assert.deepEqual(r13Targets(compact), ['src/a.ts'],
+      'a status-only commit repaints the expanded member with no new tool event')
+  } finally {
+    await compact.dispose()
+    await compact.session.close()
+  }
+
+  // ── Focus: the collapsed root Action head ──
+  const focus = await mountTspHarness({ displayState: { preset: 'focus' }, legacyCwd: R13_LAUNCH_ROOT })
+  try {
+    await r13CommitWorkspace(focus, { cwd: R13_WORKSPACE_B })
+    r13RunningRead(focus, 'r13-focus-live')
+    focus.surface.paintNow()
+    await awaitWireFact(() => r13ActionLine(focus) === 'Action: Read src/a.ts', 'the Focus Action head at B')
+    await r13CommitWorkspace(focus, { cwd: R13_WORKSPACE_C })
+    assert.equal(r13ActionLine(focus), `Action: Read ${R13_ABS_B}`,
+      'the Focus Action head follows C with the exact absolute path')
+  } finally {
+    await focus.dispose()
+    await focus.session.close()
+  }
+})
+
+test('R13 L4-D: only the formal display commit publishes a status-only root change', async () => {
+  const harness = await mountTspHarness({ displayState: { preset: 'full' }, legacyCwd: R13_LAUNCH_ROOT })
+  try {
+    await r13CommitWorkspace(harness, { cwd: R13_WORKSPACE_B })
+    r13DurableRead(harness, 'r13-formal')
+    harness.surface.paintNow()
+    await awaitWireFact(() => r13Targets(harness).includes('src/a.ts'), 'the B-relative tool target')
+
+    // A bare store update commits NO display state: nothing may repaint.
+    const framesBefore = harness.tern.frames.length
+    harness.surface.status.update({ workspace: { cwd: R13_WORKSPACE_C } })
+    // Bounded negative observation: no completion signal exists for "nothing
+    // was painted", so the frame count is read after a fixed drained window.
+    await settle()
+    assert.equal(harness.tern.frames.length, framesBefore, 'a bare status.update paints no frame')
+    assert.deepEqual(r13Targets(harness), ['src/a.ts'],
+      'the painted tool target keeps the last FORMAL root until the display commit')
+    harness.surface.display.commitDisplaySubject({}, {}, undefined)
+    // Bounded window for the async SDK frame delivery of that same commit.
+    await settle()
+    assert.deepEqual(r13Targets(harness), [R13_ABS_B], 'the formal display commit samples the new root')
+
+    // Hydration retires the old status AND the old transcript: neither root
+    // may be authorized by the incoming source.
+    harness.renderer().display.beginSessionHydration()
+    // Bounded window for the async SDK frame delivery of the Loading state.
+    await settle()
+    assert.ok(!r13Targets(harness).includes('src/a.ts'), 'hydration retires the old relative target')
+    assert.ok(!r13Targets(harness).includes(R13_ABS_B), 'hydration retires the old absolute target too')
+    harness.replaceMain()
+    r13DurableRead(harness, 'r13-after-hydration')
+    await r13CommitWorkspace(harness, { cwd: R13_WORKSPACE_C })
+    harness.surface.paintNow()
+    await awaitWireFact(() => r13Targets(harness).includes(R13_ABS_B), 'the new source uses the new root')
+    assert.ok(!r13Targets(harness).includes('src/a.ts'), 'the retired B root is never reused')
+
+    // A late formal commit on a disposed renderer paints nothing.
+    const renderer = harness.renderer()
+    await harness.dispose()
+    const framesAfterDispose = harness.tern.frames.length
+    renderer.display.commitDisplaySubject({}, {}, undefined)
+    // Bounded negative observation: a disposed renderer has no completion
+    // signal, so the frame count is read after a fixed drained window.
+    await settle()
+    assert.equal(harness.tern.frames.length, framesAfterDispose,
+      'a disposed renderer paints no late status frame')
+  } finally {
     await harness.session.close()
   }
 })

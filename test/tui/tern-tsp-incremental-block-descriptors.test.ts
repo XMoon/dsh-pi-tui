@@ -23,6 +23,7 @@ import { SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { TranscriptFolder } from '../../src/domain/transcript/folder.ts'
 import type { TurnActivity } from '../../src/domain/transcript/types.ts'
 import type { TranscriptMessage } from '../../src/domain/transcript/types.ts'
+import type { StreamingToolPreview } from '../../src/app/surface/streaming-tool-preparing.ts'
 import { projectTranscriptStructure } from '../../src/tui/transcript/structure.ts'
 import {
   TranscriptNodeKeys,
@@ -539,4 +540,282 @@ test('one Command toggle changes only its own descriptor and the static key stay
   assert.equal(runningKeys.length, settledKeys.length)
   assert.deepEqual(runningKeys.filter(key => key !== settledKeys[runningKeys.indexOf(key)]), [`s1-msg-2-static`])
   assert.equal(settledKeys[runningKeys.indexOf('s1-msg-2-static')], 's1-msg-2')
+})
+
+// ── R13: the tool-path root is the CURRENT display-subject workspace ───────
+
+/** The standalone mount root: the historical bug source. It must never be a
+ *  display root once a workspace fact is committed, and an UNKNOWN root must
+ *  keep the absolute path rather than inherit this value. */
+const R13_LAUNCH_ROOT = '/r13/launch-A'
+const R13_WORKSPACE_B = '/r13/workspace-B'
+const R13_WORKSPACE_C = '/r13/workspace-C'
+const R13_ABS_B = `${R13_WORKSPACE_B}/src/a.ts`
+
+/** The canonical Work span owners of one projection (their disclosure keys). */
+function r13WorkOwners(messages: readonly TranscriptMessage[]): TranscriptMessage[] {
+  return projectTranscriptStructure(messages).flatMap(block => block.kind === 'work' ? [block.span.owner] : [])
+}
+
+/** Every materialized tool target, top-level rows and nested PTC children. */
+function r13ToolTargets(
+  messages: readonly TranscriptMessage[],
+  preset: (typeof ALL_PRESETS)[number],
+  cwd: string | undefined,
+): string[] {
+  const options: TranscriptPresetViewOptions = {
+    preset,
+    scopePrefix: 's1-',
+    window: LATEST_WINDOW,
+    expandedWorkOwners: new Set(r13WorkOwners(messages)),
+    expandedFocusTurns: new Set([1]),
+    ...(cwd === undefined ? {} : { cwd }),
+  }
+  return flattenMain(lazyMain(messages, new TranscriptNodeKeys(), options))
+    .filter(node => node.kind === 'tool')
+    .map(node => String(node.props['target']))
+}
+
+/** Every text value a materialized root carries, in document order. */
+function r13TextsOf(root: Node): string[] {
+  return flattenMain(root)
+    .filter(node => node.kind === 'text')
+    .map(node => String(node.props['text'] ?? ''))
+}
+
+/** The path text of a materialized Preparing row (` · <summary>`) or of a
+ *  path-carrying `Action: Read <path>` line, with the known prefix removed. */
+function r13PathTextOf(texts: readonly string[]): string | undefined {
+  const carrying = texts.find(text => (text.includes('src/a.ts') || text.includes(R13_ABS_B))
+    && (text.startsWith(' · ') || text.startsWith('Action: ')))
+  if (carrying === undefined) return undefined
+  return carrying.startsWith(' · ') ? carrying.slice(3) : carrying.slice('Action: Read '.length)
+}
+
+/** One real running tool with an absolute path and an open turn. */
+function r13RunningFolder(): TranscriptFolder {
+  return apply([
+    ev('turn/start', { turn: 1 }, 0),
+    ev('step/start', { turn: 1, step: 0 }, 1),
+    userMessage(2, 'user-r13-live', 'watch the live tool'),
+    toolCall(3, 'call-r13-live', 'read', { file_path: R13_ABS_B }),
+  ])
+}
+
+const R13_PREVIEW: StreamingToolPreview = {
+  callId: 'call-r13-stream',
+  turn: 1,
+  step: 0,
+  index: 0,
+  name: 'read',
+  summary: R13_ABS_B,
+  argumentBytes: 40,
+}
+
+test('R13 D1: the CURRENT workspace root relativizes an absolute tool path in every preset', () => {
+  const messages = apply([
+    ev('turn/start', { turn: 1 }, 0),
+    userMessage(1, 'user-r13', 'read the current workspace file'),
+    toolCall(2, 'call-r13-read', 'read', { file_path: R13_ABS_B }),
+    toolResult(3, 'call-r13-read', 'the file body'),
+    ev('turn/end', { turn: 1, reason: { kind: 'completed' } }, 4),
+  ]).messages()
+  for (const preset of ALL_PRESETS) {
+    // The positive control: under the committed workspace the REAL header
+    // target really is the relative path (never merely "not A").
+    const atB = r13ToolTargets(messages, preset, R13_WORKSPACE_B)
+    assert.ok(atB.includes('src/a.ts'), `${preset}: workspace B relativizes its own absolute path`)
+    assert.ok(!atB.includes(R13_ABS_B), `${preset}: the B path is not drawn twice`)
+    // Another workspace must NOT abbreviate B's path, and neither does an
+    // unknown root: the launch directory is not a fallback.
+    for (const other of [R13_WORKSPACE_C, undefined]) {
+      const label = other === undefined ? 'unknown' : other
+      const targets = r13ToolTargets(messages, preset, other)
+      assert.ok(targets.includes(R13_ABS_B), `${preset}: ${label} keeps B's absolute path`)
+      assert.ok(!targets.includes('src/a.ts'), `${preset}: ${label} never abbreviates against B or A`)
+    }
+    const atLaunch = r13ToolTargets(messages, preset, R13_LAUNCH_ROOT)
+    assert.ok(atLaunch.includes(R13_ABS_B), `${preset}: the launch directory cannot own B's path`)
+    assert.ok(!atLaunch.includes('src/a.ts'), `${preset}: the launch directory is not a fallback root`)
+  }
+})
+
+test('R13 D2: a cwd-only change invalidates the tool block stamp (and its PTC child) but not unrelated rows', () => {
+  const messages = apply([
+    ev('turn/start', { turn: 1 }, 0),
+    userMessage(1, 'user-r13-ptc', 'run the program'),
+    ev('tool/call', {
+      turn: 1, step: 0, callId: ToolCallId('code-r13'), name: 'run_code',
+      arguments: JSON.stringify({ code: 'print(1)' }),
+    }, 2),
+    ev('tool/ptc-dispatch-start', {
+      rootCallId: ToolCallId('code-r13'),
+      parentCallId: ToolCallId('code-r13'),
+      subCallId: ToolCallId('code-r13:code:1'),
+      name: 'read',
+      arguments: { file_path: R13_ABS_B },
+    }, 3),
+    toolResult(4, 'code-r13', 'program output'),
+    assistantMessage(5, 'final-r13', 'the final answer', 1),
+    ev('turn/end', { turn: 1, reason: { kind: 'completed' } }, 6),
+  ]).messages()
+  const optionsAt = (cwd: string | undefined): TranscriptPresetViewOptions => ({
+    preset: 'full',
+    scopePrefix: 's1-',
+    window: LATEST_WINDOW,
+    ...(cwd === undefined ? {} : { cwd }),
+  })
+  const before = describeTranscriptMainBlocksForPreset(messages, new TranscriptNodeKeys(), optionsAt(R13_WORKSPACE_B))
+  const after = describeTranscriptMainBlocksForPreset(messages, new TranscriptNodeKeys(), optionsAt(R13_WORKSPACE_C))
+  assert.deepEqual(after.map(descriptor => descriptor.key), before.map(descriptor => descriptor.key),
+    'a cwd-only change keeps every top-level key and its order')
+  const blockOfToolCall = (
+    blocks: ReturnType<typeof describeTranscriptMainBlocksForPreset>,
+    callId: string,
+  ) => blocks.find(descriptor => descriptor.owners.some(owner => owner.kind === 'tool' && owner.callId === callId))
+  const rootBefore = blockOfToolCall(before, 'code-r13')
+  const rootAfter = blockOfToolCall(after, 'code-r13')
+  assert.ok(rootBefore !== undefined && rootAfter !== undefined)
+  assert.notDeepEqual(rootAfter.stamp, rootBefore.stamp,
+    'the parent tool block re-materializes for a new root (its child target derives from it)')
+  const userBefore = before.find(descriptor => descriptor.owners.some(owner => owner.kind === 'user'))
+  const userAfter = after.find(descriptor => descriptor.owners.some(owner => owner.kind === 'user'))
+  assert.ok(userBefore !== undefined && userAfter !== undefined)
+  assert.deepEqual(userAfter.stamp, userBefore.stamp, 'an unrelated User row keeps its exact stamp')
+  assert.deepEqual(userAfter.key, userBefore.key, 'an unrelated User row keeps its key')
+  // The nested PTC child really inherits the parent's root: B shows the
+  // relative path, C/unknown keep the absolute source path.
+  for (const preset of ALL_PRESETS) {
+    const childTargets = (cwd: string | undefined): string[] => {
+      const options: TranscriptPresetViewOptions = {
+        preset,
+        scopePrefix: 's1-',
+        window: LATEST_WINDOW,
+        expandedToolKeys: new Set(['msg-2', 'msg-2/sub-code-r13:code:1']),
+        expandedWorkOwners: new Set(r13WorkOwners(messages)),
+        expandedFocusTurns: new Set([1]),
+        ...(cwd === undefined ? {} : { cwd }),
+      }
+      const nodes = flattenMain(lazyMain(messages, new TranscriptNodeKeys(), options))
+      return nodes.filter(node => node.kind === 'tool' && node.id.includes('.sub-'))
+        .map(node => String(node.props['target']))
+    }
+    assert.deepEqual(childTargets(R13_WORKSPACE_B), ['src/a.ts'], `${preset}: the nested child target uses B`)
+    assert.deepEqual(childTargets(R13_WORKSPACE_C), [R13_ABS_B], `${preset}: the nested child target keeps B's path under C`)
+    assert.deepEqual(childTargets(undefined), [R13_ABS_B], `${preset}: the nested child target keeps B's path when unknown`)
+  }
+})
+
+test('R13 D3: Preparing rows and Compact/Focus Action heads follow the current root without a new tool event', () => {
+  const folder = r13RunningFolder()
+  const messages = folder.messages()
+  const optionsAt = (preset: (typeof ALL_PRESETS)[number], cwd: string | undefined, extra: Partial<TranscriptPresetViewOptions> = {}): TranscriptPresetViewOptions => ({
+    preset,
+    scopePrefix: 's1-',
+    window: LATEST_WINDOW,
+    turnActivities: folder.turnActivities(),
+    ...extra,
+    ...(cwd === undefined ? {} : { cwd }),
+  })
+  // Full: the live standalone Preparing row is its own top-level descriptor.
+  const fullPreparing = (cwd: string | undefined) =>
+    describeTranscriptMainBlocksForPreset(messages, new TranscriptNodeKeys(), optionsAt('full', cwd, {
+      preparingPreviews: [R13_PREVIEW],
+    })).filter(descriptor => descriptor.key.includes('preparing-'))
+  const fullB = fullPreparing(R13_WORKSPACE_B)
+  const fullC = fullPreparing(R13_WORKSPACE_C)
+  assert.equal(fullB.length, 1)
+  assert.equal(fullC.length, 1)
+  assert.equal(r13PathTextOf(r13TextsOf(fullB[0]!.materialize())), 'src/a.ts',
+    'Full: the live Preparing summary uses the committed workspace root')
+  assert.equal(r13PathTextOf(r13TextsOf(fullC[0]!.materialize())), R13_ABS_B,
+    'Full: another root keeps the absolute Preparing summary')
+  assert.notDeepEqual(fullC[0]!.stamp, fullB[0]!.stamp, 'Full: the Preparing stamp follows the root')
+
+  // Compact collapsed: the Activity head carries the Action of the running tool.
+  const compactBlocks = (cwd: string | undefined, extra: Partial<TranscriptPresetViewOptions> = {}) =>
+    describeTranscriptMainBlocksForPreset(messages, new TranscriptNodeKeys(), optionsAt('compact', cwd, extra))
+  const workOf = (blocks: ReturnType<typeof describeTranscriptMainBlocksForPreset>) => {
+    const work = blocks.find(descriptor => descriptor.key.includes('work-'))
+    assert.ok(work !== undefined, 'the running tool projects one Compact Activity section')
+    return work
+  }
+  const compactB = workOf(compactBlocks(R13_WORKSPACE_B))
+  const compactC = workOf(compactBlocks(R13_WORKSPACE_C))
+  assert.equal(r13PathTextOf(r13TextsOf(compactB.materialize())), 'src/a.ts',
+    'Compact collapsed: the Activity Action uses the committed workspace root')
+  assert.equal(r13PathTextOf(r13TextsOf(compactC.materialize())), R13_ABS_B,
+    'Compact collapsed: another root keeps the absolute Action')
+  assert.notDeepEqual(compactC.stamp, compactB.stamp, 'Compact: the Activity stamp follows the root')
+
+  // Compact expanded: the live Preparing child row.
+  const expandedWork = new Set(r13WorkOwners(messages))
+  const compactExpandedB = workOf(compactBlocks(R13_WORKSPACE_B, {
+    expandedWorkOwners: expandedWork, preparingPreviews: [R13_PREVIEW],
+  }))
+  const compactExpandedC = workOf(compactBlocks(R13_WORKSPACE_C, {
+    expandedWorkOwners: expandedWork, preparingPreviews: [R13_PREVIEW],
+  }))
+  assert.equal(r13PathTextOf(r13TextsOf(compactExpandedB.materialize())), 'src/a.ts',
+    'Compact expanded: the Preparing child uses the committed workspace root')
+  assert.equal(r13PathTextOf(r13TextsOf(compactExpandedC.materialize())), R13_ABS_B,
+    'Compact expanded: another root keeps the absolute Preparing child')
+  assert.notDeepEqual(compactExpandedC.stamp, compactExpandedB.stamp,
+    'Compact expanded: the Activity stamp covers the Preparing child root')
+
+  // Focus collapsed: the root head carries the Action of the running tool.
+  const focusRootOf = (cwd: string | undefined, extra: Partial<TranscriptPresetViewOptions> = {}) => {
+    const root = describeTranscriptMainBlocksForPreset(messages, new TranscriptNodeKeys(), optionsAt('focus', cwd, extra))
+      .find(descriptor => descriptor.key.includes('focus-'))
+    assert.ok(root !== undefined, 'the running tool projects one Focus Activity root')
+    return root
+  }
+  const focusB = focusRootOf(R13_WORKSPACE_B)
+  const focusC = focusRootOf(R13_WORKSPACE_C)
+  assert.equal(r13PathTextOf(r13TextsOf(focusB.materialize())), 'src/a.ts',
+    'Focus collapsed: the root Action uses the committed workspace root')
+  assert.equal(r13PathTextOf(r13TextsOf(focusC.materialize())), R13_ABS_B,
+    'Focus collapsed: another root keeps the absolute Action')
+  assert.notDeepEqual(focusC.stamp, focusB.stamp, 'Focus: the root stamp follows the root')
+
+  // Focus expanded: the nested Work's Preparing row.
+  const focusExpandedOptions = {
+    expandedFocusTurns: new Set([1]),
+    expandedWorkOwners: expandedWork,
+    preparingPreviews: [R13_PREVIEW],
+  }
+  const focusExpandedB = focusRootOf(R13_WORKSPACE_B, focusExpandedOptions)
+  const focusExpandedC = focusRootOf(R13_WORKSPACE_C, focusExpandedOptions)
+  assert.equal(r13PathTextOf(r13TextsOf(focusExpandedB.materialize())), 'src/a.ts',
+    'Focus expanded: the nested Preparing row uses the committed workspace root')
+  assert.equal(r13PathTextOf(r13TextsOf(focusExpandedC.materialize())), R13_ABS_B,
+    'Focus expanded: another root keeps the absolute nested Preparing row')
+  assert.notDeepEqual(focusExpandedC.stamp, focusExpandedB.stamp,
+    'Focus expanded: the root stamp covers the nested Preparing row root')
+
+  // A preview without a usable summary never invents a path.
+  const withoutSummary = describeTranscriptMainBlocksForPreset(messages, new TranscriptNodeKeys(), optionsAt('full', R13_WORKSPACE_B, {
+    preparingPreviews: [{ ...R13_PREVIEW, summary: undefined }],
+  })).filter(descriptor => descriptor.key.includes('preparing-'))
+  const invented = r13TextsOf(withoutSummary[0]!.materialize()).join('\n')
+  assert.ok(!invented.includes('src/a.ts') && !invented.includes(R13_ABS_B),
+    'a summary-less Preparing row states no path at all')
+  assert.ok(invented.includes('Preparing Read'), 'the summary-less row keeps its honest identity')
+})
+
+test('R13 D4: an unchanged workspace root never churns descriptor stamps', () => {
+  const messages = twoWorkFolder().messages()
+  for (const preset of ALL_PRESETS) {
+    const options: TranscriptPresetViewOptions = {
+      preset,
+      scopePrefix: 's1-',
+      window: LATEST_WINDOW,
+      cwd: R13_WORKSPACE_B,
+    }
+    const first = describeTranscriptMainBlocksForPreset(messages, new TranscriptNodeKeys(), options)
+    const second = describeTranscriptMainBlocksForPreset(messages, new TranscriptNodeKeys(), options)
+    assert.deepEqual(second.map(descriptor => descriptor.key), first.map(descriptor => descriptor.key))
+    assert.deepEqual(second.map(descriptor => descriptor.stamp), first.map(descriptor => descriptor.stamp),
+      `${preset}: an unchanged root re-derives byte-identical stamps`)
+  }
 })
