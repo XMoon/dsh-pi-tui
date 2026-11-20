@@ -48,8 +48,8 @@ test('ignores inline-code link examples but checks adjacent real links', (t) => 
   writeFileSync(join(root, 'docs/guides/user.md'),
     '# User guide\n\nExample: ' + tick + '[demo](./not-installed.md)' + tick
     + ' is syntax; see [index](../README.md).\n'
-    + 'Double: ' + tick.repeat(2) + tick + '[demo](./also-not-installed.md)'
-    + tick + tick.repeat(2) + ' and [missing](./really-missing.md).\n')
+    + 'Double: ' + tick.repeat(2) + '[demo](./also-not-installed.md)'
+    + tick.repeat(2) + ' and [missing](./really-missing.md).\n')
   assert.deepEqual(checkDocsTree(root), [
     'docs/guides/user.md:4: missing local link: ./really-missing.md',
   ])
