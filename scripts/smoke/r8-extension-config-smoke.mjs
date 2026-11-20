@@ -55,7 +55,7 @@ import {
 } from 'node:fs'
 import { createRequire } from 'node:module'
 import { dirname, join, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 import {
   discoverClientExtension,
@@ -320,6 +320,62 @@ async function hostChild() {
         await attempt(step, () => ctx.get('settings').replace(step.ns, { data: new Date() }))
         snapshot(step.name)
       }
+      if (step.kind === 'extension-port') {
+        // PR-2: exercise the new semantic port on THIS real official Host
+        // Settings authority (both the rc.5 and the rc.3 qualification boots).
+        try {
+          const { DirectExtensionConfigsConfig } = await import(
+            pathToFileURL(join(process.env.R8_PR1_WORKTREE, 'src/runtime/direct/config-direct.ts')).href
+          )
+          const config = new DirectExtensionConfigsConfig(ctx)
+          const factsOf = read => read.kind === 'ready'
+            ? {
+                kind: read.kind,
+                revision: read.revision,
+                effective: read.effective,
+                inherited: read.inherited,
+                user: read.user,
+                userDataPresent: read.userDataPresent,
+              }
+            : { kind: read.kind, reason: read.reason }
+          const a0 = config.read('@r8-pr1-fixture/a')
+          const b0 = config.read('@r8-pr1-fixture/b')
+          if (a0.kind !== 'ready' || b0.kind !== 'ready') {
+            throw new Error(`extension port rows must be readable (${a0.kind}/${b0.kind})`)
+          }
+          const writeA = await config.mutate('@r8-pr1-fixture/a', [
+            { op: 'set', path: ['label'], value: 'alpha-port' },
+          ], a0.revision, a0.generation)
+          const a1 = config.read('@r8-pr1-fixture/a')
+          const b1 = config.read('@r8-pr1-fixture/b')
+          const stale = a1.kind === 'ready'
+            ? await config.mutate('@r8-pr1-fixture/a', [
+                { op: 'set', path: ['label'], value: 'alpha-port-stale' },
+              ], a0.revision, a1.generation)
+            : { kind: 'not-run' }
+          const a2 = config.read('@r8-pr1-fixture/a')
+          report.snapshots.push({
+            name: step.name,
+            outcome: 'ok',
+            port: {
+              a0: factsOf(a0),
+              b0: factsOf(b0),
+              writeA: writeA.kind,
+              a1: factsOf(a1),
+              b1: factsOf(b1),
+              stale: stale.kind,
+              a2: factsOf(a2),
+            },
+          })
+        } catch (error) {
+          report.snapshots.push({
+            name: step.name,
+            outcome: 'error',
+            errorName: error.name,
+            errorMessage: error.message,
+          })
+        }
+      }
       if (step.kind === 'pm-bundle') {
         await attempt(step, () => ctx.get('pluginManager').setBundleEnabled(step.bundle, step.enabled))
         snapshot(step.name)
@@ -470,6 +526,8 @@ function rc3Qualification({ stampDir, candidate, tarballs, evidence }) {
     evidence.rc3 = { phase: 'provision', status: 'NOT_VERIFIED', error: error instanceof Error ? error.message : String(error) }
     notVerified('P1-10', 'official DSH rc.3 installs and boots the two Config rows',
       `rc.3 installation could not be provisioned: ${error instanceof Error ? error.message : String(error)}`)
+    notVerified('P2-14-rc3', 'the real rc.3 Host Settings authority serves the per-package Port read/write/CAS',
+      `rc.3 installation could not be provisioned: ${error instanceof Error ? error.message : String(error)}`)
     return
   }
   evidence.rc3 = { version, phase: 'install', status: 'RUNNING' }
@@ -485,6 +543,8 @@ function rc3Qualification({ stampDir, candidate, tarballs, evidence }) {
   } catch (error) {
     evidence.rc3 = { version, phase: 'install', status: 'FAIL', error: error instanceof Error ? error.message : String(error) }
     gate('P1-10', 'FAIL', 'official DSH rc.3 installs and boots the two Config rows',
+      `rc.3 official plugin install failed: ${error instanceof Error ? error.message : String(error)}`)
+    gate('P2-14-rc3', 'FAIL', 'the real rc.3 Host Settings authority serves the per-package Port read/write/CAS',
       `rc.3 official plugin install failed: ${error instanceof Error ? error.message : String(error)}`)
     return
   }
@@ -520,9 +580,34 @@ function rc3Qualification({ stampDir, candidate, tarballs, evidence }) {
       && stale?.errorName === 'SettingsConflictError',
     'official DSH rc.3 profile mounts two Config rows and Settings reads/writes them independently',
     JSON.stringify({ version, a: aEntry, b: bEntry, afterSave: describeRow(afterSave, aRow)?.value, stale: stale?.errorName }))
+
+    // P2-14 (rc.3): the new semantic port on the SAME real rc.3 Host.
+    const portReport = runHost({
+      env: rc3Env,
+      runRoot: harnessDir,
+      stampDir,
+      sentinel: join(stampDir, 'rc3-sentinel.jsonl'),
+      label: 'rc3-port',
+      host: { anchor, version },
+      steps: [{ kind: 'extension-port', name: 'rc3-port' }],
+    })
+    const port = portReport.snapshots.find(entry => entry.name === 'rc3-port')
+    const facts = port?.port
+    evidence.rc3Port = { status: port?.outcome === 'ok' ? 'PASS' : 'FAIL', port }
+    check('P2-14-rc3', port?.outcome === 'ok'
+      && facts?.writeA === 'accepted'
+      && facts?.stale === 'conflict'
+      && facts?.a1?.kind === 'ready' && facts.a1.effective?.label === 'alpha-port'
+      && facts?.a2?.kind === 'ready' && facts.a2.effective?.label === 'alpha-port'
+      && facts?.a0?.kind === 'ready' && facts?.b0?.kind === 'ready'
+      && sameJson(facts.b0.effective, facts.b1?.effective),
+    'the real rc.3 Host Settings authority serves the per-package Port read/write/CAS',
+    JSON.stringify({ version, outcome: port?.outcome, error: port?.errorMessage, writeA: facts?.writeA, stale: facts?.stale }))
   } catch (error) {
     evidence.rc3 = { version, phase: 'boot', status: 'FAIL', error: error instanceof Error ? error.message : String(error) }
     gate('P1-10', 'FAIL', 'official DSH rc.3 profile mounts two Config rows and Settings reads/writes them independently',
+      `rc.3 Host boot failed: ${error instanceof Error ? error.message : String(error)}`)
+    gate('P2-14-rc3', 'FAIL', 'the real rc.3 Host Settings authority serves the per-package Port read/write/CAS',
       `rc.3 Host boot failed: ${error instanceof Error ? error.message : String(error)}`)
   }
 }
@@ -883,6 +968,32 @@ function main() {
       bundles: bundlesAfterRemove,
       plainRows: removedSnapshot.rows.filter(row => row.id.includes('plain')),
       configRows: removedSnapshot.rows.filter(row => row.id === aRow || row.id === bRow),
+    }))
+
+    // PR-2 P2-14 (rc.5): the SAME real official Host Settings authority is
+    // read/written through the new semantic port, with a stale CAS negative.
+    const pr2PortBoot = runHost({
+      env, runRoot, stampDir, sentinel, label: 'pr2-port',
+      steps: [{ kind: 'extension-port', name: 'pr2-port' }],
+    })
+    const pr2Port = pr2PortBoot.snapshots.find(entry => entry.name === 'pr2-port')
+    const pr2PortFacts = pr2Port?.port
+    check('P2-14-rc5', pr2Port?.outcome === 'ok'
+      && pr2PortFacts?.writeA === 'accepted'
+      && pr2PortFacts?.stale === 'conflict'
+      && pr2PortFacts?.a1?.kind === 'ready' && pr2PortFacts.a1.effective?.label === 'alpha-port'
+      && pr2PortFacts?.a2?.kind === 'ready' && pr2PortFacts.a2.effective?.label === 'alpha-port'
+      && pr2PortFacts?.a0?.kind === 'ready' && pr2PortFacts?.b0?.kind === 'ready'
+      && sameJson(pr2PortFacts.b0.effective, pr2PortFacts.b1?.effective),
+    'the real rc.5 Host Settings authority serves the per-package Port read/write/CAS',
+    JSON.stringify({
+      outcome: pr2Port?.outcome,
+      error: pr2Port?.errorMessage,
+      writeA: pr2PortFacts?.writeA,
+      stale: pr2PortFacts?.stale,
+      a1: pr2PortFacts?.a1?.effective,
+      b0: pr2PortFacts?.b0?.effective,
+      b1: pr2PortFacts?.b1?.effective,
     }))
 
     // P1-08: the PACKED public export.

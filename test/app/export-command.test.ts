@@ -249,6 +249,11 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
         read: () => undefined,
         setAutoStart: async (_value: boolean, _revision: number) => {},
       },
+      extensionConfigs: {
+        read: () => ({ kind: 'unavailable' as const, reason: 'no Host settings in this fixture' }),
+        refresh: async () => {},
+        mutate: async () => ({ kind: 'rejected' as const, reason: 'no Host settings in this fixture' }),
+      },
       mcpServerSources: {
         read: () => ({ kind: 'unavailable' as const, reason: 'no Host settings in this fixture' }),
         refresh: async () => {},

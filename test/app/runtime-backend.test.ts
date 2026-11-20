@@ -220,6 +220,11 @@ test('the Direct backend is the current production surface and serves EXACTLY th
       read: () => undefined,
       setAutoStart: async (_value: boolean, _revision: number) => {},
     },
+    extensionConfigs: {
+      read: () => ({ kind: 'unavailable' as const, reason: 'no Host settings in this fixture' }),
+      refresh: async () => {},
+      mutate: async () => ({ kind: 'rejected' as const, reason: 'no Host settings in this fixture' }),
+    },
     mcpServerSources: {
       read: () => ({ kind: 'unavailable' as const, reason: 'no Host settings in this fixture' }),
       refresh: async () => {},

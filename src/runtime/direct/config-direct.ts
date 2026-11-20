@@ -124,7 +124,16 @@ import type {
   McpServerConfiguration,
   McpServerConfigurationConfig,
   McpConfigWriteOutcome,
+  ExtensionConfigDataOp,
+  ExtensionConfigRead,
+  ExtensionConfigsConfig,
 } from '../config-port.ts'
+import { extensionConfigRowId } from '../../domain/extension-config/row-id.ts'
+import {
+  extensionConfigUserDataPresent,
+  projectExtensionConfigData,
+  snapshotExtensionConfigOps,
+} from '../../domain/extension-config/data.ts'
 import { CANONICAL_TUI_SETTINGS_NS } from '../config-port.ts'
 import {
   baseDictKeysOf,
@@ -229,6 +238,7 @@ export class DirectConfigPort implements ConfigPort {
   readonly webStartupPreference: WebStartupPreferenceConfig
   readonly backendStartupPreference: BackendStartupPreferenceConfig
   readonly acpStartupPreference: AcpStartupPreferenceConfig
+  readonly extensionConfigs: ExtensionConfigsConfig
   readonly mcpServerSources: McpServerSourcesConfig
   readonly mcpServerConfiguration: McpServerConfigurationConfig
   /** FR3: the live Host MCP generation the source read is bound to. */
@@ -260,6 +270,7 @@ export class DirectConfigPort implements ConfigPort {
     this.webStartupPreference = new DirectWebStartupPreferenceConfig(ctx)
     this.backendStartupPreference = new DirectBackendStartupPreferenceConfig(ctx)
     this.acpStartupPreference = new DirectAcpStartupPreferenceConfig(ctx)
+    this.extensionConfigs = new DirectExtensionConfigsConfig(ctx)
     this.mcpServerSources = new DirectMcpServerSourcesConfig(ctx, mcpGeneration)
     this.mcpServerConfiguration = new DirectMcpServerConfigurationConfig(ctx, mcpGeneration)
   }
@@ -2750,5 +2761,114 @@ export class DirectMcpServerConfigurationConfig implements McpServerConfiguratio
       }
     }
     return { kind: 'saved', revision: readBack.revision }
+  }
+}
+
+/* ------------------------------------------------------------------------- *
+ * R8-E PR-2: per-package extension configuration.
+ * ------------------------------------------------------------------------- */
+
+function validSettingsRevision(revision: unknown): revision is number {
+  return typeof revision === 'number' && Number.isSafeInteger(revision) && revision >= 0
+}
+
+/**
+ * The Direct per-package extension-config domain: ONE official Settings
+ * descriptor read per `read()`, ONE revision-checked `settings.mutate` per
+ * `mutate()` with `['data', ...relativePath]` ops, and a fresh authoritative
+ * read-back before `accepted`. The row identity is derived from the real npm
+ * package name; no namespace, row id or profile path crosses the port.
+ */
+export class DirectExtensionConfigsConfig implements ExtensionConfigsConfig {
+  private readonly ctx: HostContextLike
+
+  constructor(ctx: HostContextLike) {
+    this.ctx = ctx
+  }
+
+  read(packageName: string): ExtensionConfigRead {
+    const read = readDirectDescriptors(this.ctx)
+    if (read.kind !== 'ready') return read
+    const namespace = extensionConfigRowId(packageName)
+    const descriptor = read.descriptors.find(entry => entry.ns === namespace)
+    if (descriptor === undefined) {
+      return { kind: 'unavailable', reason: `the "${namespace}" extension Config row is not mounted` }
+    }
+    if (!validSettingsRevision(descriptor.revision)) {
+      return { kind: 'unreadable', reason: 'the official Host settings revision is not readable' }
+    }
+    const effective = projectExtensionConfigData(descriptor.value)
+    const inherited = projectExtensionConfigData(descriptor.base)
+    const user = projectExtensionConfigData(descriptor.user)
+    if (effective.kind === 'invalid') return { kind: 'unreadable', reason: effective.reason }
+    if (inherited.kind === 'invalid') return { kind: 'unreadable', reason: inherited.reason }
+    if (user.kind === 'invalid') return { kind: 'unreadable', reason: user.reason }
+    return {
+      kind: 'ready',
+      packageName,
+      generation: settingsAuthorityOf(read.settings),
+      revision: descriptor.revision,
+      effective: effective.value,
+      inherited: inherited.value,
+      user: user.value,
+      userDataPresent: extensionConfigUserDataPresent(descriptor.user),
+    }
+  }
+
+  async refresh(): Promise<void> {}
+
+  async mutate(
+    packageName: string,
+    ops: readonly ExtensionConfigDataOp[],
+    expectedRevision: number,
+    pinnedGeneration: object,
+  ): Promise<SectionMutationOutcome> {
+    const settings = this.ctx.get('settings') as SettingsServiceLike | undefined
+    if (settings === undefined || !Object.is(settingsAuthorityOf(settings), pinnedGeneration)) {
+      return { kind: 'rejected', reason: 'the Host settings authority changed; refresh before saving' }
+    }
+    if (ops.length === 0) return { kind: 'rejected', reason: 'no settings fields were staged' }
+    const snapshot = snapshotExtensionConfigOps(ops)
+    if (snapshot.kind === 'invalid') return { kind: 'rejected', reason: snapshot.reason }
+    const read = readDirectDescriptors(this.ctx)
+    if (read.kind !== 'ready') return { kind: 'rejected', reason: read.reason }
+    const namespace = extensionConfigRowId(packageName)
+    const descriptor = read.descriptors.find(entry => entry.ns === namespace)
+    if (descriptor === undefined) {
+      return { kind: 'rejected', reason: `the "${namespace}" extension Config row is not mounted` }
+    }
+    if (!validSettingsRevision(descriptor.revision)) {
+      return { kind: 'rejected', reason: 'the official Host settings revision is not readable' }
+    }
+    if (descriptor.revision !== expectedRevision) {
+      return { kind: 'conflict', reason: 'the Host settings section changed since it was read' }
+    }
+    const wireOps: readonly SettingsMutationOp[] = snapshot.ops.map(op => op.op === 'set'
+      ? { op: 'set' as const, path: ['data', ...op.path], value: op.value }
+      : { op: 'unset' as const, path: ['data', ...op.path] })
+    try {
+      await settings.mutate(namespace, wireOps, expectedRevision)
+    } catch (error) {
+      const reason = safeErrorMessage(error)
+      if ((error as { readonly code?: unknown } | null)?.code === 'SETTINGS_CONFLICT') {
+        return { kind: 'conflict', reason }
+      }
+      // The official ConfigEditor can persist before its Loader reconciliation
+      // fails (or before the official post-write read fails). A dispatched
+      // exception therefore cannot prove the profile is unchanged.
+      return { kind: 'outcome-unconfirmed', reason }
+    }
+    const readBack = readDirectDescriptors(this.ctx)
+    if (readBack.kind !== 'ready') {
+      return { kind: 'outcome-unconfirmed', reason: readBack.reason }
+    }
+    if (!Object.is(settingsAuthorityOf(readBack.settings), pinnedGeneration)) {
+      return { kind: 'outcome-unconfirmed', reason: 'the Host settings authority changed while the write settled' }
+    }
+    const settled = readBack.descriptors.find(entry => entry.ns === namespace)
+    if (settled === undefined || !validSettingsRevision(settled.revision)) {
+      return { kind: 'outcome-unconfirmed', reason: 'the official Host settings row is not readable after the write' }
+    }
+    return { kind: 'accepted' }
   }
 }

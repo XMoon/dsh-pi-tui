@@ -75,7 +75,8 @@ test('the split-process smoke runs on tag pushes or an explicit branch dispatch'
   const job = workflow.jobs['split-process']
   assert.ok(job, 'the split-process smoke must be its own CI job')
   const splitRun = job.steps?.find(step => typeof step.run === 'string'
-    && step.run.trim() === 'pnpm smoke:split-process -- "$CANDIDATE"')
+    && step.run.includes('pnpm smoke:split-process -- "$CANDIDATE"')
+    && step.run.includes('pnpm smoke:split-process -- --case "$SPLIT_PROCESS_CASE" "$CANDIDATE"'))
   assert.ok(splitRun, 'the split-process job must execute the real lane against the downloaded candidate')
   const smokeSource = readFileSync(SCRIPT, 'utf8')
   const failureMirrors = smokeSource.match(/evidencePath: process\.env\.SPLIT_PROCESS_FAILURE_EVIDENCE/gu) ?? []

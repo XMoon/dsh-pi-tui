@@ -584,6 +584,52 @@ export type SectionMutationOutcome =
   | { readonly kind: 'rejected'; readonly reason: string }
   | { readonly kind: 'outcome-unconfirmed'; readonly reason: string }
 
+/** Each path is relative to the Config carrier's data field. */
+export type ExtensionConfigDataOp =
+  | { readonly op: 'set'; readonly path: readonly string[]; readonly value: unknown }
+  | { readonly op: 'unset'; readonly path: readonly string[] }
+
+/** One per-package extension-config read from the official Settings form. */
+export type ExtensionConfigRead =
+  | {
+      readonly kind: 'ready'
+      readonly packageName: string
+      /** Opaque, current Host/Connection identity; never serialized. */
+      readonly generation: object
+      readonly revision: number
+      /** These are exactly descriptor.value/base/user's .data projections. */
+      readonly effective: unknown
+      readonly inherited: unknown
+      readonly user: unknown
+      /** Own-field presence at descriptor.user.data, not value inequality. */
+      readonly userDataPresent: boolean
+    }
+  | { readonly kind: 'stale' | 'unavailable' | 'unreadable'; readonly reason: string }
+
+/**
+ * The per-package extension configuration sub-domain (R8-E PR-2).
+ *
+ * The ONLY business identity is the real npm package name from the official
+ * package resolution; the adapter derives the profile-owned Config row id from
+ * it. A read projects the row's `data` field from ONE authoritative Settings
+ * descriptor into detached JSON values. A write is ONE official
+ * revision-checked path mutation whose paths are relative to `data` and whose
+ * outcome is accepted only after a fresh authoritative read-back.
+ */
+export interface ExtensionConfigsConfig {
+  /** Read one package's current `data` projection, never a fabricated `{}`. */
+  read(packageName: string): ExtensionConfigRead
+  /** Direct resolves; Remote refreshes the EXISTING shared Settings mirror. */
+  refresh(): Promise<void>
+  /** ONE batch against the caller's captured current revision/generation. */
+  mutate(
+    packageName: string,
+    ops: readonly ExtensionConfigDataOp[],
+    expectedRevision: number,
+    pinnedGeneration: object,
+  ): Promise<SectionMutationOutcome>
+}
+
 /** Official DSH subagent limits, read from the volatile `subagent` section. */
 export interface SubagentLimits {
   readonly maxDepth: number
@@ -1342,6 +1388,8 @@ export interface ConfigPort {
   readonly backendStartupPreference: BackendStartupPreferenceConfig
   /** The profile-owned ACP startup preference for the NEXT Split Host launch. */
   readonly acpStartupPreference: AcpStartupPreferenceConfig
+  /** The per-package extension configuration (R8-E PR-2). */
+  readonly extensionConfigs: ExtensionConfigsConfig
   /** The READ-ONLY MCP configuration-source keys (FR3). */
   readonly mcpServerSources: McpServerSourcesConfig
   /** The MCP server configuration read/write sub-domain (FR4). */
