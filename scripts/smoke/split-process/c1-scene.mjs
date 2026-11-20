@@ -160,7 +160,7 @@ export function createC1Scene(context, options = {}) {
     await client.waitForScreen('Disconnect from dsh-pi-tui', `${label} busy exit choice`, 15_000)
     await client.waitForScreen('Keep working and disconnect', `${label} busy exit options`, 15_000)
     client.send('\x1b[B')
-    await client.waitForScreen('❯ Stop current work and disconnect', `${label} stop focus`, 15_000)
+    await client.waitForScreen('> Stop current work and disconnect', `${label} stop focus`, 15_000)
     client.send('\r')
   }
   const exitC1Client = async (client, label) => {
