@@ -26,6 +26,7 @@ import {
 import {
   buildUnitName,
   collectUnitFacts,
+  encodeUnitValue,
   profileIdentityDigest,
   renderUnitContent,
   type SystemctlResult,
@@ -67,6 +68,8 @@ function exited(code: number, stdout = '', stderr = ''): SystemctlResult {
 interface Fixture {
   readonly profile: DaemonControlProfile
   readonly scope: LocalScope
+  /** The stable lexical Profile entry a fresh unit launches. */
+  readonly stableEntry: string
   readonly unitDir: string
   readonly unitName: string
   /** Test account home for the Darwin admin seat (production resolves the OS
@@ -89,6 +92,10 @@ function fixture(t: TestContext): Fixture {
   writeFileSync(join(packageRoot, 'package.json'), `${JSON.stringify({ name: '@xmoon76/dsh-pi-tui', version: '0.5.7' })}\n`)
   writeFileSync(join(packageRoot, 'dist', 'index.mjs'), 'export const value = 1\n')
   writeFileSync(join(packageRoot, 'dist', 'local-host.mjs'), 'process.exit(0)\n')
+  // The official Profile layout: this lexical entry is what a fresh unit writes.
+  const scopePackageDir = join(profileDir, 'node_modules', '@xmoon76')
+  mkdirSync(scopePackageDir, { recursive: true, mode: 0o700 })
+  symlinkSync(packageRoot, join(scopePackageDir, 'dsh-pi-tui'))
   writeFileSync(anchor, `${JSON.stringify({ name: '@deepseek-ai/dsh', version: DSH_VERSION })}\n`, { mode: 0o644 })
   const profile: DaemonControlProfile = {
     name: 'pi-tui',
@@ -101,7 +108,14 @@ function fixture(t: TestContext): Fixture {
   const scope = inspectInstalledProfileScope({ dshHome: home, profileDir, packageRoot, dshVersion: DSH_VERSION })
   const unitDir = join(root, 'user-units')
   mkdirSync(unitDir, { recursive: true, mode: 0o700 })
-  return { profile, scope, unitDir, unitName: buildUnitName(profile.name, scope.scopeId), accountHome }
+  return {
+    profile,
+    scope,
+    stableEntry: join(scopePackageDir, 'dsh-pi-tui', 'dist', 'local-host.mjs'),
+    unitDir,
+    unitName: buildUnitName(profile.name, scope.scopeId),
+    accountHome,
+  }
 }
 
 function recordOf(scope: LocalScope, overrides: Partial<LinuxLocalInstanceRecord> = {}): LinuxLocalInstanceRecord {
@@ -167,7 +181,7 @@ function writeOwnedUnit(fx: Fixture): { readonly path: string; readonly content:
     scopeId: fx.scope.scopeId,
     buildId: fx.scope.buildId,
     nodePath: process.execPath,
-    hostEntryPath: join(fx.profile.packageRoot, 'dist', 'local-host.mjs'),
+    hostEntryPath: fx.stableEntry,
     dshAnchor: fx.profile.installAnchor,
   })
   const path = join(fx.unitDir, fx.unitName)
@@ -184,6 +198,8 @@ interface UnitState {
   stopResult?: SystemctlResult
   reloadResult?: SystemctlResult
   unitPathResult?: SystemctlResult
+  /** The MainPID the real manager would assign when `start` is accepted. */
+  startPid?: number
 }
 
 function unitSystemctl(path: string, initial: UnitState = {}) {
@@ -206,7 +222,14 @@ function unitSystemctl(path: string, initial: UnitState = {}) {
       state.mainPid = 0
       return exited(0)
     }
-    if (args.includes('start')) return exited(0)
+    if (args.includes('start')) {
+      // The real manager runs the unit: `ActiveState=active` and its MainPID is
+      // the process it started. A test models the started Host via `startPid`.
+      state.loadState = 'loaded'
+      state.activeState = 'active'
+      if (initial.startPid !== undefined) state.mainPid = initial.startPid
+      return exited(0)
+    }
     if (args.includes('show')) {
       return exited(0, [
         `LoadState=${state.loadState}`,
@@ -602,8 +625,8 @@ test('status reports an activating unit with no registry as starting, never stop
 test('restart stops and replaces an activating unit that has not published a Host', { skip: process.platform !== 'linux' }, async t => {
   const fx = fixture(t)
   const unit = writeOwnedUnit(fx)
-  const systemctl = unitSystemctl(unit.path, { activeState: 'activating', mainPid: 0 })
   const newRecord = recordOf(fx.scope, { instanceId: '44444444-4444-4444-8444-444444444444', hostPid: 6464 })
+  const systemctl = unitSystemctl(unit.path, { activeState: 'activating', mainPid: 0, startPid: newRecord.hostPid })
   let stopped = false
   let ensured = 0
   let stoppedBeforeEnsure = false
@@ -619,6 +642,8 @@ test('restart stops and replaces an activating unit that has not published a Hos
     ensureHost: async () => {
       stoppedBeforeEnsure = stopped
       ensured += 1
+      // The real public path starts the verified unit; model that manager call.
+      await systemctl.run(['--user', '--no-pager', 'start', fx.unitName])
       return { record: newRecord, cookie: 'c', identity: newRecord }
     },
   }))
@@ -954,7 +979,7 @@ test('restart replaces a verified incompatible Host after stopping its unit', { 
   const unit = writeOwnedUnit(fx)
   const oldRecord = recordOf(fx.scope, { protocol: 'dsh-pi-tui/local/0' as typeof LOCAL_PROTOCOL })
   const newRecord = recordOf(fx.scope, { instanceId: '55555555-5555-4555-8555-555555555555', hostPid: 6565 })
-  const systemctl = unitSystemctl(unit.path, { activeState: 'active', mainPid: oldRecord.hostPid })
+  const systemctl = unitSystemctl(unit.path, { activeState: 'active', mainPid: oldRecord.hostPid, startPid: newRecord.hostPid })
   let stopped = false
   let ensured = 0
   const result = await runDaemonControl({ verb: 'restart' }, fx.profile, depsOf(fx, {
@@ -969,13 +994,18 @@ test('restart replaces a verified incompatible Host after stopping its unit', { 
       if (recordValue.protocol !== LOCAL_PROTOCOL) throw new LocalScopeError('HOST_PROTOCOL_INCOMPATIBLE', 'different runtime')
       return { record: recordValue, cookie: 'c', identity: recordValue }
     },
-    ensureHost: async () => { ensured += 1; return { record: newRecord, cookie: 'c', identity: newRecord } },
+    ensureHost: async () => {
+      ensured += 1
+      await systemctl.run(['--user', '--no-pager', 'start', fx.unitName])
+      return { record: newRecord, cookie: 'c', identity: newRecord }
+    },
     sleep: async () => {},
     now: () => 0,
   }))
   assertCode(result, 0)
   assert.equal(ensured, 1)
   assert.equal(systemctl.calls.some(args => args.includes('stop')), true)
+  assert.equal(systemctl.calls.some(args => args.includes('start')), true, 'the unit is started again through the manager')
   assert.match(result.stdout, /^instance=55555555$/mu)
 })
 
@@ -2415,62 +2445,91 @@ test('restart refuses to start when the old Host exit is unconfirmed', { skip: p
   assert.equal(ensured, 0, 'a stop that did not settle must never be followed by a start')
 })
 
-test('restart refuses an owned unit from another installed build and leaves it untouched', { skip: process.platform !== 'linux' }, async t => {
+test('restart migrates an inactive other-build unit and starts a new manager-supervised instance', { skip: process.platform !== 'linux' }, async t => {
   const fx = fixture(t)
-  const otherBuild = 'a'.repeat(64)
-  const content = renderUnitContent({
+  const legacy = renderUnitContent({
     dshHome: fx.scope.dshHome,
     profileRealpath: fx.scope.profileRealpath,
     profile: 'pi-tui',
     scopeId: fx.scope.scopeId,
-    buildId: otherBuild,
+    buildId: 'a'.repeat(64),
     nodePath: process.execPath,
-    hostEntryPath: join(fx.profile.packageRoot, 'dist', 'local-host.mjs'),
+    hostEntryPath: join(fx.unitDir, 'store', 'node_modules', '@xmoon76', 'dsh-pi-tui', 'dist', 'local-host.mjs'),
     dshAnchor: fx.profile.installAnchor,
   })
   const path = join(fx.unitDir, fx.unitName)
-  writeFileSync(path, content, { mode: 0o600 })
-  const systemctl = unitSystemctl(path, { activeState: 'inactive', mainPid: 0 })
+  writeFileSync(path, legacy, { mode: 0o600 })
+  const newRecord = recordOf(fx.scope, { instanceId: '66666666-6666-4666-8666-666666666666', hostPid: 8686 })
+  const systemctl = unitSystemctl(path, { activeState: 'inactive', mainPid: 0, startPid: newRecord.hostPid })
   let ensured = 0
-  // No live Host: the pre-flight reaches the owned-unit build check directly.
   const result = await runDaemonControl({ verb: 'restart' }, fx.profile, depsOf(fx, {
     systemctl: systemctl.run,
-    ensureHost: async () => { ensured += 1; throw new Error('must not start past a refused unit') },
+    readRecord: () => (ensured > 0 ? newRecord : undefined),
+    inspectProcess: recordValue => (recordValue?.instanceId === newRecord.instanceId ? 'alive' : 'dead'),
+    authenticate: async recordValue => ({ record: recordValue, cookie: 'c', identity: recordValue }),
+    ensureHost: async () => {
+      ensured += 1
+      await systemctl.run(['--user', '--no-pager', 'start', fx.unitName])
+      return { record: newRecord, cookie: 'c', identity: newRecord }
+    },
+    sleep: async () => {},
+    now: () => 0,
   }))
-  assertCode(result, 3, /another installed build/u)
-  assert.equal(ensured, 0)
-  assert.equal(readFileSync(path, 'utf8'), content, 'the other-build unit file must be untouched')
+  assertCode(result, 0)
+  assert.equal(ensured, 1)
+  assert.match(result.stdout, /^manager=systemd$/mu, 'the started Host must be supervised by the verified unit')
+  assert.match(result.stdout, /^instance=66666666$/mu)
+  const migrated = readFileSync(path, 'utf8')
+  assert.equal(migrated.includes(encodeUnitValue(fx.stableEntry, 'Host entry path', true)), true,
+    'the generated ExecStart adopts the stable Profile entry')
+  assert.equal(migrated.includes(`X-DshPiTuiInstallBuild=${fx.scope.buildId}`), true,
+    'the generated build metadata adopts the current build')
+  assert.equal(systemctl.calls.some(args => args.includes('daemon-reload')), true, 'the unit migration reloads the manager')
 })
 
-test('restart refuses an ACTIVE other-build Host before stopping it', { skip: process.platform !== 'linux' }, async t => {
+test('restart replaces an ACTIVE other-build Host without rewriting an already stable unit', { skip: process.platform !== 'linux' }, async t => {
   const fx = fixture(t)
-  const otherBuild = 'a'.repeat(64)
   const content = renderUnitContent({
     dshHome: fx.scope.dshHome,
     profileRealpath: fx.scope.profileRealpath,
     profile: 'pi-tui',
     scopeId: fx.scope.scopeId,
-    buildId: otherBuild,
+    buildId: 'a'.repeat(64),
     nodePath: process.execPath,
-    hostEntryPath: join(fx.profile.packageRoot, 'dist', 'local-host.mjs'),
+    hostEntryPath: fx.stableEntry,
     dshAnchor: fx.profile.installAnchor,
   })
   const path = join(fx.unitDir, fx.unitName)
   writeFileSync(path, content, { mode: 0o600 })
-  const record = recordOf(fx.scope)
-  const systemctl = unitSystemctl(path, { activeState: 'active', mainPid: record.hostPid })
+  const oldRecord = recordOf(fx.scope)
+  const newRecord = recordOf(fx.scope, { instanceId: '77777777-7777-4777-8777-777777777777', hostPid: 9797 })
+  const systemctl = unitSystemctl(path, { activeState: 'active', mainPid: oldRecord.hostPid, startPid: newRecord.hostPid })
+  let stopped = false
   let ensured = 0
   const result = await runDaemonControl({ verb: 'restart' }, fx.profile, depsOf(fx, {
-    systemctl: systemctl.run,
-    readRecord: () => record,
-    inspectProcess: () => 'alive',
-    authenticate: async () => ({ record, cookie: 'c', identity: record }),
-    ensureHost: async () => { ensured += 1; throw new Error('must not start past a refused unit') },
+    systemctl: async args => {
+      const outcome = await systemctl.run(args)
+      if (args.includes('stop')) stopped = true
+      return outcome
+    },
+    readRecord: () => (stopped ? (ensured > 0 ? newRecord : undefined) : oldRecord),
+    inspectProcess: recordValue => (recordValue?.instanceId === newRecord.instanceId ? 'alive' : stopped ? 'dead' : 'alive'),
+    authenticate: async recordValue => ({ record: recordValue, cookie: 'c', identity: recordValue }),
+    ensureHost: async () => {
+      ensured += 1
+      await systemctl.run(['--user', '--no-pager', 'start', fx.unitName])
+      return { record: newRecord, cookie: 'c', identity: newRecord }
+    },
+    sleep: async () => {},
+    now: () => 0,
   }))
-  assertCode(result, 3, /another installed build/u)
-  assert.equal(ensured, 0)
-  assert.equal(systemctl.calls.some(args => args.includes('stop')), false, 'the live other-build Host must NOT be stopped by a refused restart')
-  assert.equal(readFileSync(path, 'utf8'), content, 'the other-build unit file must be untouched')
+  assertCode(result, 0)
+  assert.equal(ensured, 1)
+  assert.equal(stopped, true, 'the live other-build Host is stopped as the verified unit process')
+  assert.equal(readFileSync(path, 'utf8'), content, 'an already stable entry is not rewritten merely for its install build')
+  assert.equal(systemctl.calls.some(args => args.includes('daemon-reload')), false, 'no generated field needs migration')
+  assert.match(result.stdout, /^manager=systemd$/mu)
+  assert.match(result.stdout, /^instance=77777777$/mu)
 })
 
 test('restart recovers a verified unit when the old Host authentication fails', { skip: process.platform !== 'linux' }, async t => {
@@ -2478,7 +2537,7 @@ test('restart recovers a verified unit when the old Host authentication fails', 
   const unit = writeOwnedUnit(fx)
   const oldRecord = recordOf(fx.scope)
   const newRecord = recordOf(fx.scope, { instanceId: '33333333-3333-4333-8333-333333333333', hostPid: 6363 })
-  const systemctl = unitSystemctl(unit.path, { activeState: 'active', mainPid: oldRecord.hostPid })
+  const systemctl = unitSystemctl(unit.path, { activeState: 'active', mainPid: oldRecord.hostPid, startPid: newRecord.hostPid })
   let stopped = false
   let ensured = 0
   const result = await runDaemonControl({ verb: 'restart' }, fx.profile, depsOf(fx, {
@@ -2493,7 +2552,11 @@ test('restart recovers a verified unit when the old Host authentication fails', 
       if (recordValue.instanceId === oldRecord.instanceId) throw new LocalScopeError('HOST_AUTH_FAILED', 'tampered launch material')
       return { record: recordValue, cookie: 'c', identity: recordValue }
     },
-    ensureHost: async () => { ensured += 1; return { record: newRecord, cookie: 'c', identity: newRecord } },
+    ensureHost: async () => {
+      ensured += 1
+      await systemctl.run(['--user', '--no-pager', 'start', fx.unitName])
+      return { record: newRecord, cookie: 'c', identity: newRecord }
+    },
     sleep: async () => {},
     now: () => 0,
   }))
@@ -2760,6 +2823,34 @@ test('a repeat install of the same unit is idempotent', { skip: process.platform
   assert.equal(existsSync(join(fx.unitDir, fx.unitName)), true)
 })
 
+test('install reuses a verified other-build unit and leaves the unit and running Host unchanged', { skip: process.platform !== 'linux' }, async t => {
+  const fx = fixture(t)
+  const content = renderUnitContent({
+    dshHome: fx.scope.dshHome,
+    profileRealpath: fx.scope.profileRealpath,
+    profile: 'pi-tui',
+    scopeId: fx.scope.scopeId,
+    buildId: 'c'.repeat(64),
+    nodePath: process.execPath,
+    hostEntryPath: fx.stableEntry,
+    dshAnchor: fx.profile.installAnchor,
+  })
+  const path = join(fx.unitDir, fx.unitName)
+  writeFileSync(path, content, { mode: 0o600 })
+  const record = recordOf(fx.scope)
+  const systemctl = unitSystemctl(path, { activeState: 'inactive', mainPid: 0 })
+  const result = await runDaemonControl({ verb: 'install' }, fx.profile, depsOf(fx, {
+    systemctl: systemctl.run,
+    readRecord: () => record,
+    inspectProcess: () => 'alive',
+    authenticate: async () => ({ record, cookie: 'c', identity: record }),
+  }))
+  assertCode(result, 0)
+  assert.equal(readFileSync(path, 'utf8'), content, 'a same-Profile other-build unit is byte-preserved by install')
+  assert.equal(systemctl.calls.some(args => args.includes('daemon-reload')), false, 'an already loaded unit needs no reload')
+  assert.match(result.stdout, /^instance=11111111$/mu, 'the running independent Host instance is unchanged')
+})
+
 test('install refuses a foreign unit without overwriting it', { skip: process.platform !== 'linux' }, async t => {
   const fx = fixture(t)
   const unit = writeOwnedUnit(fx)
@@ -2931,7 +3022,7 @@ test('uninstall refuses a live Host whose verified unit MainPID differs', { skip
   assert.equal(existsSync(unit.path), true, 'a mismatched unit path must remain')
 })
 
-test('uninstall refuses an owned unit from another installed build', { skip: process.platform !== 'linux' }, async t => {
+test('uninstall removes an owner-verified unit from another installed build and keeps its source link', { skip: process.platform !== 'linux' }, async t => {
   const fx = fixture(t)
   const content = renderUnitContent({
     dshHome: fx.scope.dshHome,
@@ -2943,13 +3034,56 @@ test('uninstall refuses an owned unit from another installed build', { skip: pro
     hostEntryPath: join(fx.profile.packageRoot, 'dist', 'local-host.mjs'),
     dshAnchor: fx.profile.installAnchor,
   })
+  // The main unit path is a user link to an external configuration source.
+  const source = join(fx.unitDir, 'user-source.service')
   const path = join(fx.unitDir, fx.unitName)
-  writeFileSync(path, content, { mode: 0o600 })
+  writeFileSync(source, content, { mode: 0o600 })
+  symlinkSync(source, path)
   const result = await runDaemonControl({ verb: 'uninstall' }, fx.profile, depsOf(fx, {
-    systemctl: unitSystemctl(path, { activeState: 'inactive', mainPid: 0 }).run,
+    systemctl: unitSystemctl(source, { activeState: 'inactive', mainPid: 0 }).run,
   }))
-  assertCode(result, 3, /another installed build/u)
-  assert.equal(existsSync(path), true, 'a refused old-build uninstall must not remove or rewrite the unit')
+  assertCode(result, 0)
+  assert.equal(existsSync(path), false, 'the verified old-build unit link is removed')
+  assert.equal(readFileSync(source, 'utf8'), content, 'the configuration source is never removed or rewritten')
+})
+
+test('start adopts the current install for a stopped legacy unit before the public start', { skip: process.platform !== 'linux' }, async t => {
+  const fx = fixture(t)
+  const legacy = renderUnitContent({
+    dshHome: fx.scope.dshHome,
+    profileRealpath: fx.scope.profileRealpath,
+    profile: 'pi-tui',
+    scopeId: fx.scope.scopeId,
+    buildId: 'a'.repeat(64),
+    nodePath: process.execPath,
+    hostEntryPath: join(fx.unitDir, 'store', 'node_modules', '@xmoon76', 'dsh-pi-tui', 'dist', 'local-host.mjs'),
+    dshAnchor: fx.profile.installAnchor,
+  })
+  const path = join(fx.unitDir, fx.unitName)
+  writeFileSync(path, legacy, { mode: 0o600 })
+  const newRecord = recordOf(fx.scope, { instanceId: '88888888-8888-4888-8888-888888888888', hostPid: 1212 })
+  const systemctl = unitSystemctl(path, { activeState: 'inactive', mainPid: 0, startPid: newRecord.hostPid })
+  let ensured = 0
+  const result = await runDaemonControl({ verb: 'start' }, fx.profile, depsOf(fx, {
+    systemctl: systemctl.run,
+    readRecord: () => (ensured > 0 ? newRecord : undefined),
+    inspectProcess: recordValue => (recordValue?.instanceId === newRecord.instanceId ? 'alive' : 'dead'),
+    authenticate: async recordValue => ({ record: recordValue, cookie: 'c', identity: recordValue }),
+    ensureHost: async () => {
+      ensured += 1
+      await systemctl.run(['--user', '--no-pager', 'start', fx.unitName])
+      return { record: newRecord, cookie: 'c', identity: newRecord }
+    },
+    sleep: async () => {},
+    now: () => 0,
+  }))
+  assertCode(result, 0)
+  assert.equal(ensured, 1)
+  assert.match(result.stdout, /^host=ready$/mu)
+  const migrated = readFileSync(path, 'utf8')
+  assert.equal(migrated.includes(encodeUnitValue(fx.stableEntry, 'Host entry path', true)), true,
+    'a cold start adopts the stable Profile entry for a stopped legacy unit')
+  assert.equal(migrated.includes(`X-DshPiTuiInstallBuild=${fx.scope.buildId}`), true)
 })
 
 test('start does not report success when the new Host fails the post-snapshot ownership check', { skip: process.platform !== 'linux' }, async t => {

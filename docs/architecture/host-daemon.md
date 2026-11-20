@@ -33,8 +33,9 @@ supported Daemon platform in this contract.
   detached Host spawn with no user-manager probe and no
   `systemctl`/`launchctl` invocation at all, so a missing, broken or absent
   user manager cannot affect the basic daemon. An installed Linux unit must be
-  loaded by the real manager with this Profile's metadata, installed build and
-  canonical `FragmentPath`; it is then started through exactly one
+  loaded by the real manager with this Profile's metadata and
+  canonical `FragmentPath`; a historical install build is an `other-build`
+  diagnostic, never a start refusal. It is then started through exactly one
   `systemctl --user start <verified-name>`. An installed macOS LaunchAgent must
   be loaded by the real `gui/<uid>` launchd domain with this Profile's metadata,
   installed build and a printed source file that is the canonical target of the
@@ -55,8 +56,11 @@ supported Daemon platform in this contract.
   `X-DshPiTuiInstallBuild` metadata, and the running manager's canonical
   `FragmentPath` matching the canonical target of that profile unit path. The
   target must be a readable regular file; an existing legal unit and a
-  user-created symlink to such a target are supported. The user's installer
-  layout is not judged: an existing unit/account directory may be 0755/0775, a
+  user-created symlink to such a target are supported. `X-DshPiTuiInstallBuild`
+  records the install build the FILE was generated from; on Linux it is
+  provenance and an `other-build` diagnostic, never an admission that must equal
+  the currently installed build. The user's installer layout is not judged: an
+  existing unit/account directory may be 0755/0775, a
   legal directory symlink, a shared package store or a root-owned system install.
   Runtime directives — including `ExecStart`, `WorkingDirectory`, `Environment`,
   `Restart`, `ExecStartPre`, `ExecStop` and drop-ins — belong to the user and
@@ -83,18 +87,21 @@ supported Daemon platform in this contract.
   no-overwrite, uses validated installation facts and minimal official
   environment anchors, carries no token, Cookie, secret, one-shot backend
   selector or qualification injection, and is never enabled, started, stopped or
-  restarted. A same-identity unit is reused without restoring runtime defaults
-  and without being rewritten. A FRESHLY created unit always gets exactly one
+  restarted. A fresh unit launches the stable LEXICAL Profile entry
+  (`<profile>/node_modules/@xmoon76/dsh-pi-tui/dist/local-host.mjs`) after
+  proving that path resolves to the current official install, so the generated
+  file does not freeze a physical package-store path. A same-identity unit is
+  reused without restoring runtime defaults and without being rewritten — for a
+  historical install build too. A FRESHLY created unit always gets exactly one
   `daemon-reload` BEFORE any cached `LoadState`/`FragmentPath` check (even when
   the manager still caches an older definition at the same path), so a later
   `start` can never dispatch a stale `ExecStart`; if that reload fails, the
   freshly created file is removed so a retry is a fresh install rather than a
   silent reuse of the cached unit. An existing loaded same-identity unit is not
   reloaded on reinstall, while an existing verified unit the manager has not
-  loaded gets that one reload before `FragmentPath` verification. A foreign identity,
-  different install build or mismatched canonical
-  `FragmentPath` is `HOST_MANAGER_UNIT_CONFLICT` and is never overwritten;
-  cross-build replacement belongs to an explicit upgrade flow. Installing a unit
+  loaded gets that one reload before `FragmentPath` verification. A foreign
+  identity or mismatched canonical `FragmentPath` is
+  `HOST_MANAGER_UNIT_CONFLICT` and is never overwritten. Installing a unit
   beside a running independent Host does not migrate it: the Host keeps running
   and is still `manager=process`.
 - **User-owned macOS LaunchAgent identity.** The LaunchAgent belongs to the
@@ -240,8 +247,11 @@ stdout/stderr.
   0700 scope run directory (including the private launchd log sinks on macOS)
   and asks the existing `ensureLocalHost({hostStartPolicy:'public'})` to bring
   one up, then waits for authenticated readiness. A manager error never
-  degrades to the process fallback; a different installed build or unknown
-  service definition is a conflict; a live unauthenticated/incompatible Host is
+  degrades to the process fallback. On Linux a historical install build is an
+  `other-build` diagnostic, not a start refusal: the manager-defined unit is
+  started through systemd as-is. On macOS a different installed launchd build
+  remains a refusal until its own migration contract exists. A live
+  unauthenticated/incompatible Host is
   never replaced or killed.
 - **stop needs proven supervision.** A loaded `active`/`activating` profile unit
   whose `MainPID` is the authenticated Host is stopped only through
@@ -295,25 +305,41 @@ stdout/stderr.
   for a replaced expected Client instance.
 - **restart and uninstall are ONE explicit transition.** `restart` stops, awaits
   a confirmed old-instance exit, and only then starts a new instance; a stop
-  that is unknown, failed or still running forbids the start. An owned service
-  definition whose install build differs from THIS installation is refused
-  (exit 3) and left untouched: cross-build replacement belongs to the explicit
-  upgrade flow, not to a management command — the metadata alone cannot prove a
-  historical build's compatibility. An `install` only writes and verifies this
-  Profile's service definition; it never starts, stops, enables or migrates
+  that is unknown, failed or still running forbids the start. On Linux an owned
+  systemd unit from a HISTORICAL install build is this Profile's unit: the
+  explicit `start`/`restart` adopts the current install instead of refusing.
+  `restart` performs a read-only feasibility check of the bounded
+  generated-field migration BEFORE any stop, and only after the old kernel Host
+  is proven gone does it rewrite — in ONE atomically replaced main unit file —
+  exactly the recognized historical PiTui `ExecStart` target (to the stable
+  lexical Profile entry, preserving the original Node executable token) and,
+  only in that same confirmed migration, `X-DshPiTuiInstallBuild`; every other
+  main-unit byte, its mode and any drop-in stay untouched. The write is admitted
+  only for a current-user-owned regular main unit file (never a symlink),
+  followed by one `daemon-reload` and a re-inspection of the NEW file plus the
+  manager's `FragmentPath`. An unrecognizable/user-custom `ExecStart`, a unit
+  already pointing at the stable entry, a symlinked unit, or an
+  unwritable/foreign-owned unit is never rewritten: a custom command is used by
+  systemd as-is, while a necessary migration the current user cannot perform is
+  diagnosed BEFORE the Host is stopped. A macOS LaunchAgent whose install build
+  differs from THIS installation is still refused (exit 3) and left untouched
+  until a separate macOS migration contract defines it. An `install` only writes and verifies
+  this Profile's service definition; it never starts, stops, enables or migrates
   anything, so a running independent Host keeps its instance and stays
   `manager=process`. `uninstall` is idempotent when no service definition is
   installed; it stops only a running verified systemd unit whose `MainPID` is
   the live Host (or a unit with no live Host) and only a verified loaded
   LaunchAgent, unlinks only this Profile's verified path, and reloads systemd.
+  The historical install build is never an uninstall refusal.
   An `inactive`/unloaded unit or unloaded plist is unlink-only and leaves an
   independent running Host untouched; that successful result claims no
   interrupted Session. For a symlink the unlink leaves its source target
   intact; drop-in files and launchd private logs are also retained. It never
   removes the Profile, `DSH_HOME`, Sessions, credentials, `launch.json` or
   another Profile's service, and it never kills an independent Host. A reload
-  failure is reported as a failure, never as a completed uninstall. A cold `start` never
-  silently upgrades a different build. A mutating verb's exit 0 requires the
+  failure is reported as a failure, never as a completed uninstall. A cold
+  `start` never spawns a second Host beside a manager-started one and never
+  silently rewrites a user-custom unit. A mutating verb's exit 0 requires the
   post-transition snapshot to contain NO blocking failure AND the expected
   outcome: `start`/`restart` need an authenticated Ready Host (plus a new
   `instanceId` for `restart`), `stop` needs `host=stopped`, and `uninstall` needs

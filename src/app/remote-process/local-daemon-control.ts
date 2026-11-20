@@ -55,6 +55,7 @@ import {
   collectUnitFacts,
   inspectOwnedProfileUnit,
   installProfileHostUnit,
+  prepareOwnedProfileUnitForCurrentInstall,
   profileIdentityDigest,
   queryOwnedProfileUnit,
   runSystemctl,
@@ -369,6 +370,18 @@ function inspectScope(profile: DaemonControlProfile, deps: DaemonControlDeps): L
 /** Resolve the fixed runtime dir for the current user. */
 function runtimeDirOf(deps: DaemonControlDeps): string | undefined {
   return selectRuntimeDir(uidOf(deps))
+}
+
+/** The narrow local-Host-manager seams this command passes through. */
+function managerDepsOf(deps: DaemonControlDeps): {
+  readonly systemctl?: SystemctlRunner
+  readonly unitDir?: (uid: number) => string
+} {
+  const unitDir = deps.unitDir
+  return {
+    ...(deps.systemctl === undefined ? {} : { systemctl: deps.systemctl }),
+    ...(unitDir === undefined ? {} : { unitDir: () => unitDir }),
+  }
 }
 
 /** The Darwin launchd adapter inputs; production uses the OS account home and
@@ -1214,6 +1227,25 @@ async function runStart(profile: DaemonControlProfile, deps: DaemonControlDeps):
       dshVersion: profile.dshVersion,
     })
     assertNotAborted(deps.signal)
+    const managerDeps = managerDepsOf(deps)
+    // An installed Profile unit is adopted for the CURRENT install only while it
+    // is genuinely stopped. A unit that is still activating (or in any other
+    // transitional state) is never rewritten; the normal start path reports it.
+    const unitStopped = pre.unitState === 'not-found'
+      || pre.unitActiveState === 'inactive'
+      || pre.unitActiveState === 'failed'
+    if (pre.unit !== undefined && unitStopped) {
+      try {
+        await prepareOwnedProfileUnitForCurrentInstall({
+          scope: inspected,
+          profile: profile.name,
+          hostEntryPath: join(profile.packageRoot, 'dist', 'local-host.mjs'),
+          mode: 'apply',
+        }, managerDeps)
+      } catch (error) {
+        throw toDaemonControlError(error)
+      }
+    }
     const ensureHost = deps.ensureHost ?? ensureLocalHost
     try {
       // One committed OS transition: once the request is issued its real result
@@ -1290,21 +1322,32 @@ async function runRestart(profile: DaemonControlProfile, deps: DaemonControlDeps
     if (pre.status.host !== 'ready' && pre.status.host !== 'stopped'
       && !serviceFailureRecovery && !verifiedUnitRestart && !verifiedLaunchdRestart) throw refuseHostState(pre.status)
     const oldInstance = pre.record?.instanceId
-    // Owner decision (M6-2C scope): an owned service from ANOTHER installed
-    // build is never migrated here. Cross-build replacement is the upgrade
-    // flow's work; this stage refuses it BEFORE any stop so a refused restart
-    // leaves the running old-build Host and its service exactly as they were.
-    if (pre.unit !== undefined && pre.unit.installBuild !== pre.scope.buildId) {
-      throw new DaemonControlError(
-        'IDENTITY_OR_OWNERSHIP_REFUSED',
-        'the profile unit belongs to another installed build; removing or replacing it is deferred to the upgrade flow',
-      )
-    }
-    if (pre.launchdUnit !== undefined && pre.launchdUnit.installBuild !== pre.scope.buildId) {
+    // macOS keeps its own cross-build refusal until the launchd sibling has its
+    // own migration contract (PR2). Linux adopts the CURRENT install through the
+    // bounded generated-field migration below; a unit from another build is a
+    // diagnostic fact, never an ownership verdict.
+    if (platformOf(deps) === 'darwin' && pre.launchdUnit !== undefined
+      && pre.launchdUnit.installBuild !== pre.scope.buildId) {
       throw new DaemonControlError(
         'IDENTITY_OR_OWNERSHIP_REFUSED',
         'the profile LaunchAgent belongs to another installed build; removing or replacing it is deferred to the upgrade flow',
       )
+    }
+    const managerDeps = managerDepsOf(deps)
+    // Read-only preflight BEFORE any stop: a recognized generated entry that
+    // cannot be safely rewritten fails here, with the old Host still running.
+    // A user-custom command is a no-op and never blocks the restart.
+    if (platformOf(deps) === 'linux' && pre.unit !== undefined) {
+      try {
+        await prepareOwnedProfileUnitForCurrentInstall({
+          scope: inspected,
+          profile: profile.name,
+          hostEntryPath: join(profile.packageRoot, 'dist', 'local-host.mjs'),
+          mode: 'inspect',
+        }, managerDeps)
+      } catch (error) {
+        throw toDaemonControlError(error)
+      }
     }
     assertNotAborted(deps.signal)
     await stopFromSnapshot(pre, deps)
@@ -1317,6 +1360,16 @@ async function runRestart(profile: DaemonControlProfile, deps: DaemonControlDeps
         dshVersion: profile.dshVersion,
       })
       assertNotAborted(deps.signal)
+      // Only after the old kernel Host is proven gone: rewrite the one
+      // recognized generated field pair and re-verify the manager source.
+      if (platformOf(deps) === 'linux' && pre.unit !== undefined) {
+        await prepareOwnedProfileUnitForCurrentInstall({
+          scope: inspected,
+          profile: profile.name,
+          hostEntryPath: join(profile.packageRoot, 'dist', 'local-host.mjs'),
+          mode: 'apply',
+        }, managerDeps)
+      }
       const ensureHost = deps.ensureHost ?? ensureLocalHost
       await ensureHost({
         scope,
@@ -1328,6 +1381,15 @@ async function runRestart(profile: DaemonControlProfile, deps: DaemonControlDeps
       const post = await readSnapshot(profile, deps, scope)
       if (post.failure !== undefined) throw post.failure
       if (post.status.host !== 'ready') throw refuseHostState(post.status)
+      // When a verified unit exists it was the ONLY possible public start path,
+      // so a Ready instance it does not supervise proves the transition did not
+      // produce the Host the manager started.
+      if (pre.unit !== undefined && post.status.manager !== 'systemd') {
+        throw new DaemonControlError(
+          'TRANSITION_UNCERTAIN',
+          'the restarted Host is not supervised by the verified profile unit',
+        )
+      }
       if (oldInstance !== undefined && post.record?.instanceId === oldInstance) {
         throw new DaemonControlError('TRANSITION_UNCERTAIN', 'the restart did not produce a new Host instance')
       }
@@ -1353,7 +1415,6 @@ async function runInstall(profile: DaemonControlProfile, deps: DaemonControlDeps
     // merely unauthenticated/incompatible does not (install never touches it).
     if (pre.unitInspectionFailure !== undefined) throw pre.unitInspectionFailure
     if (pre.unitQueryFailure !== undefined) throw pre.unitQueryFailure
-    const unitDir = deps.unitDir
     assertNotAborted(deps.signal)
     try {
       await installProfileHostUnit(
@@ -1363,17 +1424,15 @@ async function runInstall(profile: DaemonControlProfile, deps: DaemonControlDeps
           dshAnchor: profile.installAnchor,
           profile: profile.name,
         },
-        {
-          ...(deps.systemctl === undefined ? {} : { systemctl: deps.systemctl }),
-          ...(unitDir === undefined ? {} : { unitDir: () => unitDir }),
-        },
+        managerDepsOf(deps),
       )
     } catch (error) {
       throw toDaemonControlError(error)
     }
-    // Post-verification: the unit must be this Profile's verified unit, and a
-    // running independent Host must be exactly the same instance afterward —
-    // install never migrates or restarts it.
+    // Post-verification: the unit must be this Profile's verified unit AND loaded
+    // by the manager from that same file, and a running independent Host must be
+    // exactly the same instance afterward — install never migrates or restarts
+    // it. A historical install build is a diagnostic, not an install refusal.
     try {
       const post = await readSnapshot(profile, deps, inspected)
       if (post.unitInspectionFailure !== undefined) throw post.unitInspectionFailure
@@ -1381,8 +1440,8 @@ async function runInstall(profile: DaemonControlProfile, deps: DaemonControlDeps
       if (post.unit === undefined) {
         throw new DaemonControlError('TRANSITION_UNCERTAIN', 'the installed profile unit could not be confirmed')
       }
-      if (post.unit.installBuild !== post.scope.buildId) {
-        throw new DaemonControlError('IDENTITY_OR_OWNERSHIP_REFUSED', 'the installed profile unit belongs to another installed build')
+      if (post.unitState === 'not-found') {
+        throw new DaemonControlError('TRANSITION_UNCERTAIN', 'the installed profile unit is not loaded by the manager')
       }
       if (pre.processAlive && pre.record !== undefined
         && (!post.processAlive || post.record === undefined || post.record.instanceId !== pre.record.instanceId)) {
@@ -1413,11 +1472,8 @@ async function runUninstall(profile: DaemonControlProfile, deps: DaemonControlDe
     if (pre.userManager !== 'available') {
       throw new DaemonControlError('MANAGER_OR_OS_FAILURE', 'the user manager cannot verify the profile unit')
     }
-    // Cross-build unit replacement is the upgrade flow's job. Never rewrite or
-    // remove a unit this installed build does not own.
-    if (pre.unit.installBuild !== pre.scope.buildId) {
-      throw new DaemonControlError('IDENTITY_OR_OWNERSHIP_REFUSED', 'the profile unit belongs to another installed build; use the upgrade flow')
-    }
+    // The historical install build is a diagnostic fact, not an uninstall
+    // refusal: ownership is the Profile metadata plus the loaded manager source.
     const loaded = pre.unitState !== 'not-found'
     const running = loaded && (pre.unitActiveState === 'active' || pre.unitActiveState === 'activating')
     const ended = loaded && (pre.unitActiveState === 'inactive' || pre.unitActiveState === 'failed')

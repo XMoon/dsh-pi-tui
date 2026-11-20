@@ -177,12 +177,6 @@ function assertDaemon(result, expected, label) {
   return status
 }
 
-function assertRefused(result, label) {
-  assertEqual(result.status, 3, `${label}: the ownership refusal must use exit 3, saw ${String(result.status)}: ${result.stderr.slice(-500)}`)
-  assert(/IDENTITY_OR_OWNERSHIP_REFUSED/u.test(`${result.stdout}${result.stderr}`),
-    `${label}: the refusal did not report IDENTITY_OR_OWNERSHIP_REFUSED: ${result.stdout}${result.stderr}`)
-}
-
 function realHome() {
   return realpathSync(userInfo().homedir)
 }
@@ -200,7 +194,23 @@ function unitSnapshot(path) {
     sha256: createHash('sha256').update(bytes).digest('hex'),
     installBuild: /^X-DshPiTuiInstallBuild=([0-9a-f]{64})$/mu.exec(text)?.[1],
     owner: /^X-DshPiTuiOwner=(.+)$/mu.exec(text)?.[1],
+    execStart: /^ExecStart=(.*)$/mu.exec(text)?.[1],
   }
+}
+
+/** The product's canonical command-line encoding (`encodeUnitValue(..., true)`). */
+function encodeCommandValue(value) {
+  let out = ''
+  for (const character of value) {
+    switch (character) {
+      case '\\': out += '\\\\'; break
+      case '"': out += '\\"'; break
+      case '%': out += '%%'; break
+      case '$': out += '$$'; break
+      default: out += character
+    }
+  }
+  return `"${out}"`
 }
 
 /** The manager's own view of one unit, parsed as a property map. */
@@ -437,7 +447,6 @@ export async function runManagedDaemonUpgrade(context) {
     const oldPayloadHash = installedPayloadHash(oldPackageRoot)
     assert(existsSync(join(oldPackageRoot, 'dist', 'local-host.mjs')), 'the old installed package has no local Host entry')
     installation = { dshInvocation: dsh, env, profileDir, dshHome, anchor, profilePackage: oldPackageRoot }
-    const profileManifestPath = join(profileDir, 'package.json')
     fragment.old = {
       packageVersion: oldArtifact.manifest.version,
       tarballSha256: oldArtifact.sha256,
@@ -516,27 +525,35 @@ export async function runManagedDaemonUpgrade(context) {
       recordKeysBeforeUpgrade: seededCredentials.recordKeys,
     }
 
-    // ── OLD build managed Host: real unit, real identity ────────────────────
-    checkpoint('C09/old-managed-start')
+    // ── OLD build managed Host: EXPLICIT install, then a managed start ──────
+    checkpoint('C09/old-managed-install')
+    // With no unit the profile is unmanaged and the manager is never queried.
     const coldStatus = assertDaemon(runDaemon(installation, ['status']),
-      { host: 'stopped', manager: 'unmanaged', unit: 'none', 'user-manager': 'available', compatibility: 'none' },
-      'cold status before the old managed start')
+      { host: 'stopped', manager: 'unmanaged', unit: 'none', 'user-manager': 'not-checked', compatibility: 'none' },
+      'cold status before the old install')
     assertEqual(coldStatus.pid, undefined, 'a stopped profile published a PID')
+    const installedOldResult = runDaemon(installation, ['install'])
+    const installedOld = assertDaemon(installedOldResult, { host: 'stopped', manager: 'unmanaged' }, 'the old unit install')
+    unitName = installedOld.unit
+    assertMatch(unitName, /^dsh-pi-tui@pi-tui-[0-9a-f]{16}\.service$/u, `the managed unit name is not the profile unit: ${String(unitName)}`)
+    const unitPath = unitPathOf(unitName)
+    assert(existsSync(unitPath), 'daemon install did not create the profile unit')
+    assertEqual(unitSnapshot(unitPath).mode, 0o600, 'the generated managed unit must be created 0600')
+    assertEqual(processCounts(dshHome).host, 0, 'daemon install must not start a Host')
+    assertEqual(showUnit(unitName).ActiveState, 'inactive', 'daemon install must not start the unit')
+
+    checkpoint('C09/old-managed-start')
     const startedOld = runDaemon(installation, ['start'])
     const oldStatus = assertDaemon(startedOld, {
       'user-manager': 'available',
       manager: DAEMON_MANAGER,
       host: 'ready',
+      unit: unitName,
       'unit-state': 'active',
       compatibility: 'compatible',
     }, 'the old managed start')
-    unitName = oldStatus.unit
-    assertMatch(unitName, /^dsh-pi-tui@pi-tui-[0-9a-f]{16}\.service$/u, `the managed unit name is not the profile unit: ${String(unitName)}`)
     assert(Number.isInteger(Number(oldStatus.pid)) && Number(oldStatus.pid) > 0, 'the old managed start published no Host PID')
-    const unitPath = unitPathOf(unitName)
-    assert(existsSync(unitPath), 'the old managed start did not install the profile unit')
     const oldUnit = unitSnapshot(unitPath)
-    assertEqual(oldUnit.mode, 0o600, 'the generated managed unit must be created 0600')
     assertEqual(oldUnit.owner, UNIT_OWNER_MARKER, 'the managed unit carries no owner marker')
     assertEqual(oldUnit.installBuild, oldBuildId, 'the managed unit installBuild is not the installed old build')
     const oldManager = showUnit(unitName)
@@ -575,29 +592,23 @@ export async function runManagedDaemonUpgrade(context) {
       credentialReadback: true,
     }
 
-    // ── Explicit old stop: unit inactive, identity and run material gone ────
-    checkpoint('C09/old-managed-stop')
-    const stoppedOld = runDaemon(installation, ['stop'])
-    assertDaemon(stoppedOld, { host: 'stopped', 'unit-state': 'inactive' }, 'the old managed stop')
-    assert(await waitGone(oldAttached.auth.hostPid, 60_000), 'the old managed Host did not exit after the explicit stop')
-    assertEqual(processCounts(dshHome).host, 0, 'the explicit stop left a Host running')
-    assertEqual(showUnit(unitName).ActiveState, 'inactive', 'the old managed unit stayed active after the explicit stop')
-    assert(!existsSync(join(scopeDirOf(dshHome, oldAttached.auth.scopeId), 'instance.json')),
-      'the old managed Host left its instance.json behind')
-    assert(!existsSync(join(scopeDirOf(dshHome, oldAttached.auth.scopeId), 'launch.json')),
-      'the old managed Host left its launch material behind')
+    // ── Old-build readback while the SAME managed Host stays running ────────
+    checkpoint('C09/old-managed-readback')
     const oldReadEvents = durableEvents(dshHome, sessionId)
     assertEqual(userPromptCount(oldReadEvents), 1, 'the old managed readback replayed or duplicated the durable prompt')
     assertEqual(oldReadEvents.slice(0, seededEvents.length).map(event => JSON.stringify(event)).join('\n'),
       seededEvents.map(event => JSON.stringify(event)).join('\n'),
       'the durable Session event prefix changed on the old managed readback')
     assertNoHistoryAppended(oldReadEvents, seededEvents.length, 'the old managed readback')
-    const oldSessionAfterStop = sha256(sessionLogPath(dshHome, sessionId))
+    // The FIRST managed resume may append one-time session-format markers; the
+    // durable history prefix above is the invariant, not whole-file equality.
+    // Every later resume/install must keep the bytes this first resume produced.
+    const sessionShaAfterOldReadback = sha256(sessionLogPath(dshHome, sessionId))
     const credentialFactsAfterOldRead = assertCredentialStorePreserved(credentialsPath, undefined, 'the old managed readback')
     const credentialKeysAfterOldRead = credentialFactsAfterOldRead.recordKeys
     assert(credentialKeysAfterOldRead.includes(CREDENTIAL_KEY), 'the old managed readback lost the seeded credential record')
     fragment.session.readbackOnOld = {
-      changedBytes: oldSessionAfterStop !== sessionSha256Before,
+      changedBytes: sessionShaAfterOldReadback !== sessionSha256Before,
       appendedEvents: appendedEventTypes(oldReadEvents, seededEvents.length),
     }
     fragment.credentials.readbackOnOld = {
@@ -611,9 +622,10 @@ export async function runManagedDaemonUpgrade(context) {
       mode: '0600',
       installBuild: oldUnit.installBuild,
       sha256: oldUnit.sha256,
+      execStart: oldUnit.execStart,
     }
 
-    // ── Install the NEW build while the OLD unit stays untouched ────────────
+    // ── Install the NEW build while the OLD Host keeps running ──────────────
     checkpoint('C09/new-profile-install')
     installPlugin(dsh, newArtifact.path, harnessDir, env, false)
     assertProfileClientPeers(profileDir, targetDshVersion, 'upgraded profile install')
@@ -629,70 +641,67 @@ export async function runManagedDaemonUpgrade(context) {
       buildId: newBuildId,
       payloadSha256: newPayloadHash,
     }
+    // The official package install never touches the product unit or the data.
     assertEqual(unitSnapshot(unitPath).sha256, oldUnit.sha256, 'the new profile install rewrote the old managed unit')
     assertCredentialStorePreserved(credentialsPath, credentialKeysAfterOldRead, 'the new profile install')
-    assertEqual(sha256(sessionLogPath(dshHome, sessionId)), oldSessionAfterStop,
-      'the new profile install changed the durable Session bytes')
-
-    // ── Wrong-build refusals: no stop, no start, no rewrite, no second Host ─
-    checkpoint('C09/wrong-build-refusal')
+    assertEqual(sha256(sessionLogPath(dshHome, sessionId)), sessionShaAfterOldReadback,
+      'the new profile install changed the durable Session bytes after the first managed resume')
+    // H0 is still the SAME authenticated old-build instance.
     const crossStatus = assertDaemon(runDaemon(installation, ['status']),
-      { host: 'stopped', manager: DAEMON_MANAGER, unit: unitName, 'unit-state': 'inactive', compatibility: 'other-build' },
-      'status with an other-build unit and no Host')
-    assertEqual(crossStatus.pid, undefined, 'an other-build status published a Host PID')
-    assertEqual(unitSnapshot(unitPath).sha256, oldUnit.sha256, 'status rewrote the other-build unit')
-    const refusedStart = runDaemon(installation, ['start'])
-    assertRefused(refusedStart, 'new-build start against the old unit')
-    assertEqual(unitSnapshot(unitPath).sha256, oldUnit.sha256, 'the refused new-build start rewrote the old unit')
-    assertEqual(unitSnapshot(unitPath).mode, 0o600, 'the refused new-build start changed the old unit mode')
-    assertEqual(showUnit(unitName).ActiveState, 'inactive', 'the refused new-build start started the old unit')
-    assertEqual(processCounts(dshHome).host, 0, 'the refused new-build start created a Host')
-    assert(!existsSync(join(scopeDirOf(dshHome, oldAttached.auth.scopeId), 'instance.json')),
-      'the refused new-build start published an instance')
-    const refusedRestart = runDaemon(installation, ['restart'])
-    assertRefused(refusedRestart, 'new-build restart against the old unit')
-    assertEqual(unitSnapshot(unitPath).sha256, oldUnit.sha256, 'the refused new-build restart rewrote the old unit')
-    assertEqual(showUnit(unitName).ActiveState, 'inactive', 'the refused new-build restart started the old unit')
-    assertEqual(processCounts(dshHome).host, 0, 'the refused new-build restart created a Host')
-    assertCredentialStorePreserved(credentialsPath, credentialKeysAfterOldRead, 'the wrong-build refusals')
-    assertEqual(sha256(sessionLogPath(dshHome, sessionId)), oldSessionAfterStop,
-      'the wrong-build refusals changed the durable Session bytes')
-    fragment.wrongBuild = {
-      compatibilityAtOldUnit: 'other-build',
-      startExitCode: refusedStart.status,
-      restartExitCode: refusedRestart.status,
-      unitBytesUnchanged: true,
-      unitModeUnchanged: true,
-      noSecondHost: true,
-      noServiceStartOrStop: true,
-    }
+      { host: 'ready', manager: DAEMON_MANAGER, unit: unitName, 'unit-state': 'active', compatibility: 'other-build' },
+      'status with the old Host under the new install')
+    assertEqual(Number(crossStatus.pid), oldAttached.auth.hostPid, 'the official package install replaced the old Host instance')
+    assertEqual(unitSnapshot(unitPath).sha256, oldUnit.sha256, 'status rewrote the old unit')
 
-    // ── Explicit uninstall: only the Profile unit path goes away ────────────
-    checkpoint('C09/old-unit-uninstall')
-    const uninstalled = runDaemon(installation, ['uninstall'])
-    assertDaemon(uninstalled, { host: 'stopped', unit: 'none', 'unit-state': 'not-found' }, 'the explicit old-unit uninstall')
-    assert(!existsSync(unitPath), 'the explicit uninstall did not remove the Profile unit path')
-    assertEqual(showUnit(unitName).LoadState, 'not-found', 'the manager still loads the removed unit')
-    assertCredentialStorePreserved(credentialsPath, credentialKeysAfterOldRead, 'the explicit old-unit uninstall')
-    assertEqual(sha256(sessionLogPath(dshHome, sessionId)), oldSessionAfterStop,
-      'the explicit uninstall changed the durable Session bytes')
-    assert(readFileSync(profileManifestPath).length > 0, 'the explicit uninstall removed the Profile manifest')
-
-    // ── NEW build managed Host: new unit, new instance, two real Clients ────
-    checkpoint('C09/new-managed-start')
-    const startedNew = runDaemon(installation, ['start'])
+    // ── Explicit restart adopts the new install (no uninstall/reinstall) ────
+    checkpoint('C09/new-managed-restart')
+    const startedNew = runDaemon(installation, ['restart'])
     const newStatus = assertDaemon(startedNew, {
       manager: DAEMON_MANAGER,
       host: 'ready',
       unit: unitName,
       'unit-state': 'active',
       compatibility: 'compatible',
-    }, 'the new managed start')
+    }, 'the new managed restart')
+    assert(await waitGone(oldAttached.auth.hostPid, 60_000), 'the old managed Host did not exit after the explicit restart')
+    assertEqual(processCounts(dshHome).host, 1, 'the explicit restart must leave exactly one managed Host')
+    const newManager = showUnit(unitName)
+    assertEqual(Number(newStatus.pid), Number(newManager.MainPID), 'the new unit MainPID is not the authenticated Host PID')
+    assertEqual(realpathSync(newManager.FragmentPath), realpathSync(unitPath), 'the new manager FragmentPath is not the profile unit')
     const newUnit = unitSnapshot(unitPath)
-    assertEqual(newUnit.mode, 0o600, 'the new generated managed unit must be created 0600')
-    assertEqual(newUnit.installBuild, newBuildId, 'the new managed unit installBuild is not the installed new build')
-    assertEqual(Number(showUnit(unitName).MainPID), Number(newStatus.pid), 'the new unit MainPID is not the authenticated Host PID')
+    // rc.5 profiles link the package in place (`nodeLinker: hoisted`), so the
+    // generated entry is ALREADY the stable Profile entry and the restart must
+    // NOT rewrite the unit merely for its historical build metadata. A
+    // store-linked layout gets exactly the bounded generated-field migration.
+    const stableEntry = join(realpathSync(profileDir), 'node_modules', EXPECTED_PACKAGE_NAME, 'dist', 'local-host.mjs')
+    const oldEntryIsStable = typeof oldUnit.execStart === 'string'
+      && oldUnit.execStart.includes(encodeCommandValue(stableEntry))
+    if (oldEntryIsStable) {
+      assertEqual(newUnit.sha256, oldUnit.sha256, 'an already stable entry must not be rewritten by the restart')
+      assertEqual(newUnit.installBuild, oldBuildId, 'historical build metadata is not rewritten without a necessary entry migration')
+    } else {
+      assertNotEqual(newUnit.sha256, oldUnit.sha256, 'the generated legacy entry must be migrated by the explicit restart')
+      assertEqual(newUnit.installBuild, newBuildId, 'the migrated unit installBuild is not the installed new build')
+      assert(typeof newUnit.execStart === 'string' && newUnit.execStart.includes(encodeCommandValue(stableEntry)),
+        'the migrated ExecStart must launch the stable Profile entry')
+    }
+    fragment.restartAdoption = {
+      branch: oldEntryIsStable ? 'already-stable-entry' : 'bounded-generated-field-migration',
+      unitBytesChanged: newUnit.sha256 !== oldUnit.sha256,
+      installBuildAfter: newUnit.installBuild,
+      mainPidMatches: true,
+      fragmentPathMatches: true,
+    }
+    assertCredentialStorePreserved(credentialsPath, credentialKeysAfterOldRead, 'the new managed restart')
+    fragment.crossBuild = {
+      compatibilityAtOldUnit: 'other-build',
+      oldHostPreservedAcrossInstall: true,
+      restartAdoptedNewBuild: true,
+      noReinstallOrUninstall: true,
+      noSecondHost: true,
+    }
 
+    // ── Two real Clients attach to the newly adopted managed Host ──────────
     const newClientA = startClient(context, installation, base, workRoot, { SPLIT_PROCESS_CLIENT_SESSION: sessionId })
     clients.push(newClientA)
     const newClientB = startClient(context, installation, base, workRoot)
@@ -724,7 +733,7 @@ export async function runManagedDaemonUpgrade(context) {
     assertCredentialStorePreserved(credentialsPath, credentialKeysAfterOldRead, 'the new managed readback')
     assertNoHistoryAppended(readbackEvents, seededEvents.length, 'the new managed readback')
     const newSessionSha256 = sha256(sessionLogPath(dshHome, sessionId))
-    assertEqual(newSessionSha256, oldSessionAfterStop,
+    assertEqual(newSessionSha256, sessionShaAfterOldReadback,
       'the upgraded Host readback changed the durable Session bytes after the first managed resume')
     const newAppended = appendedEventTypes(readbackEvents, oldReadEvents.length)
     assertEqual(newAppended.length, 0, 'the upgraded Host readback appended Session events after the first resume')
@@ -761,7 +770,7 @@ export async function runManagedDaemonUpgrade(context) {
     assertEqual(processCounts(dshHome).host, 0, 'the new managed stop left a Host running')
     assertEqual(showUnit(unitName).ActiveState, 'inactive', 'the new managed unit stayed active after the explicit stop')
 
-    // ── Rollback: install OLD, refuse the NEW unit, uninstall, start OLD ────
+    // ── Rollback: official package downgrade, then explicit restart ─────────
     checkpoint('C09/rollback-install')
     installPlugin(dsh, oldArtifact.path, harnessDir, env, false)
     assertProfileClientPeers(profileDir, targetDshVersion, 'rollback profile install')
@@ -771,42 +780,43 @@ export async function runManagedDaemonUpgrade(context) {
     assertEqual(rollbackBuildId, oldBuildId, 'the rollback profile did not resolve the old build')
     assertEqual(rollbackPayloadHash, oldPayloadHash, 'the rollback profile installed different old payload bytes')
     installation.profilePackage = rollbackPackageRoot
-    assertEqual(unitSnapshot(unitPath).sha256, newUnit.sha256, 'the rollback install rewrote the new managed unit')
+    assertEqual(unitSnapshot(unitPath).sha256, newUnit.sha256, 'the rollback install rewrote the managed unit')
     assertCredentialStorePreserved(credentialsPath, credentialKeysAfterOldRead, 'the rollback profile install')
     assertEqual(sha256(sessionLogPath(dshHome, sessionId)), newSessionSha256,
       'the rollback install changed the durable Session bytes')
+    // The install-build metadata is provenance: the hoisted rc.5 branch keeps
+    // the OLD value (already equal to the rolled-back install), while the
+    // migrated store-linked branch names the NEW build. Both are valid facts.
     const rollbackStatus = assertDaemon(runDaemon(installation, ['status']),
-      { host: 'stopped', manager: DAEMON_MANAGER, unit: unitName, 'unit-state': 'inactive', compatibility: 'other-build' },
-      'status with the new-build unit and the old build installed')
+      {
+        host: 'stopped',
+        manager: 'unmanaged',
+        unit: unitName,
+        'unit-state': 'inactive',
+        compatibility: oldEntryIsStable ? 'none' : 'other-build',
+      },
+      'status with the installed old build and the managed unit')
     assertEqual(rollbackStatus.pid, undefined, 'the rollback status published a Host PID')
-    const refusedRollbackStart = runDaemon(installation, ['start'])
-    assertRefused(refusedRollbackStart, 'rollback start against the new unit')
-    const refusedRollbackRestart = runDaemon(installation, ['restart'])
-    assertRefused(refusedRollbackRestart, 'rollback restart against the new unit')
-    assertEqual(unitSnapshot(unitPath).sha256, newUnit.sha256, 'the rollback refusals rewrote the new unit')
-    assertEqual(showUnit(unitName).ActiveState, 'inactive', 'the rollback refusals started the new unit')
-    assertEqual(processCounts(dshHome).host, 0, 'the rollback refusals created a Host')
-    fragment.wrongBuild.rollbackStartExitCode = refusedRollbackStart.status
-    fragment.wrongBuild.rollbackRestartExitCode = refusedRollbackRestart.status
 
-    checkpoint('C09/new-unit-uninstall')
-    assertDaemon(runDaemon(installation, ['uninstall']), { host: 'stopped', unit: 'none', 'unit-state': 'not-found' },
-      'the explicit new-unit uninstall')
-    assert(!existsSync(unitPath), 'the explicit rollback uninstall did not remove the new-build unit')
-    assertCredentialStorePreserved(credentialsPath, credentialKeysAfterOldRead, 'the rollback uninstall')
-
-    checkpoint('C09/rollback-start')
-    const startedRollback = runDaemon(installation, ['start'])
+    // The explicit restart adopts the old payload again. The entry already names
+    // the stable Profile entry, so the unit must stay byte-identical.
+    checkpoint('C09/rollback-restart')
+    const startedRollback = runDaemon(installation, ['restart'])
     const rollbackHost = assertDaemon(startedRollback, {
       manager: DAEMON_MANAGER,
       host: 'ready',
       unit: unitName,
       'unit-state': 'active',
       compatibility: 'compatible',
-    }, 'the rollback managed start')
-    const rollbackUnit = unitSnapshot(unitPath)
-    assertEqual(rollbackUnit.installBuild, oldBuildId, 'the rollback unit installBuild is not the old build')
-    assertEqual(Number(showUnit(unitName).MainPID), Number(rollbackHost.pid), 'the rollback unit MainPID is not the authenticated Host PID')
+    }, 'the rollback managed restart')
+    assertEqual(Number(rollbackHost.pid), Number(showUnit(unitName).MainPID), 'the rollback unit MainPID is not the authenticated Host PID')
+    assertEqual(unitSnapshot(unitPath).sha256, newUnit.sha256, 'the rollback restart rewrote an already stable unit')
+    fragment.rollback = {
+      buildId: rollbackBuildId,
+      unitBytesUnchanged: true,
+      mainPidMatches: true,
+      newInstanceVsForward: true,
+    }
     const rollbackClient = startClient(context, installation, base, workRoot, { SPLIT_PROCESS_CLIENT_SESSION: sessionId })
     clients.push(rollbackClient)
     const rollbackAttached = await waitForAuthenticatedClient(rollbackClient, 'rollback Client')
@@ -831,7 +841,7 @@ export async function runManagedDaemonUpgrade(context) {
     assertCredentialStorePreserved(credentialsPath, credentialKeysAfterOldRead, 'the rollback readback')
     assertNoHistoryAppended(rollbackEvents, seededEvents.length, 'the rollback readback')
     const rollbackSessionSha256 = sha256(sessionLogPath(dshHome, sessionId))
-    assertEqual(rollbackSessionSha256, oldSessionAfterStop,
+    assertEqual(rollbackSessionSha256, sessionShaAfterOldReadback,
       'the rollback readback changed the durable Session bytes after the first managed resume')
     const rollbackAppended = appendedEventTypes(rollbackEvents, oldReadEvents.length)
     assertEqual(rollbackAppended.length, 0, 'the rollback readback appended Session events after the first resume')
@@ -853,13 +863,15 @@ export async function runManagedDaemonUpgrade(context) {
     }
 
     checkpoint('C09/rollback-stop')
-    assertDaemon(runDaemon(installation, ['stop']), { host: 'stopped', 'unit-state': 'inactive' }, 'the rollback managed stop')
+    const stoppedRollback = runDaemon(installation, ['stop'])
+    assertDaemon(stoppedRollback, { host: 'stopped', 'unit-state': 'inactive' }, 'the rollback managed stop')
     assert(await waitGone(rollbackAttached.auth.hostPid, 60_000), 'the rollback Host did not exit after the explicit stop')
     assertEqual(processCounts(dshHome).host, 0, 'the rollback stop left a Host running')
 
     // The explicit uninstall is also the closing cleanup of the rollback unit;
     // the finally block still runs the product path as a backstop.
-    assertDaemon(runDaemon(installation, ['uninstall']), { host: 'stopped', unit: 'none', 'unit-state': 'not-found' },
+    const closingUninstall = runDaemon(installation, ['uninstall'])
+    assertDaemon(closingUninstall, { host: 'stopped', unit: 'none', 'unit-state': 'not-found' },
       'the closing rollback uninstall')
     assert(!existsSync(unitPath), 'the closing uninstall did not remove the rollback unit')
     assertCredentialStorePreserved(credentialsPath, credentialKeysAfterOldRead, 'the closing uninstall')
@@ -871,19 +883,17 @@ export async function runManagedDaemonUpgrade(context) {
       profilePreserved: true,
       sessionPreserved: true,
       credentialsPreserved: true,
-      wrongBuildNeverStoppedOrStarted: true,
+      noReinstallOrUninstallForUpgrade: true,
     }
     fragment.commands = {
       verbs: [...VERBS],
+      installOldExit: installedOldResult.status,
       startOldExit: startedOld.status,
-      stopOldExit: stoppedOld.status,
-      refusedForwardStartExit: refusedStart.status,
-      refusedForwardRestartExit: refusedRestart.status,
-      startNewExit: startedNew.status,
+      restartNewExit: startedNew.status,
       stopNewExit: stoppedNew.status,
-      refusedRollbackStartExit: refusedRollbackStart.status,
-      refusedRollbackRestartExit: refusedRollbackRestart.status,
-      startRollbackExit: startedRollback.status,
+      restartRollbackExit: startedRollback.status,
+      stopRollbackExit: stoppedRollback.status,
+      uninstallExit: closingUninstall.status,
     }
   } catch (error) {
     failure = error
