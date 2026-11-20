@@ -146,7 +146,30 @@ type SettingsCommandRunner = Pick<
   | 'subscribeSessionScopeInvalidation'
   | 'copyToClipboard'
   | 'tuiSettings'
+  | 'profileDaemonAdmin'
+  | 'recordBackendExitTransition'
 >
+
+/**
+ * M6 UX PR2 Step D: the ONE decision rule for the transient user-conversion
+ * intent. Only a verified `daemon → direct` save made by a process that is
+ * STILL running the daemon backend grants the exit-intent owner permission to
+ * ASK at exit; a verified reverse save clears it. A same-value confirm, a
+ * Direct-process save, or any other combination is `none` — it never fakes a
+ * conversion the user did not make.
+ * @param base - the authoritative Profile value BEFORE the write.
+ * @param saved - the value the write committed.
+ * @param backendKind - the CURRENT process backend ('remote' == daemon).
+ */
+export function classifyBackendExitTransition(
+  base: 'direct' | 'daemon',
+  saved: 'direct' | 'daemon',
+  backendKind: 'direct' | 'remote',
+): 'daemon-to-direct' | 'clear' | 'none' {
+  if (base === 'daemon' && saved === 'direct' && backendKind === 'remote') return 'daemon-to-direct'
+  if (base === 'direct' && saved === 'daemon') return 'clear'
+  return 'none'
+}
 
 /** The R1 candidate identities, in their FROZEN order: the raw values the
  *  document stores and the commit sends. The labels are the same lowercase
@@ -1397,6 +1420,29 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
           }
           return result
         },
+        // M6 UX PR2: the ONE explicit service install. The panel guarantees a
+        // single in-flight confirmation; this owner guarantees ONE run per
+        // confirmed request through the existing process task owner, and the
+        // control plane's own result is the ONLY success/failure source. A
+        // refusal is reported as-is: no fallback install source, no start, no
+        // automatic retry. `Not now`/Esc never reach this callback.
+        onBackendServiceInstall: (settle) => {
+          const admin = runner.profileDaemonAdmin
+          if (admin === undefined) {
+            settle({ ok: false, detail: 'the local daemon administration capability is unavailable' })
+            return
+          }
+          runOwned('settings daemon service install', async () => {
+            const result = await admin.run('install')
+            settle(result.code === 0
+              ? { ok: true }
+              : { ok: false, detail: daemonInstallRefusalDetail(result) })
+          }, {
+            diag: runner.diag,
+            sessionId: () => runner.currentSessionId,
+            onError: () => settle({ ok: false, detail: 'the install task failed before the control plane reported a result' }),
+          })
+        },
         createModelsPage,
         createAccountPage,
         createHostNumericSettingsPage: (kind, done, onAuthoritativeChange) => {
@@ -2569,7 +2615,47 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     } catch (error) {
       return classifyRejectedBackendStartup(base.backend, safeErrorMessage(error))
     }
-    return verifyCommittedBackendStartup(backend)
+    const verified = verifyCommittedBackendStartup(backend)
+    // M6 UX PR2 Step D: record the ONE process-lifetime transient
+    // user-conversion intent. Only a verified transition made by THIS Client
+    // matters; any other outcome never touches it.
+    const transition = classifyBackendExitTransition(base.backend, backend, runner.backendKind)
+    if (verified.outcome === 'verified' && runner.recordBackendExitTransition !== undefined && transition !== 'none') {
+      runner.recordBackendExitTransition(transition === 'clear' ? undefined : 'daemon-to-direct')
+    }
+    // M6 UX PR2: the ONE verified-transition follow-up. Only a NEW value that
+    // the official readback confirmed (direct → daemon) may offer the optional
+    // service install in the SAME lease; a same-value confirm, a failed write
+    // or a Daemon→Direct save never does. `installable` folds the platform and
+    // the proven local Profile capability into one fact the panel presents;
+    // the command layer keeps the install task's only owner.
+    if (verified.outcome === 'verified' && base.backend === 'direct' && backend === 'daemon') {
+      return {
+        ...verified,
+        followUp: { kind: 'daemon-service-install', installable: backendServiceInstallable() },
+      }
+    }
+    return verified
+  }
+
+  /**
+   * Whether THIS composition may offer the explicit service install: a local
+   * Linux/macOS platform and the process-local admin capability (which exists
+   * only when the official local Profile identity was proven). This is a
+   * capability fact, never a Host/manager probe.
+   */
+  const backendServiceInstallable = (): boolean =>
+    (process.platform === 'linux' || process.platform === 'darwin')
+    && runner.profileDaemonAdmin !== undefined
+
+  /**
+   * The safe one-line refusal summary for a failed install: the control plane
+   * already sanitizes its stderr (no argv, cookie, private path or secret), so
+   * its first line is the stable manager/ownership reason the UI may show.
+   */
+  const daemonInstallRefusalDetail = (result: { readonly stderr: string }): string => {
+    const line = result.stderr.split('\n').map(part => part.trim()).find(part => part !== '')
+    return line === undefined || line === '' ? 'the install could not be verified' : line
   }
 
   /** The TUI-settings-document writers. Deliberately NARROWER than

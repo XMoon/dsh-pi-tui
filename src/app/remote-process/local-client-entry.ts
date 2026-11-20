@@ -49,6 +49,8 @@ import {
   type ProcessSeat,
 } from './local-scope.ts'
 import { ensureLocalHost, type VerifiedLocalHost } from './local-discovery.ts'
+import type { DaemonControlProfile } from './local-daemon-control.ts'
+import { createProfileDaemonAdmin, profileDaemonAdminRun } from './local-profile-daemon-admin.ts'
 import {
   classifyLaunchWorkspace,
   type LaunchWorkspaceVerdict,
@@ -1173,11 +1175,29 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
   const invokedEntry = process.argv[1]
   const packageRoot = installedPackageRootFromEntry(invokedEntry === undefined ? import.meta.url : pathToFileURL(invokedEntry).href)
   const profileDir = hostModules.resolveProfileDir(options.profile, dshHome)
+  const installedDshVersion = readInstalledDshVersion(options.dshAnchor)
   const scope = scopeFromInstalledProfile({
     dshHome,
     profileDir,
     packageRoot,
-    dshVersion: readInstalledDshVersion(options.dshAnchor),
+    dshVersion: installedDshVersion,
+  })
+  // M6 UX PR2: the ONE Client-local daemon administration capability. The
+  // Profile identity is the SAME officially verified start-up fact set the
+  // scope above was built from — never an argv/cwd guess and never anything
+  // routed through the Host wire. Constructing the port performs no IO: the
+  // existing control plane is only reached when the user explicitly chooses
+  // `Install service` or `Stop daemon Host and exit`.
+  const daemonAdminProfile: DaemonControlProfile = {
+    name: options.profile,
+    dir: profileDir,
+    home: dshHome,
+    installAnchor: options.dshAnchor,
+    packageRoot,
+    dshVersion: installedDshVersion,
+  }
+  const profileDaemonAdmin = createProfileDaemonAdmin(daemonAdminProfile, {
+    run: profileDaemonAdminRun(daemonAdminProfile),
   })
   const processStartIdentity = readProcessStartDiagnostic()
   // Surface mode separates the terminal (owned by PiTui) from the structured
@@ -2254,6 +2274,7 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
           domains: mountedDomains,
           interactionDelivery,
           mountRunner,
+          profileDaemonAdmin,
           diag,
           onStatus: status => {
             emit({ m4b2s: 'surface-status', ...traceStatus(status) })

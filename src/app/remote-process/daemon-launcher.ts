@@ -99,8 +99,10 @@ export function resolveClientEntry(packageRoot: string): string {
  * Resolve this installed bundle's package root through the OFFICIAL profile
  * resolution. The launcher module itself may be reached through a symlinked
  * `dist`, so its own module URL is not a reliable package-root locator.
+ * Exported for the M6 UX PR2 Direct-side admin port, which must reuse the SAME
+ * official Profile resolution as this CLI path — never a second copy.
  */
-function resolveProfilePackageRoot(profileDir: string): string {
+export function resolveProfilePackageRoot(profileDir: string): string {
   let manifestPath: string
   try {
     manifestPath = createRequire(join(profileDir, 'package.json')).resolve('@xmoon76/dsh-pi-tui/package.json')

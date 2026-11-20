@@ -54,6 +54,7 @@ import type { CliSessionLaunchIntent } from '../../startup.ts'
 import type { Diag } from '../../runtime/process/diagnostics.ts'
 import type { LocalInstanceRecord } from './local-discovery.ts'
 import type { LocalClientTransport } from './local-transport.ts'
+import type { ProfileDaemonAdmin } from './local-profile-daemon-admin.ts'
 import type { SplitClientInteractionDeliveryOwner } from './client-interaction-delivery.ts'
 
 export type {
@@ -202,6 +203,16 @@ export interface LocalClientComposition {
    * not construct a second Context/transport/Domain/surface.
    */
   readonly mountRunner?: (input: LocalClientRunnerMountInput) => Promise<MountedLocalClientRunner>
+  /**
+   * M6 UX PR2: the ONE process-local daemon administration capability built by
+   * the real Client entry from its officially verified Profile facts. It is
+   * only a value borrowed through this composition: the entry owns it, the
+   * mounted runner consumes it (Settings follow-up install and the final exit
+   * root's confirmed whole-Host stop), and an HMR/remount re-borrows the SAME
+   * port instead of constructing a second lifecycle owner. Absent on every
+   * composition that cannot prove the official local Profile identity.
+   */
+  readonly profileDaemonAdmin?: ProfileDaemonAdmin
   /**
    * Surface-mode qualification telemetry: one structured status record on every
    * change of the observable tuple (transport, generation, `tuiMainView`
@@ -856,6 +867,11 @@ async function startSurfaceLocalClient(
       // opens the existing Sessions Workspace through it.
       interactionDelivery: delivery,
       ...(promptPresence === undefined ? {} : { promptPresence }),
+      // M6 UX PR2: the SAME process-local daemon administration capability the
+      // Client entry built; every surface revision re-borrows the SAME value.
+      ...(composition.profileDaemonAdmin === undefined
+        ? {}
+        : { profileDaemonAdmin: composition.profileDaemonAdmin }),
     }
     // Schema defaults + the explicit Client-local startup facts. No fabricated
     // profile document: a preference's absence resolves to its schema default.

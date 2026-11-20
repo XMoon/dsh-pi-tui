@@ -335,6 +335,11 @@ export interface CommandSurfaceDeps<Selection extends ModelSelectionValue, Exact
     /** Shell amendment (M3-4 PR3): whether Host-shell completion facts are
      * reachable on the selected backend. */
     readonly hostShellCompletion: import('../../runtime/host-shell-completion-port.ts').HostShellCompletionPort
+    /** M6 UX PR2: the process-local daemon administration capability, when
+     *  provable; forwarded unchanged to the Settings follow-up. */
+    readonly profileDaemonAdmin?: TuiCommandRunner['profileDaemonAdmin']
+    /** M6 UX PR2: the transient daemon→direct user-conversion intent. */
+    readonly recordBackendExitTransition?: TuiCommandRunner['recordBackendExitTransition']
   }
   /** The bound session runtime entries the runner drives. */
   readonly session: {
@@ -1611,6 +1616,16 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
       // composition's StatusStore subscription, forwarded unchanged).
       forceContextMeasurementResult: () => deps.status.forceContextMeasurementResult(),
       backendKind: deps.backend.kind,
+      // M6 UX PR2: the process-local daemon administration capability, when
+      // this composition can prove the official local Profile identity.
+      ...(deps.backend.profileDaemonAdmin === undefined
+        ? {}
+        : { profileDaemonAdmin: deps.backend.profileDaemonAdmin }),
+      // M6 UX PR2: the transient daemon→direct user-conversion intent,
+      // forwarded unchanged to the Settings command layer.
+      ...(deps.backend.recordBackendExitTransition === undefined
+        ? {}
+        : { recordBackendExitTransition: deps.backend.recordBackendExitTransition }),
       subscribeSessionScopeInvalidation: (listener) => deps.status.subscribeSessionScopeInvalidation(listener),
       // The session WRITE port (D2.1): ordinary prompts, Ctrl+S batch
       // delivery, exact queue removal, cancel and title ops go through the port.

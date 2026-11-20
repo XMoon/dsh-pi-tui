@@ -44,6 +44,7 @@ import {
 } from '../../domain/command/policy.ts'
 import {
   exitChoiceAsking,
+  exitChoiceHostStop,
   exitChoiceStopping,
   exitChoiceUnconfirmed,
   type ExitChoiceKind,
@@ -86,6 +87,15 @@ export interface ExitIntentFacts {
   }
   /** Whether a captured scope still pins the live owner AND its transport. */
   isScopeCurrent(scope: SessionScope, transportToken: unknown): boolean
+  /**
+   * M6 UX PR2: whether THIS Client may ask, at exit, about stopping the old
+   * Profile Host. It re-reads the LIVE facts on every check: the process must
+   * still run the daemon backend, the process-lifetime transient
+   * daemon→direct conversion intent must still hold, and the authoritative
+   * Profile preference must still read `direct` with a ready configuration.
+   * It is a permission to ASK — never a command to stop.
+   */
+  hostStopEligible(): boolean
 }
 
 /** The narrow dependencies of the coordinator. */
@@ -95,9 +105,12 @@ export interface ExitIntentCoordinatorDeps {
   /**
    * The ONE final exit commit — the existing `createExitController.requestExit`.
    * `workStopped` is true ONLY after the captured owner's authoritative idle
-   * proof, and only that commit may print the stopped line.
+   * proof, and only that commit may print the stopped line. `hostStopRequested`
+   * is the ONE explicit whole-Host stop authorization (M6 UX PR2): the final
+   * exit root runs the admin stop after the terminal is restored; it is never
+   * set by an ordinary detach.
    */
-  readonly commit: (options: { readonly workStopped: boolean }) => void
+  readonly commit: (options: { readonly workStopped: boolean; readonly hostStopRequested?: boolean }) => void
   /** The mounted renderer's choice seam, or undefined before a mount. */
   readonly presenter: () => SurfaceExitChoiceSeam | undefined
   /**
@@ -147,6 +160,12 @@ export function createExitIntentCoordinator(deps: ExitIntentCoordinatorDeps): Ex
   /** The in-flight daemon Stop wait, if any (owned by the open choice). */
   let stopWait: AbortController | undefined
   /**
+   * M6 UX PR2: the workStopped fact of the PR1 decision that led into the
+   * whole-Host stop confirm. The confirm itself commits nothing until the user
+   * chooses; `stay` drops it and the next exit re-decides from live facts.
+   */
+  let pendingHostStopWorkStopped = false
+  /**
    * Monotonic identity of the LATEST exit operation/decision. Every request,
    * dismissal, stale retirement and dispose bumps it, so a close-time focus
    * callback cannot hand the decision away and back again without the old
@@ -185,6 +204,7 @@ export function createExitIntentCoordinator(deps: ExitIntentCoordinatorDeps): Ex
     stopWait = undefined
     open = undefined
     captured = undefined
+    pendingHostStopWorkStopped = false
   }
 
   /** Hide the open choice and return to the idle state. */
@@ -215,7 +235,7 @@ export function createExitIntentCoordinator(deps: ExitIntentCoordinatorDeps): Ex
    * Session owner. The newer operation always wins: an old confirmation never
    * exits a surface it no longer owns.
    */
-  const commitAfterClose = (identity: CapturedChoice, workStopped: boolean, epoch: number): void => {
+  const commitAfterClose = (identity: CapturedChoice, workStopped: boolean, epoch: number, hostStopRequested = false): void => {
     closeChoice()
     // The close may synchronously restore another owner's focus and run
     // callbacks that start (and even withdraw) a NEWER operation. Only the
@@ -224,7 +244,9 @@ export function createExitIntentCoordinator(deps: ExitIntentCoordinatorDeps): Ex
     if (disposed) return
     if (operationEpoch !== epoch) return
     if (!identityCurrent(identity)) return
-    deps.commit({ workStopped })
+    deps.commit(hostStopRequested
+      ? { workStopped, hostStopRequested: true }
+      : { workStopped })
   }
 
   /** Show the same-seat unconfirmed state; never a stopped claim. */
@@ -321,7 +343,20 @@ export function createExitIntentCoordinator(deps: ExitIntentCoordinatorDeps): Ex
       commitAfterClose(identity, false, epoch)
       return
     }
+    // M6 UX PR2: the whole-Host stop confirm. `Leave` is the ordinary PR1
+    // Client detach (zero Host management), `Stop` is the ONE explicit
+    // Profile-management authorization handed to the final exit root — the
+    // admin stop runs only after the terminal is restored, and never twice.
+    if (option === 'leave-host-and-exit') {
+      commitAfterClose(identity, pendingHostStopWorkStopped, epoch)
+      return
+    }
+    if (option === 'stop-host-and-exit') {
+      commitAfterClose(identity, pendingHostStopWorkStopped, epoch, true)
+      return
+    }
     if (option === 'keep-and-disconnect' || option === 'disconnect-without-stop') {
+      if (interceptHostStopConfirm(identity, facts, false, epoch)) return
       commitAfterClose(identity, false, epoch)
       return
     }
@@ -336,6 +371,7 @@ export function createExitIntentCoordinator(deps: ExitIntentCoordinatorDeps): Ex
         // The exact owner became idle by itself: the SAME captured identity is
         // already proven current above, so detach without sending a cancel.
         // A running user shell is not proven by the Agent waiter: no stopped claim.
+        if (interceptHostStopConfirm(identity, facts, !facts.shellRunning, epoch)) return
         commitAfterClose(identity, !facts.shellRunning, epoch)
         return
       }
@@ -348,6 +384,7 @@ export function createExitIntentCoordinator(deps: ExitIntentCoordinatorDeps): Ex
       }
       if (identity.live === undefined) {
         // No live Session remains: nothing to stop; detach without a cancel.
+        if (interceptHostStopConfirm(identity, facts, false, epoch)) return
         commitAfterClose(identity, false, epoch)
         return
       }
@@ -369,6 +406,38 @@ export function createExitIntentCoordinator(deps: ExitIntentCoordinatorDeps): Ex
     }
     // An option this model did not offer: keep the choice, dispatch nothing.
     safeDiag('error', 'exit choice received an unsupported option', { option })
+  }
+
+  /**
+   * M6 UX PR2: the ONE post-decision gate. Before ANY PR1 commit that leaves
+   * the daemon Client, check the transient conversion intent against the LIVE
+   * Profile facts; when it holds, replace the direct commit with the whole-Host
+   * stop confirm (which itself commits nothing until the user chooses). The
+   * epoch of this confirmation is the NEW choice's epoch, so the old
+   * confirmation can never commit behind it. Returns true when the confirm
+   * took over; the caller must NOT commit.
+   */
+  const interceptHostStopConfirm = (
+    identity: CapturedChoice,
+    facts: ReturnType<ExitIntentFacts['capture']>,
+    workStopped: boolean,
+    _epoch: number,
+  ): boolean => {
+    // Only a daemon Client has an old shared Host to ask about; a Direct exit
+    // always commits directly even if a stale intent somehow lingers.
+    if (identity.backend !== 'daemon') return false
+    if (!deps.facts.hostStopEligible()) return false
+    // The SAME identity, revalidated live; the confirm is a NEW operation.
+    if (facts.shellRunning && open?.shellRunning !== true) {
+      // A user shell reminder must be seen before the dangerous confirm too;
+      // refresh the SAME phase with the reminder and let the next confirmation
+      // reach this gate again.
+      open = exitChoiceAsking(identity.kind, select, dismiss, true)
+      presenter()?.update(open)
+      return true
+    }
+    openHostStopChoice(facts, identity.backend, workStopped)
+    return true
   }
 
   /** Present the ONE asking-phase choice for one captured identity. */
@@ -396,6 +465,38 @@ export function createExitIntentCoordinator(deps: ExitIntentCoordinatorDeps): Ex
       transportToken: facts.transportToken,
     }
     open = exitChoiceAsking(kind, select, dismiss, facts.shellRunning)
+    seam.open(open)
+  }
+
+  /**
+   * M6 UX PR2: present the ONE whole-Host stop confirm. It is a NEW operation
+   * over the SAME captured identity: the epoch bump fences any earlier
+   * confirmation, and the choice itself performs ZERO Host management on open.
+   * `pendingHostStopWorkStopped` carries the PR1 decision's proof forward so
+   * the final commit keeps its truthful wording.
+   */
+  const openHostStopChoice = (
+    facts: ReturnType<ExitIntentFacts['capture']>,
+    backend: ExitBackendKind,
+    workStopped: boolean,
+  ): void => {
+    const seam = presenter()
+    if (seam === undefined) {
+      // Fail closed exactly like the PR1 choice: with no surface the exit is
+      // NOT committed and NOTHING is stopped.
+      safeDiag('error', 'exit intent requires the host-stop choice but no surface is mounted')
+      return
+    }
+    operationEpoch += 1
+    pendingHostStopWorkStopped = workStopped
+    captured = {
+      kind: 'daemon-host-stop',
+      backend,
+      scope: facts.scope,
+      live: facts.live,
+      transportToken: facts.transportToken,
+    }
+    open = exitChoiceHostStop(select, dismiss, facts.shellRunning)
     seam.open(open)
   }
 
@@ -430,7 +531,9 @@ export function createExitIntentCoordinator(deps: ExitIntentCoordinatorDeps): Ex
       }
       // The Agent idle proof does not prove a Client-owned shell finished; the
       // stopped line is withheld while a shell is still running.
-      commitAfterClose(identity, !deps.facts.capture().shellRunning, epoch)
+      const workStopped = !deps.facts.capture().shellRunning
+      if (interceptHostStopConfirm(identity, deps.facts.capture(), workStopped, epoch)) return
+      commitAfterClose(identity, workStopped, epoch)
       return
     }
     settleUnconfirmed(outcome.detail)
@@ -452,9 +555,19 @@ export function createExitIntentCoordinator(deps: ExitIntentCoordinatorDeps): Ex
     })
     switch (decision) {
       case 'direct-exit':
-      case 'client-detach':
+      case 'client-detach': {
+        // M6 UX PR2: the ONE post-decision confirm. Only a daemon Client that
+        // earned the transient daemon→direct conversion intent (and still
+        // proves it against the LIVE Profile facts) is asked about the old
+        // Host; every ordinary exit/detach commits directly and never stops a
+        // Host. A Direct exit always commits directly.
+        if (backend === 'daemon' && deps.facts.hostStopEligible()) {
+          openHostStopChoice(facts, backend, false)
+          return
+        }
         deps.commit({ workStopped: false })
         return
+      }
       case 'show-daemon-choice':
         openChoice('daemon-busy', facts, backend)
         return

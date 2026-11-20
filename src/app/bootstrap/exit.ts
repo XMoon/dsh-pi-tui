@@ -46,11 +46,23 @@ export function formatDaemonDetachHint(facts: {
    * Direct) backend on the next launch instead of reconnecting to this daemon.
    */
   readonly backendOverride?: boolean
+  /**
+   * M6 UX PR2: the outcome of the ONE explicit whole-Host stop. `confirmed`
+   * replaces the ordinary "not stopped" line; `unconfirmed` keeps that line and
+   * adds the truthful refusal. It is NEVER folded into `workStopped` (which
+   * only ever proves one Session Turn).
+   */
+  readonly hostStop?: { readonly confirmed: boolean; readonly detail?: string }
 }): string {
   const profile = shellQuote(facts.profile)
   const lines = [
     'Disconnected from dsh-pi-tui (daemon client).',
-    'The daemon Host was not stopped by this action.',
+    ...(facts.hostStop?.confirmed === true
+      ? ['Daemon Host stopped for this Profile.']
+      : ['The daemon Host was not stopped by this action.']),
+    ...(facts.hostStop?.confirmed === false && facts.hostStop.detail !== undefined
+      ? [`Daemon Host stop was not confirmed: ${facts.hostStop.detail}`]
+      : []),
     ...(facts.workStopped ? ['Current work: stopped.'] : []),
   ]
   const sessionId = facts.sessionId.trim()
@@ -131,6 +143,15 @@ export interface ExitControllerDeps {
   resumeHint(): string | undefined
   /** Process exit (the launcher's `appExit`). */
   exit(code: number): void
+  /**
+   * M6 UX PR2: the ONE explicit whole-Host stop, run ONLY when the exit
+   * carries the confirmed `hostStopRequested` verdict. It runs AFTER the
+   * terminal restore and BEFORE the hint/`appExit`, exactly once, and it owns
+   * the admin lifetime independently of the surface: the caller supplies the
+   * profile-bound control plane. The result is the existing control plane's
+   * own result (code 0 = proven stopped; 3/4/5 = the stable refusal classes).
+   */
+  adminStop?: () => Promise<{ readonly code: number; readonly stdout: string; readonly stderr: string }>
 }
 
 /** Best-effort diagnostics write: a throwing diag can never break the
@@ -158,11 +179,16 @@ function safeDiag(diag: ExitDiagLike, level: 'info' | 'error', message: string, 
  * @param deps - the injectable surface.
  * @returns `requestExit()` — safe to call from any entry, any number of times.
  */
-export function createExitController(deps: ExitControllerDeps): { requestExit(): void } {
+export function createExitController(deps: ExitControllerDeps): {
+  requestExit(options?: { readonly hostStopRequested?: boolean }): void
+} {
   let started = false
-  const requestExit = (): void => {
+  const requestExit = (options?: { readonly hostStopRequested?: boolean }): void => {
     if (started) return
     started = true
+    // The ONE explicit whole-Host stop verdict, captured at the latch: a later
+    // request can never add or revoke it, and the admin stop runs at most once.
+    const hostStopRequested = options?.hostStopRequested === true
     void (async () => { // allowlist: exit lifecycle root — see AGENTS.md
       // Terminal policy: each step is individually protected so a throw in
       // one can never skip a later step; cleanup and exit are guaranteed
@@ -186,6 +212,23 @@ export function createExitController(deps: ExitControllerDeps): { requestExit():
       } catch (preparationError) {
         safeDiag(deps.diag, 'error', 'retirement preparation failed', { error: safeErrorMessage(preparationError) })
       }
+      // M6 UX PR2: the ONE explicit whole-Host stop, ONLY for a confirmed
+      // verdict. It runs after the terminal is restored and before the hint,
+      // so the summary is truthful and the exit code reflects the control
+      // plane's own result. An unexpected throw is the manager/OS failure
+      // class (4): the Client still exits, never claiming success.
+      let hostStop: { readonly code: number; readonly detail?: string } | undefined
+      if (hostStopRequested && deps.adminStop !== undefined) {
+        try {
+          const result = await deps.adminStop()
+          hostStop = result.code === 0
+            ? { code: 0 }
+            : { code: result.code, detail: adminStopDetail(result) }
+        } catch (adminError) {
+          safeDiag(deps.diag, 'error', 'daemon host stop failed', { error: safeErrorMessage(adminError) })
+          hostStop = { code: 4, detail: 'the management call failed before the control plane reported a result' }
+        }
+      }
       // pi parity: after the terminal restores, print how to re-enter the
       // session (skipped when the deferred start never made one).
       try {
@@ -195,11 +238,21 @@ export function createExitController(deps: ExitControllerDeps): { requestExit():
         // A throwing hint cannot skip the exit.
       }
       try {
-        deps.exit(0)
+        deps.exit(hostStop?.code ?? 0)
       } catch {
         // The last step; there is no lower sink.
       }
     })()
   }
   return { requestExit }
+}
+
+/**
+ * The safe one-line refusal summary for a failed whole-Host stop: the control
+ * plane already sanitizes its stderr (no argv, cookie, private path or secret),
+ * so its first line is the stable reason the terminal may show.
+ */
+function adminStopDetail(result: { readonly stderr: string }): string {
+  const line = result.stderr.split('\n').map(part => part.trim()).find(part => part !== '')
+  return line === undefined || line === '' ? 'the stop could not be confirmed' : line
 }

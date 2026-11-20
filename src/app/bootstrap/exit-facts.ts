@@ -53,6 +53,12 @@ export interface ExitIntentFactSources {
   remote?: ExitIntentRemoteFacts
   /** Direct only: the attached Agent's official running/idle status. */
   directAgentRunning?(): boolean | undefined
+  /**
+   * M6 UX PR2: whether THIS Client may ask, at exit, about stopping the old
+   * Profile Host. Reads LIVE facts on every call; absent means the composition
+   * cannot prove the conversion intent (the exit then never asks).
+   */
+  hostStopEligible?(): boolean
 }
 
 /**
@@ -137,5 +143,6 @@ export function createExitIntentFacts(sources: ExitIntentFactSources): ExitInten
       if (facts === undefined) return false
       return facts.isTransportTokenCurrent(scope.sessionId ?? SESSIONLESS_TRANSPORT_SENTINEL, transportToken)
     },
+    hostStopEligible: sources.hostStopEligible ?? (() => false),
   }
 }

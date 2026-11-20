@@ -300,7 +300,23 @@ export interface SettingsWorkspaceCommitRequest {
 export interface SettingsWorkspaceCommitOutcome {
   readonly outcome: 'verified' | 'not-saved' | 'unverified' | 'indeterminate'
   readonly reason?: string
-
+  /**
+   * M6 UX PR2: the ONE verified-transition follow-up the command layer decided
+   * this Client may offer in the SAME lease. It is a pure presentation hand-off:
+   * the command layer already proved the verified write AND the local install
+   * capability, and the panel only paints the transient choice. Absent on every
+   * non-`verified` outcome and on every other field.
+   */
+  readonly followUp?: {
+    readonly kind: 'daemon-service-install'
+    /**
+     * Whether this composition can actually offer the install action: a local
+     * Linux/macOS platform AND a proven official Profile identity. `false`
+     * keeps the explanatory block and the truthful refusal line, but never
+     * paints an actable install control.
+     */
+    readonly installable: boolean
+  }
 }
 
 /** The row's commit status as the Detail pane paints it: the status WORD, its
@@ -478,6 +494,16 @@ export interface SettingsWorkspacePanelIntents {
   readonly onCommit?: (
     request: SettingsWorkspaceCommitRequest,
     settle: (outcome: SettingsWorkspaceCommitOutcome) => void,
+  ) => void
+  /**
+   * M6 UX PR2: the ONE explicit user-confirmed Profile service install, offered
+   * only after a verified `direct → daemon` transition in the SAME lease. The
+   * command layer owns the install task and calls `settle` exactly once with the
+   * control plane's own result; the panel never retries and never invents an
+   * outcome. Absent when the composition cannot prove the local capability.
+   */
+  readonly onBackendServiceInstall?: (
+    settle: (result: { readonly ok: boolean; readonly detail?: string }) => void,
   ) => void
 }
 
@@ -711,7 +737,7 @@ interface PaneLayout {
 }
 
 interface HitTarget {
-  readonly kind: 'category' | 'row' | 'pane' | 'change' | 'retry' | 'manage' | 'option' | 'confirm' | 'cancel' | 'about-action' | 'bar-escape' | 'bar-open' | 'bar-span'
+  readonly kind: 'category' | 'row' | 'pane' | 'change' | 'retry' | 'manage' | 'option' | 'confirm' | 'cancel' | 'about-action' | 'bar-escape' | 'bar-open' | 'bar-span' | 'service-install' | 'service-dismiss'
   /** The stable identity: a category id, a row id, the pane name, a candidate
    *  value or the button verb. */
   readonly id: string
@@ -749,7 +775,7 @@ const BAR_OPEN_HINTS: readonly string[] = ['Right open', 'Enter open', 'Enter/Ri
 /** One painted Detail action. A button publishes a hit target ONLY when the
  *  frame really painted it inside the pane width. */
 interface DetailButton {
-  readonly verb: 'change' | 'retry' | 'manage' | 'confirm' | 'cancel'
+  readonly verb: 'change' | 'retry' | 'manage' | 'confirm' | 'cancel' | 'service-install' | 'service-dismiss'
   readonly text: string
   /** The identity the painted button acts on: the candidate it commits, or the
    *  selected row it belongs to. It is the painted hit target's id. */
@@ -1184,6 +1210,25 @@ export class SettingsWorkspacePanel implements Component {
   /** The per-open commit identity: a settlement that does not match the live
    *  request is refused (a superseded or post-close result can never repaint). */
   private editRequestId = 0
+  /**
+   * M6 UX PR2: the ONE transient post-verified service-install follow-up. It
+   * exists only inside the SAME lease that earned it (the verified
+   * `direct → daemon` commit request identity), and it is withdrawn by Esc,
+   * `Not now`, a row change, a new choice, or this workspace's teardown —
+   * never by undoing the already-verified Profile save.
+   */
+  private serviceInstall: {
+    /** The verified commit request this follow-up belongs to. */
+    readonly requestId: number
+    /** The follow-up's own installable fact from the command layer. */
+    readonly installable: boolean
+    phase: 'asking' | 'installing'
+    focus: 'not-now' | 'install'
+  } | undefined
+  /** The LAST settled install result, kept for ONE round of the same follow-up. */
+  private serviceInstallResult: { readonly ok: boolean; readonly detail: string } | undefined
+  /** Whether THIS frame really painted the follow-up's actable actions. */
+  private paintedServiceInstallActions = false
   /** The lazily built embedded Plugin Manager page (ONE instance per open,
    *  kept across Categories/content focus changes until the category really
    *  changes or this workspace is disposed). */
@@ -1509,6 +1554,7 @@ export class SettingsWorkspacePanel implements Component {
    *  write is NOT cancelled: its owner keeps settling it, it simply has no row
    *  left to paint on, and its late settlement finds no matching request id. */
   private discardTransientEdit(): void {
+    this.clearServiceInstall()
     if (this.editPhase.kind === 'browsing') return
     this.editPhase = { kind: 'browsing' }
     this.choiceOffset = 0
@@ -1798,6 +1844,7 @@ export class SettingsWorkspacePanel implements Component {
     this.paintedEnterConfirm = false
     this.paintedChoiceNavigation = false
     this.paintedChoiceFactScroll = false
+    this.paintedServiceInstallActions = false
     // C2-R5: the typed deeplink is consumed on THIS first real frame, BEFORE the
     // direct/legacy projection is chosen. A stale/degraded snapshot that no
     // longer carries the row (or selects a direct category) therefore fails and
@@ -3330,6 +3377,15 @@ export class SettingsWorkspacePanel implements Component {
         buttons.push({ verb: 'manage', text: special.label, id: row.id })
       }
     }
+    // M6 UX PR2: the follow-up's own pointer route. It exists ONLY while the
+    // follow-up is asking AND the command layer proved the local install
+    // capability; the installing phase paints no actable button (no second
+    // submission), and `Not now` is the safe dismissal.
+    if (this.serviceInstall !== undefined && row.id === 'startup-backend'
+      && this.serviceInstall.installable && this.serviceInstall.phase === 'asking') {
+      buttons.push({ verb: 'service-install', text: 'Install service', id: row.id })
+      buttons.push({ verb: 'service-dismiss', text: 'Not now', id: row.id })
+    }
     return buttons
   }
 
@@ -3507,6 +3563,45 @@ export class SettingsWorkspacePanel implements Component {
     field('Freshness', freshnessText(row, this.snapshot.configReadiness))
     field('Description', row.description)
     if (row.freshness === 'read-error' && this.snapshot.readIssue !== undefined) field('Issue', this.snapshot.readIssue)
+    // M6 UX PR2: the ONE transient service-install follow-up, painted inside
+    // the SAME Detail lease. The explanation and the truthfulness line are the
+    // frozen copy; the actable candidate rows exist ONLY while the command
+    // layer proved the local install capability AND the follow-up is still in
+    // its asking phase. Installing locks the seat (no second submission), and
+    // a settled round keeps its one result line until it is superseded.
+    if (this.serviceInstall !== undefined && row.id === 'startup-backend') {
+      lines.push('')
+      lines.push(color.textStrong('Optional OS supervision'))
+      lines.push(color.textDim('Daemon works without installing a service.'))
+      lines.push(color.textDim("Install creates this Profile's user service only; it does not start,"))
+      lines.push(color.textDim('enable, restart, stop or migrate any running Host.'))
+      if (this.serviceInstall.phase === 'installing') {
+        lines.push(fit(color.textDim('Status'), labelWidth) + color.textDim('Installing service…'))
+      } else if (this.serviceInstallResult !== undefined) {
+        const paint = this.serviceInstallResult.ok ? color.success : color.error
+        lines.push(fit(color.textDim('Status'), labelWidth) + paint(this.serviceInstallResult.ok
+          ? 'Service installed (or already owned) · Verified'
+          : `Install could not be verified · ${this.serviceInstallResult.detail}`))
+      } else if (!this.serviceInstall.installable) {
+        lines.push(fit(color.textDim('Status'), labelWidth) + color.textDim('Daemon service install is available on local Linux/macOS only'))
+      } else {
+        lines.push(fit(color.textDim('Status'), labelWidth) + color.textDim('Not installed by this action'))
+      }
+      if (this.serviceInstall.installable && this.serviceInstall.phase === 'asking') {
+        lines.push('')
+        for (const action of ['not-now', 'install'] as const) {
+          const label = action === 'not-now' ? 'Not now' : 'Install service'
+          if (this.serviceInstall.focus === action) {
+            lines.push(`${color.primary('> ')}${color.textStrong(label)}`)
+          } else {
+            lines.push(`  ${color.text(label)}`)
+          }
+        }
+        // THIS frame really painted both actable actions: only now may the
+        // keyboard commit one (the pointer grant is the button row's own).
+        this.paintedServiceInstallActions = true
+      }
+    }
     return lines
   }
 
@@ -4543,6 +4638,47 @@ export class SettingsWorkspacePanel implements Component {
       this.handleContentInput(data)
       return
     }
+    // M6 UX PR2: the follow-up owns the SAME back/focus/commit keys the choice
+    // owns, gated by the painted grant: only actions THIS frame really painted
+    // can act. Esc and the back key withdraw the follow-up (zero admin IO, the
+    // verified save stays); the focus keys move between the two actions; Enter
+    // commits the focused one. A very small frame that dropped the candidate
+    // rows refuses every action (the painted grant is false).
+    if (this.serviceInstall !== undefined && this.focus === 'detail') {
+      const asking = this.serviceInstall.phase === 'asking' && this.serviceInstall.installable
+      const painted = asking
+        && this.paintedServiceInstallActions
+        && this.lastRenderWidth === this.intents.columns()
+        && this.lastRenderRows === this.intents.rows()
+      // Esc / the back key withdraw the follow-up in EVERY phase: zero admin IO
+      // and the verified save stays. A task already dispatched keeps its own
+      // process owner; only the transient view goes.
+      if (matchesKey(data, 'escape') || matchesKey(data, 'left') || matchesKey(data, 'backspace')) {
+        this.dismissServiceInstall()
+        return
+      }
+      // The installing seat locks the commit/focus keys: no second submission
+      // and no focus churn while the owned task runs.
+      if (this.serviceInstall.phase === 'installing'
+        && (matchesKey(data, 'enter') || matchesKey(data, 'tab') || matchesKey(data, 'shift+tab')
+          || matchesKey(data, 'up') || matchesKey(data, 'down'))) {
+        return
+      }
+      if (asking && (matchesKey(data, 'up') || matchesKey(data, 'down') || matchesKey(data, 'tab') || matchesKey(data, 'shift+tab'))) {
+        if (painted) this.serviceInstall.focus = this.serviceInstall.focus === 'not-now' ? 'install' : 'not-now'
+        this.intents.requestRender()
+        return
+      }
+      if (asking && matchesKey(data, 'enter')) {
+        if (painted) {
+          if (this.serviceInstall.focus === 'install') this.beginServiceInstall()
+          else this.dismissServiceInstall()
+        }
+        return
+      }
+      // Any other key keeps the Detail's own semantics (paging/refresh): the
+      // follow-up is a block inside the SAME scrolling pane, never a modal.
+    }
     if (matchesKey(data, 'escape')) return this.goBack()
     // §4.2 admits only the REAL Esc while the destination frame is stale (Backspace
     // is not a portable back key), so it must not act in that window.
@@ -4726,6 +4862,7 @@ export class SettingsWorkspacePanel implements Component {
       this.choiceOffset = 0
       this.editRequestId += 1
     }
+    this.clearServiceInstall()
     this.bumpRevision()
     this.intents.requestRender()
   }
@@ -5120,6 +5257,7 @@ export class SettingsWorkspacePanel implements Component {
    *  resize-driven replacement). Pending/settled phases survive: their write is
    *  already owned by the app. */
   private resetChoice(): void {
+    this.clearServiceInstall()
     if (this.editPhase.kind !== 'choosing') return
     this.editPhase = { kind: 'browsing' }
     this.choiceOffset = 0
@@ -5194,6 +5332,9 @@ export class SettingsWorkspacePanel implements Component {
     this.lastChoiceViewport = -1
     this.lastChoiceWidth = -1
     this.confirmationWarningRead = false
+    // A new choice withdraws the follow-up (a row change): the verified save
+    // stays, only the transient follow-up block goes.
+    this.clearServiceInstall()
     this.bumpRevision()
     this.intents.requestRender()
   }
@@ -5360,7 +5501,57 @@ export class SettingsWorkspacePanel implements Component {
     }
     this.editRequestId += 1
     this.choiceOffset = 0
+    // M6 UX PR2: the ONE verified-transition follow-up. It is offered exactly
+    // once per verified `direct → daemon` commit, in the SAME lease; a new
+    // follow-up supersedes any previous round's result line. Every other
+    // outcome/field leaves an existing follow-up alone.
+    if (outcome.outcome === 'verified' && field === 'startup-backend'
+      && outcome.followUp?.kind === 'daemon-service-install') {
+      this.serviceInstall = {
+        requestId: this.editRequestId,
+        installable: outcome.followUp.installable,
+        phase: 'asking',
+        focus: 'not-now',
+      }
+      this.serviceInstallResult = undefined
+    }
     this.refresh()
+  }
+
+  /** The ONE explicit install confirmation of the follow-up. The seat locks
+   *  while the command layer's owned task runs; a late or superseded settlement
+   *  can never repaint a newer follow-up. */
+  private beginServiceInstall(): void {
+    const follow = this.serviceInstall
+    if (follow === undefined || follow.phase !== 'asking' || !follow.installable) return
+    if (this.intents.onBackendServiceInstall === undefined) return
+    const requestId = follow.requestId
+    follow.phase = 'installing'
+    this.intents.requestRender()
+    this.intents.onBackendServiceInstall(result => {
+      if (this.disposed) return
+      const current = this.serviceInstall
+      if (current === undefined || current.requestId !== requestId) return
+      current.phase = 'asking'
+      this.serviceInstallResult = { ok: result.ok, detail: result.detail ?? '' }
+      this.refresh()
+    })
+  }
+
+  /** Withdraw the follow-up (Esc / `Not now` / row change): zero admin IO and
+   *  zero change to the already-verified Profile save. */
+  private dismissServiceInstall(): void {
+    if (this.serviceInstall === undefined) return
+    this.clearServiceInstall()
+    this.intents.requestRender()
+  }
+
+  /** The field-only withdrawal shared by every retirement path (row change,
+   *  new choice, extension-group switch, teardown): no repaint of its own. */
+  private clearServiceInstall(): void {
+    this.serviceInstall = undefined
+    this.serviceInstallResult = undefined
+    this.paintedServiceInstallActions = false
   }
 
   // ── mouse ────────────────────────────────────────────────────────────────
@@ -5955,6 +6146,21 @@ export class SettingsWorkspacePanel implements Component {
       case 'cancel':
         this.leaveDetailTo('rows')
         return
+      case 'service-install':
+        // The painted button IS the single explicit confirmation. The id must
+        // still be the row this frame selected (a newer row has already
+        // withdrawn the follow-up).
+        if (this.serviceInstall !== undefined && target.id === 'startup-backend') {
+          this.takeColumnFocus('detail')
+          this.beginServiceInstall()
+        }
+        return
+      case 'service-dismiss':
+        if (this.serviceInstall !== undefined && target.id === 'startup-backend') {
+          this.takeColumnFocus('detail')
+          this.dismissServiceInstall()
+        }
+        return
       case 'pane': {
         if (!isWorkspacePage(target.id)) return
         const page = target.id
@@ -6126,6 +6332,10 @@ export class SettingsWorkspacePanel implements Component {
     // teardown finds no live request and can never repaint a newer surface.
     this.editPhase = { kind: 'browsing' }
     this.editRequestId += 1
+    // The follow-up and its install task settlement die with the panel: a
+    // late result can never repaint a newer surface, and the already-dispatched
+    // install keeps its own process owner.
+    this.clearServiceInstall()
     this.pressedGesture = undefined
     this.paintedTargets = []
     this.paintedPanes = {}

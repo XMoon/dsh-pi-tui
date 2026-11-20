@@ -19,7 +19,7 @@
  */
 
 /** The exit family and proven state one choice presents. */
-export type ExitChoiceKind = 'daemon-busy' | 'direct-busy' | 'daemon-unknown' | 'direct-unknown'
+export type ExitChoiceKind = 'daemon-busy' | 'direct-busy' | 'daemon-unknown' | 'direct-unknown' | 'daemon-host-stop'
 
 /**
  * One actable option of the choice.
@@ -41,6 +41,8 @@ export type ExitChoiceOption =
   | 'disconnect-without-stop'
   | 'stop-and-exit'
   | 'exit-local'
+  | 'leave-host-and-exit'
+  | 'stop-host-and-exit'
 
 /** One painted option: the full label and the compact narrow-width label. */
 export interface ExitChoiceOptionView {
@@ -98,10 +100,13 @@ const OPTION_LABELS: Readonly<Record<ExitChoiceOption, { label: string; shortLab
   'disconnect-without-stop': { label: 'Disconnect without stopping', shortLabel: 'Disconnect' },
   'stop-and-exit': { label: 'Stop current work and exit', shortLabel: 'Stop & exit' },
   'exit-local': { label: 'Exit and retire local Host', shortLabel: 'Exit & retire' },
+  'leave-host-and-exit': { label: 'Leave daemon Host running and exit', shortLabel: 'Leave host & exit' },
+  'stop-host-and-exit': { label: 'Stop daemon Host and exit', shortLabel: 'Stop host & exit' },
 }
 
 /** Fixed title per family. */
 export function exitChoiceTitle(kind: ExitChoiceKind): string {
+  if (kind === 'daemon-host-stop') return 'Exit this daemon Client · Backend preference is now Direct'
   return kind === 'daemon-busy' || kind === 'daemon-unknown'
     ? 'Disconnect from dsh-pi-tui'
     : 'Exit dsh-pi-tui'
@@ -116,6 +121,9 @@ function baseOptions(kind: ExitChoiceKind): readonly ExitChoiceOption[] {
     case 'direct-busy': return ['stop-and-exit', 'stay']
     case 'daemon-unknown': return ['disconnect-without-stop', 'stay']
     case 'direct-unknown': return ['exit-local', 'stay']
+    // The whole-Host stop confirm: the SAFE detach is first and default; the
+    // destructive Host stop is a separate explicit action; Stay is last.
+    case 'daemon-host-stop': return ['leave-host-and-exit', 'stop-host-and-exit', 'stay']
   }
 }
 
@@ -126,6 +134,8 @@ function baseFocus(kind: ExitChoiceKind): ExitChoiceOption {
     case 'direct-busy': return 'stay'
     case 'daemon-unknown': return 'disconnect-without-stop'
     case 'direct-unknown': return 'stay'
+    // Never default to the destructive Host stop.
+    case 'daemon-host-stop': return 'leave-host-and-exit'
   }
 }
 
@@ -140,6 +150,13 @@ function body(kind: ExitChoiceKind): readonly string[] {
     case 'direct-busy': return ['The current session is still working.', 'Exiting stops the in-process local Host.']
     case 'daemon-unknown': return ["The current session's running state cannot be verified."]
     case 'direct-unknown': return ["The current session's activity cannot be verified.", 'Exiting retires the in-process local Host.']
+    // The whole-Host stop confirm: the frozen risk copy, naming EVERY kind of
+    // work a Host stop interrupts (never just "the current turn").
+    case 'daemon-host-stop': return [
+      'This TUI is still connected to the old daemon Host.',
+      'Stopping the Profile Host interrupts work for ALL connected Clients, Sessions, Jobs and pending interactions. This is not just a Turn cancel.',
+      'The next launch uses the saved Backend only when not overridden by env.',
+    ]
   }
 }
 
@@ -161,7 +178,9 @@ export function exitChoiceAsking(
       ? 'A user shell is running; leaving aborts it.'
       : kind === 'daemon-busy' || kind === 'direct-busy'
         ? 'Session is working.'
-        : 'State cannot be verified.',
+        : kind === 'daemon-host-stop'
+          ? 'Stopping the Host interrupts ALL Clients, Sessions and Jobs.'
+          : 'State cannot be verified.',
     shellRunning,
     status: undefined,
     options: viewOptions(baseOptions(kind)),
@@ -169,6 +188,23 @@ export function exitChoiceAsking(
     select,
     dismiss,
   }
+}
+
+/**
+ * The daemon whole-Host stop confirm (M6 UX PR2). It is opened ONLY after the
+ * PR1 exit decision already committed to leaving AND this Client earned the
+ * transient daemon→direct conversion intent; it never stops anything on open.
+ * `stay` withdraws the whole exit (the intent stays for the next exit),
+ * `leave-host-and-exit` is the safe detach, and `stop-host-and-exit` is the
+ * ONE explicit Profile-management authorization the final exit root executes
+ * after the terminal is restored.
+ */
+export function exitChoiceHostStop(
+  select: (option: ExitChoiceOption) => void,
+  dismiss: () => void,
+  shellRunning = false,
+): ExitChoiceModel {
+  return exitChoiceAsking('daemon-host-stop', select, dismiss, shellRunning)
 }
 
 /**
