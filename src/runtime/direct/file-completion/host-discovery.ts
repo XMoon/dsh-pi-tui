@@ -136,6 +136,7 @@ function runHostFinder(
     '--type', 'd',
     '--type', 'l',
     '--hidden',
+    '--no-ignore',
     '--exclude', '.git',
     '--exclude', '.git/*',
     '--exclude', '.git/**',
