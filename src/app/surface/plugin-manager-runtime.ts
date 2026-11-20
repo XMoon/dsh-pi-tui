@@ -100,6 +100,8 @@ export interface PluginManagerRuntimeOptions {
   readonly service: () => SurfaceExtensionService | undefined
   /** The concrete terminal page factory, selected by the composition zone. */
   readonly createPanel: PluginManagerPanelFactory
+  /** Read-only inventory-commit observer owned by the composition zone. */
+  readonly onInventoryCommitted?: (snapshot: import('../../runtime/plugin-manager-port.ts').PluginManagerSnapshot) => void
 }
 
 /** The surface Plugin Manager owner `createSurfaceRuntime()` consumes. */
@@ -127,6 +129,9 @@ export function createPluginManagerRuntime(options: PluginManagerRuntimeOptions)
         notify: (message, kind) => options.mounted().notify(message, kind),
         isOpen: () => hosts.isOpen(),
         diag: deps.diag,
+        ...(options.onInventoryCommitted === undefined
+          ? {}
+          : { onInventoryCommitted: options.onInventoryCommitted }),
       }, {
         observations: () => {
           const extensionService = options.service()

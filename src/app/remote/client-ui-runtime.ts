@@ -12,29 +12,27 @@
  * 3. @xmoon76/dsh-pi-tui/builtins plugin module (first-party contributions)
  * ```
  *
- * The extension service resolved from THAT Context is the Remote runner's UI
- * extension authority (`RemoteApplicationOverride.extensionService`); the
- * ordinary Host-context `piTuiExtensions` is never consulted on the Remote
- * branch. No second Client Context is created and no callback crosses any
- * wire: the same TUI-local modules (`src/extensions.ts` / `src/builtins.ts`)
- * that the Direct profile composition mounts on the ordinary Host Context
- * are mounted here as Cordis plugin fibers, so inject/caller-fiber lifecycle
- * semantics stay real.
- *
- * Disposal is explicit, idempotent and reverse (builtins -> extension host
- * -> startup facts); it never disposes the supplied Client Context itself —
- * the Remote application runtime disposes this subtree BEFORE the official
- * Client core.
+ * After the application runtime exists, the same owner can activate external
+ * PiTui `./tui` packages through the ONE {@link ClientExtensionMountOwner}
+ * over this Client's EXISTING official Loader/package table. External entries
+ * are unloaded FIRST (reverse order, each awaited), then builtins, extension
+ * host and startup facts; the supplied Client Context is never disposed here.
  *
  * @module app/remote/client-ui-runtime
  */
 
 import type { Context, Fiber } from '@deepseek-ai/cordis'
+import type { Loader } from '@deepseek-ai/cordis-plugin-loader'
 import * as extensionHostPlugin from '../../extensions.ts'
 import * as builtinsPlugin from '../../builtins.ts'
 import { PI_TUI_EXTENSIONS_SERVICE, type PiTuiExtensionService } from '../../extensions.ts'
 import { TUI_STARTUP_SERVICE } from '../../startup.ts'
 import type { ClientUiStartupFacts } from '../application-runtime.ts'
+import type { ConfigPort } from '../../runtime/config-port.ts'
+import type { PluginManagerPort, PluginManagerSnapshot } from '../../runtime/plugin-manager-port.ts'
+import type { Diag } from '../../runtime/process/diagnostics.ts'
+import { createClientExtensionMountOwner, type ClientExtensionMountOwner, type ClientExtensionObservation } from '../client-extensions/mount-owner.ts'
+import type { CurrentClientPackageLookup } from '../client-extensions/discovery.ts'
 import { mergeCause } from './dispose-cause.ts'
 
 /** The composed Client UI subtree. Not exported from the package root. */
@@ -42,15 +40,57 @@ export interface RemoteClientUiRuntime {
   /** The ONE Client-local extension service (identity-equal to the Client
    * Context's `piTuiExtensions` value). */
   readonly extensionService: PiTuiExtensionService
-  /** Dispose exactly the three subtree fibers (reverse order), idempotent.
-   * Never disposes the Client Context itself. */
+  /**
+   * Activate external PiTui `./tui` packages for THIS Client revision: read
+   * ONE current official Host inventory snapshot and reconcile the owner.
+   * Must run after the application runtime (and its PluginManager/Config
+   * ports) exists, and before the surface's first attach.
+   */
+  activateClientExtensions(deps: RemoteClientExtensionDeps): Promise<void>
+  /**
+   * Reconcile against ONE already-committed official Host inventory snapshot
+   * (the Plugin Manager's explicit refresh / invalidation read commit).
+   */
+  reconcileClientExtensions(snapshot: PluginManagerSnapshot): Promise<void>
+  /**
+   * Read-only Client-local facts for tests and the future status projection.
+   * Never a second Host inventory and never a public package export.
+   */
+  clientExtensionObservation(): readonly ClientExtensionObservation[]
+  /** Dispose external entries first, then the three subtree fibers (reverse
+   * order), idempotent. Never disposes the Client Context itself. */
   dispose(): Promise<void>
+}
+
+/** The narrow application ports external package activation needs. */
+export interface RemoteClientExtensionDeps {
+  readonly pluginManager: PluginManagerPort
+  readonly config: ConfigPort
+}
+
+/** The Client-local loader/package facts the process composition supplies. */
+export interface RemoteClientExtensionSource {
+  /** The SAME official Loader already installed on the Client Context. */
+  readonly loader: Loader
+  /** The SAME official `PluginPackages` service of the Client process. */
+  readonly pluginPackages: CurrentClientPackageLookup
+  /** A `file:` URL inside this Client's install for package resolution. */
+  readonly parentURL: string
+  /** The Client revision/lifecycle signal. */
+  readonly signal?: AbortSignal
+  readonly diag?: Diag
 }
 
 export interface RemoteClientUiRuntimeOptions {
   /** The EXISTING official Client Context (`wire.client.context`). */
   readonly context: Context
   readonly startup: ClientUiStartupFacts
+  /**
+   * Split-Client only: the process-owned official Loader and package table.
+   * Absent in qualification/component compositions that mount no external
+   * packages; `activateClientExtensions` is then a no-op.
+   */
+  readonly clientExtensions?: RemoteClientExtensionSource
 }
 
 /** Run one fiber disposal step, collecting its failure (never throwing). */
@@ -89,6 +129,8 @@ export async function createRemoteClientUiRuntime(
   let startupFiber: Fiber | undefined
   let extensionHostFiber: Fiber | undefined
   let builtinsFiber: Fiber | undefined
+  let extensionMountOwner: ClientExtensionMountOwner | undefined
+  let disposed = false
 
   /** Reverse-order unwind of the subtree fibers; per-step error isolation
    * (a failing step never skips the later ones). Returns the collected
@@ -97,6 +139,9 @@ export async function createRemoteClientUiRuntime(
    * unwind (the client-runtime.ts partial-unwind discipline). */
   const unwind = async (): Promise<unknown[]> => {
     const errors: unknown[] = []
+    if (extensionMountOwner !== undefined) {
+      errors.push(...await collectDisposeError(() => extensionMountOwner!.dispose()))
+    }
     for (const fiber of [builtinsFiber, extensionHostFiber, startupFiber]) {
       errors.push(...await collectDisposeError(() => fiber?.dispose()))
     }
@@ -119,9 +164,44 @@ export async function createRemoteClientUiRuntime(
     if (extensionService === undefined) {
       throw new Error('remote client UI runtime: piTuiExtensions service did not mount')
     }
-    let disposed = false
     return {
       extensionService,
+      async activateClientExtensions(deps: RemoteClientExtensionDeps): Promise<void> {
+        if (disposed) throw new Error('remote client UI runtime: activateClientExtensions after dispose')
+        if (options.clientExtensions === undefined) return
+        if (extensionMountOwner !== undefined) {
+          throw new Error('remote client UI runtime: client extensions are already activated')
+        }
+        const owner = createClientExtensionMountOwner({
+          context,
+          loader: options.clientExtensions.loader,
+          pluginPackages: options.clientExtensions.pluginPackages,
+          config: deps.config.extensionConfigs,
+          parentURL: options.clientExtensions.parentURL,
+          ...(options.clientExtensions.signal === undefined ? {} : { signal: options.clientExtensions.signal }),
+          ...(options.clientExtensions.diag === undefined ? {} : { diag: options.clientExtensions.diag }),
+        })
+        extensionMountOwner = owner
+        try {
+          const snapshot = await deps.pluginManager.snapshot()
+          if (disposed) return
+          await owner.reconcile(snapshot)
+        } catch (error) {
+          // A failed inventory read only costs external Client extensions; it
+          // never fails the already-mounted Client surface or the Host install.
+          options.clientExtensions.diag?.warn('remote client UI runtime: client extension inventory read failed', {
+            error: error instanceof Error ? error.message : String(error),
+          })
+        }
+      },
+      async reconcileClientExtensions(snapshot: PluginManagerSnapshot): Promise<void> {
+        if (disposed) return
+        if (extensionMountOwner === undefined) return
+        await extensionMountOwner.reconcile(snapshot)
+      },
+      clientExtensionObservation(): readonly ClientExtensionObservation[] {
+        return extensionMountOwner?.observation() ?? []
+      },
       async dispose(): Promise<void> {
         if (disposed) return
         disposed = true

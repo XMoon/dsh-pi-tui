@@ -204,6 +204,17 @@ export interface LocalClientComposition {
    */
   readonly mountRunner?: (input: LocalClientRunnerMountInput) => Promise<MountedLocalClientRunner>
   /**
+   * Split-Client only: the process-owned official Loader and `PluginPackages`
+   * table plus the `file:` URL of this Client module. The Client UI subtree
+   * uses them to mount external PiTui `./tui` packages on the SAME Context.
+   * Never crossed over the wire and never a second Loader/resolver.
+   */
+  readonly clientExtensions?: {
+    readonly loader: import('@deepseek-ai/cordis-plugin-loader').Loader
+    readonly pluginPackages: import('../client-extensions/discovery.ts').CurrentClientPackageLookup
+    readonly parentURL: string
+  }
+  /**
    * M6 UX PR2: the ONE process-local daemon administration capability built by
    * the real Client entry from its officially verified Profile facts. It is
    * only a value borrowed through this composition: the entry owns it, the
@@ -809,7 +820,19 @@ async function startSurfaceLocalClient(
       ...startupFactsOf(startup, kind === 'initial'),
       ...(sessionIdOverride === undefined ? {} : { sessionId: sessionIdOverride }),
     }
-    revision.ui = await createRemoteClientUiRuntime({ context, startup: revisionStartup })
+    revision.ui = await createRemoteClientUiRuntime({
+      context,
+      startup: revisionStartup,
+      ...(composition.clientExtensions === undefined
+        ? {}
+        : {
+            clientExtensions: {
+              ...composition.clientExtensions,
+              ...(signal === undefined ? {} : { signal }),
+              ...(composition.diag === undefined ? {} : { diag: composition.diag }),
+            },
+          }),
+    })
     composition.onQualification?.({ op: 'startup-stage', stage: 'ui-mounted', revision: revision.id })
     signal?.throwIfAborted()
     // T34 qualification input: hold ONE write between its real serialization
@@ -844,6 +867,29 @@ async function startSurfaceLocalClient(
       ...(promptSerializer === undefined ? {} : { promptSerializer }),
     })
     composition.onQualification?.({ op: 'startup-stage', stage: 'application-ready', revision: revision.id })
+    // The application runtime's official PluginManager/Config ports are live:
+    // activate the external PiTui packages on THIS Client revision before the
+    // runner (and therefore the first physical surface) attaches. A failing
+    // inventory read is logged inside the UI owner and never blocks the
+    // already-composed Client surface.
+    if (composition.clientExtensions !== undefined) {
+      await revision.ui.activateClientExtensions({
+        pluginManager: revision.application.selected.backend.pluginManager,
+        config: revision.application.selected.backend.config,
+      })
+      composition.onQualification?.({ op: 'startup-stage', stage: 'client-extensions-ready', revision: revision.id })
+      // Qualification-only: drive the official PM disable/re-enable path on
+      // the REAL Client revision and record the owner's observations.
+      if (process.env.SPLIT_PROCESS_CLIENT_EXTENSION_LOADER_PROBE === '1') {
+        const { runClientExtensionLoaderProbe } = await import('./client-extension-loader-probe.ts')
+        composition.onQualification?.(await runClientExtensionLoaderProbe({
+          pluginManager: revision.application.selected.backend.pluginManager,
+          ui: revision.ui,
+          pluginPackages: composition.clientExtensions.pluginPackages,
+          parentURL: composition.clientExtensions.parentURL,
+        }))
+      }
+    }
     // Qualification-only: exercise the per-package extension-config port on
     // THIS revision's production application. Production never sets the env.
     if (process.env.SPLIT_PROCESS_CLIENT_EXTENSION_CONFIG_PROBE === '1') {
@@ -867,6 +913,17 @@ async function startSurfaceLocalClient(
       selected: revision.application.selected,
       presentation: revision.application.presentation,
       extensionService: revision.application.extensionService,
+      // Client-local only: the Plugin Manager controller's committed inventory
+      // callback lands on THIS revision's live mount owner. A superseded or
+      // disposed revision is ignored instead of publishing stale state.
+      ...(composition.clientExtensions === undefined
+        ? {}
+        : {
+            reconcilePluginInventory: async snapshot => {
+              if (currentRevision !== revision) return
+              await revision.ui?.reconcileClientExtensions(snapshot)
+            },
+          }),
       // The SAME root delivery owner the revision's Remote interaction adapter
       // attaches its two providers to. The runner binds the application's ONE
       // committed-Session authority to it and the modal-safe navigation entry
