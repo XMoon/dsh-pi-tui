@@ -77,12 +77,16 @@ export function createExitIntentFacts(sources: ExitIntentFactSources): ExitInten
     const backend = sources.backend()
     // The policy backend name is `daemon`; the transport is Remote-backed.
     const remote = backend === 'daemon'
+    // The Client-owned user shell is a DISTINCT work owner: it is not the
+    // Session Agent Turn, and the Agent idle waiter cannot prove it finished.
+    const shellRunning = sources.shellRunning()
     const transportToken = remote
       ? sources.remote?.captureTransportToken(live?.sessionId ?? SESSIONLESS_TRANSPORT_SENTINEL)
       : undefined
     const base = {
       scope,
       live,
+      shellRunning,
       ...(remote ? { transportToken } : {}),
     }
     // A pending navigation is NOT part of the current Session's activity. The
@@ -99,7 +103,7 @@ export function createExitIntentFacts(sources: ExitIntentFactSources): ExitInten
         activity: sources.admissionPending() ? 'working' as ExitSessionActivity : 'idle' as ExitSessionActivity,
       }
     }
-    if (sources.admissionPending() || sources.shellRunning()) {
+    if (sources.admissionPending() || shellRunning) {
       return { ...base, activity: 'working' as ExitSessionActivity }
     }
     if (remote) {

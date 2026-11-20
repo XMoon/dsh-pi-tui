@@ -948,6 +948,8 @@ interface ExitIntentHarness {
     activity: ExitSessionActivity
     /** The live projection; undefined models a sessionless surface. */
     live: LiveSessionScope | undefined
+    /** A Client-owned user shell is running. */
+    shell: boolean
     scopeCurrent: boolean
     mounted: boolean
     /** A reentrant hook run from the presenter's close (focus restoration). */
@@ -988,6 +990,7 @@ function exitIntentHarness(options: {
     backend: options.backend ?? 'daemon',
     activity: options.activity ?? 'idle',
     live: options.sessionless === true ? undefined : (options.live ?? exitScope()),
+    shell: false,
     scopeCurrent: options.scopeCurrent ?? true,
     mounted: options.mounted ?? true,
     onClose: undefined,
@@ -1028,6 +1031,7 @@ function exitIntentHarness(options: {
         scope: state.live ?? sessionlessScope(),
         live: state.live,
         activity: state.activity,
+        shellRunning: state.shell,
       }),
       isScopeCurrent: () => state.scopeCurrent,
     },
@@ -1277,21 +1281,42 @@ test('daemon detach hint: sessionless omits Resume; a verified stop adds the one
 
 test('classifyExitIntent: the frozen decision matrix, unknown never idle', () => {
   const decide = classifyExitIntent
-  assert.equal(decide({ currentBackend: 'direct', sessionPresence: 'live', activity: 'idle', entry: 'slash' }), 'direct-exit')
-  assert.equal(decide({ currentBackend: 'daemon', sessionPresence: 'live', activity: 'idle', entry: 'slash' }), 'client-detach')
-  assert.equal(decide({ currentBackend: 'direct', sessionPresence: 'none', activity: 'idle', entry: 'plain' }), 'direct-exit')
-  assert.equal(decide({ currentBackend: 'daemon', sessionPresence: 'none', activity: 'idle', entry: 'plain' }), 'client-detach')
-  assert.equal(decide({ currentBackend: 'direct', sessionPresence: 'live', activity: 'working', entry: 'keyboard' }), 'show-direct-choice')
-  assert.equal(decide({ currentBackend: 'daemon', sessionPresence: 'live', activity: 'working', entry: 'keyboard' }), 'show-daemon-choice')
-  assert.equal(decide({ currentBackend: 'direct', sessionPresence: 'live', activity: 'unknown', entry: 'slash' }), 'show-unknown-choice')
-  assert.equal(decide({ currentBackend: 'daemon', sessionPresence: 'live', activity: 'unknown', entry: 'slash' }), 'show-unknown-choice')
+  const base = { shellRunning: false } as const
+  assert.equal(decide({ ...base, currentBackend: 'direct', sessionPresence: 'live', activity: 'idle', entry: 'slash' }), 'direct-exit')
+  assert.equal(decide({ ...base, currentBackend: 'daemon', sessionPresence: 'live', activity: 'idle', entry: 'slash' }), 'client-detach')
+  assert.equal(decide({ ...base, currentBackend: 'direct', sessionPresence: 'none', activity: 'idle', entry: 'plain' }), 'direct-exit')
+  assert.equal(decide({ ...base, currentBackend: 'daemon', sessionPresence: 'none', activity: 'idle', entry: 'plain' }), 'client-detach')
+  assert.equal(decide({ ...base, currentBackend: 'direct', sessionPresence: 'live', activity: 'working', entry: 'keyboard' }), 'show-direct-choice')
+  assert.equal(decide({ ...base, currentBackend: 'daemon', sessionPresence: 'live', activity: 'working', entry: 'keyboard' }), 'show-daemon-choice')
+  assert.equal(decide({ ...base, currentBackend: 'direct', sessionPresence: 'live', activity: 'unknown', entry: 'slash' }), 'show-unknown-choice')
+  assert.equal(decide({ ...base, currentBackend: 'daemon', sessionPresence: 'live', activity: 'unknown', entry: 'slash' }), 'show-unknown-choice')
   // A sessionless surface that claims activity is internally inconsistent: fail safe.
-  assert.equal(decide({ currentBackend: 'daemon', sessionPresence: 'none', activity: 'unknown', entry: 'keyboard' }), 'show-unknown-choice')
-  assert.equal(decide({ currentBackend: 'direct', sessionPresence: 'none', activity: 'working', entry: 'keyboard' }), 'show-unknown-choice')
+  assert.equal(decide({ ...base, currentBackend: 'daemon', sessionPresence: 'none', activity: 'unknown', entry: 'keyboard' }), 'show-unknown-choice')
+  assert.equal(decide({ ...base, currentBackend: 'direct', sessionPresence: 'none', activity: 'working', entry: 'keyboard' }), 'show-unknown-choice')
   // The entry is provenance, never a safety relaxation: every entry classifies alike.
   for (const entry of ['slash', 'plain', 'keyboard'] as const) {
-    assert.equal(decide({ currentBackend: 'daemon', sessionPresence: 'live', activity: 'unknown', entry }), 'show-unknown-choice')
+    assert.equal(decide({ ...base, currentBackend: 'daemon', sessionPresence: 'live', activity: 'unknown', entry }), 'show-unknown-choice')
   }
+  // A Client-owned user shell outranks the Agent family: neither Keep nor an
+  // Agent-idle Stop may stand in for the shell's terminal state.
+  assert.equal(decide({ ...base, shellRunning: true, currentBackend: 'daemon', sessionPresence: 'live', activity: 'working', entry: 'slash' }), 'show-shell-choice')
+  assert.equal(decide({ ...base, shellRunning: true, currentBackend: 'direct', sessionPresence: 'live', activity: 'idle', entry: 'plain' }), 'show-shell-choice')
+  assert.equal(decide({ ...base, shellRunning: true, currentBackend: 'daemon', sessionPresence: 'none', activity: 'idle', entry: 'keyboard' }), 'show-shell-choice')
+})
+
+test('exit intent: a running user shell offers only the truthful Stay choice', () => {
+  const h = exitIntentHarness({ backend: 'daemon', activity: 'working' })
+  h.state.shell = true
+  h.coordinator.request('slash')
+  assert.equal(h.current()?.kind, 'shell')
+  assert.deepEqual(h.current()?.options.map(option => option.id), ['stay'])
+  assert.equal(h.current()?.focus, 'stay')
+  assert.deepEqual(h.commits, [])
+  assert.deepEqual(h.stopCalls, [])
+  h.current()!.select('stay')
+  assert.equal(h.current(), undefined)
+  assert.deepEqual(h.commits, [], 'Stay never exits or stops the shell')
+  assert.deepEqual(h.stopCalls, [])
 })
 
 test('exit intent: a committed session switch retires the open choice with zero action', () => {

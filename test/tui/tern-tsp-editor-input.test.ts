@@ -788,10 +788,17 @@ interface PaneHarness {
   pasteMedia(): number
   /** Every real bracketed-paste receipt forwarded to the application. */
   pastedPaths(): readonly PastedPathReceipt[]
+  /** Bind the application input handlers now (the pre-bind tests). */
+  bind(): void
   dispose(): Promise<void>
 }
 
-async function mountPane(options: { withHandshake?: string; bind?: boolean } = {}): Promise<PaneHarness> {
+async function mountPane(options: {
+  withHandshake?: string
+  bind?: boolean
+  /** The live activity the renderer's Ctrl+C/Ctrl+D ladder reads. */
+  activity?: 'idle' | 'working' | 'unknown'
+} = {}): Promise<PaneHarness> {
   const tern = new ScriptedTern()
   const queued = options.withHandshake
   if (queued !== undefined) {
@@ -812,10 +819,11 @@ async function mountPane(options: { withHandshake?: string; bind?: boolean } = {
   })
   // The SurfaceRuntime.start commit point binds the input projection (the
   // default mirrors production); the F4 tests opt out to drive the window.
-  if (options.bind !== false) {
+  const bindHandlers = (): void => {
     renderer.bindInput({
       exit: () => { exitCount += 1 },
       cancel: () => { cancelCount += 1 },
+      ...(options.activity === undefined ? {} : { sessionActivity: () => options.activity! }),
       submit: () => {},
       steer: () => {},
       pasteMedia: () => { pasteMediaCalls += 1 },
@@ -824,6 +832,7 @@ async function mountPane(options: { withHandshake?: string; bind?: boolean } = {
       noteUserInput: () => { userInputs += 1 }, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false, openModelPicker() {}, openModelQuick() {}, openSessionBrowser() {}, sessionBrowserAvailable: () => true, openTasksBrowserUi() {}, tasksBrowserUiAvailable: () => true
     })
   }
+  if (options.bind !== false) bindHandlers()
   await settle()
   return {
     renderer,
@@ -835,6 +844,7 @@ async function mountPane(options: { withHandshake?: string; bind?: boolean } = {
     pasteMedia: () => pasteMediaCalls,
     pastedPaths: () => pastedPaths,
     frames: () => framesOf(tern.output.text()),
+    bind: bindHandlers,
     dispose: () => renderer.dispose(),
   }
 }
@@ -2465,4 +2475,66 @@ test('a committed inline placeholder retires the browse bookmark, so ↓ gives t
   composer.applyKey(key('down'))
   assert.deepEqual(composer.state(), { text: committed.text, cursor: committed.text.length, focused: false },
     'the new bookmark is the committed placeholder, not the draft the acceptance replaced')
+})
+
+test('a pre-bind empty-draft Ctrl+D is held, never the final emergency exit', async () => {
+  // External review P1: only the pre-bind Ctrl+C is the final emergency exit.
+  // Ctrl+D must enter the held queue and re-decide at the bind; the first
+  // replayed press arms, and only the second same-key press may exit.
+  const harness = await mountPane({ bind: false })
+  try {
+    harness.tern.input.type('\x04')
+    await settle()
+    assert.equal(harness.exitCount(), 0, 'no pre-bind final exit for Ctrl+D')
+    harness.bind()
+    await settle()
+    assert.equal(harness.exitCount(), 0, 'the held Ctrl+D replays as the first arm')
+    harness.tern.input.type('\x04')
+    // reason: the arm/confirm pair is the 1.5 s same-key contract window.
+    await settle()
+    assert.equal(harness.exitCount(), 1, 'the second Ctrl+D confirms after the bind')
+  } finally {
+    await harness.dispose()
+    await harness.session.close()
+  }
+})
+
+test('idle Ctrl+C clears the draft on the first press, then the same key exits', async () => {
+  // External review P2: the PiTui clear-then-arm ladder applies to the bound
+  // TSP idle Ctrl+C too. Busy/unknown never clear (covered separately).
+  const harness = await mountPane({ activity: 'idle' })
+  try {
+    harness.tern.input.type('abc')
+    await settle()
+    assert.equal(lastEditorProps(harness.frames())?.text, 'abc', 'the draft is present')
+    harness.tern.input.type('\x03')
+    // reason: the first idle press must clear the draft before any exit; the
+    // one arm/clear dispatch is observed on the next committed frame.
+    await settle()
+    assert.equal(harness.exitCount(), 0, 'the first idle Ctrl+C only clears and arms')
+    assert.equal(lastEditorProps(harness.frames())?.text, '', 'the first press cleared the draft')
+    harness.tern.input.type('\x03')
+    // reason: the same-key second press inside the contract window.
+    await settle()
+    assert.equal(harness.exitCount(), 1, 'the second same-key press exits')
+  } finally {
+    await harness.dispose()
+    await harness.session.close()
+  }
+})
+
+test('busy Ctrl+C cancels without clearing the draft or exiting', async () => {
+  const harness = await mountPane({ activity: 'working' })
+  try {
+    harness.tern.input.type('abc')
+    await settle()
+    harness.tern.input.type('\x03')
+    await settle()
+    assert.equal(harness.cancels(), 1, 'busy Ctrl+C reached the existing cancel path')
+    assert.equal(harness.exitCount(), 0)
+    assert.equal(lastEditorProps(harness.frames())?.text, 'abc', 'the busy cancel preserves the draft')
+  } finally {
+    await harness.dispose()
+    await harness.session.close()
+  }
 })

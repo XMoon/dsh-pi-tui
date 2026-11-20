@@ -79,6 +79,8 @@ export interface ExitIntentFacts {
     readonly scope: SessionScope
     readonly live: LiveSessionScope | undefined
     readonly activity: ExitSessionActivity
+    /** A Client-owned `!`/`!!` Host user shell is in flight. */
+    readonly shellRunning: boolean
     /** The Remote transport identity captured beside the scope (undefined on Direct). */
     readonly transportToken?: unknown
   }
@@ -404,6 +406,7 @@ export function createExitIntentCoordinator(deps: ExitIntentCoordinatorDeps): Ex
       currentBackend: backend,
       sessionPresence: facts.scope.sessionId === undefined ? 'none' : 'live',
       activity: facts.activity,
+      shellRunning: facts.shellRunning,
       entry,
     })
     switch (decision) {
@@ -419,6 +422,9 @@ export function createExitIntentCoordinator(deps: ExitIntentCoordinatorDeps): Ex
         return
       case 'show-unknown-choice':
         openChoice(backend === 'daemon' ? 'daemon-unknown' : 'direct-unknown', facts, backend)
+        return
+      case 'show-shell-choice':
+        openChoice('shell', facts, backend)
         return
     }
   }

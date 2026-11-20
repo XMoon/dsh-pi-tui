@@ -448,6 +448,7 @@ export type ExitIntentDecision =
   | 'show-daemon-choice'
   | 'show-direct-choice'
   | 'show-unknown-choice'
+  | 'show-shell-choice'
 
 /** The frozen classifier input (no host/renderer object ever enters here). */
 export interface ExitIntentInput {
@@ -455,6 +456,13 @@ export interface ExitIntentInput {
   /** `none` only when no Session exists AND no submission admission is open. */
   readonly sessionPresence: 'none' | 'live'
   readonly activity: ExitSessionActivity
+  /**
+   * A Client-owned `!`/`!!` Host user shell is in flight. It is NOT the
+   * Session Agent Turn: the Client cannot prove its terminal state and leaving
+   * aborts it, so the exit must present the truthful shell choice (no Keep, no
+   * Agent-idle Stop claim) instead of the Busy/Unknown families.
+   */
+  readonly shellRunning: boolean
   readonly entry: ExitIntentEntry
 }
 
@@ -468,6 +476,11 @@ export interface ExitIntentInput {
  * @returns the single decision the exit-intent coordinator executes.
  */
 export function classifyExitIntent(input: ExitIntentInput): ExitIntentDecision {
+  // A running user shell is Client-owned work whose terminal state cannot be
+  // proven by the Agent idle waiter, and a Client detach aborts it. The only
+  // truthful choice is the shell explanation with Stay; Keep would promise a
+  // continuation that teardown cancels, and Stop would claim the shell stopped.
+  if (input.shellRunning) return 'show-shell-choice'
   // A sessionless surface cannot be "working". A caller that reports any other
   // activity with no live Session is internally inconsistent: fail safe.
   if (input.sessionPresence === 'none') {

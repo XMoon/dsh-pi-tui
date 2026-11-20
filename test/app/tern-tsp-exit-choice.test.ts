@@ -157,6 +157,49 @@ test('TSP bound: empty-draft Ctrl+D needs the same-key second press', async () =
   }
 })
 
+test('TSP bound: C→D→C never confirms across the two exit keys', async () => {
+  const h = await mountHarness()
+  try {
+    h.activity = 'idle'
+    bindInput(h)
+    h.pane.key('a')
+    await waitFor(() => h.pane.frames().length > 0, 'the draft key was processed')
+    h.pane.key('\x03') // idle Ctrl+C: clears the draft and arms the interrupt key
+    // reason: a non-exiting arm has no positive sink; the bounded window
+    // covers the one dispatched key before the next gesture.
+    await new Promise(resolve => setTimeout(resolve, 60))
+    assert.equal(h.exits.length, 0)
+    h.pane.key('\x04') // a DIFFERENT exit key disarms, even as an editor no-op/arm
+    await new Promise(resolve => setTimeout(resolve, 60))
+    h.pane.key('\x03') // arms interrupt again, never confirms the old Ctrl+C
+    await new Promise(resolve => setTimeout(resolve, 60))
+    assert.equal(h.exits.length, 0, 'the third press re-armed instead of confirming across keys')
+    h.pane.key('\x03')
+    await waitFor(() => h.exits.length === 1, 'the same interrupt key confirms after re-arming')
+  } finally {
+    await h.dispose()
+  }
+})
+
+test('TSP bound: D→C→D never confirms across the two exit keys', async () => {
+  const h = await mountHarness()
+  try {
+    h.activity = 'idle'
+    bindInput(h)
+    h.pane.key('\x04') // arm exit
+    await new Promise(resolve => setTimeout(resolve, 60))
+    h.pane.key('\x03') // arms interrupt, disarms exit
+    await new Promise(resolve => setTimeout(resolve, 60))
+    h.pane.key('\x04') // arms exit again, disarms interrupt
+    await new Promise(resolve => setTimeout(resolve, 60))
+    assert.equal(h.exits.length, 0, 'no cross-key confirmation')
+    h.pane.key('\x04')
+    await waitFor(() => h.exits.length === 1, 'the same exit key confirms after re-arming')
+  } finally {
+    await h.dispose()
+  }
+})
+
 test('TSP bound: unknown Ctrl+C refuses to arm and states the unobservable state', async () => {
   const h = await mountHarness()
   try {
@@ -242,14 +285,10 @@ test('TSP native choice: Esc means Stay and a stale-epoch pointer event is dropp
     await new Promise(resolve => setTimeout(resolve, 60))
     assert.deepEqual(selections, [], 'a superseded frame click performs no action')
     const currentStop = exitOptionIds(h).find(id => id.endsWith('.opt-1'))!
+    // External review P2: a real button is an action, not a focus-then-confirm
+    // list row. The FIRST current-epoch click must activate.
     h.pane.event({ ev: 'action', sf: SURFACE_ID, id: currentStop, act: EXIT_ACTION })
-    // A first click on an unfocused row only focuses it; the focus repaint is
-    // the authoritative sink (no fixed wait).
-    await waitFor(() => JSON.stringify(h.ops()).includes('❯ Stop current work and disconnect'),
-      'the click moved the keyboard focus to Stop')
-    assert.deepEqual(selections, [], 'a click on another row focuses instead of activating')
-    h.pane.event({ ev: 'action', sf: SURFACE_ID, id: currentStop, act: EXIT_ACTION })
-    await waitFor(() => selections.length === 1, 'the focused row click activates')
+    await waitFor(() => selections.length === 1, 'ONE current-epoch button click activates')
     assert.deepEqual(selections, ['stop-and-disconnect'])
 
     h.renderer.exitChoice.open(choiceModel(select))

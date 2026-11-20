@@ -1919,13 +1919,11 @@ export function createTspInteractionSeat(options: TspInteractionSeatOptions): Ts
     for (const [index, option] of model.options.entries()) {
       // The options live in their own `options` column of the SAME overlay.
       if (event.id !== `${LAYER_ID}.${EXIT_CHOICE_KEY}-${exitChoiceEpoch}.options.opt-${index}`) continue
-      // A click only focuses the row when another row owned the keyboard
-      // highlight; the SAME row's click activates through the ONE model callback.
-      if (index !== exitChoiceFocus) {
-        exitChoiceFocus = index
-        options.render()
-        return true
-      }
+      // A real button click is the SAME commit intent as Enter: the CURRENT
+      // epoch's button activates through the ONE model callback on the FIRST
+      // click. The old-epoch/foreign-surface identity fence above already
+      // rejects stale events; a button is not a focus-then-confirm list row.
+      exitChoiceFocus = index
       model.select(option.id)
       return true
     }

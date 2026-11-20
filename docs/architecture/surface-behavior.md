@@ -50,6 +50,14 @@ Direct path keeps its existing exit controller (owned-session retirement inside
 the `appExit` disposal). There is no second exit controller, no new Host RPC,
 and no `/detach`/`/shutdown` command.
 
+**A running user shell is not an Agent Turn.** While a `!` / `!!` Host user
+shell is in flight the choice offers only `Stay in the TUI` plus the
+explanation that leaving aborts the shell; the user must let it finish or
+cancel it first. A shell has no Agent-idle terminal proof of its own, so Keep
+and Stop are never offered for it, and `Current work: stopped.` is never derived
+from the Agent waiter alone. The keyboard's busy Ctrl+C remains the existing
+cancel path, which aborts the shell and the exact live Session turn together.
+
 **Daemon Stop terminal proof.** `Stop current work and disconnect` captures the
 Session scope and the exact Remote transport identity once, re-validates both
 before acting, and sends ONE official cancel through the session control

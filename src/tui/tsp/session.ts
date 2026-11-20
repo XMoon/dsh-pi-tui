@@ -5474,9 +5474,16 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
   }
 
   const dispatchKey = (key: Key, handlers: TspInputHandlers): boolean => {
-    // M6 UX PR1: only the two exit keys may confirm an armed exit window. Any
-    // other action (including a modal answer) is an intervening gesture.
-    if (!(key.ctrl === true && (key.name === 'c' || key.name === 'd'))) lastExitKey = undefined
+    // M6 UX PR1: only the two exit keys may confirm an armed exit window, and
+    // only the SAME one. Pressing the OTHER exit key is an intervening gesture
+    // even when its own edit action is a no-op (e.g. Ctrl+D on a non-empty
+    // draft), so C→D→C or D→C→D can never confirm across keys. Any other key
+    // (including a modal answer) disarms too.
+    const exitKeyIdentity: RawExitIdentity | undefined = key.ctrl === true
+      ? key.name === 'c' ? 'interrupt' : key.name === 'd' ? 'exit' : undefined
+      : undefined
+    if (exitKeyIdentity === undefined) lastExitKey = undefined
+    else if (lastExitKey !== undefined && lastExitKey.identity !== exitKeyIdentity) lastExitKey = undefined
     // 1. The disposal fence: `disposed` is checked by the loop before this.
     // 2. B3-A2 §6.6: a temporary Screen that is still physically open or
     //    closing covers this pane. While it exists the modal seat's logical
@@ -5570,7 +5577,18 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
         display.notify("The current session's running state cannot be verified.", 'error')
         return false
       }
-      if (armOrConfirmRawExit('interrupt')) handlers.exit()
+      if (armOrConfirmRawExit('interrupt')) {
+        handlers.exit()
+        return false
+      }
+      // The FIRST idle press clears the draft, exactly like the PiTui
+      // clear-then-arm ladder; the SECOND same-key press inside the window
+      // exits. Busy/unknown never reach this branch (they cancel/refuse above
+      // and never clear the draft).
+      if (composer.state().text !== '') {
+        composer.clearDraftStateOnly()
+        render()
+      }
       return false
     }
     if (workHub?.handleKey(key)) return false
@@ -6123,16 +6141,15 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // emergency semantics and is held like any other key.
     if (key.ctrl === true && key.name === 'c' && !inputBound) return true
     // The empty-draft Ctrl+D exit is ORDER-dependent (the reducer decides it
-    // against the live draft): pre-bind, it may act directly ONLY while the
-    // held queue is EMPTY — with held keys the draft's emptiness is not yet
-    // knowable (the held edits have not applied), so the gesture must wait
-    // and re-decide in arrival order at the bind.
+    // against the live draft): the gesture ALWAYS waits for the bind and is
+    // re-decided in arrival order there. It is not a final emergency exit —
+    // only the pre-bind Ctrl+C is. Holding it also means the same-key 1.5 s
+    // confirmation (not one key) is required after the bind.
     // While the fence is up the composer accepts NO key: the draft (and any
     // submit) would belong to a subject the surface is replacing. Dropped, not
     // held, and the existing draft is preserved.
     if (fencedOut(key)) return false
     if (!inputBound) {
-      if (key.ctrl === true && key.name === 'd' && heldKeys.length === 0 && composer.getDraft() === '') return true
       if (heldKeys.length < HELD_KEYS_LIMIT) {
         heldKeys.push(key)
       } else if (!heldOverflowed) {

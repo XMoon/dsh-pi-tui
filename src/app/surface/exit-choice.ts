@@ -10,15 +10,16 @@
  * API is introduced here.
  *
  * The model is deliberately small: one of two exit families (daemon/direct)
- * times the proven activity (busy / unknown) plus the transient phases one
- * choice can pass through (asking, stopping, unconfirmed). Options are
+ * times the proven activity (busy / unknown), plus the Client-owned user-shell
+ * blocker and the transient phases one choice can pass through (asking,
+ * stopping, unconfirmed). Options are
  * semantic ids so a renderer never derives a business action from a label.
  *
  * @module @xmoon76/dsh-pi-tui/app/surface/exit-choice
  */
 
 /** The exit family and proven state one choice presents. */
-export type ExitChoiceKind = 'daemon-busy' | 'direct-busy' | 'daemon-unknown' | 'direct-unknown'
+export type ExitChoiceKind = 'daemon-busy' | 'direct-busy' | 'daemon-unknown' | 'direct-unknown' | 'shell'
 
 /**
  * One actable option of the choice.
@@ -113,6 +114,10 @@ function baseOptions(kind: ExitChoiceKind): readonly ExitChoiceOption[] {
     case 'direct-busy': return ['stop-and-exit', 'stay']
     case 'daemon-unknown': return ['disconnect-without-stop', 'stay']
     case 'direct-unknown': return ['exit-local', 'stay']
+    // A Client-owned user shell cannot be proven stopped by the Agent waiter,
+    // and detaching aborts it. Only the truthful safe path is actable; the
+    // body tells the user to finish or cancel the shell first.
+    case 'shell': return ['stay']
   }
 }
 
@@ -123,6 +128,7 @@ function baseFocus(kind: ExitChoiceKind): ExitChoiceOption {
     case 'direct-busy': return 'stay'
     case 'daemon-unknown': return 'disconnect-without-stop'
     case 'direct-unknown': return 'stay'
+    case 'shell': return 'stay'
   }
 }
 
@@ -137,6 +143,10 @@ function body(kind: ExitChoiceKind): readonly string[] {
     case 'direct-busy': return ['The current session is still working.', 'Exiting stops the in-process local Host.']
     case 'daemon-unknown': return ["The current session's running state cannot be verified."]
     case 'direct-unknown': return ["The current session's activity cannot be verified.", 'Exiting retires the in-process local Host.']
+    case 'shell': return [
+      'A user shell is still running.',
+      'Leaving aborts it, so the shell must finish or be cancelled first.',
+    ]
   }
 }
 
@@ -151,9 +161,11 @@ export function exitChoiceAsking(
     phase: 'choose',
     title: exitChoiceTitle(kind),
     body: body(kind),
-    shortBody: kind === 'daemon-busy' || kind === 'direct-busy'
-      ? 'Session is working.'
-      : 'State cannot be verified.',
+    shortBody: kind === 'shell'
+      ? 'A user shell is still running.'
+      : kind === 'daemon-busy' || kind === 'direct-busy'
+        ? 'Session is working.'
+        : 'State cannot be verified.',
     status: undefined,
     options: viewOptions(baseOptions(kind)),
     focus: baseFocus(kind),
