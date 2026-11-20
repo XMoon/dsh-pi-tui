@@ -157,16 +157,49 @@ export function createControlDispatcher(
 }
 
 /**
+ * The ONE stdin control channel an entry attached, with the release that ends
+ * it. A process whose shutdown has completed releases the channel: the launcher
+ * holds the other end of that pipe, so a resumed stdin would otherwise keep the
+ * event loop alive and the process resident after its own shutdown finished.
+ */
+export interface EntryControlChannel {
+  /**
+   * Stop reading the control channel: drop the listener this attachment owns
+   * and pause stdin. Idempotent, so the control `shutdown` op and the signal
+   * shutdown owner can both release the SAME channel.
+   */
+  release(): void
+}
+
+/**
+ * The narrow stdin surface the control channel owns and releases. Structural so
+ * a contract test can drive the same attachment over a fake stream instead of
+ * the test runner's own stdin.
+ */
+export interface EntryControlStdin {
+  setEncoding(encoding: BufferEncoding): unknown
+  resume(): unknown
+  pause(): unknown
+  on(event: 'data', listener: (chunk: string) => void): unknown
+  off(event: 'data', listener: (chunk: string) => void): unknown
+}
+
+/**
  * Read newline-delimited JSON control requests from stdin. Malformed input is
  * reported as a structured `control-error` line and otherwise ignored: the
  * launcher is the only writer, and a typo must not crash a live Host.
+ * @param handler - the entry's control handler.
+ * @param stdin - the control stream (the process stdin by default).
+ * @returns the channel, whose {@link EntryControlChannel.release} the shutdown
+ *   owner calls once no further control request can be admitted.
  */
-export function attachEntryControl(handler: EntryControlHandler): void {
-  process.stdin.setEncoding('utf8')
-  process.stdin.resume()
-  const dispatcher = createControlDispatcher(handler, { onStop: () => process.stdin.pause() })
+export function attachEntryControl(
+  handler: EntryControlHandler,
+  stdin: EntryControlStdin = process.stdin,
+): EntryControlChannel {
+  let released = false
   let buffer = ''
-  process.stdin.on('data', (chunk: string) => {
+  const onData = (chunk: string): void => {
     buffer += chunk
     for (let newline = buffer.indexOf('\n'); newline >= 0; newline = buffer.indexOf('\n')) {
       const line = buffer.slice(0, newline).trim()
@@ -174,5 +207,16 @@ export function attachEntryControl(handler: EntryControlHandler): void {
       if (line === '') continue
       void dispatcher.dispatch(line) // allowlist: queue owns its terminal failure handling
     }
-  })
+  }
+  const release = (): void => {
+    if (released) return
+    released = true
+    stdin.off('data', onData)
+    stdin.pause()
+  }
+  stdin.setEncoding('utf8')
+  stdin.resume()
+  const dispatcher = createControlDispatcher(handler, { onStop: release })
+  stdin.on('data', onData)
+  return { release }
 }

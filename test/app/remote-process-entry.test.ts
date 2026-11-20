@@ -21,7 +21,7 @@ import { createRequire } from 'node:module'
 import { Context } from '@deepseek-ai/cordis'
 import { PI_TUI_EXTENSIONS_SERVICE } from '../../src/extensions.ts'
 import { startLocalClient, type LocalClientStatus } from '../../src/app/remote-process/client-bootstrap.ts'
-import { createControlDispatcher } from '../../src/app/remote-process/entry-control.ts'
+import { attachEntryControl, createControlDispatcher } from '../../src/app/remote-process/entry-control.ts'
 import {
   assertHandoffRestored,
   assertHandoffSignalExclusivity,
@@ -152,6 +152,63 @@ test('a rejected control handler is reported and does not strand later commands'
   await dispatcher.dispatch('{"op":"status"}')
   assert.deepEqual(seen, ['status', 'boom', 'status'], 'the queue continues after a rejected handler')
   assert.equal(records.filter(record => record.m4a0 === 'control-failure').length, 1)
+})
+
+/** A control stream that only records what the attachment does to it. */
+function fakeControlStdin() {
+  const listeners = new Set<(chunk: string) => void>()
+  const foreign: string[] = []
+  return {
+    encoding: '',
+    paused: false,
+    listeners,
+    foreign,
+    /** One listener this attachment does NOT own: release must leave it. */
+    addForeignListener(): void { listeners.add(chunk => { foreign.push(chunk) }) },
+    setEncoding(encoding: string): void { this.encoding = encoding },
+    resume(): void { this.paused = false },
+    pause(): void { this.paused = true },
+    on(_event: 'data', listener: (chunk: string) => void): void { listeners.add(listener) },
+    off(_event: 'data', listener: (chunk: string) => void): void { listeners.delete(listener) },
+    emit(chunk: string): void { for (const listener of [...listeners]) listener(chunk) },
+  }
+}
+
+test('releasing the entry control channel pauses stdin, drops only its own listener and is idempotent', () => {
+  const stdin = fakeControlStdin()
+  stdin.addForeignListener()
+  const channel = attachEntryControl(() => false, stdin)
+  assert.equal(stdin.encoding, 'utf8')
+  assert.equal(stdin.paused, false, 'the live channel must keep reading')
+  assert.equal(stdin.listeners.size, 2, 'the attachment adds exactly one listener')
+  channel.release()
+  assert.equal(stdin.paused, true, 'a released channel must not keep the event loop alive')
+  assert.equal(stdin.listeners.size, 1, 'release drops the attachment listener only')
+  channel.release()
+  assert.equal(stdin.listeners.size, 1, 'release is idempotent')
+  const seen = [...stdin.listeners][0]
+  assert.notEqual(seen, undefined)
+})
+
+test('the attached control channel still serves status and shutdown before it is released', async () => {
+  const stdin = fakeControlStdin()
+  const seen: string[] = []
+  const channel = attachEntryControl(request => {
+    seen.push(request.op)
+    return request.op === 'shutdown'
+  }, stdin)
+  stdin.emit('{"op":"status"}\n')
+  await new Promise<void>(resolve => { setImmediate(resolve) })
+  assert.deepEqual(seen, ['status'], 'the live channel must answer status')
+  stdin.emit('{"op":"shutdown"}\n')
+  await new Promise<void>(resolve => { setImmediate(resolve) })
+  assert.deepEqual(seen, ['status', 'shutdown'], 'the live channel must admit shutdown')
+  // The control `shutdown` op releases the channel itself; the shutdown owner
+  // then only has to call the SAME idempotent release.
+  assert.equal(stdin.paused, true)
+  assert.equal(stdin.listeners.size, 0)
+  channel.release()
+  assert.equal(stdin.listeners.size, 0)
 })
 
 test('a post-boot failure drains the HMR transaction queue before the Host disposes', async () => {

@@ -33,7 +33,7 @@ import { existsSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { dirname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { attachEntryControl, createEntryDiag, writeEntryRecord } from './entry-control.ts'
+import { attachEntryControl, createEntryDiag, writeEntryRecord, type EntryControlChannel } from './entry-control.ts'
 import { HostActivityObserver } from './host-activity.ts'
 import { PI_TUI_WEB_ACCESS_ROWS } from '../host/features/web-roster.ts'
 import {
@@ -1359,6 +1359,7 @@ async function runLocalHostEntryOwned(options: LocalHostEntryOptions, scratchOwn
       let published: PublishedLocalHost | undefined
       let stopping: Promise<void> | undefined
       let shuttingDown = false
+      let controlChannel: EntryControlChannel | undefined
       let resolveStopped: (() => void) | undefined
       const stopped = new Promise<void>(resolve => { resolveStopped = resolve })
       const stop = (code: number, owner: PublishedLocalHost | undefined): Promise<void> => {
@@ -1440,6 +1441,13 @@ async function runLocalHostEntryOwned(options: LocalHostEntryOptions, scratchOwn
           if (stopBarrier !== undefined && stopBarrier !== '') {
             await waitForQualificationBarrier(stopBarrier)
           }
+          // The shutdown is complete: no further control request can be
+          // admitted. Release the stdin channel this entry resumed, because the
+          // launcher holds the other end of that pipe — a resumed stdin keeps
+          // the event loop alive, and the process would stay resident after its
+          // own shutdown (a signal-driven stop never runs the control `shutdown`
+          // op that releases it). Idempotent with that path.
+          controlChannel?.release()
           resolveStopped?.()
         })()
         return stopping
@@ -1573,7 +1581,7 @@ async function runLocalHostEntryOwned(options: LocalHostEntryOptions, scratchOwn
         return
       }
       writeEntryRecord({ m4a0: 'ready', ...status, liveness: initialLiveness, localHost: publishedHost.identity })
-      attachEntryControl(async request => {
+      controlChannel = attachEntryControl(async request => {
         if (request.op === 'status') {
           const snapshot = await liveness!.snapshot()
           writeEntryRecord({
