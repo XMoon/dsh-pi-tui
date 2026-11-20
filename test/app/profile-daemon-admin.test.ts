@@ -1,5 +1,5 @@
 /**
- * M6 UX PR2 Step B: the ONE Client-local daemon administration port.
+ * The Client-local daemon administration port: the ONE Client-local daemon administration port.
  *
  * Evidence level: structural composition seam (L2/L3). These tests prove the
  * port is a pure profile-bound wrapper over the EXISTING
@@ -7,7 +7,7 @@
  * same stable failure taxonomy — and that constructing or idling the port never
  * reaches an OS manager. The real OS install/stop evidence stays with the
  * selectable split-process lanes (`daemon-controls-m6-2c`, macOS launchd D4L).
- * @module @xmoon76/dsh-pi-tui/m6-ux-pr2-daemon-admin-integration.test
+ * @module @xmoon76/dsh-pi-tui/profile-daemon-admin.test
  */
 
 import assert from 'node:assert/strict'
@@ -91,9 +91,14 @@ test('the PRODUCTION run seam passes the bound Profile into the real control pla
     }
   }
   const observed: Array<{ name: string; profileRealpath: string; scopeId: string }> = []
+  // The admin seat is platform-owned: Darwin binds a file seat under the
+  // account home (the directory is pre-created so the bind reaches the
+  // record read), Linux binds an abstract-socket seat (no directory). Both
+  // then reach the SAME profile-scoped record read.
+  const platform = process.platform === 'darwin' ? 'darwin' : 'linux'
   const run = (profile: DaemonControlProfile) => profileDaemonAdminRun(profile, {
-    platform: 'darwin',
-    darwinAccountHome: accountHome,
+    platform,
+    ...(platform === 'darwin' ? { darwinAccountHome: accountHome } : {}),
     readRecord: (scope) => {
       observed.push({ name: profile.name, profileRealpath: scope.profileRealpath, scopeId: scope.scopeId })
       return undefined
@@ -102,16 +107,18 @@ test('the PRODUCTION run seam passes the bound Profile into the real control pla
   })
   const profileA = mkProfile('profile-a')
   const profileB = mkProfile('profile-b')
-  // Pre-create each profile's admin seat directory so the real control plane
-  // binds its seat and reaches the profile-scoped record read.
-  for (const profile of [profileA, profileB]) {
-    const scope = inspectInstalledProfileScope({
-      dshHome: profile.home,
-      profileDir: profile.dir,
-      packageRoot: profile.packageRoot,
-      dshVersion: profile.dshVersion,
-    })
-    mkdirSync(darwinHostProfileSeatDir(scope.scopeId, accountHome), { recursive: true })
+  if (platform === 'darwin') {
+    // Pre-create each profile's admin seat directory so the real control plane
+    // binds its seat and reaches the profile-scoped record read.
+    for (const profile of [profileA, profileB]) {
+      const scope = inspectInstalledProfileScope({
+        dshHome: profile.home,
+        profileDir: profile.dir,
+        packageRoot: profile.packageRoot,
+        dshVersion: profile.dshVersion,
+      })
+      mkdirSync(darwinHostProfileSeatDir(scope.scopeId, accountHome), { recursive: true })
+    }
   }
   await run(profileA)('stop')
   await run(profileB)('stop')

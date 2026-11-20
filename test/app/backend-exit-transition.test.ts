@@ -1,5 +1,5 @@
 /**
- * M6 UX PR2 Step D: the ONE transient user-conversion intent.
+ * The transient daemon-to-direct exit-transition intent: the ONE transient user-conversion intent.
  *
  * Evidence level: decision-rule contract (L3). These tests prove the intent is
  * set ONLY by a verified `daemon → direct` save made by a process still running
@@ -7,7 +7,7 @@
  * same-value confirm, a failed/unknown outcome, or a Direct-process save. The
  * full source→decision→sink chain (Settings verified write → intent → exit
  * owner ask) is exercised by `test/app/lifecycle.test.ts`.
- * @module @xmoon76/dsh-pi-tui/m6-ux-pr2-backend-transition.test
+ * @module @xmoon76/dsh-pi-tui/backend-exit-transition.test
  */
 
 import assert from 'node:assert/strict'

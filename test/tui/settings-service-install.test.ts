@@ -1,5 +1,5 @@
 /**
- * M6 UX PR2 Step C: the ONE optional service-install follow-up inside the SAME
+ * The Settings service-install follow-up: the ONE optional service-install follow-up inside the SAME
  * Settings lease.
  *
  * Evidence level: mounted panel behaviour (L2). It proves the verified
@@ -7,7 +7,7 @@
  * perform zero admin IO, that a single explicit confirmation drives exactly one
  * install through the command layer, and that a stale or superseded settlement
  * never repaints a newer follow-up.
- * @module @xmoon76/dsh-pi-tui/m6-ux-pr2-settings-service-install.test
+ * @module @xmoon76/dsh-pi-tui/settings-service-install.test
  */
 
 import assert from 'node:assert/strict'
@@ -188,7 +188,7 @@ test('a failed install reports the truthful refusal and keeps the Daemon save', 
   assert.doesNotMatch(text, /Service installed/u, 'a refusal never claims a success')
 })
 
-test('PR2: a short viewport that hides the risk copy refuses the install (RFL-002)', () => {
+test('a short viewport that hides the risk copy refuses the install', () => {
   // A tiny detail viewport cannot host the WHOLE follow-up block (risk copy +
   // both actions); the grant stays false, so Tab/Enter can never install.
   let installCalls = 0

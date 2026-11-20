@@ -778,7 +778,7 @@ test('isCancellation recognizes AbortError name and ABORT_ERR code', () => {
 function exitHarness(options: {
   resumeHint?: () => string | undefined
   prepareRetirement?: () => void
-  /** M6 UX PR2: the ONE admin stop result, or a thrown error. */
+  /** The ONE admin stop result, or a thrown error. */
   adminStop?: () => Promise<{ code: number; stdout: string; stderr: string }>
 } = {}) {
   const { diag, lines } = captureDiag()
@@ -962,7 +962,7 @@ interface ExitIntentHarness {
     shell: boolean
     scopeCurrent: boolean
     mounted: boolean
-    /** M6 UX PR2: the transient daemon→direct conversion intent. */
+    /** The transient daemon→direct conversion intent. */
     hostStopEligible: boolean
     /** A reentrant hook run from the presenter's close (focus restoration). */
     onClose: (() => void) | undefined
@@ -1733,16 +1733,16 @@ test('exit intent: a cancellation-shaped Stop failure still settles the seat', a
   assert.deepEqual(h.commits, [])
 })
 
-// ── M6 UX PR2: the whole-Host stop confirm (Step E) ─────────────────────────
+// ── the whole-Host stop confirm ─────────────────────────────────────────
 
-test('PR2: an ordinary daemon exit with no conversion intent never asks about the Host', () => {
+test('an ordinary daemon exit with no conversion intent never asks about the Host', () => {
   const h = exitIntentHarness({ backend: 'daemon', activity: 'idle', hostStopEligible: false })
   h.coordinator.request('slash')
   assert.deepEqual(h.commits, [{ workStopped: false }], 'the plain detach commits directly')
   assert.equal(h.opens.length, 0, 'no Host confirm is offered without the intent')
 })
 
-test('PR2: an idle daemon exit WITH the intent opens the host-stop confirm, default Leave', () => {
+test('an idle daemon exit WITH the intent opens the host-stop confirm, default Leave', () => {
   const h = exitIntentHarness({ backend: 'daemon', activity: 'idle', hostStopEligible: true })
   h.coordinator.request('slash')
   const model = h.opens[0]!
@@ -1754,7 +1754,7 @@ test('PR2: an idle daemon exit WITH the intent opens the host-stop confirm, defa
   assert.deepEqual(h.commits, [], 'opening the confirm commits nothing')
 })
 
-test('PR2: `Leave daemon Host running and exit` detaches with zero Host management', () => {
+test('`Leave daemon Host running and exit` detaches with zero Host management', () => {
   const h = exitIntentHarness({ backend: 'daemon', activity: 'idle', hostStopEligible: true })
   h.coordinator.request('slash')
   h.current()!.select('leave-host-and-exit')
@@ -1762,7 +1762,7 @@ test('PR2: `Leave daemon Host running and exit` detaches with zero Host manageme
   assert.equal(h.stopCalls.length, 0, 'Leave never touches the Host')
 })
 
-test('PR2: `Stop daemon Host and exit` hands the ONE authorization to the final exit root', () => {
+test('`Stop daemon Host and exit` hands the ONE authorization to the final exit root', () => {
   const h = exitIntentHarness({ backend: 'daemon', activity: 'idle', hostStopEligible: true })
   h.coordinator.request('slash')
   h.current()!.select('stop-host-and-exit')
@@ -1771,7 +1771,7 @@ test('PR2: `Stop daemon Host and exit` hands the ONE authorization to the final 
   assert.equal(h.stopCalls.length, 0, 'the PR1 session cancel is NOT the Host stop')
 })
 
-test('PR2: `Stay` withdraws the whole exit and keeps the intent for the next exit', () => {
+test('`Stay` withdraws the whole exit and keeps the intent for the next exit', () => {
   const h = exitIntentHarness({ backend: 'daemon', activity: 'idle', hostStopEligible: true })
   h.coordinator.request('slash')
   h.current()!.select('stay')
@@ -1783,7 +1783,7 @@ test('PR2: `Stay` withdraws the whole exit and keeps the intent for the next exi
   assert.equal(h.current()?.kind, 'daemon-host-stop')
 })
 
-test('PR2: PR1 Keep on a busy Daemon reaches the Host confirm when the intent holds', () => {
+test('PR1 Keep on a busy Daemon reaches the Host confirm when the intent holds', () => {
   const h = exitIntentHarness({ backend: 'daemon', activity: 'working', hostStopEligible: true })
   h.coordinator.request('slash')
   h.current()!.select('keep-and-disconnect')
@@ -1793,7 +1793,7 @@ test('PR2: PR1 Keep on a busy Daemon reaches the Host confirm when the intent ho
   assert.deepEqual(h.commits, [{ workStopped: false, hostStopRequested: true }])
 })
 
-test('PR2: a confirmed Session Stop reaches the Host confirm with its own truthful proof', async () => {
+test('a confirmed Session Stop reaches the Host confirm with its own truthful proof', async () => {
   const idle = deferred<StopCurrentWorkOutcome>()
   const h = exitIntentHarness({
     backend: 'daemon',
@@ -1810,7 +1810,7 @@ test('PR2: a confirmed Session Stop reaches the Host confirm with its own truthf
   assert.deepEqual(h.commits, [{ workStopped: true }], 'the PR1 turn proof is carried into the detach')
 })
 
-test('PR2: an intent that is no longer eligible never opens the Host confirm', () => {
+test('an intent that is no longer eligible never opens the Host confirm', () => {
   const h = exitIntentHarness({ backend: 'daemon', activity: 'idle', hostStopEligible: true })
   h.coordinator.request('slash')
   assert.equal(h.current()?.kind, 'daemon-host-stop')
@@ -1822,7 +1822,7 @@ test('PR2: an intent that is no longer eligible never opens the Host confirm', (
   assert.deepEqual(h.commits, [{ workStopped: false }], 'the ordinary detach still commits')
 })
 
-test('PR2: a Host modal preemption dismisses the confirm with zero Host writes', () => {
+test('a Host modal preemption dismisses the confirm with zero Host writes', () => {
   const h = exitIntentHarness({ backend: 'daemon', activity: 'idle', hostStopEligible: true })
   h.coordinator.request('slash')
   const model = h.current()!
@@ -1834,7 +1834,7 @@ test('PR2: a Host modal preemption dismisses the confirm with zero Host writes',
   assert.equal(h.closed(), 1)
 })
 
-test('PR2: two simultaneous confirmations dispatch exactly ONE authorization', () => {
+test('two simultaneous confirmations dispatch exactly ONE authorization', () => {
   const h = exitIntentHarness({ backend: 'daemon', activity: 'idle', hostStopEligible: true })
   h.coordinator.request('slash')
   // A double key press and a pointer release can land in the same frame; the
@@ -1845,7 +1845,7 @@ test('PR2: two simultaneous confirmations dispatch exactly ONE authorization', (
   assert.equal(h.commits.length, 1, 'exactly one Host-stop verdict is committed')
 })
 
-test('PR2: a reentrant close callback that opens a newer intent wins over the old confirm', () => {
+test('a reentrant close callback that opens a newer intent wins over the old confirm', () => {
   const h = exitIntentHarness({ backend: 'daemon', activity: 'idle', hostStopEligible: true })
   h.coordinator.request('slash')
   const first = h.current()!
@@ -1857,16 +1857,16 @@ test('PR2: a reentrant close callback that opens a newer intent wins over the ol
   assert.equal(h.commits.length, 0, 'the old confirmation cannot commit behind the newer operation')
 })
 
-test('PR2: a Direct-process exit never asks about the daemon Host', () => {
+test('a Direct-process exit never asks about the daemon Host', () => {
   const h = exitIntentHarness({ backend: 'direct', activity: 'idle', hostStopEligible: true })
   h.coordinator.request('slash')
   assert.deepEqual(h.commits, [{ workStopped: false }], 'Direct exits directly')
   assert.equal(h.opens.length, 0)
 })
 
-// ── M6 UX PR2: the post-TTY whole-Host stop (Step F) ────────────────────────
+// ── the post-TTY whole-Host stop ──────────────────────────────────────────
 
-test('PR2: a confirmed Host stop runs AFTER the terminal restore and before the hint/exit', async () => {
+test('a confirmed Host stop runs AFTER the terminal restore and before the hint/exit', async () => {
   const { requestExit, calls, exitDone } = exitHarness({
     prepareRetirement: () => {},
     adminStop: async () => ({ code: 0, stdout: 'host=stopped', stderr: '' }),
@@ -1879,7 +1879,7 @@ test('PR2: a confirmed Host stop runs AFTER the terminal restore and before the 
   assert.deepEqual(calls.exits, [0], 'a proven stop exits 0')
 })
 
-test('PR2: an ordinary exit never runs the admin stop', async () => {
+test('an ordinary exit never runs the admin stop', async () => {
   const { requestExit, calls, exitDone } = exitHarness({
     adminStop: async () => ({ code: 0, stdout: '', stderr: '' }),
   })
@@ -1889,7 +1889,7 @@ test('PR2: an ordinary exit never runs the admin stop', async () => {
   assert.deepEqual(calls.order, ['cleanup', 'hint', 'exit'])
 })
 
-test('PR2: a refused stop exits with the control plane code and claims no success', async () => {
+test('a refused stop exits with the control plane code and claims no success', async () => {
   for (const code of [3, 4, 5]) {
     const { requestExit, calls, exitDone } = exitHarness({
       adminStop: async () => ({ code, stdout: '', stderr: 'IDENTITY_OR_OWNERSHIP_REFUSED: the unit is foreign' }),
@@ -1900,7 +1900,7 @@ test('PR2: a refused stop exits with the control plane code and claims no succes
   }
 })
 
-test('PR2: an unexpected admin throw falls back to the manager/OS failure class (4)', async () => {
+test('an unexpected admin throw falls back to the manager/OS failure class (4)', async () => {
   const { requestExit, calls, exitDone } = exitHarness({
     adminStop: async () => { throw new Error('management call exploded') },
   })
@@ -1909,7 +1909,7 @@ test('PR2: an unexpected admin throw falls back to the manager/OS failure class 
   assert.equal(calls.adminStop, 1, 'the failed call is still exactly one attempt (no retry)')
 })
 
-test('PR2: a duplicate request after the verdict never runs a second admin stop', async () => {
+test('a duplicate request after the verdict never runs a second admin stop', async () => {
   const { requestExit, calls, exitDone } = exitHarness({
     adminStop: async () => ({ code: 0, stdout: '', stderr: '' }),
   })
@@ -1919,7 +1919,7 @@ test('PR2: a duplicate request after the verdict never runs a second admin stop'
   assert.equal(calls.adminStop, 1, 'the latch keeps the authorization single')
 })
 
-test('PR2: the detach hint replaces the not-stopped line only for a verified stop', () => {
+test('the detach hint replaces the not-stopped line only for a verified stop', () => {
   const confirmed = formatDaemonDetachHint({
     profile: 'pi-tui',
     sessionId: 'session-a',
@@ -1945,7 +1945,7 @@ test('PR2: the detach hint replaces the not-stopped line only for a verified sto
   assert.doesNotMatch(ordinary, /Daemon Host stop was not confirmed/u)
 })
 
-test('PR2: a close-time callback that invalidates the intent never executes the Host stop', () => {
+test('a close-time callback that invalidates the intent never executes the Host stop', () => {
   const h = exitIntentHarness({ backend: 'daemon', activity: 'idle', hostStopEligible: true })
   h.coordinator.request('slash')
   assert.equal(h.current()?.kind, 'daemon-host-stop')
