@@ -4,22 +4,22 @@
  *
  * Two genuinely built packages of the SAME profile and DSH runtime are installed
  * in turn through the official `dsh plugin --profile ...` command while every
- * Host transition goes through the six EXISTING public `daemon` verbs. The
- * scene proves the user-controlled runbook and the failure boundaries:
+ * Host transition goes through the existing public `daemon` verbs. The scene
+ * proves the user-controlled runbook and the failure boundaries:
  *
- *   OLD installed -> `daemon start` -> real Host identity / unit installBuild
- *   -> official durable Session turn + official credential-store record
- *   -> explicit `daemon stop` (manager-inactive, original PID/starttime gone)
- *   -> NEW installed while the OLD unit file stays untouched
- *   -> `status` reports `other-build`, `start`/`restart` refuse with the
- *      ownership exit class BEFORE any second Host or service start/stop
- *   -> explicit `daemon uninstall` removes only the Profile unit path
- *   -> `daemon start` creates the NEW build unit and a genuinely new,
- *      authenticated Host instance; two real PTY Clients attach to it and the
- *      durable Session + credential record read back through the official
- *      product paths
- *   -> the same sequence in reverse for the rollback (NEW unit refused while
- *      the OLD build is installed, explicit uninstall, OLD Host Ready again).
+ *   OLD installed -> `daemon install` -> `daemon start` -> real Host identity /
+ *   unit installBuild -> official durable Session turn + official
+ *   credential-store record
+ *   -> official NEW install while the OLD Host and unit stay running
+ *   -> `status` reports `other-build`; the same authenticated old Host is kept
+ *   -> explicit `daemon restart` proves the old kernel identity gone and adopts
+ *      the current install through the bounded generated-field migration (or
+ *      keeps an already-stable generated entry untouched); two real PTY Clients
+ *      attach to the new authenticated Host and the durable Session +
+ *      credential record read back through the official product paths
+ *   -> explicit `daemon stop`; the official OLD payload install starts no Host;
+ *      explicit `daemon restart` adopts the old test payload again
+ *   -> the closing `daemon uninstall` removes only the Profile unit path.
  *
  * The scene is strictly environment-gated exactly like the M6-2B/M6-2C native
  * cases: it only qualifies itself as a dedicated, attested, non-root test

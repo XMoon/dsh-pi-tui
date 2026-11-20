@@ -16,7 +16,7 @@
  * re-authenticates the SAME Host A and reopens the SAME Session. The old PID
  * remains only as the waiting parent that forwards the replacement exit code.
  *
- * Both packages name the same `dsh-pi-tui/local/1` wire protocol and the same
+ * Both packages name the same `dsh-pi-tui/local/2` wire protocol and the same
  * exact DSH runtime, but carry different package versions, bundles and
  * buildIds. The new Client B must authenticate the SAME Host A, call the real
  * official `session/list`, private PiFile RPC and private terminal-progress
@@ -36,11 +36,18 @@
  * qualifies the safe order — introduce the new build, stop the old Host
  * explicitly, then replace the installed profile — and leaves the running old
  * installation byte-for-byte intact while the cross-build Client attaches.
+ * That stop-before-payload-swap order belongs to this legacy cross-build
+ * fixture; it is not a universal prerequisite for daemon plugin updates. With
+ * the same DSH runtime, the official plugin manager may install the new
+ * package while the old Host keeps running, and an explicit `daemon restart`
+ * adopts the installed build (the opt-in native cases qualify that journey).
  *
- * The three real scenes live in `scripts/smoke/split-upgrade/` and are frozen in
- * `scripts/lib/split-upgrade-selection.mjs`: the full lane runs every registered
- * case in order, while `--case`/`--suite` run only the selected set in its own
- * isolated profile and never claim cross-build compatibility.
+ * The default U01-U09 lane runs the three registered default-lane cases in
+ * `scripts/smoke/split-upgrade/`. The frozen registry in
+ * `scripts/lib/split-upgrade-selection.mjs` additionally holds two explicit
+ * opt-in OS native cases (Linux systemd and macOS LaunchAgent); `--case` /
+ * `--suite` run only the selected set in its own isolated profile and never
+ * claim cross-build compatibility.
  *
  * Usage:
  *   pnpm smoke:split-upgrade -- --old <absolute-old.tgz> --new <absolute-new.tgz> [--evidence <file>]
