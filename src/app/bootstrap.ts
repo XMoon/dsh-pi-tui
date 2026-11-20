@@ -3424,6 +3424,10 @@ export function applyRunnerWithRuntime(
       diag,
       cleanup: surfaceLifecycle.disposeSurface,
       prepareRetirement: sessionRuntime.preCancelOwnedSession,
+      // M6 UX PR2 (F3): the ONE installed B1 Client transport, released only on
+      // the explicit whole-Host Stop path, after the TTY restore and before the
+      // control plane runs. Idempotent: the Client root teardown reuses it.
+      ...(override?.releaseTransport === undefined ? {} : { releaseTransport: override.releaseTransport }),
       hint: (message) => process.stdout.write(`\n${message}\n`),
       resumeHint: () => {
         // The Host's profileContext names the profile for EVERY launch form,

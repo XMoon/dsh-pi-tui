@@ -872,6 +872,11 @@ async function startSurfaceLocalClient(
       ...(composition.profileDaemonAdmin === undefined
         ? {}
         : { profileDaemonAdmin: composition.profileDaemonAdmin }),
+      // M6 UX PR2 (F3): the SAME B1 transport the Client root owns. The exit
+      // root releases it only on the explicit whole-Host Stop path.
+      ...(composition.transport === undefined
+        ? {}
+        : { releaseTransport: () => composition.transport!.dispose() }),
     }
     // Schema defaults + the explicit Client-local startup facts. No fabricated
     // profile document: a preference's absence resolves to its schema default.

@@ -145,6 +145,16 @@ export interface ExitControllerDeps {
   /** Process exit (the launcher's `appExit`). */
   exit(code: number): void
   /**
+   * M6 UX PR2 (F3): the SAME selected-runtime Remote transport owner the
+   * runner's teardown already uses. On the ONE explicit whole-Host Stop path
+   * it is released AFTER the terminal restore and BEFORE {@link adminStop}:
+   * the Host's graceful shutdown otherwise waits for THIS Client's still-open
+   * Remote transport while the Client waits for the Host PID, a mutual wait
+   * that can only time out. Idempotent; the runner's later teardown reuses the
+   * same memoized owner. Never called for Leave/Stay/ordinary exits.
+   */
+  releaseTransport?(): Promise<void>
+  /**
    * M6 UX PR2: the ONE explicit whole-Host stop, run ONLY when the exit
    * carries the confirmed `hostStopRequested` verdict. It runs AFTER the
    * terminal restore and BEFORE the hint/`appExit`, exactly once, and it owns
@@ -213,6 +223,24 @@ export function createExitController(deps: ExitControllerDeps): {
       } catch (preparationError) {
         safeDiag(deps.diag, 'error', 'retirement preparation failed', { error: safeErrorMessage(preparationError) })
       }
+      // M6 UX PR2 (F3): on the ONE explicit Stop path release the selected
+      // runtime's Remote transport AFTER the terminal restore and BEFORE the
+      // control plane. The connected Client's own `daemon stop` otherwise
+      // races the Host's graceful shutdown: the Host waits for this Client's
+      // transport while the Client waits for the Host PID. The release is the
+      // SAME memoized owner the runner teardown uses. A failure is recorded
+      // and never assumed to mean the connection is gone; the control plane's
+      // own post-proof stays the only success source.
+      let transportReleaseError: string | undefined
+      if (hostStopRequested && deps.releaseTransport !== undefined) {
+        try {
+          await deps.releaseTransport()
+          safeDiag(deps.diag, 'info', 'remote transport released before the daemon host stop')
+        } catch (releaseError) {
+          transportReleaseError = safeErrorMessage(releaseError)
+          safeDiag(deps.diag, 'error', 'remote transport release failed before the daemon host stop', { error: transportReleaseError })
+        }
+      }
       // M6 UX PR2: the ONE explicit whole-Host stop, ONLY for a confirmed
       // verdict. It runs after the terminal is restored and before the hint,
       // so the summary is truthful and the exit code reflects the control
@@ -228,9 +256,15 @@ export function createExitController(deps: ExitControllerDeps): {
         } else {
           try {
             const result = await deps.adminStop()
+            const refusal = adminStopDetail(result)
             hostStop = result.code === 0
               ? { code: 0 }
-              : { code: result.code, detail: adminStopDetail(result) }
+              : {
+                  code: result.code,
+                  detail: transportReleaseError === undefined
+                    ? refusal
+                    : `${refusal} (the Client transport release also failed: ${transportReleaseError})`,
+                }
           } catch (adminError) {
             safeDiag(deps.diag, 'error', 'daemon host stop failed', { error: safeErrorMessage(adminError) })
             hostStop = { code: 4, detail: 'the management call failed before the control plane reported a result' }

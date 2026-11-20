@@ -376,6 +376,15 @@ export interface RemoteApplicationOverride {
    * Direct and on every composition without the official local Profile identity.
    */
   readonly profileDaemonAdmin?: ProfileDaemonAdminPort
+  /**
+   * Split-Client only (M6 UX PR2 F3): release the ONE installed B1 Client
+   * transport. Used ONLY on the explicit whole-Host Stop exit path, after the
+   * TTY restore and before the control plane runs, so the Host's graceful
+   * shutdown is not held by this Client's still-open connection. The
+   * transport's own latched dispose is idempotent, so the Client root's later
+   * teardown reuses the SAME owner — never a second exit controller.
+   */
+  readonly releaseTransport?: () => Promise<void>
 }
 
 /**

@@ -778,6 +778,7 @@ test('isCancellation recognizes AbortError name and ABORT_ERR code', () => {
 function exitHarness(options: {
   resumeHint?: () => string | undefined
   prepareRetirement?: () => void
+  releaseTransport?: () => Promise<void>
   /** The ONE admin stop result, or a thrown error. */
   adminStop?: () => Promise<{ code: number; stdout: string; stderr: string }>
 } = {}) {
@@ -785,6 +786,7 @@ function exitHarness(options: {
   const calls = {
     cleanup: 0,
     prepare: 0,
+    release: 0,
     adminStop: 0,
     hints: [] as string[],
     exits: [] as number[],
@@ -801,6 +803,13 @@ function exitHarness(options: {
     hint: (message) => { calls.hints.push(message); calls.order.push('hint') },
     resumeHint: options.resumeHint ?? (() => 'dsh --profile pi-tui --session session-exit'),
     exit: (code) => { calls.exits.push(code); calls.order.push('exit'); resolveExit(code) },
+    ...(options.releaseTransport === undefined ? {} : {
+      releaseTransport: async () => {
+        calls.release += 1
+        calls.order.push('release')
+        return await options.releaseTransport!()
+      },
+    }),
     ...(options.adminStop === undefined ? {} : {
       adminStop: async () => {
         calls.adminStop += 1
@@ -823,6 +832,52 @@ test('exit cleans up, prepares retirement, hints, and exits once — in that ord
   assert.deepEqual(calls.order, ['cleanup', 'prepare', 'hint', 'exit'],
     'the synchronous retirement preparation must sit between the surface cleanup and the resume hint')
   assert.match(lines.join('\n'), /exit/)
+})
+
+test('exit: the explicit Host stop releases the selected transport BEFORE the admin stop', async () => {
+  const { requestExit, calls, exitDone } = exitHarness({
+    prepareRetirement: () => {},
+    releaseTransport: async () => {},
+    adminStop: async () => ({ code: 0, stdout: 'stopped', stderr: '' }),
+  })
+  requestExit({ hostStopRequested: true })
+  assert.equal(await exitDone, 0)
+  assert.deepEqual(calls.order, ['cleanup', 'prepare', 'release', 'adminStop', 'hint', 'exit'],
+    'the Remote transport must be released after the TTY restore and before the control plane')
+  assert.deepEqual(calls.exits, [0])
+})
+
+test('exit: Leave / Stay / ordinary exits never release the Remote transport', async () => {
+  const { requestExit, calls, exitDone } = exitHarness({
+    prepareRetirement: () => {},
+    releaseTransport: async () => {},
+    adminStop: async () => ({ code: 0, stdout: 'stopped', stderr: '' }),
+  })
+  requestExit()
+  assert.equal(await exitDone, 0)
+  assert.equal(calls.release, 0, 'a plain detach keeps its transport until appExit')
+  assert.equal(calls.adminStop, 0)
+  assert.deepEqual(calls.order, ['cleanup', 'prepare', 'hint', 'exit'])
+})
+
+test('exit: a failed transport release is recorded, never assumed gone, and the stop still runs truthfully', async () => {
+  const { requestExit, calls, exitDone, lines } = exitHarness({
+    prepareRetirement: () => {},
+    releaseTransport: async () => { throw new Error('transport release exploded') },
+    adminStop: async () => ({
+      code: 5,
+      stdout: '',
+      stderr: 'dsh-pi-tui daemon: TRANSITION_UNCERTAIN: Host stop may already be committed; final verification failed.\n',
+    }),
+  })
+  requestExit({ hostStopRequested: true })
+  assert.equal(await exitDone, 5, 'the control plane refusal is the exit code; never a hardcoded success')
+  assert.deepEqual(calls.order, ['cleanup', 'prepare', 'release', 'adminStop', 'hint', 'exit'])
+  assert.match(lines.join('\n'), /remote transport release failed before the daemon host stop/,
+    'the release failure must be recorded')
+  assert.deepEqual(calls.hints, [
+    'dsh --profile pi-tui --session session-exit',
+  ])
 })
 
 test('exit without a preparation hook still cleans up, hints, and exits', async () => {
