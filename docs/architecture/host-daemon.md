@@ -154,10 +154,12 @@ supported Daemon platform in this contract.
   migration to a plist whose decoded `ProgramArguments` is exactly this
   product's historical two-string generated block (node executable plus an
   installed product `dist/local-host.mjs` of this Profile). Provenance is
-  proven only when the plist's recorded `X-DshPiTuiInstallBuild` equals the
-  still-readable old package's computed build identity for THIS Profile; a
-  pruned old package or a pin to another Profile/build cannot prove provenance
-  and stays `user-managed`. When proven, only that decoded second entry becomes
+  proven only when the old package lives under THIS Profile's own
+  `node_modules` layout (hoisted or `node_modules/.pnpm/<pkg>@<ver>_<hash>`),
+  is still readable, and its computed build identity equals the plist's
+  recorded `X-DshPiTuiInstallBuild`. A pruned old package, an external
+  readable store and a pin to another Profile/build cannot prove provenance
+  and stay `user-managed`. When proven, only that decoded second entry becomes
   the current stable named entry and, when the entry actually migrates, the
   adjacent generated `X-DshPiTuiInstallBuild` value is updated; every other
   byte, comment, extra key and user-customized argv is preserved. A

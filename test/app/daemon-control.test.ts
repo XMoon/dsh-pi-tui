@@ -275,7 +275,7 @@ const UID = process.getuid?.() ?? 1000
 
 /** A still-readable historical product package whose computed build identity proves provenance. */
 function writeOldDarwinPackage(fx: Fixture): { readonly root: string; readonly buildId: string } {
-  const root = join(fx.profile.dir, 'old-store', 'node_modules', '@xmoon76', 'dsh-pi-tui')
+  const root = join(fx.profile.dir, 'node_modules', '.pnpm', '@xmoon76+dsh-pi-tui@0.5.6_probe', 'node_modules', '@xmoon76', 'dsh-pi-tui')
   mkdirSync(join(root, 'dist'), { recursive: true, mode: 0o700 })
   writeFileSync(join(root, 'package.json'), `${JSON.stringify({ name: '@xmoon76/dsh-pi-tui', version: '0.5.6' })}\n`)
   writeFileSync(join(root, 'dist', 'local-host.mjs'), 'process.exit(1)\n')

@@ -14,7 +14,7 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, realpathSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import test, { type TestContext } from 'node:test'
 import { testLifecycle, type TestLifecycle } from '../support/temp-lifecycle.ts'
 import {
@@ -114,7 +114,7 @@ function namedEntryOf(fx: Fixture): string {
 
 /** A still-readable historical product package whose computed build identity proves provenance. */
 function writeOldProductPackage(fx: Fixture): { readonly root: string; readonly buildId: string } {
-  const root = join(fx.root, 'old-store', 'node_modules', '@xmoon76', 'dsh-pi-tui')
+  const root = join(fx.profileDir, 'node_modules', '.pnpm', '@xmoon76+dsh-pi-tui@0.5.6_probe', 'node_modules', '@xmoon76', 'dsh-pi-tui')
   mkdirSync(join(root, 'dist'), { recursive: true, mode: 0o700 })
   writeFileSync(join(root, 'package.json'), `${JSON.stringify({ name: '@xmoon76/dsh-pi-tui', version: '0.5.6' })}\n`)
   writeFileSync(join(root, 'dist', 'local-host.mjs'), 'process.exit(1)\n')
@@ -849,7 +849,7 @@ test('migration preserves a pruned old package path as user-managed (no provenan
   // The old physical package was pruned by the official upgrade: the record
   // cannot prove this argv was product-generated for THIS Profile, so it must
   // stay byte-for-byte user-managed rather than be invented into a migration.
-  const prunedEntry = join(fx.root, 'store', 'node_modules', '.pnpm', '@xmoon76+dsh-pi-tui@0.5.7_abc123', 'node_modules', '@xmoon76', 'dsh-pi-tui', 'dist', 'local-host.mjs')
+  const prunedEntry = join(fx.profileDir, 'node_modules', '.pnpm', '@xmoon76+dsh-pi-tui@0.5.7_abc123', 'node_modules', '@xmoon76', 'dsh-pi-tui', 'dist', 'local-host.mjs')
   writeFileSync(path, renderLaunchdPlist({ ...fx.facts, hostEntryPath: prunedEntry, buildId: 'e'.repeat(64) }), { mode: 0o600 })
   const deps = depsOf(fx)
   const inspected = prepareOwnedLaunchdForCurrentInstall(fx.facts, ownedUnitOf(fx, deps), deps, 'inspect')
@@ -870,6 +870,23 @@ test('migration preserves an exact-shaped argv pinned to another Profile', { ski
   const unit = ownedUnitOf(fx, deps)
   assert.deepEqual(prepareOwnedLaunchdForCurrentInstall(fx.facts, unit, deps, 'inspect'), { plan: { kind: 'no-op', reason: 'user-managed' } })
   assert.equal(readFileSync(path, 'utf8').includes(pinnedEntry), true, 'a user pin to another Profile is preserved')
+})
+
+test('migration preserves a readable external same-build package outside the Profile', { skip: NATIVE_PLIST_DECODER_SKIP }, t => {
+  const fx = fixture(t)
+  mkdirSync(join(fx.accountHome, 'Library', 'LaunchAgents'), { recursive: true, mode: 0o700 })
+  const path = plistPathOf(fx)
+  const old = writeOldProductPackage(fx)
+  const externalRoot = join(fx.root, 'external', 'node_modules', '@xmoon76', 'dsh-pi-tui')
+  mkdirSync(dirname(externalRoot), { recursive: true, mode: 0o700 })
+  symlinkSync(old.root, externalRoot)
+  const externalEntry = join(externalRoot, 'dist', 'local-host.mjs')
+  writeFileSync(path, renderLaunchdPlist({ ...fx.facts, hostEntryPath: externalEntry, buildId: old.buildId }), { mode: 0o600 })
+  const deps = depsOf(fx)
+  const unit = ownedUnitOf(fx, deps)
+  assert.deepEqual(prepareOwnedLaunchdForCurrentInstall(fx.facts, unit, deps, 'inspect'), { plan: { kind: 'no-op', reason: 'user-managed' } },
+    'a readable external package with a matching build is still a user pin, not Profile provenance')
+  assert.equal(readFileSync(path, 'utf8').includes(externalEntry), true, 'the external pin is preserved')
 })
 
 test('migration preserves an exact-shaped argv whose recorded build identity does not match', { skip: NATIVE_PLIST_DECODER_SKIP }, t => {
