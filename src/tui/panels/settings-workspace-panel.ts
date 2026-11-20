@@ -3153,20 +3153,17 @@ export class SettingsWorkspacePanel implements Component {
     this.detailOffset = offset
     const lines: string[] = []
     for (let i = 0; i < scrollViewport; i += 1) lines.push(content[offset + i] ?? '')
-    // M6 UX PR2: the follow-up's actable rows earn their painted grant ONLY
-    // when the WHOLE follow-up block (every risk line AND both complete action
-    // rows) really lands inside the granted viewport — a clipped or
-    // scrolled-away risk copy never lets Tab/Enter/pointer commit an install.
+    // M6 UX PR2: the follow-up's actable rows earn their painted grant ONLY when
+    // BOTH complete action labels really land inside the granted viewport. The
+    // risk copy is scroll-reachable (readable) in the same pane; a clipped or
+    // scrolled-away action label never grants an install (plan §3.2 "only a
+    // complete label is clickable"), and a tiny screen that cannot host both
+    // complete labels degrades to no install rather than a hidden action.
     let serviceInstallActionsVisible = false
-    const block = this.serviceInstallBlock
-    if (this.serviceInstall !== undefined && this.serviceInstall.installable
-      && this.serviceInstall.phase === 'asking' && block !== undefined) {
-      const fullyVisible = block.start >= offset && block.end <= offset + scrollViewport
-      if (fullyVisible) {
-        const shown = lines.map(line => line.replace(/\x1b\[[0-9;]*m/gu, ''))
-        serviceInstallActionsVisible = shown.some(line => /\bNot now\b/u.test(line))
-          && shown.some(line => /\bInstall service\b/u.test(line))
-      }
+    if (this.serviceInstall !== undefined && this.serviceInstall.installable && this.serviceInstall.phase === 'asking') {
+      const shown = lines.map(line => line.replace(/\x1b\[[0-9;]*m/gu, ''))
+      serviceInstallActionsVisible = shown.some(line => /\bNot now\b/u.test(line))
+        && shown.some(line => /\bInstall service\b/u.test(line))
     }
     const painted = pinned === 1 ? this.layoutButtons(width, buttons) : { text: '', painted: [] }
     if (pinned === 1) {

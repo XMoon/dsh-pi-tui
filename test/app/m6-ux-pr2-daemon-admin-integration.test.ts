@@ -74,7 +74,7 @@ test('the PRODUCTION run seam passes the bound Profile into the real control pla
   const accountHome = life.tempDir('m62c-acct-')
   const mkProfile = (name: string): DaemonControlProfile => {
     const root = life.tempDir(`m62c-sink-${name}-`)
-    const dir = join(root, 'profiles', name)
+    const dir = join(root, `profiles/${name}`)
     mkdirSync(dir, { recursive: true })
     mkdirSync(join(root, 'anchor'), { recursive: true })
     writeFileSync(join(root, 'anchor', 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh', version: '0.2.2-rc.5' }))
