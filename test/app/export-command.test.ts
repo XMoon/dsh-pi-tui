@@ -773,10 +773,16 @@ function makeHarness(home: string, options: {
   const live = new Map<string, Agent>()
   const makeHandle = (session: HarnessSession): { agent: Agent; dispose: () => Promise<void> } => {
     // The structural Agent shape the runner's surface rebuild and the
-    // Direct retirement touch: ctx (get/on), whenIdle, cancel, inbox.
+    // Direct retirement touch: ctx (get/on/effect), whenIdle, cancel, inbox.
+    // `effect` models the official Agent-scope lifecycle (the per-Turn latch
+    // disposes with the Agent exactly as in production).
+    const effectDisposers: Array<() => void> = []
     const agentContext = {
       get: () => undefined,
       on: () => () => {},
+      effect: (fn: () => () => void) => {
+        effectDisposers.push(fn())
+      },
     }
     let cancelled = false
     let releaseIdle: (() => void) | undefined
@@ -801,7 +807,14 @@ function makeHarness(home: string, options: {
       },
     } as unknown as Agent
     live.set(session.id, agent)
-    return { agent, dispose: async () => { live.delete(session.id) } }
+    return {
+      agent,
+      dispose: async () => {
+        // The Agent-scope teardown runs the registered effect disposers.
+        for (const disposeEffect of effectDisposers.splice(0)) disposeEffect()
+        live.delete(session.id)
+      },
+    }
   }
   const persistence = {
     list: async () => [...persisted.values()].map(session => session.header),

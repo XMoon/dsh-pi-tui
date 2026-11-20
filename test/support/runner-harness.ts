@@ -182,10 +182,15 @@ export function fakeAgent(
   agentOptions: { provider?: string; model?: string; reasoningEffort?: string } = { provider: 'p', model: 'm' },
 ): Agent {
   // A small structural Agent context is sufficient for the Direct setup
-  // callbacks.
+  // callbacks. It models the official Agent-scope `effect` (M6 PR-C C2): the
+  // per-Turn latch disposes with the Agent exactly as in production.
+  const effectDisposers: Array<() => void> = []
   const agentContext = {
     get: () => undefined,
     on: () => () => {},
+    effect: (fn: () => () => void) => {
+      effectDisposers.push(fn())
+    },
   }
   // cancel is idempotent and BREAKS a pending whenIdle (the real Agent
   // contract): a cancelled agent's whenIdle settles immediately, which is
@@ -209,6 +214,11 @@ export function fakeAgent(
     session,
     ctx: agentContext,
     options: agentOptions,
+    /** The fake's Agent-scope teardown hook (M6 PR-C C2): `handle.dispose`
+     *  runs the registered effect disposers like the real Agent scope. */
+    runEffectDisposers: () => {
+      for (const disposeEffect of effectDisposers.splice(0)) disposeEffect()
+    },
     // DSH 0.2.2: the Agent owns its model selection (`AgentModel`).
     model: fakeAgentModel(session, agentOptions),
     status: 'idle',
@@ -322,6 +332,10 @@ export function makeHarness(
         retirementEvents.push(`dispose:${session.id}`)
         // A failing dispose must NOT remove the live owner: the handle is leaked.
         if (disposeFailures.has(session.id)) throw new Error(`dispose failed for ${session.id}`)
+        // The Agent-scope teardown runs the registered effect disposers
+        // (assigned first: the ASI-free spelling).
+        const teardownEffects = (agent as unknown as { runEffectDisposers(): void }).runEffectDisposers
+        teardownEffects()
         live.delete(session.id)
       },
     }

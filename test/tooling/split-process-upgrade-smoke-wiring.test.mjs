@@ -319,7 +319,7 @@ test('the cross-build case owns the real old/new pair, reexec handoff and both l
     source.indexOf('return fragment'),
   )
   for (const field of [
-    "protocol: 'dsh-pi-tui/local/1'",
+    "protocol: 'dsh-pi-tui/local/2'",
     'dshVersion: targetDshVersion',
     'oldBuildId,',
     'newBuildId,',

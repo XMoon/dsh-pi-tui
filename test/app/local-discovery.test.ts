@@ -465,7 +465,7 @@ test('Client admission accepts one protocol and DSH runtime across package build
     ), 'a different installed build must not block Client admission')
     assert.doesNotThrow(() => assertHostPublicationIdentity(record, scope))
     for (const [field, changed] of [
-      ['protocol', { protocol: 'dsh-pi-tui/local/2' as typeof LOCAL_PROTOCOL }],
+      ['protocol', { protocol: 'dsh-pi-tui/local/3' as typeof LOCAL_PROTOCOL }],
       ['bundleVersion', { bundleVersion: '9.9.9' }],
       ['dshVersion', { dshVersion: '0.2.1-rc.5' }],
       ['buildId', { buildId: 'a'.repeat(64) }],
@@ -487,7 +487,8 @@ test('Client admission refuses another protocol, the retired protocol name and a
     const scope = scopeFor(value)
     const record = recordFor(scope)
     for (const [label, changed] of [
-      ['a future protocol major', { protocol: 'dsh-pi-tui/local/2' as typeof LOCAL_PROTOCOL }],
+      ['a future protocol major', { protocol: 'dsh-pi-tui/local/3' as typeof LOCAL_PROTOCOL }],
+      ['the previous protocol major (local/1)', { protocol: 'dsh-pi-tui/local/1' as typeof LOCAL_PROTOCOL }],
       ['the retired internal protocol name', { protocol: 'm4-b1/1' as typeof LOCAL_PROTOCOL }],
       ['another DSH runtime', { dshVersion: '0.2.1-rc.5' }],
     ] as const) {
@@ -1219,13 +1220,22 @@ test('expected-instance handoff attaches only the exact authenticated Host and n
 
     // Negative: a protocol/DSH mismatch stays the existing refusal and no /connect happens.
     identity = hostRecord
-    const foreign = { ...hostRecord, protocol: 'dsh-pi-tui/local/2' as typeof LOCAL_PROTOCOL }
+    const foreign = { ...hostRecord, protocol: 'dsh-pi-tui/local/3' as typeof LOCAL_PROTOCOL }
     writeHost(foreign)
     await assert.rejects(
       ensureLocalHost({ ...options, expectedInstanceId: foreign.instanceId }),
       (error: unknown) => error instanceof LocalScopeError && error.code === 'HOST_PROTOCOL_INCOMPATIBLE',
     )
     assert.equal(connectRequests, 3, 'an incompatible expected Host must not authenticate')
+    // The PREVIOUS protocol major (local/1, an old live Host) is refused the
+    // same way at connect: the Host and its running work are never touched.
+    const previousMajor = { ...hostRecord, protocol: 'dsh-pi-tui/local/1' as typeof LOCAL_PROTOCOL }
+    writeHost(previousMajor)
+    await assert.rejects(
+      ensureLocalHost({ ...options, expectedInstanceId: previousMajor.instanceId }),
+      (error: unknown) => error instanceof LocalScopeError && error.code === 'HOST_PROTOCOL_INCOMPATIBLE',
+    )
+    assert.equal(connectRequests, 3, 'a previous-protocol Host must not authenticate')
 
     // The ordinary ensure path is unchanged: a live Host is authenticated...
     writeHost(hostRecord)

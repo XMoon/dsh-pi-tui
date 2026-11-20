@@ -73,7 +73,7 @@ import { setTerminalTitle, terminalTitleOf } from '../tui/terminal/title.ts'
 import { createClientToolPresenter } from '../tui/transcript/client-tool-presenter.ts'
 import { parseProgressUpdates, parseResponseStyle, type ProgressUpdatesState, type ResponseStyleState } from '../domain/communication/policy.ts'
 import { parseGitAttributionMode, type GitAttributionState } from '../domain/communication/git-attribution.ts'
-import { resolveDisplayPreset, type DisplayState } from '../domain/display/preset.ts'
+import { isFocusDisplayPreset, resolveDisplayPreset, type DisplayState } from '../domain/display/preset.ts'
 import { guardedStreamWriter } from '../tui/notification/terminal-notifier.ts'
 import { createTerminalNotificationPresentation } from '../tui/notification/runtime.ts'
 import { sessionStatsFactsOf } from '../domain/status/stats.ts'
@@ -118,6 +118,8 @@ import type {
   RemoteTransportLifetime,
   RunnerStartupSettlement,
 } from '../app/application-runtime.ts'
+import { createPromptPresenceClient, type PromptPresenceClient } from './remote/prompt-presence-client.ts'
+import { installTuiPromptTurnLatch } from './agent/turn-policy.ts'
 import type { ModelSelectionDto } from '../runtime/catalog-port.ts'
 import { selectApplicationRuntime } from './bootstrap/runtime-selection.ts'
 import { createPresentationBridge } from './bootstrap/presentation-bridge.ts'
@@ -656,6 +658,51 @@ export function applyRunnerWithRuntime(
     // the section reads it on every assembly.
     const gitAttributionState: GitAttributionState = { mode: parseGitAttributionMode(persistedTuiSettings?.gitAttribution) }
 
+    // M6 PR-C C3: the ONE Client-local session-view presence owner (Split
+    // Client only). The Host folds ACKed per-Peer presence into the per-Turn
+    // TUI prompt decision; the view is re-projected on every navigation commit
+    // and every display mutation, and every prompt admission awaits the
+    // current revision's ACK. Direct leaves the capability absent: its local
+    // fold needs no wire ACK.
+    const promptPresence = override?.promptPresence === undefined
+      ? undefined
+      : createPromptPresenceClient({
+        capability: override.promptPresence,
+        localView: () => ({
+          viewedSessionId: ownership.currentSessionId() ?? null,
+          displayPreset: displayState.preset,
+        }),
+        signal: lifecycleController.signal,
+        // The Peer-lifetime revision scope: the Host stores one strictly
+        // increasing revision per authenticated Peer, and the Client
+        // CONNECTION root (passed through the mount seam) outlives the
+        // qualification-only Surface replacement — the runner's own plugin
+        // fiber is a FRESH object per Surface revision and would reset the
+        // counter into a `stale-revision` refusal.
+        peerScope: startupSettlement?.presencePeerScope ?? ctx,
+        // The existing transport identity capture/compare pair: an ACK carried
+        // by a superseded Connection generation or a replaced binding must
+        // never confirm this Client's presence.
+        transport: {
+          capture: (sessionId) => override.presentation.sessionFacts.captureTransportToken(sessionId) as
+            | { readonly generation: unknown; readonly binding: unknown }
+            | undefined,
+          isCurrent: (sessionId, token) => override.presentation.sessionFacts.isTransportTokenCurrent(sessionId, token),
+          mainViewRetained: (sessionId) => override.presentation.sessionFacts.mainViewRetained(sessionId),
+        },
+        diag,
+      })
+    if (promptPresence !== undefined) {
+      // Resample AFTER the synchronous navigation commit (the coalesced
+      // microtask of the official scope invalidation) and once initially for a
+      // startup Resume that already committed before this subscription. The
+      // owner sends its best-effort withdraw and retires on the lifecycle
+      // abort; the authoritative removal is the old Peer's signal abort.
+      const unsubscribePresence = ownership.subscribeScopeInvalidation(() => promptPresence.resample())
+      lifecycleController.signal.addEventListener('abort', () => { unsubscribePresence() }, { once: true })
+      promptPresence.resample()
+    }
+
     // Completion notifications (plan: Client/TUI presentation capability —
     // settled detection, focus detection, terminal output and settings parsing
     // stay separate modules, never a blob in the runner). A4-4: the notification
@@ -926,7 +973,33 @@ export function applyRunnerWithRuntime(
         // Behavior preserved: the same `composeDirectAgent` wiring, now with the
         // runtime's Agent-scoped model-selection install.
         compose: (installSelection, presetId) =>
-          composeDirectAgent(ctx, installSelection, presetId, displayState, diag, progressUpdatesState, responseStyleState, gitAttributionState),
+          composeDirectAgent(ctx, installSelection, presetId, displayState, diag, progressUpdatesState, responseStyleState, gitAttributionState, {
+            // M6 PR-C C2: production Direct installs the FROZEN per-Turn latch
+            // (the public `composeAgent` compatibility entry keeps its
+            // pre-C2 live-display semantics). Eligible = the committed local
+            // main view is exactly this Agent's Session; Focus = the current
+            // local display preset — never a Profile default, never another
+            // Session's or a subagent's view.
+            installTurnPolicy: (agentCtx, agent) => {
+              // A Direct Agent created AFTER the runner lifecycle aborted (a
+              // late non-cooperative transition child) has no live runner
+              // scope: the Session event plane is gone, and subscribing would
+              // register an effect on an INACTIVE context (Cordis
+              // INACTIVE_EFFECT). Fail closed with no policy — the late owner
+              // is retired, never prompted.
+              if (ctx.fiber.uid === null) return { currentTurn: () => undefined }
+              const latch = installTuiPromptTurnLatch(
+                { on: (_event, listener, listenerOptions) => ctx.on('session/event', listener, listenerOptions) },
+                agent.session,
+                () => ({
+                  eligible: ownership.currentSessionId() === agent.session.id,
+                  focus: isFocusDisplayPreset(displayState.preset),
+                }),
+              )
+              agentCtx.effect(() => () => latch.dispose(), 'direct-tui-turn-latch')
+              return latch
+            },
+          }),
         getViewedQueueAgent: () => viewerRef?.viewedQueueAuthority(),
       })
       return constructedDirectRuntime
@@ -2657,7 +2730,18 @@ export function applyRunnerWithRuntime(
       },
       settings: {
         applyFooterSettings: (doc, saved) => settings.applyFooterSettings(doc, saved),
-        setDisplayPreset: (preset) => settings.setDisplayPreset(preset),
+        setDisplayPreset: (preset) => {
+          const result = settings.setDisplayPreset(preset)
+          // M6 PR-C C3: `/display` and `/focus` mutate the shared DisplayState
+          // synchronously through the unified seam; re-project the new view to
+          // the Host right after (independent from the detached Profile save).
+          promptPresence?.resample()
+          return result
+        },
+        // M6 PR-C C3: the Settings workspace's display-preset commit applies
+        // through the app DIRECTLY (its own persistence sequence), bypassing
+        // the unified seam above — it re-projects through this notification.
+        onDisplayPresetMutated: () => promptPresence?.resample(),
       },
       model,
       viewer: {
@@ -3600,6 +3684,9 @@ export function applyRunnerWithRuntime(
           return runtime.withPromptAdmission(agent as Agent, hasImages, task)
         },
       },
+      // M6 PR-C C3: the Split-Client presence prerequisite for the steer/queue
+      // admission (absent on Direct).
+      ...(promptPresence === undefined ? {} : { ackPromptView: () => promptPresence.ackCurrentView() }),
       // M6 UX PR1: the bare `exit` word uses the `plain` entry of the SAME
       // exit-intent decision (it can never bypass a Busy Choice).
       requestExit: () => exitIntent.request('plain'),
@@ -4604,6 +4691,10 @@ export function applyRunnerWithRuntime(
           sessionRuntime.withWriter(scope, task),
         withPromptAdmission: <T>(scope: LiveSessionScope, line: string, task: () => Promise<T>): Promise<T> =>
           command.runner().withPromptAdmission(scope, line, task),
+        // M6 PR-C C3: the Split-Client presence prerequisite (absent on
+        // Direct) — every ordinary/queued prompt admission awaits the current
+        // view's Host ACK before this Client starts its own new Turn.
+        ...(promptPresence === undefined ? {} : { ackPromptView: () => promptPresence.ackCurrentView() }),
         isDisposed: () => cleanedUp,
         isScopeCurrent: (scope) => sessionScope.isCurrent(scope),
         // PR2: the live composer hold — every restore/merge of the hold's

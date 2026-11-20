@@ -387,6 +387,23 @@ export async function createRemoteApplicationHostFixture(
         signal?: AbortSignal,
       ): Promise<readonly { readonly path: string; readonly kind: 'file' | 'directory' }[]>
     }
+    /**
+     * M6 PR-C C3: omit the built-in Host Runtime row (`pi-tui-host-runtime`).
+     * The row installs the per-Agent TUI prompt policy on every ordinary Agent
+     * it observes (`agent/created`), so a test that installs its OWN
+     * controlled TUI prompt policy on real Agents (the neutral latch/sections
+     * semantics) opts out to avoid duplicate section registration. The row's
+     * own installation is covered by the Host parity/wire suites. Off by
+     * default so every other consumer keeps its exact previous composition.
+     */
+    readonly withoutHostRuntime?: boolean
+    /**
+     * Canonical `pi-tui-preferences` document values for this fixture (e.g.
+     * `{ gitAttribution: 'product-model' }`); omitted fields use the schema
+     * defaults. The Host Runtime's prompt rows read these refs live at every
+     * assembly.
+     */
+    readonly preferences?: Record<string, unknown>
   } = {},
 ): Promise<{
   ctx: Context
@@ -484,8 +501,8 @@ export async function createRemoteApplicationHostFixture(
     // The canonical preference authority the Host Runtime injects. These
     // historical in-process fixtures mount the row directly, so they publish
     // the same canonical references a real Host profile would.
-    ctx.provide('piTuiPreferences', CanonicalPreferencesConfig({} as never))
-    await ctx.plugin(piTuiHostRuntime, { sessionId: '' } as never)
+    ctx.provide('piTuiPreferences', CanonicalPreferencesConfig({ ...(options.preferences ?? {}) } as never))
+    if (options.withoutHostRuntime !== true) await ctx.plugin(piTuiHostRuntime, { sessionId: '' } as never)
     await ctx.plugin(performanceHost)
     // The official `workspace` Remote owner (the `workspace-controller` Host
     // row): an ordinary Remote create names a Host WorkspaceId, so the Host must

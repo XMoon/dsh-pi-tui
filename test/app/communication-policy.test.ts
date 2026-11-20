@@ -58,6 +58,32 @@ function communicationRegistry(display: DisplayState = { preset: 'full' }) {
   }
 }
 
+/**
+ * M6 PR-C C2: the production policy is FROZEN per Turn — the section text
+ * exists only inside an eligible Turn, and the Focus bit is frozen at
+ * `turn/start`. The production-runner phases emit the OFFICIAL Session
+ * boundaries around their assertions instead of fabricating an always-active
+ * Turn.
+ */
+function turnBoundaries(ctx: Context, session: unknown): { start(): void; end(): void } {
+  let turn = 0
+  return {
+    start: () => {
+      turn += 1
+      ctx.emit('session/event', session as never, {
+        type: 'turn/start', seq: turn, time: Date.now(),
+        data: { turn },
+      } as never)
+    },
+    end: () => {
+      ctx.emit('session/event', session as never, {
+        type: 'turn/end', seq: turn, time: Date.now(),
+        data: { turn, reason: { kind: 'completed' } },
+      } as never)
+    },
+  }
+}
+
 test('parsers accept only the exact values and default missing/invalid settings', () => {
   assert.equal(DEFAULT_PROGRESS_UPDATES, 'milestones')
   assert.equal(DEFAULT_RESPONSE_STYLE, 'default')
@@ -325,6 +351,8 @@ test('production startup resolves both settings before compose and settings swit
     responseStyle: 'explanatory',
   })
   life.defer(() => fiber.dispose())
+  const turns = turnBoundaries(ctx, session)
+  turns.start()
   assert.match(registry.text('tui:progress-updates'), /# Progress updates: Off/)
   assert.match(registry.text('tui:response-style'), /# Response style: Explanatory/)
   const commands = harness.commands as { handler(name: string): (input: { rawInput: string }) => unknown }
@@ -359,17 +387,23 @@ test('production startup resolves both settings before compose and settings swit
     vt.sendInput('\x1b')
     await vt.waitForRender()
   }
-  // Plan §12 behavior: switch to Focus without recompose, then back.
+  // Plan §12 behavior: switch to Focus without recompose, then back. The
+  // Focus bit is FROZEN at turn/start, so each preset gets its own Turn.
+  turns.end()
   await commands.handler('display')({ rawInput: 'focus' })
   await settle()
+  turns.start()
   assert.equal(registry.text('tui:progress-updates'), '', 'Focus empties the effective progress section')
   assert.equal(registry.text('tui:response-style'), '')
   assert.equal(registry.text('tui:focus-mode'), FOCUS_MODE_PROMPT)
+  turns.end()
   await commands.handler('display')({ rawInput: 'full' })
   await settle()
+  turns.start()
   assert.match(registry.text('tui:progress-updates'), /# Progress updates: Off/)
   assert.equal(registry.sections.size, 4, 'neither setting recomposes the agent')
   assert.equal(registry.text('tui:git-attribution'), '', 'the default-off attribution section is empty')
+  turns.end()
 })
 
 // ── C2-R1: the two prompt axes are independent live objects ────────────────
@@ -474,6 +508,8 @@ test('a Settings workspace Confirm reaches the registered prompt section through
     responseStyle: 'default',
   })
   life.defer(() => fiber.dispose())
+  const turns = turnBoundaries(ctx, session)
+  turns.start()
   assert.equal(registry.text('tui:response-style'), '', 'the default response style adds no guidance')
   assert.match(registry.text('tui:progress-updates'), /# Progress updates: Milestones/)
 
@@ -537,7 +573,13 @@ test('a Settings workspace Confirm reaches the registered prompt section through
 
   // Focus suppresses the EFFECTIVE progress narration without touching either
   // committed preference — the suppression the workspace contract promises.
+  // The Focus bit is FROZEN at turn/start, so the preset switch closes the
+  // current Turn and the Focus assertions run inside a fresh one.
+  turns.end()
   await commands.handler('display')({ rawInput: 'focus' })
+  // Bounded settle window: the /display commit must land before the frozen turn/start.
+  await settle()
+  turns.start()
   await waitForFrame(
     () => registry.text('tui:progress-updates'),
     text => text === '',
@@ -551,7 +593,11 @@ test('a Settings workspace Confirm reaches the registered prompt section through
   // registered section rather than the document: `/display` runs its own
   // whole-document replace, and this fixture's volatile refs stay at their
   // startup values, so the document mirror is not the authority here.)
+  turns.end()
   await commands.handler('display')({ rawInput: 'full' })
+  // Bounded settle window: same display-commit before the frozen turn/start.
+  await settle()
+  turns.start()
   await waitForFrame(
     () => registry.text('tui:progress-updates'),
     text => /# Progress updates: Frequent/u.test(text),
@@ -559,4 +605,5 @@ test('a Settings workspace Confirm reaches the registered prompt section through
     'leaving Focus never restored the committed cadence',
   )
   assert.equal(registry.sections.size, 4, 'Focus never re-registered a section')
+  turns.end()
 })

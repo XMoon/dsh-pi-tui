@@ -801,6 +801,11 @@ export interface TuiCommandRunner {  ctx: Context
   displayPreset?(): DisplayPreset
   /** Apply a canonical display preset through the shared setter. */
   setDisplayPreset?(preset: DisplayPreset): DisplayPresetApplyResult
+  /** M6 PR-C C3: fired after a display-preset mutation whose local state
+   * update bypassed the shared `settings.setDisplayPreset` seam (the Settings
+   * workspace commit path applies through the app directly). The Split-Client
+   * presence owner re-projects the new view to the Host. */
+  onDisplayPresetMutated?(): void
   /** @deprecated Compatibility facade for existing command-only callers. */
   focusEnabled(): boolean
   /** @deprecated Compatibility facade; production commands use setDisplayPreset. */

@@ -128,6 +128,19 @@ export async function runClientHmrSignals(context) {
           `T57 expected exactly one ${operation} record`)
       }
       await client.waitForScreen('long-turn answer', 'T57 new TTY paint', 120_000)
+      // Q1 / RFL-012: the replacement Surface must CONTINUE the same-Peer
+      // presence revision scope. Submit one Prompt through the new surface:
+      // the admission gate awaits the Host's ACK for the current view — a
+      // `stale-revision` refusal (the old per-owner counter resetting to 1)
+      // restores the draft and dispatches NOTHING. A fresh Host Turn is the
+      // real source->decision->sink proof on the real Gateway/Peer; the old
+      // surface already retired (status above), so this is also the teardown
+      // negative — no second owner can carry the vote.
+      client.send('\x15t57 post-hmr prompt\r')
+      await waitForHostSessionEvent(dshHome, sessionId, event => event.type === 'turn/start' && event.data?.turn === 2, 'T57 post-HMR turn/start')
+      await waitForHostSessionEvent(dshHome, sessionId, event => event.type === 'turn/end' && event.data?.turn === 2, 'T57 post-HMR turn/end')
+      await client.waitForScreen('long-turn answer', 'T57 post-HMR reply paint', 120_000)
+      trace('t57-post-hmr-prompt', { sessionId, turn: 2, admission: 'host-accepted', staleRevisionRefusal: false })
       await assertHostIdentityKept(host, hostBefore, 'T57 Host identity')
       await assertHostRowsKept(host, rowsBefore, 'T57 Host Loader rows')
       await exitC1Client(client, 'T57 Client')

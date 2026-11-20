@@ -2136,6 +2136,11 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
           applyRunnerWithRuntime(pluginContext, input.config, input.override, {
             surfaceReady: () => bridge.markMounted(),
             surfaceFailed: error => bridge.fail(error),
+            // M6 PR-C C3: the presence revision scope is the Client
+            // CONNECTION root — it survives the qualification-only Surface
+            // replacement (a fresh plugin fiber per revision would reset the
+            // per-Peer revision counter into a `stale-revision` refusal).
+            presencePeerScope: clientContext,
             // M4 PR4: the ONE process-owned manual reload capability of this
             // real surface mount. The command handler has already made the
             // Client-local safety decision in the SAME synchronous stack; this

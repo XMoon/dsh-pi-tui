@@ -32,7 +32,7 @@ import { createHash } from 'node:crypto'
 import { existsSync, readFileSync } from 'node:fs'
 import type { Context } from '@deepseek-ai/cordis'
 import { PI_TUI_EXTENSIONS_SERVICE } from '../../extensions.ts'
-import type { RemoteApplicationOverride } from '../application-runtime.ts'
+import type { RemoteApplicationOverride, RemotePromptPresenceCapability } from '../application-runtime.ts'
 import { Config as TuiConfigSchema } from '../config/schema.ts'
 import {
   createRemoteApplicationRuntimeFromClient,
@@ -839,6 +839,13 @@ async function startSurfaceLocalClient(
     if (kind === 'hmr' && process.env.SPLIT_PROCESS_CLIENT_HMR_FAIL === '1') {
       throw new Error('local client entry: qualification forced HMR surface mount failure')
     }
+    // M6 PR-C C3: the mounted private session-view presence capability, if the
+    // Host serves it. It crosses the composition seam as the ONE narrow
+    // structural capability (no transport, no Cookie, no extra Remote mount —
+    // the descriptor rides the existing single `PI_TUI_CLIENT_CONTRIBUTION`).
+    const promptPresence = (domains.remote as unknown as {
+      readonly piTuiPromptPresence?: RemotePromptPresenceCapability
+    } | undefined)?.piTuiPromptPresence
     const override: RemoteApplicationOverride = {
       selected: revision.application.selected,
       presentation: revision.application.presentation,
@@ -848,6 +855,7 @@ async function startSurfaceLocalClient(
       // committed-Session authority to it and the modal-safe navigation entry
       // opens the existing Sessions Workspace through it.
       interactionDelivery: delivery,
+      ...(promptPresence === undefined ? {} : { promptPresence }),
     }
     // Schema defaults + the explicit Client-local startup facts. No fabricated
     // profile document: a preference's absence resolves to its schema default.

@@ -31,6 +31,40 @@ import type { Backend, BackendKind } from '../runtime/backend.ts'
 import type { SessionOwnerAccess, SessionOwnerRetirement } from './session/owner-access.ts'
 import type { PiTuiExtensionService } from '../extensions.ts'
 import type { SessionBrowserAnswerEligibility } from './command/session-browser-presentation.ts'
+import type { DisplayPreset } from '../domain/display/preset.ts'
+
+/**
+ * The `syncView` ACK the structural presence capability returns: the typed
+ * applied/refused answer of the private Remote method. Declared STRUCTURALLY
+ * (the refusal vocabulary is the wire contract's closed set, mirrored here)
+ * so this transport-neutral module never imports `runtime/remote/**`. The
+ * owning contract module is
+ * `runtime/remote/pi-tui-prompt-presence-contract.ts`.
+ */
+export type RemotePromptPresenceAck =
+  | { readonly kind: 'applied'; readonly revision: number }
+  | {
+      readonly kind: 'refused'
+      readonly reason: 'owner-required' | 'session-not-live' | 'stale-revision' | 'scope-unavailable'
+    }
+
+/**
+ * The ONE narrow Client Remote presence capability (M6 PR-C C3): the mounted
+ * `piTuiPromptPresence.syncView` method and nothing else. A Client's own
+ * session-view presence is asserted through it and the authoritative Host ACK
+ * is awaited; the Client never speaks for another Peer.
+ */
+export interface RemotePromptPresenceCapability {
+  syncView(
+    viewedSessionId: string | null,
+    displayPreset: DisplayPreset,
+    revision: number,
+    signal?: AbortSignal,
+  ): Promise<
+    | { readonly ok: true; readonly value: RemotePromptPresenceAck }
+    | { readonly ok: false; readonly error: unknown }
+  >
+}
 
 /**
  * The one selected application runtime core: the common inputs the bootstrap
@@ -331,6 +365,9 @@ export interface RemoteApplicationOverride {
   readonly extensionService: PiTuiExtensionService
   /** Split-Client only: the Client-root interaction delivery owner. */
   readonly interactionDelivery?: SplitClientInteractionDeliveryControl
+  /** Split-Client only: the mounted private session-view presence capability
+   *  (M6 PR-C C3). Direct leaves it absent — the local fold needs no wire ACK. */
+  readonly promptPresence?: RemotePromptPresenceCapability
 }
 
 /**
@@ -379,6 +416,15 @@ export interface RunnerStartupSettlement {
   surfaceReady(): void
   surfaceFailed(error: unknown): void
   /**
+   * M6 PR-C C3: the presence revision scope identity owned by the Client
+   * CONNECTION root (the client Context). The Host stores one strictly
+   * increasing revision per authenticated Peer, so the counter must SURVIVE
+   * the qualification-only Surface replacement — a fresh plugin fiber per
+   * revision is a fresh WeakMap key and would reset the counter into a
+   * `stale-revision` refusal. Absent on Direct (no presence owner exists).
+   */
+  presencePeerScope?: object
+  /**
    * M4 PR4: the split Client's ONE process-owned manual-reload request. It
    * returns the process preflight's synchronous decision; the caller
    * (the `/reload-client` command handler) has already made the Client-local
@@ -397,6 +443,10 @@ export interface RemoteSessionFactsSource {
    *  generation + exact binding object; see the owning module). */
   captureTransportToken(sessionId: string): unknown
   isTransportTokenCurrent(sessionId: string, token: unknown): boolean
+  /** The exact current official main-view retain fact of one Session: its
+   *  already-retained binding is held by the `tuiMainView` owner. A generic
+   *  binding kept alive by another source (operation/child) is NOT a view. */
+  mainViewRetained(sessionId: string): boolean
   /** S3-R0: the read→commit revision/identity proof of one window re-fold
    *  (undefined when a newer window or a replaced identity made the read
    *  superseded; see the owning module). */

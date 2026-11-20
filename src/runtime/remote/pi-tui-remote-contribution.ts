@@ -69,6 +69,9 @@ import {
   PI_TUI_SESSION_POLICY_SET_APPROVAL,
 } from './pi-tui-session-policy-contract.ts'
 import { PI_TUI_DEFAULT_MODEL_SAVE_SELECTION } from './pi-tui-default-model-contract.ts'
+import {
+  PI_TUI_PROMPT_PRESENCE_SYNC_VIEW,
+} from './pi-tui-prompt-presence-contract.ts'
 
 /** The npm package that owns every private Remote invocation here. A test
  *  guards that it equals each contract module's own package constant. */
@@ -103,6 +106,7 @@ export const PI_TUI_HOST_CONTRIBUTION: TypertContribution = {
     PI_TUI_SESSION_POLICY_READ,
     PI_TUI_SESSION_POLICY_SET_APPROVAL,
     PI_TUI_DEFAULT_MODEL_SAVE_SELECTION,
+    PI_TUI_PROMPT_PRESENCE_SYNC_VIEW,
   ],
 }
 
@@ -132,5 +136,6 @@ export const PI_TUI_CLIENT_CONTRIBUTION: TypertRemoteContribution = {
     PI_TUI_SESSION_POLICY_READ,
     PI_TUI_SESSION_POLICY_SET_APPROVAL,
     PI_TUI_DEFAULT_MODEL_SAVE_SELECTION,
+    PI_TUI_PROMPT_PRESENCE_SYNC_VIEW,
   ],
 }

@@ -1,49 +1,46 @@
 /**
  * The Direct Host system-prompt installation owner (TS8-F3): the ONLY module
  * that composes `ctx.get('systemPrompt')` and registers the TUI-owned
- * system-prompt sections. It installs every TUI-owned communication section —
- * progress updates, response style, git attribution and Focus — reading the
- * pure prompt text from `domain/communication/**` on every assembly, so a live
- * state change is seen by the next model step without re-composition.
+ * system-prompt sections on the Direct branch. It installs every TUI-owned
+ * communication section — progress updates, response style, git attribution
+ * and Focus — reading the pure prompt text from `domain/communication/**` on
+ * every assembly, so a live state change is seen by the next model step
+ * without re-composition.
+ *
+ * M6 PR-C C2: the section names, orders, texts and the per-Turn policy live in
+ * ONE shared neutral owner (`app/agent/prompt-sections.ts` +
+ * `app/agent/turn-policy.ts`) that the Split Host installs through the same
+ * functions, so Direct/Host assembled text cannot drift. This module keeps
+ * ONLY the Direct-specific composition: the structural `ctx.get('systemPrompt')`
+ * lookup, the graceful degradation diagnostics, and the per-section public
+ * installers the existing tests and the public `composeAgent` surface use.
  *
  * Direct-only by construction (the `dsh-system-prompt` service lookup), so it
  * lives under `app/direct`. A missing service degrades gracefully: the Agent
- * still runs and the absence is recorded in diagnostics. The section registry
- * owns the returned disposers' lifetime with the agent scope (as before);
- * registration failures on the Focus section are contained and recorded.
+ * still runs and the absence is recorded in diagnostics.
+ *
  * @module @xmoon76/dsh-pi-tui/app/direct/system-prompt
  */
 
 import type { Context } from '@deepseek-ai/cordis'
 import type { Diag } from '../../runtime/process/diagnostics.ts'
 import type { DisplayState } from '../../domain/display/preset.ts'
-import {
-  PROGRESS_UPDATES_SECTION_NAME,
-  PROGRESS_UPDATES_SECTION_ORDER,
-  RESPONSE_STYLE_SECTION_NAME,
-  RESPONSE_STYLE_SECTION_ORDER,
-  progressUpdatesPromptText,
-  responseStylePromptText,
-  type ProgressUpdatesState,
-  type ResponseStyleState,
+import type {
+  ProgressUpdatesState,
+  ResponseStyleState,
 } from '../../domain/communication/policy.ts'
-import { FOCUS_SECTION_NAME, FOCUS_SECTION_ORDER, focusPromptText } from '../../domain/communication/focus.ts'
+import type { GitAttributionState } from '../../domain/communication/git-attribution.ts'
 import {
-  GIT_ATTRIBUTION_SECTION_NAME,
-  GIT_ATTRIBUTION_SECTION_ORDER,
-  gitAttributionPromptText,
-  type GitAttributionState,
-} from '../../domain/communication/git-attribution.ts'
+  installFocusSection,
+  installGitAttributionSection,
+  installProgressUpdatesSection,
+  installResponseStyleSection,
+  liveDisplayTurnPolicy,
+  type SystemPromptLike,
+  type TuiPromptTurnPolicy,
+} from '../agent/prompt-sections.ts'
 
-/** The dsh-system-prompt service surface the sections need (structural — the
- * bundle never imports dsh-system-prompt as a dependency). */
-export interface SystemPromptLike {
-  section(section: {
-    name: string
-    order: number
-    text: string | ((context: unknown) => string)
-  }): () => void
-}
+export type { SystemPromptLike } from '../agent/prompt-sections.ts'
 
 /** The live states one agent composition installs sections from. Every state
  * is caller-owned and read on every assembly (a provider, not a snapshot). */
@@ -53,6 +50,13 @@ export interface DirectSystemPromptSections {
   readonly progressUpdatesState?: ProgressUpdatesState
   readonly responseStyleState?: ResponseStyleState
   readonly gitAttributionState?: GitAttributionState
+  /**
+   * The per-Turn policy. Absent = the pre-C2 live-display semantics: the
+   * display state is evaluated live and every Turn is eligible (the public
+   * `composeAgent` helper and the section unit tests). A Split/Direct Host
+   * Agent supplies the frozen latch instead.
+   */
+  readonly turnPolicy?: TuiPromptTurnPolicy
 }
 
 /** Register the progress-updates section. Its effective text reads the live
@@ -62,30 +66,26 @@ export function installProgressUpdatesPrompt(
   displayState: DisplayState,
   state: ProgressUpdatesState,
 ): () => void {
-  return systemPrompt.section({
-    name: PROGRESS_UPDATES_SECTION_NAME,
-    order: PROGRESS_UPDATES_SECTION_ORDER,
-    text: () => progressUpdatesPromptText(displayState, state),
-  })
+  return installProgressUpdatesSection(systemPrompt, liveDisplayTurnPolicy(displayState), () => state)
 }
 
 /** Register the response-style section; each assembly reads the live state. */
 export function installResponseStylePrompt(systemPrompt: SystemPromptLike, state: ResponseStyleState): () => void {
-  return systemPrompt.section({
-    name: RESPONSE_STYLE_SECTION_NAME,
-    order: RESPONSE_STYLE_SECTION_ORDER,
-    text: () => responseStylePromptText(state),
-  })
+  return installResponseStyleSection(
+    systemPrompt,
+    { currentTurn: () => ({ eligible: true, focus: false }) },
+    () => state,
+  )
 }
 
 /** Register the git-attribution section (Agent guidance only: one prompt
  * section, no Git-level enforcement — the prompt-based migration plan). */
 export function installGitAttributionPrompt(systemPrompt: SystemPromptLike, state: GitAttributionState): () => void {
-  return systemPrompt.section({
-    name: GIT_ATTRIBUTION_SECTION_NAME,
-    order: GIT_ATTRIBUTION_SECTION_ORDER,
-    text: () => gitAttributionPromptText(state),
-  })
+  return installGitAttributionSection(
+    systemPrompt,
+    { currentTurn: () => ({ eligible: true, focus: false }) },
+    () => state,
+  )
 }
 
 /**
@@ -95,11 +95,7 @@ export function installGitAttributionPrompt(systemPrompt: SystemPromptLike, stat
  * behavioral policy, not a runtime-context snapshot.
  */
 export function installFocusPrompt(systemPrompt: SystemPromptLike, displayState: DisplayState): () => void {
-  return systemPrompt.section({
-    name: FOCUS_SECTION_NAME,
-    order: FOCUS_SECTION_ORDER,
-    text: () => focusPromptText(displayState),
-  })
+  return installFocusSection(systemPrompt, liveDisplayTurnPolicy(displayState))
 }
 
 /**
@@ -127,18 +123,31 @@ export function installDirectTuiSystemPromptSections(agentCtx: Context, sections
     if (displayState !== undefined) diag?.warn('focus prompt unavailable', { reason: 'systemPrompt service missing' })
     return disposers
   }
+  const turn = sections.turnPolicy
   if (needsCommunication) {
-    if (progressUpdatesState !== undefined && displayState !== undefined) {
-      disposers.push(installProgressUpdatesPrompt(systemPrompt, displayState, progressUpdatesState))
+    if (progressUpdatesState !== undefined && (turn !== undefined || displayState !== undefined)) {
+      disposers.push(turn === undefined
+        ? installProgressUpdatesPrompt(systemPrompt, displayState!, progressUpdatesState)
+        : installProgressUpdatesSection(systemPrompt, turn, () => progressUpdatesState))
     } else if (progressUpdatesState !== undefined) {
       diag?.warn('progress updates prompt unavailable', { reason: 'display state missing' })
     }
-    if (responseStyleState !== undefined) disposers.push(installResponseStylePrompt(systemPrompt, responseStyleState))
-    if (gitAttributionState !== undefined) disposers.push(installGitAttributionPrompt(systemPrompt, gitAttributionState))
+    if (responseStyleState !== undefined) {
+      disposers.push(turn === undefined
+        ? installResponseStylePrompt(systemPrompt, responseStyleState)
+        : installResponseStyleSection(systemPrompt, turn, () => responseStyleState))
+    }
+    if (gitAttributionState !== undefined) {
+      disposers.push(turn === undefined
+        ? installGitAttributionPrompt(systemPrompt, gitAttributionState)
+        : installGitAttributionSection(systemPrompt, turn, () => gitAttributionState))
+    }
   }
   if (displayState !== undefined) {
     try {
-      disposers.push(installFocusPrompt(systemPrompt, displayState))
+      disposers.push(turn === undefined
+        ? installFocusPrompt(systemPrompt, displayState)
+        : installFocusSection(systemPrompt, turn))
     } catch (error) {
       // A throwing registration must not kill the TUI (the section registry
       // rejects duplicate names — a collision from another layer).

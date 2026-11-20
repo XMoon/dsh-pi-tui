@@ -40,7 +40,7 @@ import {
   type ClientReexecIntent,
   type ReexecChildHandle,
 } from '../../src/app/remote-process/local-client-entry.ts'
-import { LocalScopeError } from '../../src/app/remote-process/local-scope.ts'
+import { LOCAL_PROTOCOL, LocalScopeError } from '../../src/app/remote-process/local-scope.ts'
 import { collectHostEntryStatus } from '../../src/app/remote-process/host-bootstrap.ts'
 import { drainHmrTransactions, finishHostFailureCleanup, HOST_ONLY_PATCH } from '../../src/app/remote-process/local-host-entry.ts'
 import {
@@ -319,7 +319,7 @@ test('the Client status is projected from the official state/generation at call 
     hostPid: 42,
     hostStarttime: '99',
     origin: 'http://127.0.0.1:41000',
-    protocol: 'dsh-pi-tui/local/1' as const,
+    protocol: LOCAL_PROTOCOL as typeof LOCAL_PROTOCOL,
     bundleVersion: '0.5.4',
     dshVersion: '0.2.1-rc.4',
     buildId: 'b'.repeat(64),
@@ -375,7 +375,7 @@ test('a disposing transport failure is primary and the Client root failure rides
     hostPid: 42,
     hostStarttime: '99',
     origin: 'http://127.0.0.1:41000',
-    protocol: 'dsh-pi-tui/local/1' as const,
+    protocol: LOCAL_PROTOCOL as typeof LOCAL_PROTOCOL,
     bundleVersion: '0.5.4',
     dshVersion: '0.2.1-rc.4',
     buildId: 'b'.repeat(64),
@@ -471,7 +471,7 @@ const CONNECTED_STATUS: LocalClientStatus = {
     hostPid: 77,
     hostStarttime: '123',
     origin: 'http://127.0.0.1:40000',
-    protocol: 'dsh-pi-tui/local/1',
+    protocol: LOCAL_PROTOCOL as typeof LOCAL_PROTOCOL,
     bundleVersion: '0.5.4',
     dshVersion: '0.2.1-rc.4',
     buildId: 'b'.repeat(64),
