@@ -303,6 +303,43 @@ test('a non-canonical package identity is rejected before any write', async () =
   assert.equal(h.document(), before, 'the profile is untouched')
 })
 
+test('a missing Settings surface fails closed while legacy USER values survive', async () => {
+  const h = harness({ direct: { theme: 'dark' } })
+  const before = h.document()
+  await assert.rejects(
+    () => migrateProfileTuiPreferences({ ...h.input(), forms: undefined }),
+    (error: unknown) => error instanceof TuiPreferencesMigrationError
+      && error.code === 'TUI_PREFERENCES_MIGRATION_UNAVAILABLE'
+      && /refusing to start with defaults/u.test(error.message),
+    'a legacy value must not be silently replaced by canonical defaults',
+  )
+  assert.equal(h.document(), before, 'the raw legacy source is preserved')
+  assert.equal(h.writes.length, 0, 'no canonical write happened')
+})
+
+test('a missing Settings surface with no surviving legacy value is a safe unavailable no-op', async () => {
+  const h = harness()
+  const report = await migrateProfileTuiPreferences({ ...h.input(), forms: undefined })
+  assert.deepEqual(report, { status: 'unavailable', reason: 'settings service unavailable' })
+  assert.equal(h.writes.length, 0)
+})
+
+test('a missing canonical Loader entry fails closed while legacy USER values survive', async () => {
+  const h = harness({ direct: { theme: 'dark' } })
+  const before = h.document()
+  const configEditor = {
+    entries: () => [],
+    edit: async () => { throw new Error('the canonical edit must never run') },
+  } as unknown as ProfileConfigEditorLike
+  await assert.rejects(
+    () => migrateProfileTuiPreferences({ ...h.input(), configEditor }),
+    (error: unknown) => error instanceof TuiPreferencesMigrationError
+      && error.code === 'TUI_PREFERENCES_MIGRATION_UNAVAILABLE',
+  )
+  assert.equal(h.document(), before)
+  assert.equal(h.writes.length, 0)
+})
+
 test('a refused canonical write is a WRITE failure and does not advance the marker', async () => {
   await assert.rejects(
     () => migrateProfileTuiPreferences(harness({ direct: { theme: 'dark' }, refuseWrite: true }).input()),

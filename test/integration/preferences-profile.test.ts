@@ -23,7 +23,7 @@
  */
 
 import assert from 'node:assert/strict'
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
@@ -232,6 +232,32 @@ test('the Host migration writes the canonical USER row under the real profile lo
     diag: { warn: () => {}, info: () => {} },
   })
   assert.equal(retry.status, 'current', 'marker 2 makes a retry a pure read')
+})
+
+test('a profile with no USER patch is an empty source and the canonical write creates it', async t => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('prefs-no-user-patch-')
+  const plane = await bootPlane(life, root, { resetUserDocument: true })
+  rmSync(plane.patchPath)
+  assert.equal(existsSync(plane.patchPath), false,
+    'the test must exercise the supported absent-USER-patch input, not a pre-created []')
+  const report = await migrateProfileTuiPreferences({
+    patchPath: plane.patchPath,
+    configEditor: (plane.ctx as unknown as { configEditor: ProfileConfigEditorLike }).configEditor,
+    forms: settingsOf(plane.ctx),
+    home: root,
+    resolvePreset: async () => {},
+    diag: { warn: () => {}, info: () => {} },
+  })
+  assert.ok(report.status === 'absent' || report.status === 'migrated', `unexpected migration report ${JSON.stringify(report.status)}`)
+  assert.equal(existsSync(plane.patchPath), true, 'the official edit creates the USER patch')
+  const canonical = descriptorOf(plane.ctx)
+  assert.equal((canonical?.user as { legacySettingsMigrationVersion?: number } | undefined)?.legacySettingsMigrationVersion, 2)
+  const cold = await bootPlane(life, root, {})
+  const coldDescriptor = descriptorOf(cold.ctx)
+  assert.equal((coldDescriptor?.user as { legacySettingsMigrationVersion?: number } | undefined)?.legacySettingsMigrationVersion, 2,
+    'a cold Loader/Settings composition rereads the created marker as current')
+  await cold.dispose()
 })
 
 test('a same-id Loader row with a non-canonical package identity is refused before any mutation', async t => {

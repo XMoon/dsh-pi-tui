@@ -5,6 +5,8 @@
  * refresh. */
 
 import assert from 'node:assert/strict'
+import { readFileSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 import test from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import { createToolResultMessage, MessageId, type ToolCallId } from '@deepseek-ai/dsh-llm'
@@ -86,6 +88,34 @@ async function pickSecondModel(app: TuiApp, harness: RunnerHarness): Promise<voi
   input('\r')
   await settle()
 }
+
+test('a Direct bootstrap with a missing Settings surface and a surviving legacy value refuses to mount', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('direct-prefs-barrier-')
+  const patchPath = join(home, 'cordis.patch.yml')
+  writeFileSync(patchPath, [
+    '- id: tui-app',
+    "  name: '@xmoon76/dsh-pi-tui'",
+    '  config:',
+    '    theme: dark',
+    '',
+  ].join('\n'))
+  const ctx = new Context()
+  ctx.provide('profileContext', { home, patchPath })
+  const harness = makeHarness(home)
+  let exited = false
+  try {
+    await mountRunner(ctx, home, harness, {}, {}, () => { exited = true })
+    assert.equal(exited, true,
+      'the missing migration surface must terminate the Direct bootstrap before a surface is admitted')
+    assert.equal(readFileSync(patchPath, 'utf8').includes('pi-tui-preferences'), false,
+      'the failed barrier must not create a canonical row')
+    assert.match(readFileSync(patchPath, 'utf8'), /theme: dark/u,
+      'the raw legacy value must be preserved')
+  } finally {
+    await disposeContext(ctx)
+  }
+})
 
 test('the real runner hydrates resume, deferred create, and switch exactly once each', async (t) => {
   const life = testLifecycle(t)

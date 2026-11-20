@@ -55,6 +55,7 @@ export const TUI_PREFERENCES_MIGRATION_VERSION = 2
 
 /** The stable failure codes a caller/diagnostic may report. */
 export type TuiPreferencesMigrationCode =
+  | 'TUI_PREFERENCES_MIGRATION_UNAVAILABLE'
   | 'TUI_PREFERENCES_MIGRATION_SOURCE'
   | 'TUI_PREFERENCES_MIGRATION_CONFLICT'
   | 'TUI_PREFERENCES_MIGRATION_WRITE'
@@ -214,6 +215,39 @@ interface MigrationPlan {
 }
 
 /**
+ * Whether the profile still holds a TUI preference that only this migration can
+ * carry into the canonical row. Used when the migration surface is unavailable:
+ * a no-op composition may continue on canonical defaults, but any surviving
+ * legacy value must fail the startup barrier instead of being silently lost.
+ */
+async function legacyPreferencesPresent(input: ProfilePreferencesMigrationInput): Promise<boolean> {
+  let profileText = ''
+  try {
+    profileText = readFileSync(input.patchPath, 'utf8')
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+  }
+  const sources = rawUserConfigs(profileText)
+  for (const id of [LEGACY_DIRECT_NAMESPACE, LEGACY_SPLIT_NAMESPACE]) {
+    const section = sources.get(id)
+    if (section !== undefined && Object.keys(section).length > 0) return true
+  }
+  const legacyText = await readLegacyDocument(input.home)
+  if (legacyText === undefined) return false
+  let document: unknown
+  try {
+    document = parseYaml(legacyText)
+  } catch (error) {
+    throw new TuiPreferencesMigrationError(
+      'TUI_PREFERENCES_MIGRATION_SOURCE',
+      `legacy settings document is malformed: ${error instanceof Error ? error.message : String(error)}`,
+    )
+  }
+  const section = legacySection(document, 'dsh-pi-tui')
+  return section !== undefined && Object.keys(section).length > 0
+}
+
+/**
  * Run the Host-owned migration barrier.
  *
  * Callers MUST await this before the first TUI/Agent/Host-business read of
@@ -227,7 +261,13 @@ export async function migrateProfileTuiPreferences(
   const { forms, configEditor, diag } = input
   if (forms === undefined || configEditor === undefined) {
     const reason = forms === undefined ? 'settings service unavailable' : 'config editor unavailable'
-    diag.warn('canonical TUI preference migration unavailable; will retry on next start', { reason })
+    if (await legacyPreferencesPresent(input)) {
+      throw new TuiPreferencesMigrationError(
+        'TUI_PREFERENCES_MIGRATION_UNAVAILABLE',
+        `cannot migrate legacy TUI preferences: ${reason}; refusing to start with defaults`,
+      )
+    }
+    diag.warn('canonical TUI preference migration unavailable; no legacy TUI values survive, canonical defaults remain usable', { reason })
     return { status: 'unavailable', reason }
   }
   // The canonical row must be a Loader-managed profile entry for the official
@@ -238,9 +278,14 @@ export async function migrateProfileTuiPreferences(
   // instead of pretending a marker write happened.
   const entry = configEditor.entries().find(candidate => candidate.options.id === TUI_PREFERENCES_NAMESPACE)
   if (entry === undefined) {
-    diag.warn('canonical TUI preference migration unavailable; will retry on next start', {
-      reason: `no "${TUI_PREFERENCES_NAMESPACE}" Loader entry in this composition`,
-    })
+    const reason = `no "${TUI_PREFERENCES_NAMESPACE}" Loader entry in this composition`
+    if (await legacyPreferencesPresent(input)) {
+      throw new TuiPreferencesMigrationError(
+        'TUI_PREFERENCES_MIGRATION_UNAVAILABLE',
+        `cannot migrate legacy TUI preferences: ${reason}; refusing to start with defaults`,
+      )
+    }
+    diag.warn('canonical TUI preference migration unavailable; no legacy TUI values survive, canonical defaults remain usable', { reason })
     return { status: 'unavailable', reason: 'canonical preferences row is not Loader-managed' }
   }
   if (entry.options.name !== TUI_PREFERENCES_ROW_NAME) {
@@ -326,8 +371,17 @@ export async function migrateProfileTuiPreferences(
     await configEditor.edit(entry, (current, _inherited) => {
       // The official ConfigEditor runs this callback INSIDE the profile file
       // lock: re-read the raw USER sources here so a concurrent write observed
-      // after the pre-check cannot be overwritten with a stale snapshot.
-      const sources = rawUserConfigs(readFileSync(input.patchPath, 'utf8'))
+      // after the pre-check cannot be overwritten with a stale snapshot. A
+      // profile without a USER patch is a supported empty sequence (the
+      // official loader and ConfigEditor both accept it); only ENOENT is
+      // treated as empty here.
+      let before = ''
+      try {
+        before = readFileSync(input.patchPath, 'utf8')
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+      }
+      const sources = rawUserConfigs(before)
       const canonicalRaw = sources.get(TUI_PREFERENCES_NAMESPACE) ?? {}
       if (markerOf(canonicalRaw) >= TUI_PREFERENCES_MIGRATION_VERSION) throw new MigrationAlreadyCurrent()
       const directRaw = sources.get(LEGACY_DIRECT_NAMESPACE) ?? {}
