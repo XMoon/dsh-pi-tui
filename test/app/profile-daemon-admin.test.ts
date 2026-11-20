@@ -284,16 +284,16 @@ function directProfileFixture(root: string, packageName: string): {
   }
 }
 
-test('the composition-bound admin port drives the real control plane for install and stop, with zero IO on the safe path', async t => {
-  // The production-composition source→decision→sink (F1): the SAME Direct
+test('the composition-bound admin port reaches the real control plane for install and stop with the bound Profile identity', async t => {
+  // NARROW manager-seam evidence (not the UI decision layer): the SAME Direct
   // resolver + port binding the composition uses (`resolveDirectDaemonAdminProfile`
   // → `createProfileDaemonAdmin(profile, { run: profileDaemonAdminRun(profile) })`),
-  // driven by the exact verbs the decision layers call — the Settings follow-up
-  // install (`onBackendServiceInstall` → `admin.run('install')`) and the exit
-  // admin stop (`adminStop` → `admin.run('stop')`). `readRecord` observes the
-  // REAL profile-scoped record the control plane derives, so a wrong binding
-  // cannot pass. The OS lanes (Linux systemd / macOS launchd) are the OS
-  // post-proof that this same `runDaemonControl` performs the real install/stop.
+  // driven by the install and stop verbs. `readRecord` observes the REAL
+  // profile-scoped record the control plane derives, so a wrong binding cannot
+  // pass. The OS lanes (Linux systemd / macOS launchd) are the OS post-proof
+  // that this same `runDaemonControl` performs the real install/stop. The UI
+  // DECISION chain (Settings confirmation / Exit choice) → this sink is Path 1/2
+  // of the F1 closure (real composition), not proven here.
   const life = testLifecycle(t)
   const accountHome = life.tempDir('f1-acct-')
   const platform = process.platform === 'darwin' ? 'darwin' : 'linux'
@@ -341,10 +341,4 @@ test('the composition-bound admin port drives the real control plane for install
     assert.equal(entry.profileRealpath, expected.profileRealpath, `${entry.verb} read the bound profile directory`)
   }
   assert.deepEqual([...new Set(observed.map(e => e.verb))].sort(), ['install', 'stop'], 'both the install and stop decisions reached the sink')
-  // THE SAFE PATH: `Not now` / a dismissed follow-up never calls the port at
-  // all — zero manager IO, proven by a port whose run would throw if touched.
-  let safeCalls = 0
-  const safeAdmin = createProfileDaemonAdmin(profile, { run: async () => { safeCalls += 1; return recorded(0) } })
-  void safeAdmin // the decision NOT to install/stop simply never calls `.run`
-  assert.equal(safeCalls, 0, 'the safe/dismissed path performs zero manager IO')
 })
