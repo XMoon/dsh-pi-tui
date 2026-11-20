@@ -207,6 +207,29 @@ function statusOf(stdout) {
   return fields
 }
 
+/**
+ * The Direct-only TUI/Host rows that must never appear as `pending (waiting for
+ * services: ... tuiStartup)` in the daemon supervisor. The management command
+ * captures BOTH streams, but real Host/manager diagnostics are allowed: only a
+ * warning naming one of these rows is the misleading condition.
+ */
+const DIRECT_ONLY_SUPERVISOR_IDS = [
+  'pi-tui-extension-host', 'pi-tui-builtins', 'pi-tui-performance-host', 'workspace-files', 'tui-app',
+  'workspace-controller', 'directory-picker', 'pi-tui-schedule',
+  'pi-tui-direct-connection', 'pi-tui-direct-file-upload', 'pi-tui-direct-session-controller',
+]
+
+/** Fail on a real supervisor warning that any Direct-only row is pending on tuiStartup. */
+function assertNoDirectOnlyPendingWarnings(result, label) {
+  const lines = `${result.stdout}\n${result.stderr}`.split('\n')
+  for (const line of lines) {
+    if (!line.includes('pending (waiting for')) continue
+    const id = DIRECT_ONLY_SUPERVISOR_IDS.find(candidate => line.trim().startsWith(candidate)
+      || line.includes(`${candidate} (`))
+    assert(id === undefined, `${label}: ${id} stayed pending in the daemon supervisor: ${line.trim()}`)
+  }
+}
+
 function assertStatus(result, fields, message) {
   assert(result.status === 0, `${message}: expected exit 0, saw ${String(result.status)}: ${result.stderr.slice(-500)}`)
   const status = statusOf(result.stdout)
@@ -454,32 +477,70 @@ export async function runDaemonControlProcessFallback({ installation, trace, dsh
   let failure
   let result
   try {
-    const initialStatus = assertStatus(runDaemon(installation, ['status']), { host: 'stopped', unit: 'none', 'user-manager': 'not-checked' }, 'the basic pre-start status')
+    // Fault negative: the management entry itself must report a missing
+    // launcher row as the existing nonzero controlNotMountedMessage and start
+    // no Host/Client. This is a real user-patch disable, never a stderr filter.
+    {
+      const patchPath = join(installation.profileDir, 'cordis.patch.yml')
+      const original = existsSync(patchPath) ? readFileSync(patchPath, 'utf8') : undefined
+      try {
+        const stock = (original ?? '').split('\n').filter(line => line.trim() !== '[]').join('\n')
+        writeFileSync(patchPath, `${stock.replace(/\s*$/u, '')}\n- id: pi-tui-daemon-launcher\n  disabled: true\n`, { mode: 0o600 })
+        const refused = runDaemon(installation, ['status'])
+        assert(refused.status !== 0, 'a profile without the daemon launcher row must fail status nonzero')
+        assert(/daemon launcher row did not mount/u.test(`${refused.stdout}${refused.stderr}`),
+          `the launcher-missing failure must print the existing controlNotMountedMessage, saw: ${refused.stderr.slice(-800)}`)
+        const counts = processCounts(dshHome)
+        assert(counts.host === 0 && counts.client === 0,
+          `a launcher-missing management entry must create no Host/Client, saw ${JSON.stringify(counts)}`)
+        trace('daemon-control-launcher-missing-negative', { exit: refused.status, host: counts.host, client: counts.client })
+      } finally {
+        if (original === undefined) rmSync(patchPath, { force: true })
+        else writeFileSync(patchPath, original, { mode: 0o600 })
+      }
+      // The restored Profile is the ordinary management graph again.
+      assertStatus(runDaemon(installation, ['status']), { host: 'stopped', 'user-manager': 'not-checked' }, 'the restored profile status')
+    }
+    const initialStatusResult = runDaemon(installation, ['status'])
+    const initialStatus = assertStatus(initialStatusResult, { host: 'stopped', unit: 'none', 'user-manager': 'not-checked' }, 'the basic pre-start status')
     assert(initialStatus.manager === 'unmanaged', 'a no-Host/no-unit status must be unmanaged')
+    assertNoDirectOnlyPendingWarnings(initialStatusResult, 'the basic pre-start status')
     const started = runDaemon(installation, ['start'])
     const ready = assertStatus(started, { host: 'ready', manager: 'process', unit: 'none' }, 'the basic start')
+    assertNoDirectOnlyPendingWarnings(started, 'the basic start')
     assert(!existsSync(unitPath), 'the basic daemon must never install a unit')
     assert(hostPids(dshHome).length === 1, 'the fallback start must create exactly one Host')
+    const readyStatus = runDaemon(installation, ['status'])
+    assertStatus(readyStatus, { host: 'ready', manager: 'process' }, 'the basic ready status')
+    assertNoDirectOnlyPendingWarnings(readyStatus, 'the basic ready status')
     assert(existsSync(hostLog), 'the fallback Host must write its private host.log')
     assert((statSync(hostLog).mode & 0o777) === 0o600, 'the fallback host.log must be 0600')
     const logHashBefore = createHash('sha256').update(readFileSync(hostLog)).digest('hex')
     const logs = runDaemon(installation, ['logs', '--lines', '20'])
     assert(logs.status === 0, `the fallback logs must read the private host.log: ${logs.stderr.slice(-300)}`)
+    assertNoDirectOnlyPendingWarnings(logs, 'the basic logs')
     const logHashAfter = createHash('sha256').update(readFileSync(hostLog)).digest('hex')
     assert(logHashBefore === logHashAfter, 'reading the private Host log must not change it')
     const stopped = runDaemon(installation, ['stop'])
     assertStatus(stopped, { host: 'stopped' }, 'the fallback stop')
+    assertNoDirectOnlyPendingWarnings(stopped, 'the fallback stop')
     await waitFor(() => hostPids(dshHome).length === 0, 'the fallback Host SIGTERM exit', 60_000)
+    const stoppedStatus = runDaemon(installation, ['status'])
+    assertStatus(stoppedStatus, { host: 'stopped' }, 'the fallback stopped status')
+    assertNoDirectOnlyPendingWarnings(stoppedStatus, 'the fallback stopped status')
     const restartedFromStopped = runDaemon(installation, ['start'])
     const beforeRestart = assertStatus(restartedFromStopped, { host: 'ready' }, 'the fallback restart precondition')
     const restarted = runDaemon(installation, ['restart'])
     const afterRestart = assertStatus(restarted, { host: 'ready' }, 'the fallback restart')
     assert(afterRestart.instance !== beforeRestart.instance, 'the fallback restart must create a new instance')
+    assertNoDirectOnlyPendingWarnings(restarted, 'the fallback restart')
     const uninstalled = runDaemon(installation, ['uninstall'])
     assertStatus(uninstalled, { unit: 'none' }, 'the fallback uninstall')
+    assertNoDirectOnlyPendingWarnings(uninstalled, 'the fallback uninstall')
     assert(hostPids(dshHome).length === 1, 'uninstall must not kill an independent Host')
     const finalStop = runDaemon(installation, ['stop'])
     assertStatus(finalStop, { host: 'stopped' }, 'the fallback final stop')
+    assertNoDirectOnlyPendingWarnings(finalStop, 'the fallback final stop')
     trace('daemon-control-process-fallback', { instance: ready.instance })
     result = {
       status: 'PASS',

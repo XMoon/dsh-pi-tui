@@ -890,26 +890,37 @@ async function startSurfaceLocalClient(
 
   /** Reverse-dispose exactly one revision: runner -> UI -> application adapters. */
   const disposeRevision = async (revision: SurfaceRevision): Promise<void> => {
+    const startedAt = performance.now()
+    const stage = (name: string, stageStartedAt: number): void => {
+      composition.onQualification?.({ op: 'dispose-stage', stage: `revision-${name}`, revision: revision.id, durationMs: Math.round((performance.now() - stageStartedAt) * 10) / 10 })
+    }
     revision.surfaceMounted = false
     emitStatus()
     revision.statusCleanup?.()
     revision.statusCleanup = undefined
     const errors: unknown[] = []
     if (revision.runner !== undefined) {
+      const runnerAt = performance.now()
       try { await revision.runner.dispose() } catch (error) { errors.push(error) }
+      stage('runner', runnerAt)
     }
     if (revision.ui !== undefined) {
+      const uiAt = performance.now()
       try { await revision.ui.dispose() } catch (error) { errors.push(error) }
+      stage('ui', uiAt)
     }
     // The runner may already have released the selected adapters; this is the
     // SAME memoized release. When the runner never mounted, this is the first
     // release. The root Domain graph and B1 transport stay root-owned.
     if (revision.application !== undefined) {
+      const adaptersAt = performance.now()
       try { await revision.application.selected.disposeTransport() } catch (error) { errors.push(error) }
+      stage('adapters', adaptersAt)
     }
     revision.runner = undefined
     revision.ui = undefined
     revision.application = undefined
+    composition.onQualification?.({ op: 'dispose-stage', stage: 'revision-total', revision: revision.id, durationMs: Math.round((performance.now() - startedAt) * 10) / 10 })
     throwDisposalErrors(errors, 'local client surface revision')
   }
 
@@ -1542,10 +1553,16 @@ async function startSurfaceLocalClient(
     async dispose(): Promise<void> {
       if (disposed) return
       disposed = true
+      const startedAt = performance.now()
+      const stage = (name: string, stageStartedAt: number): void => {
+        composition.onQualification?.({ op: 'dispose-stage', stage: name, durationMs: Math.round((performance.now() - stageStartedAt) * 10) / 10 })
+      }
       // Stop is the ONE outer coordinator: it first aborts the in-flight
       // revision through `signal`, then waits for that revision task before
       // releasing the Context. Never release the root underneath a mount.
+      const drainAt = performance.now()
       await revisionTasks.drain()
+      stage('revision-drain', drainAt)
       const errors: unknown[] = []
       const revision = currentRevision
       currentRevision = undefined
@@ -1559,9 +1576,16 @@ async function startSurfaceLocalClient(
       // Stop the official Gateway/Connection BEFORE the Session Client goes
       // away: while the pump is live its Agent resolver must stay mounted; the
       // transport disposal is what aborts any remaining delivery task.
+      const transportAt = performance.now()
       try { await transport.dispose() } catch (error) { errors.push(error) }
+      stage('transport-dispose', transportAt)
+      const domainsAt = performance.now()
       try { await domains.dispose() } catch (error) { errors.push(error) }
+      stage('domains-dispose', domainsAt)
+      const rootAt = performance.now()
       try { await context.fiber.dispose() } catch (error) { errors.push(error) }
+      stage('root-dispose', rootAt)
+      stage('total', startedAt)
       throwDisposalErrors(errors, 'local client surface')
     },
   }

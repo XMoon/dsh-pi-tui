@@ -266,9 +266,18 @@ export async function runPublicDaemonEntry({ installation, trace }) {
     assert(status.fields.unit === 'none', `daemon status invented an installed unit: ${JSON.stringify(status.fields)}`)
     trace('m6-2a-public-daemon-mounted', { host: counts.host, client: counts.client, manager: status.fields.manager, userManager: status.fields['user-manager'] })
     // Exit the real TUI through the ordinary /exit key path.
+    const exitRequestedAt = Date.now()
     positive.child.stdin.write('/exit\r')
     const exit = await Promise.race([positive.exit, sleep(60_000).then(() => ({ code: 'timeout', signal: null }))])
+    const supervisorExitedAt = Date.now()
     assert(exit.code === 0, `public-entry daemon: /exit exited ${JSON.stringify(exit)}`)
+    // B3: the supervisor's own exit is not enough. The ONE foreground Client
+    // must be a REAL exited OS process by the time the supervisor is gone
+    // (the supervisor holds its child disposal, so a live Client here is a
+    // false success). The duration is traced, never a hard-coded CI SLA.
+    assert(processCounts(dshHome).client === 0,
+      'public-entry daemon: the supervisor exited while its Client was still alive')
+    trace('m6-2a-public-daemon-exit', { requestToSupervisorExitMs: supervisorExitedAt - exitRequestedAt, clientPidGone: true })
   } finally {
     await reap(positive.child, installation)
   }
@@ -300,12 +309,19 @@ export async function runPublicDaemonEntry({ installation, trace }) {
   // second-Host-business authority row daemon-disabled, and stateless infra not.
   {
     const roster = dumpDaemonComposedRoster(installation)
-    for (const id of ['session', 'session-persistence-jsonl', 'storage-json', 'jobs', 'typert-gateway', 'remote-access', 'deepseek-account', 'authorization', 'credentials']) {
+    for (const id of [
+      'session', 'session-persistence-jsonl', 'storage-json', 'jobs', 'typert-gateway', 'remote-access', 'deepseek-account', 'authorization', 'credentials',
+      // The Direct-only TUI/Host rows that previously stayed pending on
+      // `tuiStartup` and printed the misleading supervisor warning.
+      'pi-tui-extension-host', 'pi-tui-builtins', 'pi-tui-performance-host', 'workspace-files', 'tui-app',
+      'workspace-controller', 'directory-picker', 'pi-tui-schedule',
+      'pi-tui-direct-connection', 'pi-tui-direct-file-upload', 'pi-tui-direct-session-controller',
+    ]) {
       assertRosterDaemonDisabled(roster, id)
     }
     for (const id of ['timer', 'llm', 'tools', 'typert']) assertRosterNotPatched(roster, id)
     result.composedRoster = 'AUDITED'
-    trace('m6-2a-composed-roster', { authorityDisabled: 9 })
+    trace('m6-2a-composed-roster', { authorityDisabled: 9, directOnlyDisabled: 11 })
   }
 
   // R6-02: real runtime Loader entry.disabled / fiber state in the supervisor.
@@ -454,10 +470,18 @@ async function runRuntimeLoaderAudit(installation, trace) {
     }
     assert(Array.isArray(dump), `R6-02: runtime Loader dump was not produced${dump && dump.error ? ` (${String(dump.error)})` : ''}`)
     const pick = (id) => dump.find(row => row.id === id || row.id === `include:${id}` || row.id.endsWith(`:${id}`))
-    // Every second-Host-business authority row (incl. the pi-tui conditional ones)
-    // must be RUNTIME-disabled with NO active fiber; stateless infra stays enabled
-    // WITH an active fiber.
-    const authorityIds = ['session', 'session-persistence-jsonl', 'storage-json', 'jobs', 'typert-gateway', 'remote-access', 'deepseek-account', 'authorization', 'credentials', 'workspace', 'job-controller', 'webserver']
+    // Every second-Host-business authority row (incl. the pi-tui conditional
+    // ones) must be RUNTIME-disabled with NO active fiber. The Direct-only
+    // TUI/Host rows are included: leaving them enabled-but-pending on
+    // `tuiStartup` is exactly the misleading supervisor warning this case
+    // guards. Stateless infra below must stay enabled.
+    const authorityIds = [
+      'session', 'session-persistence-jsonl', 'storage-json', 'jobs', 'typert-gateway', 'remote-access', 'deepseek-account', 'authorization', 'credentials',
+      'workspace', 'job-controller', 'webserver',
+      'pi-tui-extension-host', 'pi-tui-builtins', 'pi-tui-performance-host', 'workspace-files', 'tui-app',
+      'workspace-controller', 'directory-picker', 'pi-tui-schedule',
+      'pi-tui-direct-connection', 'pi-tui-direct-file-upload', 'pi-tui-direct-session-controller',
+    ]
     for (const id of authorityIds) {
       const row = pick(id)
       assert(row !== undefined, `R6-02: the runtime supervisor Loader has no row for ${id} (ids sample: ${dump.map(r => r.id).slice(0, 8).join(',')})`)

@@ -26,10 +26,12 @@
     - id: pi-tui-extension-host
       name: '@xmoon76/dsh-pi-tui/extensions'
       inject: [tuiStartup]
+      disabled: !!js "ctx.get('tuiDaemonStartup') !== undefined"
 
     - id: pi-tui-builtins
       name: '@xmoon76/dsh-pi-tui/builtins'
       inject: [tuiStartup, piTuiExtensions]
+      disabled: !!js "ctx.get('tuiDaemonStartup') !== undefined"
 
     # The bundle's OWN Host performance projection (plan PR-1): the single
     # authority for the R5 / All model-request output rate and the recent TTFB.
@@ -42,6 +44,7 @@
     - id: pi-tui-performance-host
       name: '@xmoon76/dsh-pi-tui/performance-host'
       inject: [tuiStartup, sessionProjections]
+      disabled: !!js "ctx.get('tuiDaemonStartup') !== undefined"
 
     # Workspace file service (the OFFICIAL `@deepseek-ai/dsh-api-workspace-files`):
     # the ONE Host owner of the `workspaceFiles` Remote namespace the delivered-
@@ -54,6 +57,7 @@
     - id: workspace-files
       name: '@deepseek-ai/dsh-api-workspace-files'
       inject: [tuiStartup]
+      disabled: !!js "ctx.get('tuiDaemonStartup') !== undefined"
 
     # Visual tools: three Host tool definitions — the two generators
     # (`dsh_pi_tui_chart`, `dsh_pi_tui_svg`) and the publication tool
@@ -163,6 +167,7 @@
       # are published, otherwise the Account page could start a sign-in the
       # Host cannot complete.
       inject: [tuiStartup, piTuiExtensions, authorization, workspaceRegistry, pluginManager, jobController, piTuiPerformanceReady, deepseekAccount, webServer]
+      disabled: !!js "ctx.get('tuiDaemonStartup') !== undefined"
       config:
         sessionId: ''
 
@@ -224,6 +229,7 @@
     - id: workspace-controller
       name: '@deepseek-ai/dsh-api-workspace-controller'
       inject: [tuiStartup]
+      disabled: !!js "ctx.get('tuiDaemonStartup') !== undefined"
 
     # The ONE official Host directory-browsing backend (`ctx.directoryPicker`,
     # browse capability): the existing Workspace Controller mounts its
@@ -238,6 +244,7 @@
     - id: directory-picker
       name: '@deepseek-ai/dsh-host-directory-picker-browse'
       inject: [tuiStartup]
+      disabled: !!js "ctx.get('tuiDaemonStartup') !== undefined"
 
     # ── Host Schedule management (S5-PR4) ──────────────────────────────────
     # ONE Host Schedule domain shared by Direct and the Host-only Split
@@ -256,6 +263,7 @@
     - id: pi-tui-schedule
       name: '@deepseek-ai/dsh-schedule'
       inject: [tuiStartup, sessionController]
+      disabled: !!js "ctx.get('tuiDaemonStartup') !== undefined"
 
     # The three OFFICIAL Direct activation prerequisites of a Schedule target
     # that creates Sessions, declared exactly once for the Direct graph:
@@ -270,16 +278,19 @@
     - id: pi-tui-direct-connection
       name: '@deepseek-ai/dsh-client-connection'
       inject: [tuiStartup, credentials, webServer]
+      disabled: !!js "ctx.get('tuiDaemonStartup') !== undefined"
       config:
         trustedHosts: []
 
     - id: pi-tui-direct-file-upload
       name: '@deepseek-ai/dsh-client-file-upload'
       inject: [tuiStartup, agents, attachments, commands, connection]
+      disabled: !!js "ctx.get('tuiDaemonStartup') !== undefined"
 
     - id: pi-tui-direct-session-controller
       name: '@deepseek-ai/dsh-api-session-controller'
       inject: [tuiStartup, agentDefaultModel, agents, attachments, fileUploads, fs, llm, remoteAccess, sessions, sessionProjections, sessionQuery, typert, typertGateway, workspaceRegistry]
+      disabled: !!js "ctx.get('tuiDaemonStartup') !== undefined"
       config:
         nativeOpen: false
 

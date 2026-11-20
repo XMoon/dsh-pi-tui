@@ -165,6 +165,30 @@ async function waitForPaintedSkills(client, query, { visible, absent = [] }, lab
 /** The real painted frame of one Surface Client. */
 const viewportText = async client => (await client.viewport()).join('\n')
 
+/**
+ * Capture the Sessionless Welcome BEFORE the first input and prove the Host
+ * Workspace is already confirmed there. The stale `Select a Host workspace to
+ * load skills.` notice (the pre-G12 first-frame admission bug) must be absent:
+ * the Welcome is the user-visible proof that the automatic catalog admission
+ * observed the confirmed Host Workspace.
+ */
+async function assertConfirmedSessionlessWelcome(client, workspaceName, label) {
+  const deadline = Date.now() + 120_000
+  let frame = ''
+  while (Date.now() < deadline) {
+    frame = await viewportText(client)
+    if (frame.includes('Host directory:') && frame.includes(workspaceName)) break
+    await sleep(150)
+  }
+  assert(frame.includes('Host directory:') && frame.includes(workspaceName),
+    `${label}: the Welcome never confirmed the Host workspace before the first input\n${frame}`)
+  assert(!frame.includes('Select a Host workspace to load skills.'),
+    `${label}: the stale sessionless Skills notice painted before the first input\n${frame}`)
+  assert(!frame.includes('No Host workspace selected'),
+    `${label}: the Welcome reported an unselected workspace after the Host preflight\n${frame}`)
+  return frame
+}
+
 /** Open the real /sessions Workspace tree (the frozen row header + the root
  *  Add-directory row are the anchors the tree paints when it is ready). */
 async function openWorkspaceTree(client, label) {
@@ -239,6 +263,16 @@ export async function runSessionlessSkillsHot(context) {
     await waitForSurfaceStatus(clientB, sessionless, 'F6 B sessionless surface', 120_000)
     assert(lastSurfaceStatus(clientA)?.openSessionId === undefined, 'F6 Client A opened a Session')
     assert(lastSurfaceStatus(clientB)?.openSessionId === undefined, 'F6 Client B opened a Session')
+
+    // ── BEFORE the first input: the real Welcome already names the confirmed
+    // Host Workspace and carries NO stale Skills selection notice. ──────────
+    await assertConfirmedSessionlessWelcome(clientA, basename(w1), 'F6 A first-frame Welcome')
+    await assertConfirmedSessionlessWelcome(clientB, basename(clientLocal), 'F6 B first-frame Welcome')
+    trace('f6-first-frame-welcome', {
+      hostPid: hostFacts.hostPid,
+      workspaceConfirmedBeforeInput: true,
+      staleSkillsNotice: false,
+    })
 
     // ── A: the launch Workspace was Host-confirmed and its skills stand ─────
     const aFrame = await waitForPaintedSkills(clientA, '/f6-alpha', {

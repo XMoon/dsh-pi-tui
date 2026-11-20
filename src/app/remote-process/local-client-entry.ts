@@ -1230,6 +1230,11 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
     return run
   }
   const diag = createEntryDiag('client', recordSink?.emit ?? (options.mode === 'surface' ? () => {} : undefined))
+  /** Monotonic process-relative stamp for the shutdown qualification records.
+   *  Surface mode writes these ONLY to its private 0600 JSONL sink; the real
+   *  terminal never carries timing JSON. */
+  const processStartedAt = performance.now()
+  const elapsedMs = (): number => Math.round((performance.now() - processStartedAt) * 10) / 10
   const CLIENT_DISPOSE_DEADLINE_MS = 10_000
   const disposeWithinDeadline = async (dispose: () => Promise<void>, errors: unknown[]): Promise<boolean> => {
     let timer: ReturnType<typeof setTimeout> | undefined
@@ -1273,6 +1278,7 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
     // chain then unwinds exactly the graph it created, and this coordinator
     // performs the ONE transport/root release after it settles.
     startupAbort.abort(failure ?? new Error('local client entry: stop requested during startup'))
+    emit({ m4a0: 'shutdown-stage', processRole: 'client', phase: 'requested', pid: process.pid, atMs: elapsedMs() })
     stopping = (async () => {
       if (failure !== undefined) {
         const primary = failure instanceof Error ? failure : new Error(String(failure))
@@ -1311,8 +1317,12 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
           // A same-process surface revision in flight owns the Context until it
           // settles. Stop aborted its signal first; now wait for the ONE serial
           // revision slot before releasing the root.
+          const revisionAt = performance.now()
           await revisionTask
+          emit({ m4a0: 'shutdown-stage', processRole: 'client', phase: 'revision-drained', pid: process.pid, durationMs: Math.round((performance.now() - revisionAt) * 10) / 10, atMs: elapsedMs() })
+          const disposeAt = performance.now()
           try { await handle.dispose() } catch (error) { errors.push(error) }
+          emit({ m4a0: 'shutdown-stage', processRole: 'client', phase: 'handle-disposed', pid: process.pid, durationMs: Math.round((performance.now() - disposeAt) * 10) / 10, atMs: elapsedMs() })
           rootReleased = true
           return
         }
@@ -1331,12 +1341,13 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
         try { await context?.fiber.dispose() } catch (error) { errors.push(error) }
         rootReleased = true
       }, errors)
+      emit({ m4a0: 'shutdown-stage', processRole: 'client', phase: 'dispose-settled', pid: process.pid, timedOut, atMs: elapsedMs() })
       if (options.mode === 'surface' && handle !== undefined) {
         // The final owner inventory the qualification reads after the process
         // left: every Client-owned service row and `tuiMainView` reference is
         // released (0), while the Host is untouched. Emitted BEFORE the record
         // sink closes and before the process exits.
-        emit({ m4b2s: 'client-closed', ...traceStatus(handle.status) })
+        emit({ m4b2s: 'client-closed', ...traceStatus(handle.status), atMs: elapsedMs() })
       }
       const transportCleanupFailed = errors.some(error => error instanceof Error && (error as { cleanupFailed?: boolean }).cleanupFailed === true)
       if (errors.length > 0 || timedOut) {
@@ -1370,6 +1381,7 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
       }
       process.stdin.pause()
       resolveStopped?.()
+      emit({ m4a0: 'shutdown-stage', processRole: 'client', phase: 'cleanup-complete', pid: process.pid, atMs: elapsedMs(), failure: failure !== undefined, errors: errors.length })
       if (timedOut || transportCleanupFailed) forceExitAfterCleanupFailure()
     })()
     return stopping
