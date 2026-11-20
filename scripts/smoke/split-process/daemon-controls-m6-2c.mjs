@@ -16,7 +16,7 @@
 
 import { spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:net'
 import { dirname, join } from 'node:path'
 import { userInfo } from 'node:os'
@@ -648,12 +648,18 @@ export async function runDaemonControlOwnerAndMultiProfile({ installation, trace
     assert(refused.status === 3, `a foreign unit must be refused with exit 3, saw ${String(refused.status)}`)
     assert(readFileSync(unitPathA, 'utf8') === foreign, 'a foreign unit must never be rewritten or removed')
     unlinkSync(unitPathA)
-    // Owner decision: an owned unit from ANOTHER installed build is refused by
-    // restart (cross-build migration is M6-2D work), never rewritten, and the
-    // explicit uninstall of a verified same-build unit still works afterwards.
+    // Same-Profile unit from a HISTORICAL installed build: its generated record
+    // names a physical store-shaped package root and an old install build. The
+    // explicit restart must ADOPT the current install with exactly the bounded
+    // generated-field rewrite, then start a new authenticated managed Host.
     const oldBuildId = 'a'.repeat(64)
     const encoded = value => `"${value.replace(/\\/gu, '\\\\').replace(/"/gu, '\\"').replace(/%/gu, '%%').replace(/\$/gu, '$$')}"`
-    const oldUnit = [
+    const legacyPackage = join(workDir, 'legacy-store', 'node_modules', '@xmoon76', 'dsh-pi-tui')
+    mkdirSync(dirname(legacyPackage), { recursive: true })
+    cpSync(installation.profilePackage, legacyPackage, { recursive: true, dereference: true })
+    const legacyEntry = join(legacyPackage, 'dist', 'local-host.mjs')
+    const stableEntry = join(realpathSync(installation.profileDir), 'node_modules', '@xmoon76', 'dsh-pi-tui', 'dist', 'local-host.mjs')
+    const buildUnit = entry => [
       '[Unit]',
       'Description=dsh-pi-tui local Host (profile-scoped)',
       `X-DshPiTuiOwner=${OWNER_MARKER}`,
@@ -665,7 +671,7 @@ export async function runDaemonControlOwnerAndMultiProfile({ installation, trace
       '',
       '[Service]',
       'Type=exec',
-      `ExecStart=${encoded(process.execPath)} ${encoded(join(installation.profilePackage, 'dist', 'local-host.mjs'))}`,
+      `ExecStart=${encoded(process.execPath)} ${encoded(entry)}`,
       `WorkingDirectory=${realpathSync(installation.profileDir).replace(/%/gu, '%%')}`,
       `Environment="DSH_HOME=${installation.dshHome.replace(/%/gu, '%%')}"`,
       `Environment="SPLIT_PROCESS_DSH_ANCHOR=${installation.anchor.replace(/%/gu, '%%')}"`,
@@ -678,28 +684,45 @@ export async function runDaemonControlOwnerAndMultiProfile({ installation, trace
       'StandardError=journal',
       '',
     ].join('\n')
+    const oldUnit = buildUnit(legacyEntry)
     writeFileSync(unitPathA, oldUnit, { mode: 0o600 })
-    assert(systemctl(['--user', '--no-pager', '--no-ask-password', 'daemon-reload']).status === 0, 'daemon-reload failed before the old-build refusal')
-    const refusedOldBuild = runDaemon(installation, ['restart'])
-    assert(refusedOldBuild.status === 3, `an old-build unit must be refused by restart with exit 3, saw ${String(refusedOldBuild.status)}`)
-    assert(readFileSync(unitPathA, 'utf8') === oldUnit, 'a refused old-build unit must never be rewritten or removed')
-    // Cross-build replacement belongs to the upgrade flow: uninstall must refuse
-    // the old-build unit too, never rewrite or remove it behind the user's back.
-    const removedOld = runDaemon(installation, ['uninstall'])
-    assert(removedOld.status === 3, `uninstalling an old-build unit must be refused with exit 3, saw ${String(removedOld.status)}`)
-    assert(/another installed build/u.test(removedOld.stderr), 'the old-build uninstall must name the build conflict')
-    assert(existsSync(unitPathA) === true && readFileSync(unitPathA, 'utf8') === oldUnit,
-      'a refused old-build uninstall must leave the unit untouched')
-    // Fixture cleanup only: this old-build unit is owned by the scene, and the
-    // product correctly refuses to migrate or remove it.
-    unlinkSync(unitPathA)
-    assert(systemctl(['--user', '--no-pager', '--no-ask-password', 'daemon-reload']).status === 0, 'daemon-reload after fixture unit removal')
-    assertStatus(runDaemon(installation, ['start']), { host: 'ready' }, 'profile A restart after the old-build refusal')
-    // Reinstall the same-build unit so the closing uninstall assertion exercises
-    // the owner-scoped uninstall path.
+    assert(systemctl(['--user', '--no-pager', '--no-ask-password', 'daemon-reload']).status === 0, 'daemon-reload failed before the historical-unit restart')
+    const adopted = assertStatus(runDaemon(installation, ['restart']), {
+      manager: 'systemd',
+      host: 'ready',
+      unit: unitA,
+      'unit-state': 'active',
+      compatibility: 'compatible',
+    }, 'profile A restart adopting the historical unit')
+    const currentBuildId = installedArtifactBuildId(installation)
+    assert(typeof currentBuildId === 'string' && /^[0-9a-f]{64}$/u.test(currentBuildId),
+      'the installed artifact buildId is unavailable')
+    const expectedUnit = oldUnit
+      .replace(`ExecStart=${encoded(process.execPath)} ${encoded(legacyEntry)}`, `ExecStart=${encoded(process.execPath)} ${encoded(stableEntry)}`)
+      .replace(`X-DshPiTuiInstallBuild=${oldBuildId}`, `X-DshPiTuiInstallBuild=${currentBuildId}`)
+    assert(readFileSync(unitPathA, 'utf8') === expectedUnit,
+      'the generated-field migration must change exactly the ExecStart target and install build')
+    assert(showUnitProps(unitA).MainPID === String(adopted.pid), 'the adopted Host is not the managed unit MainPID')
+    assert(hostPids(dshHome).length === 1, 'profile A must run exactly one Host after adoption')
+    // The PRODUCT uninstall (never a manual unlink) removes the adopted unit.
+    assertStatus(runDaemon(installation, ['uninstall']), { unit: 'none', 'unit-state': 'not-found', host: 'stopped' },
+      'profile A uninstall of the adopted unit')
+    assert(existsSync(unitPathA) === false, 'the product uninstall must remove the profile unit')
+    // A unit that STILL records another installed build is removable by the
+    // explicit uninstall without any rewrite: the historical build is diagnostic.
+    writeFileSync(unitPathA, oldUnit, { mode: 0o600 })
+    assert(systemctl(['--user', '--no-pager', '--no-ask-password', 'daemon-reload']).status === 0, 'daemon-reload failed before the old-build uninstall')
+    assertStatus(runDaemon(installation, ['uninstall']), { unit: 'none', 'unit-state': 'not-found' }, 'profile A old-build uninstall')
+    assert(existsSync(unitPathA) === false, 'a verified old-build unit must be removable by the product uninstall')
+    // No unit now: the basic detached Host is still the cold-start path.
+    assertStatus(runDaemon(installation, ['start']), { host: 'ready', manager: 'process', unit: 'none' },
+      'profile A detached start after the unit removal')
+    assertStatus(runDaemon(installation, ['stop']), { host: 'stopped' }, 'profile A detached stop')
+    // Reinstall the current-build unit so the closing uninstall assertion
+    // exercises the owner-scoped uninstall path again.
     const reinstalledA = runDaemon(installation, ['install'])
     assert(reinstalledA.status === 0, `reinstalling profile A must succeed: ${reinstalledA.stderr.slice(-300)}`)
-    assertStatus(runDaemon(second, ['status']), { host: 'ready' }, 'profile B after the old-build refusal')
+    assertStatus(runDaemon(second, ['status']), { host: 'ready' }, 'profile B after the historical-unit adoption')
     // Uninstall A removes only A's unit; B stays ready.
     assertStatus(runDaemon(installation, ['uninstall']), { unit: 'none' }, 'profile A uninstall')
     assert(existsSync(unitPathA) === false, 'uninstall must remove only profile A unit')
@@ -712,7 +735,9 @@ export async function runDaemonControlOwnerAndMultiProfile({ installation, trace
       twoProfiles: true,
       crossProfileUnaffected: true,
       foreignUnitRefused: true,
-      oldBuildRefusedNotMigrated: true,
+      historicalUnitAdopted: true,
+      boundedGeneratedFieldMigration: true,
+      oldBuildUninstall: true,
       uninstallOwnerScoped: true,
     }
   } catch (error) {

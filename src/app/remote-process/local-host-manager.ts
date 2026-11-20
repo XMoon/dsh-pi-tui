@@ -9,8 +9,11 @@
  * start`. On macOS no plist keeps the same detached path; an owned plist means
  * one verified launchd bootstrap/kickstart through the Darwin adapter. The
  * Linux `installProfileHostUnit()` and macOS `installLaunchdUnit()` are the ONLY
- * paths that write a service definition; they never start, stop, enable,
- * auto-restart or migrate a Host.
+ * paths that create a service definition; the ONE bounded exception is
+ * `prepareOwnedProfileUnitForCurrentInstall()`, which an EXPLICIT CLI
+ * `start`/`restart` uses to migrate a recognized pre-existing generated unit
+ * field pair to the stable Profile entry. None of them starts, stops, enables,
+ * auto-restarts or migrates a Host.
  *
  * `systemctl`/`journalctl` and `/bin/launchctl` are invoked through fixed
  * argument arrays. A missing command can only affect the explicit service-
@@ -30,6 +33,7 @@
 import { spawn } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import {
+  accessSync,
   closeSync,
   constants,
   existsSync,
@@ -41,6 +45,7 @@ import {
   openSync,
   readFileSync,
   realpathSync,
+  renameSync,
   statSync,
   unlinkSync,
   writeSync,
@@ -70,6 +75,10 @@ const UNIT_OWNER_MARKER = 'local-host-manager-v1'
 const UNIT_LOAD_WAIT_MS = 3_000
 /** Bound on the per-attempt LoadState poll interval. */
 const UNIT_LOAD_POLL_MS = 100
+/** The one installed package a Profile Host unit launches. */
+const PROFILE_PACKAGE_NAME = '@xmoon76/dsh-pi-tui'
+/** The one stable lexical Host entry below an official Profile. */
+const PROFILE_HOST_ENTRY = ['dist', 'local-host.mjs'] as const
 
 /** One `systemctl` outcome; only `exited` carries a real process exit. */
 export type SystemctlResult =
@@ -414,6 +423,45 @@ export function collectUnitFacts(options: HostStartOptions): UnitFacts {
     hostEntryPath: options.hostEntryPath,
     dshAnchor,
   }
+}
+
+/**
+ * The stable LEXICAL Host entry inside this Profile's own package. The official
+ * DSH/pnpm resolution keeps pointing `node_modules/@xmoon76/dsh-pi-tui` at the
+ * CURRENT install, so this path survives a package update where a frozen pnpm
+ * store path does not.
+ */
+function stableProfileHostEntry(scope: LocalScope): string {
+  return join(scope.profileRealpath, 'node_modules', PROFILE_PACKAGE_NAME, ...PROFILE_HOST_ENTRY)
+}
+
+/**
+ * Prove the stable Profile entry resolves to the CURRENT official install and
+ * return the lexical path a user unit may launch. The installed root is the
+ * launcher's real `createRequire` resolution result; a different real target
+ * means this profile layout is not the official one and must not be written.
+ */
+export function resolveStableProfileHostEntry(scope: LocalScope, installedHostEntryPath: string): string {
+  const namedEntry = stableProfileHostEntry(scope)
+  let installedReal: string
+  let namedReal: string
+  try {
+    installedReal = realpathSync(installedHostEntryPath)
+    namedReal = realpathSync(namedEntry)
+  } catch (error) {
+    throw new LocalScopeError(
+      'HOST_MANAGER_UNIT_CONFLICT',
+      'managed Host: the stable profile Host entry or the current installed Host entry is not readable',
+      error,
+    )
+  }
+  if (namedReal !== installedReal) {
+    throw new LocalScopeError(
+      'HOST_MANAGER_UNIT_CONFLICT',
+      'managed Host: the stable profile Host entry does not resolve to the current installed package',
+    )
+  }
+  return namedEntry
 }
 
 /**
@@ -1027,10 +1075,15 @@ export async function installProfileHostUnit(
     }
   }
   const unitName = buildUnitName(options.profile, options.scope.scopeId)
-  const content = renderUnitContent(collectUnitFacts(options))
   let unit = inspectOwnedProfileUnit(options.scope, options.profile, unitDir)
   let created = false
   if (unit.kind === 'none') {
+    // A FRESH unit launches the stable lexical Profile entry, never the frozen
+    // physical store path the official resolution currently happens to expose.
+    const content = renderUnitContent(collectUnitFacts({
+      ...options,
+      hostEntryPath: resolveStableProfileHostEntry(options.scope, options.hostEntryPath),
+    }))
     // A fresh file may otherwise SHADOW a same-named unit the manager already
     // runs from a lower-priority path; refuse that before any write/reload.
     await assertFreshUnitNameIsNotShadowed(unitName, unitDir, runtimeDir, systemctl)
@@ -1039,9 +1092,6 @@ export async function installProfileHostUnit(
   }
   if (unit.kind !== 'owned') {
     throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the installed unit could not be confirmed')
-  }
-  if (unit.installBuild !== options.scope.buildId) {
-    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the installed unit belongs to another installed build')
   }
   let reloaded = false
   if (created) {
@@ -1150,13 +1200,279 @@ function rollbackFreshUnit(unit: OwnedProfileUnit): Error | undefined {
   }
 }
 
+// ── Explicit CLI start/restart: bounded generated-field migration ─────────────
+//
+// A unit written by a PRE-PR1 install records the physical pnpm store path it
+// ran from. That path can disappear on the next official `dsh plugin` update.
+// Only an EXACTLY recognized two-token PiTui `ExecStart` in `[Service]` plus the
+// same-Profile owner metadata is rewritten — and only to the stable lexical
+// Profile entry. Every other `ExecStart` is user configuration: it is used by
+// systemd as-is and is never rewritten.
+
+/** One recognized historical PiTui-generated `ExecStart=` command line. */
+interface GeneratedExecStart {
+  /** The complete original line, replaced at its own position only. */
+  readonly line: string
+  /** The raw (still encoded) Node executable token, preserved byte-for-byte. */
+  readonly nodeToken: string
+  /** The decoded historical physical Host entry. */
+  readonly hostEntryPath: string
+}
+
+/** Decode ONE canonical `encodeUnitValue(..., commandLine: true)` double-quoted token. */
+function decodeCommandToken(
+  text: string,
+  start: number,
+): { readonly raw: string; readonly value: string; readonly end: number } | undefined {
+  if (text[start] !== '"') return undefined
+  let value = ''
+  let index = start + 1
+  for (; index < text.length; index += 1) {
+    const character = text[index] as string
+    if (character === '"') return { raw: text.slice(start, index + 1), value, end: index + 1 }
+    if (character === '\\') {
+      const escaped = text[index + 1]
+      if (escaped !== '\\' && escaped !== '"') return undefined
+      value += escaped
+      index += 1
+      continue
+    }
+    if (character === '%' || character === '$') {
+      if (text[index + 1] !== character) return undefined
+      value += character
+      index += 1
+      continue
+    }
+    value += character
+  }
+  return undefined
+}
+
+/**
+ * Recognize the ONE generated command line: exactly two canonical encoded
+ * tokens (absolute Node executable and a physical PiTui `local-host.mjs`). The
+ * historical root may already be gone; then only the recognizable published
+ * layout is required. A root that is still accessible must declare this exact
+ * package. Anything else is user configuration and returns `undefined`.
+ */
+function parseGeneratedExecStart(value: string): GeneratedExecStart | undefined {
+  const node = decodeCommandToken(value, 0)
+  if (node === undefined || value[node.end] !== ' ') return undefined
+  const host = decodeCommandToken(value, node.end + 1)
+  if (host === undefined || host.end !== value.length) return undefined
+  if (!isAbsolute(node.value) || !isAbsolute(host.value)) return undefined
+  const publishedSuffix = '/node_modules/@xmoon76/dsh-pi-tui/dist/local-host.mjs'
+  if (!host.value.endsWith(publishedSuffix)) return undefined
+  if (existsSync(host.value)) {
+    try {
+      installedPackageRootFromEntry(pathToFileURL(host.value).href)
+    } catch {
+      return undefined
+    }
+  }
+  return { line: `ExecStart=${value}`, nodeToken: node.raw, hostEntryPath: host.value }
+}
+
+/** Find the single PiTui-generated `ExecStart=` of one unit, if it is recognized. */
+function inspectGeneratedExecStart(content: string): GeneratedExecStart | undefined {
+  let section = ''
+  let found: { readonly line: string; readonly value: string } | undefined
+  let count = 0
+  for (const line of content.split('\n')) {
+    const sectionMatch = /^\[([^\]]+)\]$/u.exec(line)
+    if (sectionMatch !== null) {
+      section = sectionMatch[1] as string
+      continue
+    }
+    if (!/^\s*ExecStart\s*=/u.test(line)) continue
+    count += 1
+    // A reset/duplicate, a non-canonical spelling or a directive outside
+    // `[Service]` is user configuration, not the generated shape.
+    if (count > 1 || section !== 'Service' || !line.startsWith('ExecStart=')) return undefined
+    found = { line, value: line.slice('ExecStart='.length) }
+  }
+  if (found === undefined) return undefined
+  return parseGeneratedExecStart(found.value)
+}
+
+/** The current user may replace this regular main unit file in place. */
+function inspectMigrationWriteAdmission(unit: OwnedProfileUnit, uid: number): number {
+  let info
+  try {
+    info = lstatSync(unit.filePath)
+  } catch (error) {
+    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the profile unit changed during the migration plan', error)
+  }
+  if (info.isSymbolicLink()) {
+    throw new LocalScopeError(
+      'HOST_MANAGER_UNIT_CONFLICT',
+      'managed Host: the profile unit is a user-managed symlink; its configuration source is never rewritten',
+    )
+  }
+  if (!info.isFile()) {
+    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the profile unit is not a regular file')
+  }
+  if (info.uid !== uid) {
+    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the profile unit is not owned by the current user')
+  }
+  if ((info.mode & 0o200) === 0) {
+    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the profile unit is not writable by the current user')
+  }
+  try {
+    accessSync(unit.unitDir, constants.W_OK)
+  } catch (error) {
+    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the user unit directory is not writable', error)
+  }
+  return info.mode & 0o777
+}
+
+/** Rewrite exactly the two generated fields; every other byte is preserved. */
+function migrateGeneratedUnitContent(
+  content: string,
+  generated: GeneratedExecStart,
+  namedEntry: string,
+  buildId: string,
+): string {
+  const execStart = `ExecStart=${generated.nodeToken} ${encodeUnitValue(namedEntry, 'Host entry path', true)}`
+  let execStartReplaced = false
+  let buildReplaced = false
+  const migrated = content.split('\n').map(line => {
+    if (line === generated.line) {
+      execStartReplaced = true
+      return execStart
+    }
+    if (line.startsWith('X-DshPiTuiInstallBuild=')) {
+      buildReplaced = true
+      return `X-DshPiTuiInstallBuild=${buildId}`
+    }
+    return line
+  })
+  // Both generated fields were proven present exactly once by inspection; a
+  // lost field here means the planned rewrite would not be the bounded one.
+  if (!execStartReplaced || !buildReplaced) {
+    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the generated unit fields are not the planned shape')
+  }
+  return migrated.join('\n')
+}
+
+/** Atomically replace the OWNED main unit file, preserving its original mode. */
+function replaceOwnedUnitFile(unit: OwnedProfileUnit, content: string, mode: number): void {
+  const tempPath = join(unit.unitDir, `.${unit.unitName}.${String(process.pid)}.${randomUUID()}.tmp`)
+  let fd: number | undefined
+  try {
+    fd = openSync(tempPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, mode)
+    fchmodSync(fd, mode)
+    const buffer = Buffer.from(content, 'utf8')
+    let offset = 0
+    while (offset < buffer.length) offset += writeSync(fd, buffer, offset, buffer.length - offset)
+    fsyncSync(fd)
+    closeSync(fd)
+    fd = undefined
+    // Re-prove the exact file this plan inspected immediately before the rename.
+    assertUnitFileIdentity(unit)
+    renameSync(tempPath, unit.filePath)
+  } catch (error) {
+    if (fd !== undefined) closeSync(fd)
+    try { unlinkSync(tempPath) } catch { /* temp may not exist */ }
+    if (error instanceof LocalScopeError) throw error
+    throw new LocalScopeError('HOST_MANAGER_START_FAILED', 'managed Host: the migrated unit could not be written', error)
+  } finally {
+    try { unlinkSync(tempPath) } catch { /* renamed or already removed */ }
+  }
+}
+
+/** The bounded preparation answer for the current installed package. */
+export type ProfileUnitPreparation =
+  | { readonly kind: 'none' }
+  | { readonly kind: 'unchanged' }
+  | { readonly kind: 'not-loaded' }
+  | { readonly kind: 'migration-required' }
+  | { readonly kind: 'migrated' }
+
+/** One bounded CLI start/restart unit preparation. */
+export interface ProfileUnitPreparationOptions {
+  readonly scope: LocalScope
+  readonly profile: string
+  /** The current official installed Host entry (`packageRoot/dist/local-host.mjs`). */
+  readonly hostEntryPath: string
+  /** `inspect` is read-only; `apply` may rewrite the one generated field block. */
+  readonly mode: 'inspect' | 'apply'
+}
+
+/**
+ * Prepare the Profile unit for the CURRENT installed package, for the explicit
+ * CLI `start`/`restart` paths only. `inspect` never writes and proves whether the
+ * `apply` rewrite is possible before a Host is stopped; `apply` performs the one
+ * bounded atomic rewrite plus manager reload and re-verifies the manager source.
+ * A user-custom `ExecStart` and a unit already pointing at the stable entry are
+ * byte-preserved no-ops. There is no upgrade state, parser or manager here.
+ */
+export async function prepareOwnedProfileUnitForCurrentInstall(
+  options: ProfileUnitPreparationOptions,
+  deps: HostManagerDeps = {},
+): Promise<ProfileUnitPreparation> {
+  const uid = requireLinuxUid()
+  const unitDir = deps.unitDir !== undefined ? deps.unitDir(uid) : inspectExistingUserUnitDir()
+  if (unitDir === undefined) return { kind: 'none' }
+  const inspected = inspectOwnedProfileUnit(options.scope, options.profile, unitDir)
+  if (inspected.kind === 'none') return { kind: 'none' }
+  const systemctl = deps.systemctl ?? runSystemctl
+  const runtimeDir = selectRuntimeDir(uid)
+  // The manager's own `FragmentPath` is the source authority: this query refuses
+  // a loaded unit whose file is not this exact Profile path.
+  const state = await queryOwnedProfileUnit(inspected, runtimeDir, systemctl)
+  if (state.loadState === 'not-found') return { kind: 'not-loaded' }
+  const generated = inspectGeneratedExecStart(inspected.content)
+  if (generated === undefined) return { kind: 'unchanged' }
+  if (generated.hostEntryPath === stableProfileHostEntry(options.scope)) return { kind: 'unchanged' }
+  const namedEntry = resolveStableProfileHostEntry(options.scope, options.hostEntryPath)
+  const mode = inspectMigrationWriteAdmission(inspected, uid)
+  if (options.mode === 'inspect') return { kind: 'migration-required' }
+  const content = migrateGeneratedUnitContent(inspected.content, generated, namedEntry, options.scope.buildId)
+  // Re-prove BOTH authorities immediately before the committed write: the exact
+  // inspected file and the manager source of that same unit. A unit that started
+  // a Host between the caller's snapshot and this point is never rewritten while
+  // it may still be coming up.
+  assertUnitFileIdentity(inspected)
+  const beforeWrite = await queryOwnedProfileUnit(inspected, runtimeDir, systemctl)
+  if (beforeWrite.loadState === 'not-found') {
+    throw new LocalScopeError('HOST_MANAGER_START_FAILED', 'managed Host: the installed unit is not loaded by the manager')
+  }
+  if (beforeWrite.activeState !== 'inactive' && beforeWrite.activeState !== 'failed') {
+    throw new LocalScopeError(
+      'HOST_MANAGER_START_FAILED',
+      'managed Host: the profile unit is not stopped; refusing to rewrite its command while it may start a Host',
+    )
+  }
+  replaceOwnedUnitFile(inspected, content, mode)
+  const reload = await systemctl(['--user', '--no-pager', '--no-ask-password', 'daemon-reload'], runtimeDir)
+  if (reload.kind !== 'exited' || reload.code !== 0) {
+    throw new LocalScopeError(
+      'HOST_MANAGER_START_FAILED',
+      'managed Host: the migrated unit was written but systemctl daemon-reload failed; the manager load state is unconfirmed',
+    )
+  }
+  // The committed file is a NEW inode: re-read it instead of reusing the plan.
+  const refreshed = inspectOwnedProfileUnit(options.scope, options.profile, unitDir)
+  if (refreshed.kind !== 'owned' || refreshed.filePath !== inspected.filePath || refreshed.content !== content) {
+    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the migrated unit could not be confirmed')
+  }
+  const after = await queryOwnedProfileUnit(refreshed, runtimeDir, systemctl)
+  if (after.loadState === 'not-found') {
+    throw new LocalScopeError('HOST_MANAGER_START_FAILED', 'managed Host: the migrated unit is not loaded by the manager')
+  }
+  return { kind: 'migrated' }
+}
+
 /**
  * Start the public daemon Host candidate. The ONE decision input is the
  * installed unit fact: no unit means the basic detached Host immediately, with
  * no user-manager probe and no systemctl call; an installed unit must be loaded
- * by the real manager with a matching FragmentPath and this installed build,
- * and is then started through exactly one `systemctl --user start`. A manager
- * failure or unit conflict is thrown and NEVER degrades to a detached process.
+ * by the real manager with a matching FragmentPath, and is then started through
+ * exactly one `systemctl --user start`. A different installed build is a
+ * diagnostic fact, never an ownership verdict. A manager failure or unit
+ * conflict is thrown and NEVER degrades to a detached process; this function
+ * never writes a unit.
  */
 export async function startPublicHostCandidate(
   options: HostStartOptions,
@@ -1167,9 +1483,6 @@ export async function startPublicHostCandidate(
   if (unitDir === undefined) return spawnHostCandidate(options)
   const unit = inspectOwnedProfileUnit(options.scope, options.profile, unitDir)
   if (unit.kind === 'none') return spawnHostCandidate(options)
-  if (unit.installBuild !== options.scope.buildId) {
-    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the installed unit belongs to another installed build')
-  }
   const systemctl = deps.systemctl ?? runSystemctl
   const runtimeDir = selectRuntimeDir(uid)
   const state = await queryOwnedProfileUnit(unit, runtimeDir, systemctl)

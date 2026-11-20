@@ -32,9 +32,11 @@ import {
   inspectOwnedProfileUnit,
   inspectTrustedDshAnchor,
   inspectTrustedExecutable,
+  prepareOwnedProfileUnitForCurrentInstall,
   profileIdentityDigest,
   profileUnitSlug,
   renderUnitContent,
+  resolveStableProfileHostEntry,
   spawnHostCandidate,
   startManagedHostCandidate,
   startPublicHostCandidate,
@@ -326,7 +328,10 @@ test('concurrent identical installs converge to exactly one creator and one inta
 
 interface ManagedFixture {
   readonly scope: LocalScope
+  /** The official (physical pnpm store) resolution of the installed Host entry. */
   readonly entry: string
+  /** The stable lexical Profile entry a fresh unit launches. */
+  readonly stableEntry: string
   readonly anchor: string
   readonly markerPath: string
 }
@@ -343,12 +348,23 @@ function managedFixture(t: TestContext): ManagedFixture {
   writeFileSync(join(packageRoot, 'dist', 'index.mjs'), 'export const value = 1\n')
   const markerPath = join(root, 'spawned.marker')
   writeFileSync(join(packageRoot, 'dist', 'local-host.mjs'), `import { writeFileSync } from 'node:fs'\nwriteFileSync(${JSON.stringify(markerPath)}, 'spawned')\n`)
+  // The official Profile layout: `node_modules/@xmoon76/dsh-pi-tui` points at
+  // the current install. A fresh unit launches this stable lexical entry.
+  const scopePackageDir = join(profile, 'node_modules', '@xmoon76')
+  mkdirSync(scopePackageDir, { recursive: true, mode: 0o700 })
+  symlinkSync(packageRoot, join(scopePackageDir, 'dsh-pi-tui'))
   const anchorDir = join(root, 'dsh')
   mkdirSync(anchorDir, { recursive: true })
   const anchor = join(anchorDir, 'package.json')
   writeFileSync(anchor, `${JSON.stringify({ name: '@deepseek-ai/dsh', version: DSH_VERSION })}\n`, { mode: 0o644 })
   const scope = scopeFromInstalledProfile({ dshHome: home, profileDir: profile, packageRoot, dshVersion: DSH_VERSION })
-  return { scope, entry: join(packageRoot, 'dist', 'local-host.mjs'), anchor, markerPath }
+  return {
+    scope,
+    entry: join(packageRoot, 'dist', 'local-host.mjs'),
+    stableEntry: join(scopePackageDir, 'dsh-pi-tui', 'dist', 'local-host.mjs'),
+    anchor,
+    markerPath,
+  }
 }
 
 /**
@@ -493,7 +509,7 @@ test('install queries the real manager BEFORE creating a missing user unit direc
   assert.equal(existsSync(unitDir), true)
 })
 
-test('install creates one unit, reloads once and never starts or enables it', async t => {
+test('install creates one unit with the stable Profile entry, reloads once and never starts or enables it', async t => {
   const fx = managedFixture(t)
   const unitDir = testLifecycle(t).tempDir('m62b-install-fresh-')
   const unitName = buildUnitName('pi-tui', fx.scope.scopeId)
@@ -504,11 +520,34 @@ test('install creates one unit, reloads once and never starts or enables it', as
   assert.equal(result.reloaded, true)
   assert.equal(result.unitName, unitName)
   assert.equal(result.unitPath, finalPath)
-  assert.match(readFileSync(finalPath, 'utf8'), new RegExp(`^X-DshPiTuiScopeId=${fx.scope.scopeId}$`, 'mu'))
+  const content = readFileSync(finalPath, 'utf8')
+  assert.match(content, new RegExp(`^X-DshPiTuiScopeId=${fx.scope.scopeId}$`, 'mu'))
+  // The generated unit must launch the STABLE lexical Profile entry, not the
+  // physical install path the official resolution currently happens to expose.
+  assert.equal(content.includes(` ${encodeUnitValue(fx.stableEntry, 'Host entry path', true)}`), true,
+    'a fresh unit must launch the stable lexical Profile entry')
+  assert.equal(content.includes(fx.entry), false, 'a fresh unit must not freeze the current physical package path')
   const flattened = systemctl.calls.map(args => args.join(' '))
   assert.equal(flattened.filter(call => call.includes('daemon-reload')).length, 1, 'a fresh unit needs exactly one reload')
   assert.equal(flattened.some(call => /\bstart\b/u.test(call)), false, 'install must never start the unit')
   assert.equal(flattened.some(call => /\benable\b/u.test(call)), false, 'install must never enable the unit')
+})
+
+test('the stable Profile entry must resolve to the current installed package entry', t => {
+  const fx = managedFixture(t)
+  assert.equal(resolveStableProfileHostEntry(fx.scope, fx.entry), fx.stableEntry)
+  const otherRoot = join(testLifecycle(t).tempDir('m62b-other-package-'), 'package')
+  mkdirSync(join(otherRoot, 'dist'), { recursive: true })
+  writeFileSync(join(otherRoot, 'package.json'), `${JSON.stringify({ name: '@xmoon76/dsh-pi-tui', version: '0.5.7' })}\n`)
+  writeFileSync(join(otherRoot, 'dist', 'local-host.mjs'), 'process.exit(0)\n')
+  assert.throws(
+    () => resolveStableProfileHostEntry(fx.scope, join(otherRoot, 'dist', 'local-host.mjs')),
+    error => isCode(error, 'HOST_MANAGER_UNIT_CONFLICT') && /does not resolve to the current installed package/u.test(String(error)),
+  )
+  assert.throws(
+    () => resolveStableProfileHostEntry(fx.scope, join(otherRoot, 'dist', 'missing.mjs')),
+    error => isCode(error, 'HOST_MANAGER_UNIT_CONFLICT'),
+  )
 })
 
 test('install reloads a freshly created unit even when the manager still reports a cached loaded definition', async t => {
@@ -740,7 +779,7 @@ test('install explicitly reloads an existing but not-loaded unit and verifies Fr
   assert.equal(systemctl.calls.filter(args => args.includes('daemon-reload')).length, 1)
 })
 
-test('install refuses a foreign unit, another build and a wrong DSH anchor without overwriting', async t => {
+test('install refuses a foreign unit and a wrong DSH anchor, and reuses a same-Profile other-build unit', async t => {
   const fx = managedFixture(t)
   const foreignDir = testLifecycle(t).tempDir('m62b-install-foreign-')
   const foreign = writeUnit(fx, foreignDir, renderUnitContent({
@@ -756,19 +795,20 @@ test('install refuses a foreign unit, another build and a wrong DSH anchor witho
   )
   assert.equal(readFileSync(foreign.path, 'utf8'), foreign.content)
 
+  // A same-Profile unit from a HISTORICAL install build is this Profile's unit:
+  // `install` only confirms/reuses it, never rewrites it and never rejects it.
   const oldBuildDir = testLifecycle(t).tempDir('m62b-install-oldbuild-')
   const oldBuild = writeUnit(fx, oldBuildDir, renderUnitContent({
     dshHome: fx.scope.dshHome, profileRealpath: fx.scope.profileRealpath, profile: 'pi-tui', scopeId: fx.scope.scopeId,
     buildId: 'c'.repeat(64), nodePath: process.execPath, hostEntryPath: fx.entry, dshAnchor: fx.anchor,
   }))
-  await assert.rejects(
-    installProfileHostUnit(hostOptions(fx), {
-      unitDir: () => oldBuildDir,
-      systemctl: fakeManager({ finalPath: oldBuild.path, unitPath: oldBuildDir, loaded: true }).run,
-    }),
-    error => isCode(error, 'HOST_MANAGER_UNIT_CONFLICT'),
-  )
-  assert.equal(readFileSync(oldBuild.path, 'utf8'), oldBuild.content)
+  const reused = await installProfileHostUnit(hostOptions(fx), {
+    unitDir: () => oldBuildDir,
+    systemctl: fakeManager({ finalPath: oldBuild.path, unitPath: oldBuildDir, loaded: true }).run,
+  })
+  assert.equal(reused.created, false, 'a same-Profile other-build unit is reused, never replaced')
+  assert.equal(reused.reloaded, false, 'an already loaded other-build unit is not reloaded')
+  assert.equal(readFileSync(oldBuild.path, 'utf8'), oldBuild.content, 'a same-Profile other-build unit is byte-preserved')
 
   const wrongDir = testLifecycle(t).tempDir('m62b-install-wronganchor-')
   const wrongAnchor = join(dirname(fx.anchor), 'wrong.json')
@@ -980,7 +1020,7 @@ test('a public start with a broken manager or an unloaded unit never falls back 
   assert.equal(existsSync(fx.markerPath), false)
 })
 
-test('a public start refuses an installed unit from another build', async t => {
+test('a public start starts an owner-verified other-build unit once and never rewrites it', async t => {
   const fx = managedFixture(t)
   const unitDir = testLifecycle(t).tempDir('m62b-start-oldbuild-')
   const unit = writeUnit(fx, unitDir, renderUnitContent({
@@ -988,11 +1028,311 @@ test('a public start refuses an installed unit from another build', async t => {
     buildId: 'c'.repeat(64), nodePath: process.execPath, hostEntryPath: fx.entry, dshAnchor: fx.anchor,
   }))
   const systemctl = fakeManager({ finalPath: unit.path, unitPath: unitDir, loaded: true })
-  await assert.rejects(
-    startPublicHostCandidate(hostOptions(fx), { unitDir: () => unitDir, systemctl: systemctl.run }),
-    error => isCode(error, 'HOST_MANAGER_UNIT_CONFLICT'),
+  const observation = await startPublicHostCandidate(hostOptions(fx), { unitDir: () => unitDir, systemctl: systemctl.run })
+  assert.equal(observation(), undefined)
+  assert.equal(systemctl.calls.filter(args => args.includes('start')).length, 1,
+    'an owner/manager-verified other-build unit is started exactly once')
+  assert.equal(readFileSync(unit.path, 'utf8'), unit.content, 'a public start never rewrites the user unit')
+})
+
+// ── Generated-field migration for explicit CLI start/restart ─────────────────
+
+/** The historical physical store entry shape a pre-PR1 install generated. */
+function storeStyleHostEntry(root: string): string {
+  return join(root, 'node_modules', '@xmoon76', 'dsh-pi-tui', 'dist', 'local-host.mjs')
+}
+
+/** One pre-PR1 generated unit plus user-owned runtime directives. */
+function legacyGeneratedUnit(fx: ManagedFixture, storeRoot: string, buildId = 'c'.repeat(64)): string {
+  return renderUnitContent({
+    dshHome: fx.scope.dshHome,
+    profileRealpath: fx.scope.profileRealpath,
+    profile: 'pi-tui',
+    scopeId: fx.scope.scopeId,
+    buildId,
+    nodePath: process.execPath,
+    hostEntryPath: storeStyleHostEntry(storeRoot),
+    dshAnchor: fx.anchor,
+  }).replace('RestartSec=2s', 'RestartSec=7s')
+    + 'ExecStartPre=/usr/bin/true\nEnvironment="MY_CUSTOM_FLAG=1"\n'
+}
+
+/** A fake manager that keeps answering the same loaded, inactive unit. */
+function migrationManager(path: string, calls: string[][], loaded = true) {
+  return async (args: readonly string[]): Promise<SystemctlResult> => {
+    calls.push([...args])
+    if (args.includes('daemon-reload')) return exited(0)
+    if (args.includes('show')) {
+      return exited(0, [
+        `LoadState=${loaded ? 'loaded' : 'not-found'}`,
+        'ActiveState=inactive',
+        `FragmentPath=${loaded ? path : ''}`,
+        'DropInPaths=',
+        'MainPID=0',
+        'UnitFileState=disabled',
+        '',
+      ].join('\n'))
+    }
+    return exited(0)
+  }
+}
+
+test('a recognized generated legacy unit is migrated field-only, revalidated and becomes a no-op', async t => {
+  const fx = managedFixture(t)
+  const unitDir = testLifecycle(t).tempDir('m62b-migrate-')
+  const path = join(unitDir, buildUnitName('pi-tui', fx.scope.scopeId))
+  const storeRoot = testLifecycle(t).tempDir('m62b-old-store-')
+  const legacy = legacyGeneratedUnit(fx, storeRoot)
+  writeFileSync(path, legacy, { mode: 0o644 })
+  chmodSync(path, 0o644)
+  const dropInDir = join(unitDir, `${buildUnitName('pi-tui', fx.scope.scopeId)}.d`)
+  mkdirSync(dropInDir, { recursive: true, mode: 0o700 })
+  writeFileSync(join(dropInDir, '50-user.conf'), '[Service]\nRestart=no\n', { mode: 0o600 })
+  const calls: string[][] = []
+  const systemctl = migrationManager(path, calls)
+  const deps = { unitDir: () => unitDir, systemctl }
+  const base = { scope: fx.scope, profile: 'pi-tui', hostEntryPath: fx.entry }
+
+  const inspected = await prepareOwnedProfileUnitForCurrentInstall({ ...base, mode: 'inspect' }, deps)
+  assert.equal(inspected.kind, 'migration-required')
+  assert.equal(readFileSync(path, 'utf8'), legacy, 'inspect must never write the unit')
+  assert.equal(calls.some(args => args.includes('daemon-reload')), false, 'inspect must never reload the manager')
+
+  const migrated = await prepareOwnedProfileUnitForCurrentInstall({ ...base, mode: 'apply' }, deps)
+  assert.equal(migrated.kind, 'migrated')
+  const content = readFileSync(path, 'utf8')
+  const expectedExecStart = `ExecStart=${encodeUnitValue(process.execPath, 'node path', true)} ${encodeUnitValue(fx.stableEntry, 'Host entry path', true)}`
+  assert.equal(content.includes(expectedExecStart), true, 'the generated ExecStart must launch the stable Profile entry')
+  assert.equal(content.includes(storeStyleHostEntry(storeRoot)), false, 'the frozen physical store path must be gone')
+  assert.equal(content.includes(`X-DshPiTuiInstallBuild=${fx.scope.buildId}`), true, 'the generated install build is refreshed')
+  for (const preserved of [
+    'Description=dsh-pi-tui local Host (profile-scoped)',
+    'Restart=on-failure',
+    'RestartSec=7s',
+    'ExecStartPre=/usr/bin/true',
+    'Environment="MY_CUSTOM_FLAG=1"',
+    'TimeoutStopSec=15s',
+  ]) {
+    assert.equal(content.includes(preserved), true, `the migration must preserve ${preserved}`)
+  }
+  assert.equal(lstatSync(path).mode & 0o777, 0o644, 'the original unit mode must be preserved')
+  assert.equal(readFileSync(join(dropInDir, '50-user.conf'), 'utf8'), '[Service]\nRestart=no\n', 'a user drop-in is never touched')
+  const reloadAt = calls.findIndex(args => args.includes('daemon-reload'))
+  assert(reloadAt > 0, 'the migration must reload the manager')
+  assert(calls.slice(reloadAt + 1).some(args => args.includes('show')), 'the manager source must be revalidated after the reload')
+
+  const reloads = calls.filter(args => args.includes('daemon-reload')).length
+  const again = await prepareOwnedProfileUnitForCurrentInstall({ ...base, mode: 'apply' }, deps)
+  assert.equal(again.kind, 'unchanged', 'an already stable unit is a no-op')
+  assert.equal(readFileSync(path, 'utf8'), content, 'a repeated preparation must not rewrite the unit')
+  assert.equal(calls.filter(args => args.includes('daemon-reload')).length, reloads, 'a no-op must not reload the manager')
+})
+
+test('user-custom commands, symlinked units and unwritable units are never rewritten', async t => {
+  const fx = managedFixture(t)
+  const base = { scope: fx.scope, profile: 'pi-tui', hostEntryPath: fx.entry }
+  const storeRoot = testLifecycle(t).tempDir('m62b-old-store-')
+  const legacy = legacyGeneratedUnit(fx, storeRoot)
+
+  // A wrapper command that merely names the product entry is user configuration.
+  const wrapperDir = testLifecycle(t).tempDir('m62b-migrate-wrapper-')
+  const wrapperPath = join(wrapperDir, buildUnitName('pi-tui', fx.scope.scopeId))
+  const wrapper = legacy.replace(
+    /^ExecStart=.*$/mu,
+    `ExecStart=${encodeUnitValue('/bin/sh', 'shell', true)} ${encodeUnitValue(join(wrapperDir, 'wrapper.sh'), 'wrapper', true)}`,
   )
-  assert.equal(systemctl.calls.some(args => args.includes('start')), false)
+  writeFileSync(wrapperPath, wrapper, { mode: 0o600 })
+  const wrapperCalls: string[][] = []
+  const wrapperResult = await prepareOwnedProfileUnitForCurrentInstall(
+    { ...base, mode: 'apply' },
+    { unitDir: () => wrapperDir, systemctl: migrationManager(wrapperPath, wrapperCalls) },
+  )
+  assert.equal(wrapperResult.kind, 'unchanged', 'a user wrapper is not a generated entry')
+  assert.equal(readFileSync(wrapperPath, 'utf8'), wrapper, 'a user wrapper is never rewritten')
+  assert.equal(wrapperCalls.some(args => args.includes('daemon-reload')), false, 'a user wrapper needs no reload')
+
+  // A user-owned symlink unit is a configuration link: a needed migration is
+  // refused and the source bytes stay untouched.
+  const linkDir = testLifecycle(t).tempDir('m62b-migrate-link-')
+  const sourcePath = join(linkDir, 'source.service')
+  const linkPath = join(linkDir, buildUnitName('pi-tui', fx.scope.scopeId))
+  writeFileSync(sourcePath, legacy, { mode: 0o644 })
+  symlinkSync(sourcePath, linkPath)
+  const linkCalls: string[][] = []
+  await assert.rejects(
+    prepareOwnedProfileUnitForCurrentInstall(
+      { ...base, mode: 'inspect' },
+      { unitDir: () => linkDir, systemctl: migrationManager(linkPath, linkCalls) },
+    ),
+    error => isCode(error, 'HOST_MANAGER_UNIT_CONFLICT') && /symlink/u.test(String(error)),
+  )
+  assert.equal(readFileSync(sourcePath, 'utf8'), legacy, 'a symlinked unit source is never rewritten')
+
+  // A unit this user cannot write is refused before any stop or reload.
+  const readOnlyDir = testLifecycle(t).tempDir('m62b-migrate-readonly-')
+  const readOnlyPath = join(readOnlyDir, buildUnitName('pi-tui', fx.scope.scopeId))
+  writeFileSync(readOnlyPath, legacy, { mode: 0o400 })
+  chmodSync(readOnlyPath, 0o400)
+  const readOnlyCalls: string[][] = []
+  await assert.rejects(
+    prepareOwnedProfileUnitForCurrentInstall(
+      { ...base, mode: 'inspect' },
+      { unitDir: () => readOnlyDir, systemctl: migrationManager(readOnlyPath, readOnlyCalls) },
+    ),
+    error => isCode(error, 'HOST_MANAGER_UNIT_CONFLICT') && /not writable/u.test(String(error)),
+  )
+  assert.equal(readOnlyCalls.some(args => args.includes('daemon-reload')), false)
+})
+
+test('the apply path re-proves the stopped state and file identity before committing a rewrite', async t => {
+  const fx = managedFixture(t)
+  const base = { scope: fx.scope, profile: 'pi-tui', hostEntryPath: fx.entry }
+
+  // (a) The unit starts between the caller's snapshot and the write: no rewrite.
+  const activeDir = testLifecycle(t).tempDir('m62b-guard-active-')
+  const activePath = join(activeDir, buildUnitName('pi-tui', fx.scope.scopeId))
+  const activeLegacy = legacyGeneratedUnit(fx, join(activeDir, 'store'))
+  writeFileSync(activePath, activeLegacy, { mode: 0o600 })
+  const activeCalls: string[][] = []
+  let activeShows = 0
+  const activeManager = async (args: readonly string[]): Promise<SystemctlResult> => {
+    activeCalls.push([...args])
+    if (args.includes('daemon-reload')) return exited(0)
+    if (args.includes('show')) {
+      activeShows += 1
+      // First show is the plan query; the second is the pre-write re-proof.
+      const started = activeShows > 1
+      return exited(0, [
+        'LoadState=loaded',
+        `ActiveState=${started ? 'active' : 'inactive'}`,
+        `FragmentPath=${activePath}`,
+        'DropInPaths=',
+        `MainPID=${started ? '4242' : '0'}`,
+        'UnitFileState=disabled',
+        '',
+      ].join('\n'))
+    }
+    return exited(0)
+  }
+  await assert.rejects(
+    prepareOwnedProfileUnitForCurrentInstall(
+      { ...base, mode: 'apply' },
+      { unitDir: () => activeDir, systemctl: activeManager },
+    ),
+    error => isCode(error, 'HOST_MANAGER_START_FAILED') && /not stopped/u.test(String(error)),
+  )
+  assert.equal(readFileSync(activePath, 'utf8'), activeLegacy, 'a unit that became active must not be rewritten')
+  assert.equal(activeCalls.some(args => args.includes('daemon-reload')), false, 'a refused write must not reload')
+
+  // (b) User bytes change between the plan query and the write: no overwrite.
+  const changedDir = testLifecycle(t).tempDir('m62b-guard-changed-')
+  const changedPath = join(changedDir, buildUnitName('pi-tui', fx.scope.scopeId))
+  const changedLegacy = legacyGeneratedUnit(fx, join(changedDir, 'store'))
+  writeFileSync(changedPath, changedLegacy, { mode: 0o600 })
+  const replacement = `${changedLegacy}# user edit after the snapshot\n`
+  const changedCalls: string[][] = []
+  let changedShows = 0
+  const changedManager = async (args: readonly string[]): Promise<SystemctlResult> => {
+    changedCalls.push([...args])
+    if (args.includes('daemon-reload')) return exited(0)
+    if (args.includes('show')) {
+      changedShows += 1
+      if (changedShows === 2) writeFileSync(changedPath, replacement, { mode: 0o600 })
+      return exited(0, [
+        'LoadState=loaded',
+        'ActiveState=inactive',
+        `FragmentPath=${changedPath}`,
+        'DropInPaths=',
+        'MainPID=0',
+        'UnitFileState=disabled',
+        '',
+      ].join('\n'))
+    }
+    return exited(0)
+  }
+  await assert.rejects(
+    prepareOwnedProfileUnitForCurrentInstall(
+      { ...base, mode: 'apply' },
+      { unitDir: () => changedDir, systemctl: changedManager },
+    ),
+    error => isCode(error, 'HOST_MANAGER_UNIT_CONFLICT') && /changed during the transition/u.test(String(error)),
+  )
+  assert.equal(readFileSync(changedPath, 'utf8'), replacement, 'a changed unit file must never be overwritten')
+  assert.equal(changedCalls.some(args => args.includes('daemon-reload')), false)
+})
+
+test('a committed migration reports an unconfirmed result when the reload or manager source fails', async t => {
+  const fx = managedFixture(t)
+  const base = { scope: fx.scope, profile: 'pi-tui', hostEntryPath: fx.entry }
+
+  // A failed reload AFTER the atomic write leaves the committed rewrite in place.
+  const reloadDir = testLifecycle(t).tempDir('m62b-guard-reload-')
+  const reloadPath = join(reloadDir, buildUnitName('pi-tui', fx.scope.scopeId))
+  const reloadLegacy = legacyGeneratedUnit(fx, join(reloadDir, 'store'))
+  writeFileSync(reloadPath, reloadLegacy, { mode: 0o600 })
+  const reloadManager = async (args: readonly string[]): Promise<SystemctlResult> => {
+    if (args.includes('daemon-reload')) return exited(1, '', 'reload failed')
+    if (args.includes('show')) {
+      return exited(0, [
+        'LoadState=loaded',
+        'ActiveState=inactive',
+        `FragmentPath=${reloadPath}`,
+        'DropInPaths=',
+        'MainPID=0',
+        'UnitFileState=disabled',
+        '',
+      ].join('\n'))
+    }
+    return exited(0)
+  }
+  await assert.rejects(
+    prepareOwnedProfileUnitForCurrentInstall(
+      { ...base, mode: 'apply' },
+      { unitDir: () => reloadDir, systemctl: reloadManager },
+    ),
+    error => isCode(error, 'HOST_MANAGER_START_FAILED') && /written but systemctl daemon-reload failed/u.test(String(error)),
+  )
+  const committed = readFileSync(reloadPath, 'utf8')
+  assert.notEqual(committed, reloadLegacy, 'the atomic rewrite is committed before the reload attempt')
+  assert.equal(committed.includes(encodeUnitValue(fx.stableEntry, 'Host entry path', true)), true)
+
+  // A manager that loaded a DIFFERENT file after the reload is a committed
+  // uncertainty: the new file is not rolled back and the real failure is raised.
+  const fragmentDir = testLifecycle(t).tempDir('m62b-guard-fragment-')
+  const fragmentPath = join(fragmentDir, buildUnitName('pi-tui', fx.scope.scopeId))
+  const fragmentLegacy = legacyGeneratedUnit(fx, join(fragmentDir, 'store'))
+  writeFileSync(fragmentPath, fragmentLegacy, { mode: 0o600 })
+  const elsewhere = join(fragmentDir, 'elsewhere.service')
+  writeFileSync(elsewhere, '[Unit]\n', { mode: 0o600 })
+  let reloaded = false
+  const fragmentManager = async (args: readonly string[]): Promise<SystemctlResult> => {
+    if (args.includes('daemon-reload')) {
+      reloaded = true
+      return exited(0)
+    }
+    if (args.includes('show')) {
+      return exited(0, [
+        'LoadState=loaded',
+        'ActiveState=inactive',
+        `FragmentPath=${reloaded ? elsewhere : fragmentPath}`,
+        'DropInPaths=',
+        'MainPID=0',
+        'UnitFileState=disabled',
+        '',
+      ].join('\n'))
+    }
+    return exited(0)
+  }
+  await assert.rejects(
+    prepareOwnedProfileUnitForCurrentInstall(
+      { ...base, mode: 'apply' },
+      { unitDir: () => fragmentDir, systemctl: fragmentManager },
+    ),
+    error => isCode(error, 'HOST_MANAGER_UNIT_CONFLICT') && /different unit file/u.test(String(error)),
+  )
+  assert.equal(reloaded, true, 'the reload is committed before the source is revalidated')
+  assert.equal(readFileSync(fragmentPath, 'utf8').includes(encodeUnitValue(fx.stableEntry, 'Host entry path', true)), true,
+    'the committed rewrite stays in place when the manager source cannot be confirmed')
 })
 
 test('a detached Host entry under an external dist symlink locates its package root', async t => {
