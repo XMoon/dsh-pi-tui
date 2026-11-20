@@ -206,6 +206,25 @@ test('the generated settings Remote and the production ConfigPort read/write two
   assert.deepEqual(await pending, { kind: 'accepted' })
   assert.equal(config.hasUnsettledWrites(), false)
 
+  // Whole-data Reset is the ONE official empty-relative-path unset. The
+  // official SettingsForms.mutate may materialize the inherited value into
+  // the USER patch when the base layer owns `data`; the effective value is the
+  // contract and no `null` is written in place of a reset.
+  const beforeReset = config.extensionConfigs.read(PACKAGE_A)
+  assert.equal(beforeReset.kind, 'ready')
+  if (beforeReset.kind !== 'ready') return
+  assert.deepEqual(await config.extensionConfigs.mutate(PACKAGE_A, [
+    { op: 'unset', path: [] },
+  ], beforeReset.revision, beforeReset.generation), { kind: 'accepted' })
+  const afterReset = config.extensionConfigs.read(PACKAGE_A)
+  assert.equal(afterReset.kind, 'ready')
+  if (afterReset.kind !== 'ready') return
+  assert.deepEqual(afterReset.effective, { label: 'alpha', limit: 3 })
+  assert.equal(afterReset.userDataPresent, false)
+  // A whole-data reset that equals the inherited layer removes the USER row:
+  // no copied inherited value and no `null` remain as an override.
+  assert.equal(plane.userConfig(NS_A), undefined)
+
   // A real Host write after the port read makes the captured revision stale.
   const staleRead = config.extensionConfigs.read(PACKAGE_A)
   assert.equal(staleRead.kind, 'ready')

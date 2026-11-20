@@ -1,5 +1,6 @@
 /** Direct per-package extension-config adapter contract evidence. */
 import assert from 'node:assert/strict'
+import { isDeepStrictEqual } from 'node:util'
 import { test } from 'node:test'
 import { Context, Service, symbols } from '@deepseek-ai/cordis'
 import {
@@ -104,8 +105,8 @@ class SettingsFixture implements SettingsServiceLike {
         else setPath(user, op.path, inherited)
       }
     }
-    descriptor.user = user
-    descriptor.value = merge(base, user)
+    descriptor.user = isDeepStrictEqual(user, base) ? {} : user
+    descriptor.value = merge(base, descriptor.user)
     descriptor.revision = (descriptor.revision ?? 0) + 1
     if (this.mutateFailureAfterApply !== undefined) throw this.mutateFailureAfterApply
   }
@@ -215,32 +216,35 @@ test('nested set and whole-data unset map to exact relative paths and one CAS ba
   assert.deepEqual(b.user, undefined)
 
   assert.deepEqual(await config.mutate(PACKAGE_A, [
-    { op: 'unset', path: [] },
+    { op: 'unset', path: ['nested', 'flag'] },
   ], afterSet.revision, afterSet.generation), { kind: 'accepted' })
   assert.deepEqual(settings.mutations[1], {
     ns: NS_A,
-    ops: [{ op: 'unset', path: ['data'] }],
+    ops: [{ op: 'unset', path: ['data', 'nested', 'flag'] }],
     revision: 5,
+  })
+  const afterUnsetField = config.read(PACKAGE_A)
+  assert.equal(afterUnsetField.kind, 'ready')
+  if (afterUnsetField.kind !== 'ready') return
+  assert.deepEqual(afterUnsetField.effective, { label: 'alpha-2', limit: 3, nested: {} })
+  assert.equal(afterUnsetField.userDataPresent, true)
+
+  assert.deepEqual(await config.mutate(PACKAGE_A, [
+    { op: 'unset', path: [] },
+  ], afterUnsetField.revision, afterUnsetField.generation), { kind: 'accepted' })
+  assert.deepEqual(settings.mutations[2], {
+    ns: NS_A,
+    ops: [{ op: 'unset', path: ['data'] }],
+    revision: 6,
   })
   const reset = config.read(PACKAGE_A)
   assert.equal(reset.kind, 'ready')
   if (reset.kind !== 'ready') return
   assert.deepEqual(reset.effective, { label: 'alpha', limit: 3 })
-  // The official `SettingsForms.mutate` materializes an inherited value into
-  // the USER patch when the base layer owns the field; the effective value is
-  // the contract, own-field presence is reported truthfully.
-  assert.equal(reset.userDataPresent, true)
-
-  const afterUnsetField = config.read(PACKAGE_A)
-  assert.equal(afterUnsetField.kind, 'ready')
-  if (afterUnsetField.kind !== 'ready') return
-  assert.deepEqual(await config.mutate(PACKAGE_A, [
-    { op: 'unset', path: ['nested', 'flag'] },
-  ], afterUnsetField.revision, afterUnsetField.generation), { kind: 'accepted' })
-  const removed = config.read(PACKAGE_A)
-  assert.equal(removed.kind, 'ready')
-  if (removed.kind !== 'ready') return
-  assert.deepEqual(removed.user, { label: 'alpha', limit: 3 })
+  // A whole-config reset that equals the inherited layer removes the USER row
+  // entirely, so no `null` or copied inherited value remains as an override.
+  assert.equal(reset.userDataPresent, false)
+  assert.equal(reset.user, undefined)
 })
 
 test('a stale revision is a conflict before dispatch and changes no row', async () => {

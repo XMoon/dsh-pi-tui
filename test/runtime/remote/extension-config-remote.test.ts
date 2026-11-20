@@ -1,5 +1,6 @@
 /** Remote per-package extension-config adapter contract evidence over the production mirror. */
 import assert from 'node:assert/strict'
+import { isDeepStrictEqual } from 'node:util'
 import { test } from 'node:test'
 import {
   RemoteConfigPort,
@@ -85,8 +86,8 @@ function applyMutation(target: Namespace, ops: readonly RemoteSettingsPathOp[]):
       else setPath(user, op.path, inherited)
     }
   }
-  target.user = user
-  target.value = merge(base, user)
+  target.user = isDeepStrictEqual(user, base) ? {} : user
+  target.value = merge(base, target.user)
   target.revision = (target.revision ?? 0) + 1
 }
 

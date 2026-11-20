@@ -7,6 +7,7 @@
  * `test/integration/extension-config-settings-pr2.test.ts`.
  */
 import assert from 'node:assert/strict'
+import { isDeepStrictEqual } from 'node:util'
 import { test } from 'node:test'
 import {
   DirectExtensionConfigsConfig,
@@ -93,8 +94,8 @@ function applyOps(descriptor: Descriptor, ops: readonly { op: 'set' | 'unset'; p
       else setPath(user, op.path, inherited)
     }
   }
-  descriptor.user = user
-  descriptor.value = merge(base, user)
+  descriptor.user = isDeepStrictEqual(user, base) ? {} : user
+  descriptor.value = merge(base, descriptor.user)
   descriptor.revision = (descriptor.revision ?? 0) + 1
 }
 
