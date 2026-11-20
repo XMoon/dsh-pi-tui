@@ -92,9 +92,19 @@ export function formatDaemonDetachHint(facts: {
  * Only a CURRENT authoritative `daemon` may be resumed by the plain command;
  * `direct` or an unreadable/unknown backend must carry the explicit override.
  * @param currentBackend - the authoritative persisted Backend at exit time.
+ * @param hostConfirmedStopped - whether THIS exit stopped the Profile Host. A
+ *   confirmed stop removes the Host a daemon pin could reconnect to, so the
+ *   next launch must follow the persisted backend instead of being forced back
+ *   to daemon.
  * @returns true when the resume command needs `DSH_PI_TUI_BACKEND=daemon`.
  */
-export function daemonResumeBackendOverride(currentBackend: 'direct' | 'daemon' | undefined): boolean {
+export function daemonResumeBackendOverride(
+  currentBackend: 'direct' | 'daemon' | undefined,
+  hostConfirmedStopped = false,
+): boolean {
+  // Only a Host that is still running can be reconnected to; after a confirmed
+  // stop the hint must not contradict the backend the user just chose.
+  if (hostConfirmedStopped) return false
   // Unknown/unready is never proof that the Profile still selects daemon: a
   // plain command could silently cold-launch Direct, so fail safe and pin.
   return currentBackend !== 'daemon'

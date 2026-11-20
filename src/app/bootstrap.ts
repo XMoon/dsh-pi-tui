@@ -3448,10 +3448,14 @@ export function applyRunnerWithRuntime(
             profile,
             sessionId,
             workStopped: exitWorkStopped,
-            // RFL-016: what the NEXT launch picks now — a verified
-            // daemon→direct save can have moved the Profile while the old Host
-            // keeps running, so the launch envelope is the wrong fact.
-            backendOverride: daemonResumeBackendOverride(backend.config.backendStartupPreference.read()?.backend),
+            // RFL-016/019: the pin exists to RECONNECT to a Host that is still
+            // running. A confirmed Stop means there is nothing to reconnect to,
+            // so the next launch follows the persisted backend; Leave / ordinary
+            // detach / a refused Stop still pin when the Profile moved.
+            backendOverride: daemonResumeBackendOverride(
+              backend.config.backendStartupPreference.read()?.backend,
+              exitHostStop?.confirmed === true,
+            ),
 
             ...(exitHostStop === undefined ? {} : { hostStop: exitHostStop }),
           })

@@ -1385,6 +1385,10 @@ test('daemon detach hint: a temporary backend override is preserved and argument
   assert.equal(daemonResumeBackendOverride('daemon'), false, 'a still-daemon Profile resumes with the plain command')
   assert.equal(daemonResumeBackendOverride('direct'), true, 'a verified daemon→direct save must still pin daemon to reach the old Host')
   assert.equal(daemonResumeBackendOverride(undefined), true, 'an unknown backend is never proof of daemon: pin')
+  // RFL-019: a confirmed Stop leaves no Host to reconnect to, so the next
+  // launch must follow the persisted backend, never be forced back to daemon.
+  assert.equal(daemonResumeBackendOverride('direct', true), false, 'a stopped Host never pins')
+  assert.equal(daemonResumeBackendOverride('daemon', true), false, 'a stopped Host never pins')
 })
 
 test('classifyExitIntent: the frozen decision matrix, unknown never idle', () => {
@@ -2230,4 +2234,36 @@ test('a verified daemon→direct Leave pins the daemon backend in the resume com
   })
   assert.match(after, /DSH_PI_TUI_BACKEND=daemon dsh --profile pi-tui-dev --session session-42/u)
   assert.match(after, /The daemon Host was not stopped by this action\./u)
+})
+
+test('a confirmed Stop never forces the next launch back to daemon (RFL-019)', () => {
+  const stoppedDirect = formatDaemonDetachHint({
+    profile: 'pi-tui-dev',
+    sessionId: 'session-42',
+    workStopped: false,
+    backendOverride: daemonResumeBackendOverride('direct', true),
+    hostStop: { confirmed: true },
+  })
+  assert.ok(!stoppedDirect.includes('DSH_PI_TUI_BACKEND'),
+    'the Host is gone; the next launch follows the persisted Direct backend')
+  assert.match(stoppedDirect, /Daemon Host stopped for this Profile\./u)
+  const stoppedDaemon = formatDaemonDetachHint({
+    profile: 'pi-tui-dev',
+    sessionId: 'session-42',
+    workStopped: false,
+    backendOverride: daemonResumeBackendOverride('daemon', true),
+    hostStop: { confirmed: true },
+  })
+  assert.ok(!stoppedDaemon.includes('DSH_PI_TUI_BACKEND'))
+  // A REFUSED stop leaves the old Host running: the pin is still required when
+  // the Profile moved to Direct.
+  const refused = formatDaemonDetachHint({
+    profile: 'pi-tui-dev',
+    sessionId: 'session-42',
+    workStopped: false,
+    backendOverride: daemonResumeBackendOverride('direct', false),
+    hostStop: { confirmed: false, detail: 'the terminal was not restored' },
+  })
+  assert.match(refused, /DSH_PI_TUI_BACKEND=daemon dsh --profile pi-tui-dev --session session-42/u)
+  assert.match(refused, /Daemon Host stop was not confirmed/u)
 })
