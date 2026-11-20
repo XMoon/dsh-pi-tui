@@ -282,7 +282,7 @@ export function createExitIntentCoordinator(deps: ExitIntentCoordinatorDeps): Ex
     const controller = new AbortController()
     stopWait = controller
     open = exitChoiceVerifying(select, dismiss)
-    presenter()?.update(open)
+    presenter()?.open(open)
     // The update callback may synchronously dismiss (a Host modal) and start a
     // NEWER operation: abort this verification rather than read/commit for a
     // decision the user already withdrew.
@@ -336,7 +336,7 @@ export function createExitIntentCoordinator(deps: ExitIntentCoordinatorDeps): Ex
     const controller = new AbortController()
     stopWait = controller
     open = exitChoiceVerifying(select, dismiss)
-    presenter()?.update(open)
+    presenter()?.open(open)
     // The update callback may synchronously dismiss (a Host modal) and start a
     // NEWER operation: abort this verification rather than revive it.
     if (disposed || stopWait !== controller || operationEpoch !== epoch) {

@@ -1750,7 +1750,7 @@ test('an idle daemon exit WITH the intent opens the host-stop confirm, default L
   const h = exitIntentHarness({ backend: 'daemon', activity: 'idle', hostStopEligible: true })
   h.coordinator.request('slash')
   await tick()
-  const model = h.opens[0]!
+  const model = h.opens.find(m => m.phase === 'choose')!
   assert.equal(model.kind, 'daemon-host-stop')
   assert.deepEqual(model.options.map(option => option.id),
     ['leave-host-and-exit', 'stop-host-and-exit', 'stay'])
@@ -1789,7 +1789,7 @@ test('`Stay` withdraws the whole exit and keeps the intent for the next exit', a
   // The next exit asks again: the intent is a process-lifetime fact.
   h.coordinator.request('slash')
   await tick()
-  assert.equal(h.opens.length, 2, 'the confirm is offered again on the next exit')
+  assert.equal(h.opens.filter(m => m.phase === 'choose').length, 2, 'the confirm is offered again on the next exit')
   assert.equal(h.current()?.kind, 'daemon-host-stop')
 })
 
@@ -1833,7 +1833,7 @@ test('an intent that is no longer eligible never opens the Host confirm', async 
   h.state.hostStopEligible = false
   h.coordinator.request('slash')
   await tick()
-  assert.equal(h.opens.length, 1, 'no NEW host-stop confirm is opened')
+  assert.equal(h.opens.filter(m => m.phase === 'choose').length, 1, 'no NEW host-stop confirm is opened')
   assert.deepEqual(h.commits, [{ workStopped: false }], 'the ordinary detach still commits')
 })
 

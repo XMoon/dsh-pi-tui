@@ -1242,6 +1242,9 @@ export class SettingsWorkspacePanel implements Component {
   /** The risk line indices already scrolled into view (a jump past them does
    *  NOT mark them read). Latched read = every risk line seen at least once. */
   private serviceInstallRiskSeen = new Set<number>()
+  /** The projection signature (width + risk range) the seen set belongs to;
+   *  a change clears the set so a resize can never alias stale indices. */
+  private serviceInstallRiskSignature: string | undefined
   /** The lazily built embedded Plugin Manager page (ONE instance per open,
    *  kept across Categories/content focus changes until the category really
    *  changes or this workspace is disposed). */
@@ -3168,14 +3171,22 @@ export class SettingsWorkspacePanel implements Component {
     let serviceInstallActionsVisible = false
     if (this.serviceInstall !== undefined && this.serviceInstall.installable && this.serviceInstall.phase === 'asking') {
       // Mark the risk lines currently in view as seen (accumulates across
-      // renders; a jump past them never marks them).
+      // renders; a jump past them never marks them). The set is keyed to the
+      // CURRENT projection signature (cleared on width/range change) so a
+      // resize that re-wraps the risk can never let stale indices prove a new
+      // line was read.
       const risk = this.serviceInstallRisk
       let riskRead = false
       if (risk !== undefined) {
         const lo = Math.max(offset, risk.start)
         const hi = Math.min(offset + scrollViewport, risk.end)
         for (let i = lo; i < hi; i += 1) this.serviceInstallRiskSeen.add(i)
-        riskRead = this.serviceInstallRiskSeen.size >= (risk.end - risk.start)
+        // Every CURRENT risk line must have been seen; a stale or partial set
+        // never grants.
+        riskRead = true
+        for (let i = risk.start; i < risk.end; i += 1) {
+          if (!this.serviceInstallRiskSeen.has(i)) { riskRead = false; break }
+        }
       }
       const shown = lines.map(line => line.replace(/\x1b\[[0-9;]*m/gu, ''))
       const actionsVisible = shown.some(line => /\bNot now\b/u.test(line))
@@ -3637,6 +3648,13 @@ export class SettingsWorkspacePanel implements Component {
       // The risk copy (heading + blast-radius sentences) is what must be READ
       // before an install is granted; its line range drives the seen-tracking.
       this.serviceInstallRisk = { start: riskStart, end: lines.length }
+      // A width/range change re-wraps the risk: clear the seen set so stale line
+      // indices can never prove a NEW risk line was read.
+      const riskSignature = `${width}|${riskStart}|${lines.length}`
+      if (this.serviceInstallRiskSignature !== riskSignature) {
+        this.serviceInstallRiskSignature = riskSignature
+        this.serviceInstallRiskSeen = new Set<number>()
+      }
       if (this.serviceInstall.phase === 'installing') {
         lines.push(fit(color.textDim('Status'), labelWidth) + color.textDim('Installing service…'))
       } else if (this.serviceInstallResult !== undefined) {

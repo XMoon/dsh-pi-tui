@@ -20,7 +20,7 @@ import {
   resolveDirectDaemonAdminProfile,
   type ProfileDaemonAdminVerb,
 } from '../../src/app/remote-process/local-profile-daemon-admin.ts'
-import type { DaemonControlProfile, DaemonControlResult } from '../../src/app/remote-process/local-daemon-control.ts'
+import type { DaemonControlDeps, DaemonControlProfile, DaemonControlResult } from '../../src/app/remote-process/local-daemon-control.ts'
 import { inspectInstalledProfileScope, darwinHostProfileSeatDir } from '../../src/app/remote-process/local-scope.ts'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
 
@@ -104,11 +104,14 @@ test('the PRODUCTION run seam passes the bound Profile into the real control pla
   // record read), Linux binds an abstract-socket seat (no directory). Both
   // then reach the SAME profile-scoped record read.
   const platform = process.platform === 'darwin' ? 'darwin' : 'linux'
-  const run = (profile: DaemonControlProfile) => profileDaemonAdminRun(profile, {
+  // Each PORT gets its OWN sink-observation slice: the assertion ties a port's
+  // sink calls to the profile THAT PORT DISPLAYS, so swapping the injected run
+  // (portA → run(profileB)) is caught instead of silently passing.
+  const mkDeps = (sink: typeof observed): DaemonControlDeps => ({
     platform,
     ...(platform === 'darwin' ? { darwinAccountHome: accountHome } : {}),
     readRecord: (scope) => {
-      observed.push({ name: profile.name, profileRealpath: scope.profileRealpath, scopeId: scope.scopeId })
+      sink.push({ name: '', profileRealpath: scope.profileRealpath, scopeId: scope.scopeId })
       return undefined
     },
     inspectProcess: () => 'dead',
@@ -126,30 +129,33 @@ test('the PRODUCTION run seam passes the bound Profile into the real control pla
   const expectedB = expectedScope(profileB)
   assert.notEqual(expectedA.scopeId, expectedB.scopeId, 'the two official identities are distinct')
   if (platform === 'darwin') {
-    // Pre-create each profile's admin seat directory so the real control plane
-    // binds its seat and reaches the profile-scoped record read.
     for (const scope of [expectedA, expectedB]) {
       mkdirSync(darwinHostProfileSeatDir(scope.scopeId, accountHome), { recursive: true })
     }
   }
-  // Run through the PRODUCTION PORT, not the seam directly: the port binds the
-  // displayed Profile to its admin sink. `createProfileDaemonAdmin(profile, {run})`
-  // must route to the SAME profile it displays.
-  const portA = createProfileDaemonAdmin(profileA, { run: verb => run(profileA)(verb) })
-  const portB = createProfileDaemonAdmin(profileB, { run: verb => run(profileB)(verb) })
-  await portA.run('stop')
-  await portB.run('stop')
-  // Each bound Profile reached the control plane with its OWN official identity:
-  // name→scope must match, so an A/B swap (each producing the other's scope) or
-  // a wrong binding cannot pass.
-  assert.equal(observed.filter(e => e.name === 'profile-a').length > 0, true, 'profile-a reached the sink')
-  assert.equal(observed.filter(e => e.name === 'profile-b').length > 0, true, 'profile-b reached the sink')
-  for (const entry of observed) {
-    const expected = entry.name === 'profile-a' ? expectedA : expectedB
-    assert.equal(entry.scopeId, expected.scopeId,
-      `${entry.name} reached the control plane with its own official scope identity`)
-    assert.equal(entry.profileRealpath, expected.profileRealpath,
-      `${entry.name} reached the control plane with its own official profile directory`)
+  // Run through the PRODUCTION PORT: the port binds the displayed Profile to
+  // its admin sink. Each port's run uses its OWN displayed profile.
+  const sinkA: typeof observed = []
+  const sinkB: typeof observed = []
+  const adminA = createProfileDaemonAdmin(profileA, { run: verb => profileDaemonAdminRun(profileA, mkDeps(sinkA))(verb) })
+  const adminB = createProfileDaemonAdmin(profileB, { run: verb => profileDaemonAdminRun(profileB, mkDeps(sinkB))(verb) })
+  await adminA.run('stop')
+  await adminB.run('stop')
+  // The port displays its bound Profile's name; the composition must hand the
+  // SAME identity to the sink. Each port's sink slice is asserted against ITS
+  // OWN bound profile, so a swapped injected run (adminA → profileB) produces
+  // the other scope and fails.
+  assert.equal(adminA.profile, profileA.name, 'adminA displays its bound profile')
+  assert.equal(adminB.profile, profileB.name, 'adminB displays its bound profile')
+  assert.ok(sinkA.length > 0, 'adminA reached the control plane')
+  assert.ok(sinkB.length > 0, 'adminB reached the control plane')
+  for (const entry of sinkA) {
+    assert.equal(entry.scopeId, expectedA.scopeId, 'adminA reached the sink with its bound profile identity')
+    assert.equal(entry.profileRealpath, expectedA.profileRealpath, 'adminA read its bound profile directory')
+  }
+  for (const entry of sinkB) {
+    assert.equal(entry.scopeId, expectedB.scopeId, 'adminB reached the sink with its bound profile identity')
+    assert.equal(entry.profileRealpath, expectedB.profileRealpath, 'adminB read its bound profile directory')
   }
 })
 
