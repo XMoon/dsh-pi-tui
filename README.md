@@ -135,6 +135,7 @@ dsh --profile pi-tui --continue            # 继续当前 Host Workspace 中最�
 候选版提供 Linux 与 macOS 本地 daemon 后端，**默认仍是 Direct**（进程内 TUI）。它不改变现有安装，只有显式选择后才生效：
 
 - **选择**：本次启动设置 `DSH_PI_TUI_BACKEND=daemon`，或在 `/settings → General → Backend` 保存 `Daemon`（官方 Profile 配置项 `tui-startup.backend`）。优先级为 `DSH_PI_TUI_BACKEND` > 已保存 Profile 配置 > `direct`；非法值、空串与非 Linux/macOS 平台会非零退出，不会静默回退 Direct。选择只影响下一次冷启动，不会热切换当前进程，也不会重启任何 Host。
+- **可选服务安装与退出确认**：在 `/settings → General → Backend` 保存 `Daemon` 并 Verified 后，同一设置页会提供一次可选的服务安装（`Not now` 零管理操作；显式 `Install service` 只对该 Profile 执行一次受认证安装，不启动、不启用、不迁移正在运行的 Host）。当一个正在运行的 Daemon Client 保存 `Direct` 并 Verified 后，退出时会多出一次危险操作确认：默认 `Leave daemon Host running and exit`（普通断开，不停 Host）、显式 `Stop daemon Host and exit`（终端恢复后对该 Profile 执行唯一一次受认证的 `daemon stop`，会中断所有连接的 Client/Session/Job）或 `Stay in the TUI`。普通退出与普通断开永远不会停止 Host。
 - **管理命令**（只操作当前 `--profile`）：
 
   ```sh

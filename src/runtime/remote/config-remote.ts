@@ -622,6 +622,19 @@ class RemoteConfigMirror {
    * result describes a superseded state). Either failure discards the
    * result and re-reads, bounded.
    */
+  /**
+   * Force ONE fresh authoritative read that does NOT merely join a
+   * previously-started in-flight refresh: used by the exit-time dangerous
+   * gate, which must observe the Host state AFTER its confirm action. It
+   * awaits any pre-existing in-flight refresh to settle, then starts a NEW
+   * `describe()` whose double fence (generation + invalidation) commits only a
+   * current snapshot.
+   */
+  async describeFresh(): Promise<void> {
+    await this.refresh
+    await this.describe()
+  }
+
   describe(): Promise<void> {
     if (this.disposed) return Promise.resolve()
     // One in-flight refresh serves every concurrent caller (a write's
@@ -2172,6 +2185,14 @@ class RemoteBackendStartupPreferenceConfig implements BackendStartupPreferenceCo
       throw new Error(`settings namespace "${TUI_STARTUP_NS}" exposes no form projection`)
     }
     await this.mirror.mutate(TUI_STARTUP_NS, [{ op: 'set', path: ['backend'], value }], expectedRevision, 'record')
+  }
+
+  async readFresh(): Promise<BackendStartupPreferenceState | undefined> {
+    // Force a NEW official settings read (not merely the last mirror snapshot,
+    // and not a previously-started in-flight refresh), so a concurrent write by
+    // another Client is observed even before its invalidation event arrives.
+    await this.mirror.describeFresh()
+    return this.read()
   }
 }
 

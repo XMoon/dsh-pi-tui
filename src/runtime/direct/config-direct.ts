@@ -2420,6 +2420,12 @@ class DirectBackendStartupPreferenceConfig implements BackendStartupPreferenceCo
       { op: 'set', path: ['backend'], value },
     ], expectedRevision)
   }
+
+  async readFresh(): Promise<BackendStartupPreferenceState | undefined> {
+    // Direct's Host is in-process: the settings service read IS the live
+    // authoritative config read. There is no snapshot to force past.
+    return this.read()
+  }
 }
 
 /** The typed guard for the closed public backend vocabulary. */

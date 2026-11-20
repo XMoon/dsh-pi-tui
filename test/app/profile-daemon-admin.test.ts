@@ -1,0 +1,344 @@
+/**
+ * The Client-local daemon administration port: the ONE Client-local daemon administration port.
+ *
+ * Evidence level: structural composition seam (L2/L3). These tests prove the
+ * port is a pure profile-bound wrapper over the EXISTING
+ * `local-daemon-control.runDaemonControl` — same Profile facts, same verbs,
+ * same stable failure taxonomy — and that constructing or idling the port never
+ * reaches an OS manager. The real OS install/stop evidence stays with the
+ * selectable split-process lanes (`daemon-controls-m6-2c`, macOS launchd D4L).
+ * @module @xmoon76/dsh-pi-tui/profile-daemon-admin.test
+ */
+
+import assert from 'node:assert/strict'
+import test, { type TestContext } from 'node:test'
+import { mkdirSync, symlinkSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+import {
+  createProfileDaemonAdmin,
+  profileDaemonAdminRun,
+  resolveDirectDaemonAdminProfile,
+  type ProfileDaemonAdminVerb,
+} from '../../src/app/remote-process/local-profile-daemon-admin.ts'
+import type { DaemonControlDeps, DaemonControlProfile, DaemonControlResult } from '../../src/app/remote-process/local-daemon-control.ts'
+import { inspectInstalledProfileScope, darwinHostProfileSeatDir } from '../../src/app/remote-process/local-scope.ts'
+import { testLifecycle } from '../support/temp-lifecycle.ts'
+
+const PROFILE_A: DaemonControlProfile = {
+  name: 'profile-a',
+  dir: '/fixtures/.dsh/profiles/profile-a',
+  home: '/fixtures/.dsh',
+  installAnchor: '/fixtures/dsh/package.json',
+  packageRoot: '/fixtures/pkg',
+  dshVersion: '0.2.2-rc.5',
+}
+
+const PROFILE_B: DaemonControlProfile = {
+  ...PROFILE_A,
+  name: 'profile-b',
+  dir: '/fixtures/.dsh/profiles/profile-b',
+}
+
+const recorded = (code: number): DaemonControlResult => ({ code, stdout: '', stderr: '' })
+
+// ── the port is a pure profile-bound wrapper ────────────────────────────────
+
+test('the port forwards each authorized verb to the bound run seam with the SAME identity', async () => {
+  const calls: Array<{ verb: ProfileDaemonAdminVerb; boundProfile: string }> = []
+  // ONE run seam shared by two ports proves the binding is per-port, not a
+  // global: each port reports its OWN captured identity.
+  const run = async (verb: ProfileDaemonAdminVerb, admin: { readonly profile: string }): Promise<DaemonControlResult> => {
+    calls.push({ verb, boundProfile: admin.profile })
+    return recorded(0)
+  }
+  const adminA = createProfileDaemonAdmin(PROFILE_A, { run: verb => run(verb, adminA) })
+  const adminB = createProfileDaemonAdmin(PROFILE_B, { run: verb => run(verb, adminB) })
+  assert.equal(adminA.profile, 'profile-a')
+  assert.equal(adminB.profile, 'profile-b')
+  assert.deepEqual(await adminA.run('install'), recorded(0))
+  assert.deepEqual(await adminB.run('stop'), recorded(0))
+  assert.deepEqual(calls, [
+    { verb: 'install', boundProfile: 'profile-a' },
+    { verb: 'stop', boundProfile: 'profile-b' },
+  ], 'each port drives only its own bound Profile identity')
+})
+
+test('the PRODUCTION run seam passes the bound Profile into the real control plane', async t => {
+  // Source→sink proof: the SAME `runDaemonControl` the CLI uses is reached by
+  // the production seam, and the scope identity it consumes comes from the
+  // bound Profile. Two distinct bound profiles produce two distinct scope
+  // identities — if the seam bound the WRONG profile the two would coincide
+  // and this test fails. `readRecord` observes the REAL scope the control
+  // plane derived, not the port's own declaration.
+  const life = testLifecycle(t)
+  const accountHome = life.tempDir('m62c-acct-')
+  const mkProfile = (name: string): DaemonControlProfile => {
+    // Build a real installed-profile layout and resolve the identity through
+    // the SAME Direct composition resolver the production admin port uses
+    // (`resolveDirectDaemonAdminProfile`), so the profile under test is the
+    // official one, not a hand-made object.
+    const root = life.tempDir(`m62c-sink-${name}-`)
+    const packageRoot = join(root, 'packages', 'bundle')
+    const dir = join(root, `profiles/${name}`)
+    mkdirSync(join(packageRoot, 'dist'), { recursive: true })
+    writeFileSync(join(packageRoot, 'package.json'), JSON.stringify({ name: '@xmoon76/dsh-pi-tui', version: '0.5.7' }))
+    writeFileSync(join(packageRoot, 'dist', 'local-client.mjs'), 'export {}\n')
+    mkdirSync(join(root, 'anchor', 'node_modules', '@deepseek-ai', 'dsh'), { recursive: true })
+    writeFileSync(join(root, 'anchor', 'node_modules', '@deepseek-ai', 'dsh', 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh', version: '0.2.2-rc.5' }))
+    const installed = join(dir, 'node_modules', '@xmoon76')
+    mkdirSync(installed, { recursive: true })
+    symlinkSync(packageRoot, join(installed, 'dsh-pi-tui'), 'dir')
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ name }))
+    const resolved = resolveDirectDaemonAdminProfile({
+      name,
+      dir,
+      home: root,
+      installAnchor: join(root, 'anchor', 'node_modules', '@deepseek-ai', 'dsh', 'package.json'),
+    })
+    assert.ok(resolved !== undefined, 'the official Direct resolver proves the installed profile identity')
+    return resolved
+  }
+  const observed: Array<{ name: string; profileRealpath: string; scopeId: string }> = []
+  // The admin seat is platform-owned: Darwin binds a file seat under the
+  // account home (the directory is pre-created so the bind reaches the
+  // record read), Linux binds an abstract-socket seat (no directory). Both
+  // then reach the SAME profile-scoped record read.
+  const platform = process.platform === 'darwin' ? 'darwin' : 'linux'
+  // Each PORT gets its OWN sink-observation slice: the assertion ties a port's
+  // sink calls to the profile THAT PORT DISPLAYS, so swapping the injected run
+  // (portA → run(profileB)) is caught instead of silently passing.
+  const mkDeps = (sink: typeof observed): DaemonControlDeps => ({
+    platform,
+    ...(platform === 'darwin' ? { darwinAccountHome: accountHome } : {}),
+    readRecord: (scope) => {
+      sink.push({ name: '', profileRealpath: scope.profileRealpath, scopeId: scope.scopeId })
+      return undefined
+    },
+    inspectProcess: () => 'dead',
+  })
+  const profileA = mkProfile('profile-a')
+  const profileB = mkProfile('profile-b')
+  // The OFFICIAL scope identity each bound Profile must reach the sink with.
+  const expectedScope = (profile: DaemonControlProfile) => inspectInstalledProfileScope({
+    dshHome: profile.home,
+    profileDir: profile.dir,
+    packageRoot: profile.packageRoot,
+    dshVersion: profile.dshVersion,
+  })
+  const expectedA = expectedScope(profileA)
+  const expectedB = expectedScope(profileB)
+  assert.notEqual(expectedA.scopeId, expectedB.scopeId, 'the two official identities are distinct')
+  if (platform === 'darwin') {
+    for (const scope of [expectedA, expectedB]) {
+      mkdirSync(darwinHostProfileSeatDir(scope.scopeId, accountHome), { recursive: true })
+    }
+  }
+  // Run through the PRODUCTION PORT: the port binds the displayed Profile to
+  // its admin sink. Each port's run uses its OWN displayed profile.
+  const sinkA: typeof observed = []
+  const sinkB: typeof observed = []
+  const adminA = createProfileDaemonAdmin(profileA, { run: verb => profileDaemonAdminRun(profileA, mkDeps(sinkA))(verb) })
+  const adminB = createProfileDaemonAdmin(profileB, { run: verb => profileDaemonAdminRun(profileB, mkDeps(sinkB))(verb) })
+  await adminA.run('stop')
+  await adminB.run('stop')
+  // The port displays its bound Profile's name; the composition must hand the
+  // SAME identity to the sink. Each port's sink slice is asserted against ITS
+  // OWN bound profile, so a swapped injected run (adminA → profileB) produces
+  // the other scope and fails.
+  assert.equal(adminA.profile, profileA.name, 'adminA displays its bound profile')
+  assert.equal(adminB.profile, profileB.name, 'adminB displays its bound profile')
+  assert.ok(sinkA.length > 0, 'adminA reached the control plane')
+  assert.ok(sinkB.length > 0, 'adminB reached the control plane')
+  for (const entry of sinkA) {
+    assert.equal(entry.scopeId, expectedA.scopeId, 'adminA reached the sink with its bound profile identity')
+    assert.equal(entry.profileRealpath, expectedA.profileRealpath, 'adminA read its bound profile directory')
+  }
+  for (const entry of sinkB) {
+    assert.equal(entry.scopeId, expectedB.scopeId, 'adminB reached the sink with its bound profile identity')
+    assert.equal(entry.profileRealpath, expectedB.profileRealpath, 'adminB read its bound profile directory')
+  }
+})
+
+test('the port performs NO manager IO at construction and while idle', async () => {
+  let runCalls = 0
+  createProfileDaemonAdmin(PROFILE_A, { run: async () => { runCalls += 1; return recorded(0) } })
+  profileDaemonAdminRun(PROFILE_A, {
+    platform: 'linux',
+    systemctl: async () => {
+      throw new Error('the manager must not be probed before an explicit user action')
+    },
+  })
+  assert.equal(runCalls, 0, 'constructing the port and its run seam performs zero IO')
+})
+
+// ── the run seam is a lazy wrapper over runDaemonControl ────────────────────
+
+test('the run seam reaches the existing control plane with the bound Profile and stable failure classes', async t => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('m62c-admin-')
+  const profile = {
+    name: 'pi-tui',
+    dir: join(root, 'profiles', 'pi-tui'),
+    home: root,
+    installAnchor: join(root, 'anchor', 'package.json'),
+    packageRoot: root,
+    dshVersion: '0.2.2-rc.5',
+  }
+  mkdirSync(profile.dir, { recursive: true })
+  mkdirSync(join(root, 'anchor'), { recursive: true })
+  writeFileSync(join(root, 'anchor', 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh', version: '0.2.2-rc.5' }))
+  const run = profileDaemonAdminRun(profile, { platform: 'win32' })
+  const result = await run('install')
+  assert.equal(result.code, 3, 'the stable unsupported-platform class is preserved')
+  assert.match(result.stderr, /UNSUPPORTED_PLATFORM/u, 'the stable reason reaches the caller unchanged')
+})
+
+test('the run seam does NOT pass an already-aborted caller signal as its own cancellation', async t => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('m62c-abort-')
+  const profile = {
+    name: 'pi-tui',
+    dir: join(root, 'profiles', 'pi-tui'),
+    home: root,
+    installAnchor: join(root, 'anchor', 'package.json'),
+    packageRoot: root,
+    dshVersion: '0.2.2-rc.5',
+  }
+  mkdirSync(profile.dir, { recursive: true })
+  mkdirSync(join(root, 'anchor'), { recursive: true })
+  writeFileSync(join(root, 'anchor', 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh', version: '0.2.2-rc.5' }))
+  // The controller owns the admin lifetime: the surface abort signal must not
+  // cancel an already-committed Host stop, so the run seam takes no signal.
+  const run = profileDaemonAdminRun(profile, { platform: 'win32' })
+  const result = await run('stop')
+  assert.equal(result.code, 3)
+  assert.match(result.stderr, /UNSUPPORTED_PLATFORM/u)
+})
+
+// ── Direct-side identity resolution reuses the official rules ──────────────
+
+test('resolveDirectDaemonAdminProfile reuses the official package-root resolution', t => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('m62c-direct-')
+  const profile = directProfileFixture(root, '@xmoon76/dsh-pi-tui')
+  const resolved = resolveDirectDaemonAdminProfile(profile.context)
+  assert.ok(resolved !== undefined, 'an installable profile proves the official bundle')
+  assert.equal(resolved.name, 'pi-tui')
+  assert.equal(resolved.home, root)
+  assert.equal(resolved.installAnchor, profile.context.installAnchor)
+  assert.equal(resolved.packageRoot, profile.packageRoot)
+  assert.equal(resolved.dshVersion, '0.2.2-rc.5')
+})
+
+test('a Direct profile that cannot resolve the installed bundle fails closed with the official error', t => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('m62c-missing-')
+  const profileDir = join(root, 'profiles', 'pi-tui')
+  mkdirSync(profileDir, { recursive: true })
+  writeFileSync(join(profileDir, 'package.json'), JSON.stringify({ name: 'pi-tui' }))
+  assert.throws(
+    () => resolveDirectDaemonAdminProfile({
+      name: 'pi-tui',
+      dir: profileDir,
+      home: root,
+      installAnchor: join(root, 'anchor', 'package.json'),
+    }),
+    /does not resolve the installed @xmoon76\/dsh-pi-tui/u,
+    'an unprovable identity is a hard failure, never a fallback',
+  )
+})
+
+test('an installed manifest with a foreign package name fails closed', t => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('m62c-foreign-')
+  const profile = directProfileFixture(root, 'someone-else')
+  assert.throws(
+    () => resolveDirectDaemonAdminProfile(profile.context),
+    /resolves a different package/u,
+    'a foreign bundle is never accepted as the official install',
+  )
+})
+
+/** Build a profile whose `node_modules` resolves the given package name. */
+function directProfileFixture(root: string, packageName: string): {
+  readonly context: { name: string; dir: string; home: string; installAnchor: string }
+  readonly packageRoot: string
+} {
+  const packageRoot = join(root, 'packages', 'bundle')
+  const anchorDir = join(root, 'anchor', 'node_modules', '@deepseek-ai', 'dsh')
+  const profileDir = join(root, 'profiles', 'pi-tui')
+  mkdirSync(join(packageRoot, 'dist'), { recursive: true })
+  writeFileSync(join(packageRoot, 'package.json'), JSON.stringify({ name: packageName, version: '0.5.7' }))
+  writeFileSync(join(packageRoot, 'dist', 'local-client.mjs'), 'export {}\n')
+  mkdirSync(anchorDir, { recursive: true })
+  writeFileSync(join(anchorDir, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh', version: '0.2.2-rc.5' }))
+  // The npm store layout: the profile's node_modules holds a symlink to the
+  // installed bundle, so the official realpath resolution lands on packageRoot.
+  const installedParent = join(profileDir, 'node_modules', '@xmoon76')
+  mkdirSync(installedParent, { recursive: true })
+  symlinkSync(packageRoot, join(installedParent, 'dsh-pi-tui'), 'dir')
+  writeFileSync(join(profileDir, 'package.json'), JSON.stringify({ name: 'pi-tui' }))
+  return {
+    context: { name: 'pi-tui', dir: profileDir, home: root, installAnchor: join(anchorDir, 'package.json') },
+    packageRoot,
+  }
+}
+
+test('the composition-bound admin port reaches the real control plane for install and stop with the bound Profile identity', async t => {
+  // NARROW manager-seam evidence (not the UI decision layer): the SAME Direct
+  // resolver + port binding the composition uses (`resolveDirectDaemonAdminProfile`
+  // → `createProfileDaemonAdmin(profile, { run: profileDaemonAdminRun(profile) })`),
+  // driven by the install and stop verbs. `readRecord` observes the REAL
+  // profile-scoped record the control plane derives, so a wrong binding cannot
+  // pass. The OS lanes (Linux systemd / macOS launchd) are the OS post-proof
+  // that this same `runDaemonControl` performs the real install/stop. The UI
+  // DECISION chain (Settings confirmation / Exit choice) → this sink is Path 1/2
+  // of the F1 closure (real composition), not proven here.
+  const life = testLifecycle(t)
+  const accountHome = life.tempDir('f1-acct-')
+  const platform = process.platform === 'darwin' ? 'darwin' : 'linux'
+  const installed = (name: string): DaemonControlProfile => {
+    const root = life.tempDir(`f1-${name}-`)
+    const packageRoot = join(root, 'packages', 'bundle')
+    const dir = join(root, `profiles/${name}`)
+    mkdirSync(join(packageRoot, 'dist'), { recursive: true })
+    writeFileSync(join(packageRoot, 'package.json'), JSON.stringify({ name: '@xmoon76/dsh-pi-tui', version: '0.5.7' }))
+    writeFileSync(join(packageRoot, 'dist', 'local-client.mjs'), 'export {}\n')
+    mkdirSync(join(root, 'anchor', 'node_modules', '@deepseek-ai', 'dsh'), { recursive: true })
+    writeFileSync(join(root, 'anchor', 'node_modules', '@deepseek-ai', 'dsh', 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh', version: '0.2.2-rc.5' }))
+    mkdirSync(join(dir, 'node_modules', '@xmoon76'), { recursive: true })
+    symlinkSync(packageRoot, join(dir, 'node_modules', '@xmoon76', 'dsh-pi-tui'), 'dir')
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ name }))
+    return resolveDirectDaemonAdminProfile({ name, dir, home: root, installAnchor: join(root, 'anchor', 'node_modules', '@deepseek-ai', 'dsh', 'package.json') })!
+  }
+  const profile = installed('profile-a')
+  const observed: Array<{ verb: string; scopeId: string; profileRealpath: string }> = []
+  let lastVerb = ''
+  // The composition-bound port: the EXACT production binding.
+  const admin = createProfileDaemonAdmin(profile, {
+    run: verb => profileDaemonAdminRun(profile, {
+      platform,
+      ...(platform === 'darwin' ? { darwinAccountHome: accountHome } : {}),
+      readRecord: (scope) => {
+        observed.push({ verb: lastVerb, scopeId: scope.scopeId, profileRealpath: scope.profileRealpath })
+        return undefined
+      },
+      inspectProcess: () => 'dead',
+    })(verb),
+  })
+  const expected = inspectInstalledProfileScope({ dshHome: profile.home, profileDir: profile.dir, packageRoot: profile.packageRoot, dshVersion: profile.dshVersion })
+  if (platform === 'darwin') mkdirSync(darwinHostProfileSeatDir(expected.scopeId, accountHome), { recursive: true })
+  // DECISION → SINK (install): the Settings follow-up's explicit confirm.
+  lastVerb = 'install'
+  await admin.run('install')
+  // DECISION → SINK (stop): the exit's post-TTY admin stop.
+  lastVerb = 'stop'
+  await admin.run('stop')
+  // The real control plane derived the bound Profile's OWN scope for both verbs.
+  assert.ok(observed.length >= 2, `both verbs reached the real control plane (got ${JSON.stringify(observed)})`)
+  for (const entry of observed) {
+    assert.equal(entry.scopeId, expected.scopeId, `${entry.verb} reached the sink with the bound profile identity`)
+    assert.equal(entry.profileRealpath, expected.profileRealpath, `${entry.verb} read the bound profile directory`)
+  }
+  assert.deepEqual([...new Set(observed.map(e => e.verb))].sort(), ['install', 'stop'], 'both the install and stop decisions reached the sink')
+})

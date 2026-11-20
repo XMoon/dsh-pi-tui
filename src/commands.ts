@@ -42,7 +42,7 @@ import { SessionScopeSupersededError, type LiveSessionScope, type SessionScope }
 import type { WorkspaceNextIntentOwner } from './app/session/workspace-next-intent.ts'
 import type { SessionSwitchOutcome } from './app/session/runtime.ts'
 import type { NavigationIntent } from './app/session/transition.ts'
-import type { ClientReloadProcessRefusal } from './app/application-runtime.ts'
+import type { ClientReloadProcessRefusal, ProfileDaemonAdminPort } from './app/application-runtime.ts'
 import type { ClientReloadRefusal } from './app/remote-process/client-reload-safety.ts'
 import type { DefaultIntentRecord } from './app/command/model-default-intent.ts'
 import type { SessionBrowserAnswerEligibility } from './app/command/session-browser-presentation.ts'
@@ -782,6 +782,24 @@ export interface TuiCommandRunner {  ctx: Context
    * guessed one from optional fields.
    */
   readonly backendKind: 'direct' | 'remote'
+  /**
+   * M6 UX PR2: the ONE process-local daemon administration capability, when
+   * this composition can prove the official local Profile identity. It is the
+   * ONLY route the Settings follow-up (`Install service`) may use to reach the
+   * existing profile-scoped control plane; absent everywhere else, so the
+   * follow-up then offers no install action instead of guessing an identity.
+   */
+  readonly profileDaemonAdmin?: ProfileDaemonAdminPort
+  /**
+   * M6 UX PR2: the ONE process-lifetime transient user-conversion intent. The
+   * Settings command submits it ONLY on a verified `daemon → direct` Profile
+   * transition made by THIS Client while it runs the daemon backend, and clears
+   * it on a verified reverse save. It is never persisted, never a configuration
+   * value and never a Host-running fact: it only grants the exit-intent owner
+   * permission to ASK (once, at exit) about stopping the old Profile Host.
+   * HMR/dispose clear it; it is never restored across sessions.
+   */
+  recordBackendExitTransition?(transition: 'daemon-to-direct' | undefined): void
   /**
    * C3 (owner ruling on RFL-A-017): the ONE session-scope invalidation
    * trigger — the SessionOwnershipCore's payload-less owner/generation

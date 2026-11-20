@@ -2001,6 +2001,16 @@ export interface SettingsWorkspaceOpenOptions {
    */
   readonly onCommit?: (request: SettingsWorkspaceCommitRequest) => Promise<SettingsWorkspaceCommitOutcome>
   /**
+   * M6 UX PR2: the ONE explicit Profile service install, offered only after a
+   * verified `direct → daemon` transition in the SAME lease. The command layer
+   * owns the install task and settles exactly once with the control plane's own
+   * result; the app fences the settlement against THIS screen lease. Absent
+   * when the composition cannot prove the local capability.
+   */
+  readonly onBackendServiceInstall?: (
+    settle: (result: { readonly ok: boolean; readonly detail?: string }) => void,
+  ) => void
+  /**
    * The lazy factory of the ONE embedded Plugin Manager page hosted INSIDE this
    * Settings workspace (`Settings → Plugins`). The app owner supplies it from
    * the shared surface Plugin Manager runtime; it is invoked only when the
@@ -28150,6 +28160,21 @@ export class TuiApp {
             if (this.disposed || this.workspaceLease !== record) return
             settle({ outcome: 'not-saved', reason: safeErrorMessage(error) })
           },
+        })
+      },
+      // M6 UX PR2: the ONE explicit service install, fenced against THIS
+      // screen lease exactly like onCommit. A late or superseded settlement
+      // never repaints a newer follow-up; the command layer keeps the task's
+      // single-run ownership.
+      onBackendServiceInstall: (settle) => {
+        const install = options.onBackendServiceInstall
+        if (install === undefined) {
+          settle({ ok: false, detail: 'the local daemon administration capability is unavailable' })
+          return
+        }
+        install((result) => {
+          if (this.disposed || this.workspaceLease !== record) return
+          settle(result)
         })
       },
     }, {

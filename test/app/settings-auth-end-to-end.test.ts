@@ -187,6 +187,7 @@ function open(width = 120, height = 40, authorizationOverride?: unknown): Harnes
       },
       backendStartupPreference: {
         read: () => ({ backend: 'direct' as const, revision: 1, userOverridden: false }),
+        readFresh: async () => ({ backend: 'direct' as const, revision: 1, userOverridden: false }),
         setBackend: async (_value: 'direct' | 'daemon', _revision: number) => {},
       },
       acpStartupPreference: {

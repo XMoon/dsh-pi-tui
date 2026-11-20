@@ -65,6 +65,19 @@ restart, and does not migrate a live Host into a new manager.
 The `daemon stop`, `restart` and `uninstall` operations can interrupt
 Host work. Check `daemon status` and the running sessions first.
 
+From the TUI, `/settings → General → Backend` saves the same Profile
+preference (applies on the next launch). After a verified save to `Daemon`,
+the same settings screen offers the optional service install as a separate
+explicit action — `Not now` performs zero management IO, and one `Install`
+confirmation runs exactly one profile-scoped install. The install never
+starts, enables or migrates a running Host.
+
+When a running Daemon Client saves `Direct` and then exits, it asks once
+about the old Host: `Leave daemon Host running and exit` (the default) detaches
+without touching the Host, and only the explicit `Stop daemon Host and exit`
+runs the authenticated `daemon stop` after the terminal is restored. The stop
+interrupts every connected Client, Session and Job of that Profile's Host.
+
 ## Optional local ACP listener
 
 The split Host can expose an optional Host-owned ACP v1 listener, which is

@@ -265,6 +265,7 @@ function setupProof(options: ProofOptions): SinkHarness {
       },
       backendStartupPreference: {
         read: () => ({ backend: 'direct' as const, revision: 1, userOverridden: false }),
+        readFresh: async () => undefined,
         setBackend: async (_value: 'direct' | 'daemon', _revision: number) => {},
       },
       acpStartupPreference: {

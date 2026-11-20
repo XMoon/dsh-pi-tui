@@ -952,6 +952,17 @@ export interface BackendStartupPreferenceConfig {
    *  cannot be read at all OR carries an invalid backend (fail-closed). Never a
    *  fabricated default. */
   read(): BackendStartupPreferenceState | undefined
+  /**
+   * A FRESH authoritative read for the exit-time dangerous whole-Host-stop
+   * gate. It must reflect the Host state AFTER the call, not merely the last
+   * observed snapshot: Direct reads the live in-process Host config authority;
+   * Remote forces a NEW official `settings.describe()` (never just a
+   * previously-started in-flight mirror refresh). The caller still checks
+   * `configReadiness() === 'ready'` afterwards for the generation/revision
+   * evidence — a stale/unready result is NOT a verified read and must never
+   * authorize the Host stop.
+   */
+  readFresh(): Promise<BackendStartupPreferenceState | undefined>
   /** Persist `backend` through the official settings write at the revision the
    *  user's decision was read at. A stale revision is a refusal (the official
    *  conflict), never a silent overwrite. */

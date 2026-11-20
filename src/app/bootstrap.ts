@@ -117,9 +117,11 @@ import type {
   RemoteApplicationOverride,
   RemoteTransportLifetime,
   RunnerStartupSettlement,
+  ProfileDaemonAdminPort,
 } from '../app/application-runtime.ts'
 import { createPromptPresenceClient, type PromptPresenceClient } from './remote/prompt-presence-client.ts'
 import { installTuiPromptTurnLatch } from './agent/turn-policy.ts'
+import { createProfileDaemonAdmin, profileDaemonAdminRun, resolveDirectDaemonAdminProfile } from '../app/remote-process/local-profile-daemon-admin.ts'
 import type { ModelSelectionDto } from '../runtime/catalog-port.ts'
 import { selectApplicationRuntime } from './bootstrap/runtime-selection.ts'
 import { createPresentationBridge } from './bootstrap/presentation-bridge.ts'
@@ -257,6 +259,12 @@ function canonicalPreferenceRefs(ctx: Context): TuiConfigRefs {
   }
   return refs
 }
+
+/**
+ * M6 UX PR2: the safe one-line refusal summary for a failed whole-Host stop.
+ * The control plane already sanitizes its stderr (no argv, cookie, private path
+ * or secret), so its first line is the stable reason the terminal may show.
+ */
 
 export function applyRunnerWithRuntime(
   ctx: Context,
@@ -465,6 +473,53 @@ export function applyRunnerWithRuntime(
     // physical-surface readiness is settled through `startupSettlement` once
     // `surface.start` returned; this Host handshake is not that proof.)
     startup.markSurfaceMounted?.()
+    // M6 UX PR2: the ONE process-local daemon administration capability.
+    // Split Client: the value the real Client entry already built from its
+    // officially verified Profile facts. Direct: bound here from the SAME
+    // official Host `profileContext` the CLI cold-control path consumes, with
+    // the SAME installed-package resolution. Construction proves the local
+    // capability but performs NO manager IO — the existing control plane is
+    // reached only when the user explicitly chooses `Install service` or the
+    // confirmed whole-Host exit stop.
+    let profileDaemonAdmin: ProfileDaemonAdminPort | undefined = override?.profileDaemonAdmin
+    if (profileDaemonAdmin === undefined && override === undefined) {
+      const profileContext = ctx.get('profileContext') as {
+        readonly name?: string
+        readonly dir?: string
+        readonly home?: string
+        readonly installAnchor?: string
+      } | undefined
+      if (profileContext?.name !== undefined && profileContext.dir !== undefined
+        && profileContext.home !== undefined && profileContext.installAnchor !== undefined) {
+        // A failure to PROVE the installed bundle is a capability refusal, not
+        // a startup failure: the TUI must still launch and simply offer no
+        // install/stop action (fail closed, never a guessed identity).
+        try {
+          const adminProfile = resolveDirectDaemonAdminProfile({
+            name: profileContext.name,
+            dir: profileContext.dir,
+            home: profileContext.home,
+            installAnchor: profileContext.installAnchor,
+          })
+          if (adminProfile !== undefined) {
+            profileDaemonAdmin = createProfileDaemonAdmin(adminProfile, {
+              run: profileDaemonAdminRun(adminProfile),
+            })
+          }
+        } catch (error) {
+          diag.info('daemon admin capability unavailable', { error: safeErrorMessage(error) })
+        }
+      }
+    }
+    /**
+     * M6 UX PR2: the ONE process-lifetime transient user-conversion intent.
+     * Only a verified `daemon → direct` Profile save made by THIS Client (while
+     * it runs the daemon backend) sets it; a verified reverse save clears it.
+     * It is never persisted and never a configuration value: it only grants the
+     * exit-intent owner permission to ASK, at exit, about stopping the old
+     * Profile Host. HMR/dispose clear it through the owner below.
+     */
+    let backendExitTransition: 'daemon-to-direct' | undefined
     const isRemote = override !== undefined
     if (!isRemote) {
       // Loader siblings mount concurrently. Await the complete application
@@ -2696,6 +2751,18 @@ export function applyRunnerWithRuntime(
         // The selected backend's live semantic completion authority. Direct
         // compgen stays on the in-process compatibility path; Remote calls Host.
         hostShellCompletion: backend.hostShellCompletion,
+        // M6 UX PR2: the process-local daemon administration capability, when
+        // this composition proved the official local Profile identity. The
+        // Settings follow-up is its ONLY consumer; it never reaches a Host
+        // service, the Remote wire or an extension declaration.
+        ...(profileDaemonAdmin === undefined ? {} : { profileDaemonAdmin }),
+        // M6 UX PR2: the ONE transient user-conversion intent. The Settings
+        // command submits the verified transition; the exit-intent owner reads
+        // it as a permission to ASK (never a command to stop).
+        recordBackendExitTransition: (transition) => {
+          if (lifecycleController.signal.aborted) return
+          backendExitTransition = transition
+        },
       },
       session: {
         workspaceNextIntent,
@@ -3334,6 +3401,12 @@ export function applyRunnerWithRuntime(
     // M6 UX PR1: whether the committed exit carries a PROVEN "current work
     // stopped" fact. The daemon detach hint prints the stopped line only then.
     let exitWorkStopped = false
+    /**
+     * M6 UX PR2: the outcome of the ONE explicit whole-Host stop (only for a
+     * confirmed verdict). It is set by the final exit root's admin step and
+     * read by the resume hint so the two texts never contradict each other.
+     */
+    let exitHostStop: { readonly confirmed: boolean; readonly detail?: string } | undefined
     // The ONE exit orchestration, shared by every exit entry (the exit keys,
     // /exit, /quit): latch once → dispose/restore the Client surface →
     // synchronously pre-cancel the exact current Direct owner → resume-hint
@@ -3347,6 +3420,14 @@ export function applyRunnerWithRuntime(
       diag,
       cleanup: surfaceLifecycle.disposeSurface,
       prepareRetirement: sessionRuntime.preCancelOwnedSession,
+      // M6 UX PR2 (F3): the ONE installed B1 Client transport, released only on
+      // the explicit whole-Host Stop path, after the TTY restore and before the
+      // control plane runs. Idempotent: the Client root teardown reuses it.
+      ...(override?.releaseTransport === undefined ? {} : { releaseTransport: override.releaseTransport }),
+      // M6 UX PR2 (N1): the destructive Host stop requires the PROVEN terminal
+      // restore, so the exit root asks the SAME teardown transaction the TTY
+      // release settled on — never a second teardown owner.
+      rendererReleased: surfaceLifecycle.surfaceReleased,
       hint: (message) => process.stdout.write(`\n${message}\n`),
       resumeHint: () => {
         // The Host's profileContext names the profile for EVERY launch form,
@@ -3363,13 +3444,34 @@ export function applyRunnerWithRuntime(
             profile,
             sessionId,
             workStopped: exitWorkStopped,
-            backendOverride: daemonResumeBackendOverride(process.env.SPLIT_PROCESS_CLIENT_LAUNCH_BACKEND),
+            // RFL-016C: the pin answers "how do I get back to the Host this
+            // Client left" and must NOT trust the last-known config mirror.
+            // Leave/ordinary detach pin; a confirmed stop never does; an
+            // unconfirmed stop is UNKNOWN and follows the Profile with a
+            // `daemon status` pointer instead.
+            backendOverride: daemonResumeBackendOverride(exitHostStop),
+
+            ...(exitHostStop === undefined ? {} : { hostStop: exitHostStop }),
           })
         }
         const resume = resumeCommand(profile, sessionId)
         return resume === undefined ? undefined : `${color.textDim('To resume this session:')} ${resume}`
       },
       exit,
+      // M6 UX PR2: the ONE explicit whole-Host stop, bound to the SAME
+      // process-local admin port the Settings follow-up uses. It runs ONLY for
+      // a confirmed verdict, after the terminal restore; the control plane's
+      // own pre/post proof is the ONLY success source, and the result feeds
+      // both the truthful hint and the exit code. A thrown call still records
+      // the truthful "not confirmed" state so the hint never claims a stop.
+      ...(profileDaemonAdmin === undefined
+        ? {}
+        : {
+            adminStop: async () => await profileDaemonAdmin!.run('stop'),
+            // RFL-017: the exit root publishes the ONE authoritative outcome
+            // (manager result AND every local refusal) to the same hint fact.
+            hostStopOutcome: (outcome) => { exitHostStop = outcome },
+          }),
     })
     /**
      * M6 UX PR1: the ONE exit-intent coordinator. It reads the live backend /
@@ -3408,10 +3510,39 @@ export function applyRunnerWithRuntime(
             },
           }
           : {}),
+        // M6 UX PR2: the whole-Host stop eligibility. The SYNC intent check decides
+        // whether to intercept at all (transient daemon→direct intent + daemon
+        // backend + the admin capability to actually run the stop). It is
+        // deliberately PERMISSIVE about readiness: a transiently stale mirror at
+        // exit must still reach the fresh read, which re-earns readiness.
+        hostStopIntentCurrent: () => selectedRuntime.kind === 'remote'
+          && backendExitTransition === 'daemon-to-direct'
+          && profileDaemonAdmin !== undefined,
+        // The close-time freshness re-check: it does NOT replace the fresh read
+        // (hostStopEligible does that before the verdict), but it catches the
+        // fresh result being invalidated DURING the close (a
+        // settings/document-updated or disconnect that leaves the config stale).
+        // An unready config must never COMMIT the Host stop.
+        hostStopReadinessCurrent: () => selectedRuntime.kind === 'remote'
+          && backend.config.configReadiness() === 'ready',
+        hostStopEligible: async () => {
+          if (selectedRuntime.kind !== 'remote') return false
+          if (backendExitTransition !== 'daemon-to-direct') return false
+          if (profileDaemonAdmin === undefined) return false
+          const config = backend.config
+          // The FRESH authoritative read: forces a new official settings read on
+          // Remote (or the live Host read on Direct), never just the snapshot.
+          const state = await config.backendStartupPreference.readFresh()
+          // The generation/revision evidence: only a current, ready config that
+          // still reads `direct` confirms the transition. A stale/unready read
+          // is NOT verified and must never authorize the Host stop.
+          if (config.configReadiness() !== 'ready') return false
+          return state?.backend === 'direct'
+        },
       }),
-      commit: ({ workStopped }) => {
+      commit: ({ workStopped, hostStopRequested }) => {
         exitWorkStopped = workStopped
-        requestExit()
+        requestExit(hostStopRequested === true ? { hostStopRequested: true } : undefined)
       },
       presenter: () => surface.exitChoice,
       stopCurrentWork: stopDaemonWorkForExit,

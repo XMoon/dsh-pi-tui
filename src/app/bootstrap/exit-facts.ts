@@ -53,6 +53,24 @@ export interface ExitIntentFactSources {
   remote?: ExitIntentRemoteFacts
   /** Direct only: the attached Agent's official running/idle status. */
   directAgentRunning?(): boolean | undefined
+  /**
+   * M6 UX PR2: the SYNC local part of the whole-Host-stop eligibility — the
+   * process-lifetime transient daemon→direct intent, the daemon backend and
+   * the admin capability. Absent means the composition cannot prove the
+   * conversion intent (the exit then never asks).
+   */
+  hostStopIntentCurrent?(): boolean
+  /**
+   * M6 UX PR2: the close-time freshness re-check (config readiness). Absent
+   * means the composition cannot prove it — the close-time commit then refuses
+   * a Host stop (conservative).
+   */
+  hostStopReadinessCurrent?(): boolean
+  /**
+   * M6 UX PR2: the FULL eligibility including a FRESH authoritative Profile
+   * Backend read. Absent means the composition cannot prove it (never asks).
+   */
+  hostStopEligible?(): Promise<boolean>
 }
 
 /**
@@ -137,5 +155,8 @@ export function createExitIntentFacts(sources: ExitIntentFactSources): ExitInten
       if (facts === undefined) return false
       return facts.isTransportTokenCurrent(scope.sessionId ?? SESSIONLESS_TRANSPORT_SENTINEL, transportToken)
     },
+    hostStopIntentCurrent: sources.hostStopIntentCurrent ?? (() => false),
+    hostStopReadinessCurrent: sources.hostStopReadinessCurrent ?? (() => false),
+    hostStopEligible: sources.hostStopEligible ?? (async () => false),
   }
 }

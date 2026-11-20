@@ -368,6 +368,41 @@ export interface RemoteApplicationOverride {
   /** Split-Client only: the mounted private session-view presence capability
    *  (M6 PR-C C3). Direct leaves it absent — the local fold needs no wire ACK. */
   readonly promptPresence?: RemotePromptPresenceCapability
+  /**
+   * Split-Client only (M6 UX PR2): the ONE process-local daemon administration
+   * capability the real Client entry built from its officially verified Profile
+   * facts. A value borrowed through the in-process composition — never a Host
+   * service, never a Remote wire object, never a public declaration. Absent on
+   * Direct and on every composition without the official local Profile identity.
+   */
+  readonly profileDaemonAdmin?: ProfileDaemonAdminPort
+  /**
+   * Split-Client only (M6 UX PR2 F3): release the ONE installed B1 Client
+   * transport. Used ONLY on the explicit whole-Host Stop exit path, after the
+   * TTY restore and before the control plane runs, so the Host's graceful
+   * shutdown is not held by this Client's still-open connection. The
+   * transport's own latched dispose is idempotent, so the Client root's later
+   * teardown reuses the SAME owner — never a second exit controller.
+   */
+  readonly releaseTransport?: () => Promise<void>
+}
+
+/**
+ * The structural daemon-administration port the composition passes (M6 UX PR2).
+ * Only the two EXPLICIT, user-authorized actions exist: install this Profile's
+ * optional service, and — only on a confirmed whole-Host exit — stop this
+ * Profile's Host. The result is the existing control plane's own result, so the
+ * caller's success claim always rests on the manager/ownership post-proof.
+ */
+export interface ProfileDaemonAdminPort {
+  /** The exact official Profile identity these actions address. */
+  readonly profile: string
+  /** Run ONE already-authorized management verb for {@link profile}. */
+  run(verb: 'install' | 'stop'): Promise<{
+    readonly code: number
+    readonly stdout: string
+    readonly stderr: string
+  }>
 }
 
 /**

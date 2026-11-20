@@ -15,6 +15,7 @@ import type { TuiMouseEvent } from '@xmoon76/pi-tui'
 import { ExitChoicePanel } from '../../src/tui/interaction/exit-choice.ts'
 import {
   exitChoiceAsking,
+  exitChoiceHostStop,
   exitChoiceStopping,
   exitChoiceUnconfirmed,
   type ExitChoiceModel,
@@ -261,4 +262,15 @@ test('a long status is budgeted by its real rows and never hides the actions', (
   assert.match(text, /Stay in the TUI/u)
   seat.component.handleInput('\r')
   assert.deepEqual(seat.selections, ['disconnect-without-stop'])
+})
+
+test('a short whole-Host stop seat keeps only the safe actions, never a hidden destructive Stop', () => {
+  // The full risk body cannot fit; the short body does not carry the whole
+  // blast radius, so the destructive Stop must not remain actable (G5).
+  const h = mountRecorder(select => exitChoiceHostStop(select, () => {}))
+  h.component.setMaxRows(4)
+  const lines = h.component.render(60).map(stripAnsi)
+  const actable = lines.join('\n')
+  assert.doesNotMatch(actable, /Stop daemon Host and exit/u, 'no destructive Stop is actable without the full risk copy')
+  assert.match(actable, /Leave daemon Host running and exit|Stay in the TUI/u, 'the safe path remains')
 })

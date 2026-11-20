@@ -102,6 +102,21 @@ the Client choice with zero business action. `Esc` and `Ctrl+C` inside the choic
 mean `Stay`; no Host work is cancelled by either. The exit controller is called
 only at the final commit.
 
+**Whole-Host stop confirm (M6 UX PR2).** A Daemon Client that itself made a
+verified `daemon → direct` Profile transition earns ONE transient exit
+permission; only when the PR1 exit decision has already committed to leaving
+AND the LIVE Profile facts still prove the transition does the SAME coordinator
+open the `daemon-host-stop` confirm. It is strictly NOT a Turn stop: its three
+options are `Leave daemon Host running and exit` (the safe default, the ordinary
+detach), `Stop daemon Host and exit` (the ONE explicit Profile-management
+authorization, handed to the final exit root which runs the authenticated
+`daemon stop` after the terminal restore), and `Stay in the TUI` (the whole exit
+is withdrawn; the permission stays for the next exit). The confirm names the
+full blast radius (ALL connected Clients, Sessions, Jobs and pending
+interactions) and never claims a stop before the control plane's own proof. A
+Host Question/Approval preempts it with zero management writes, exactly like the
+PR1 choice.
+
 **Keyboard rule.** The default effective exit key keeps its same-key 1.5-second
 confirmation and the Ctrl+C clear-draft / Ctrl+D forward-delete editor behavior.
 While the exact current Session is `working`, the DEFAULT physical Ctrl+C is a

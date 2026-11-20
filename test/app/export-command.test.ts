@@ -242,7 +242,7 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
         setAutoStart: async (_value: boolean, _revision: number) => {},
       },
       backendStartupPreference: {
-        read: () => undefined,
+        read: () => undefined, readFresh: async () => undefined,
         setBackend: async (_value: 'direct' | 'daemon', _revision: number) => {},
       },
       acpStartupPreference: {

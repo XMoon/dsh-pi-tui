@@ -955,7 +955,7 @@ function setup(options: HarnessOptions = {}): Harness {
         },
       },
       backendStartupPreference: {
-        read: () => backendStartupState,
+        read: () => backendStartupState, readFresh: async () => undefined,
         setBackend: async (value: PublicBackendValue, revision: number) => {
           backendStartupWrites.push(value)
           if (options.backendStartupWriteFailure !== undefined) throw new Error(options.backendStartupWriteFailure)
@@ -6252,7 +6252,7 @@ test('a narrow Account deeplink → rail-browse About reads nothing; Enter reads
       configReadiness: () => 'ready',
       visualTools: { read: () => undefined, setEnabled: async (_enabled: boolean, _revision: number) => {} },
       webStartupPreference: { read: () => undefined, setAutoStart: async (_value: boolean, _revision: number) => {} },
-      backendStartupPreference: { read: () => undefined, setBackend: async (_value: 'direct' | 'daemon', _revision: number) => {} },
+      backendStartupPreference: { read: () => undefined, readFresh: async () => undefined, setBackend: async (_value: 'direct' | 'daemon', _revision: number) => {} },
       acpStartupPreference: { read: () => undefined, setAutoStart: async (_value: boolean, _revision: number) => {} },
       footerCustomItems: { rawForPersistence: () => ({ kind: 'available', value: undefined }) },
       permissions: { presetNames: () => [], defaultPreset: () => undefined },
