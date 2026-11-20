@@ -2432,9 +2432,10 @@ async function runD4LaunchdScene({ installation, workRoot, report, start, projec
   assert(otherBuild !== plistText && otherBuild.includes('e'.repeat(64)), 'L02-NEG: could not build the other-build plist fixture')
   writeFileSync(plistPath, otherBuild, { mode: 0o600 })
   const otherBuildInstall = daemon(['install'])
-  assert(otherBuildInstall.status === 3 && /IDENTITY_OR_OWNERSHIP_REFUSED/u.test(otherBuildInstall.stderr),
-    `L02-NEG other build: expected exit 3, saw ${String(otherBuildInstall.status)}: ${otherBuildInstall.stderr.slice(-500)}`)
-  assert(readFileSync(plistPath, 'utf8') === otherBuild, 'L02-NEG: an other-build plist must never be overwritten')
+  assert(otherBuildInstall.status === 0,
+    `L02-NEG old build: a same-profile old-build plist must be reused, saw exit ${String(otherBuildInstall.status)}: ${otherBuildInstall.stderr.slice(-500)}`)
+  assert(readFileSync(plistPath, 'utf8') === otherBuild, 'L02-NEG: a same-profile old-build plist is preserved byte-for-byte')
+  assert(!otherBuildInstall.stdout.includes('error'), 'L02-NEG: the old-build reinstall must not claim a manager failure')
   const symlinkTarget = join(workRoot, 'd4l-symlink-target.plist')
   writeFileSync(symlinkTarget, plistText, { mode: 0o600 })
   unlinkSync(plistPath)
@@ -2500,6 +2501,36 @@ async function runD4LaunchdScene({ installation, workRoot, report, start, projec
   assert(existsSync(plistPath), 'L05 independent: stop must not remove the installed plist')
   assertNoLoadedJob(label, 'L05 independent stop')
   report.rows.push({ id: 'L05-INDEPENDENT', status: 'PASS', hostPid: initialHost.record.hostPid, plistKept: true })
+
+  // ── L02-CUSTOM: a legal user launchd configuration is really executed ────
+  // Independent of the default no-auto-start job: an extra environment key and
+  // a legal RunAtLoad=true must reach launchd and still produce the real
+  // foreground Host. The default plist bytes are restored afterwards so the
+  // L04-NEG2/L03 lifecycle keeps its original premise.
+  const customPlist = plistText
+    .replace('    <key>SPLIT_PROCESS_PROFILE</key>', '    <key>D4L_CUSTOM_FLAG</key>\n    <string>on</string>\n    <key>SPLIT_PROCESS_PROFILE</key>')
+    .replace('<key>RunAtLoad</key>\n  <false/>', '<key>RunAtLoad</key>\n  <true/>')
+    .replace('</dict>\n</plist>', '</dict>\n<!-- D4L user runtime comment -->\n</plist>')
+  assert(customPlist !== plistText, 'L02-CUSTOM: could not build the user-customized plist fixture')
+  writeFileSync(plistPath, customPlist, { mode: 0o600 })
+  recordPlistIdentity(label, plistPath)
+  const customStart = daemonOk(['start'], 'L02-CUSTOM start')
+  assert(customStart.fields.host === 'ready' && customStart.fields.manager === 'launchd',
+    `L02-CUSTOM: the user launchd configuration did not produce a ready launchd Host: ${JSON.stringify(customStart.fields)}`)
+  const customHost = requireLiveHost('L02-CUSTOM host')
+  const customPrint = launchctlJobPrint(label)
+  assert(customPrint.status === 0 && customPrint.stdout.includes('D4L_CUSTOM_FLAG => on'),
+    'L02-CUSTOM: the extra user environment key did not reach the real loaded job')
+  const customPid = parseLaunchctlJobPid(customPrint.stdout)
+  assert(customPid !== undefined && customPid === customHost.record.hostPid,
+    'L02-CUSTOM: the launchd job PID is not the authenticated Host')
+  const customStop = daemonOk(['stop'], 'L02-CUSTOM stop')
+  assert(/^host=stopped$/mu.test(customStop.result.stdout), 'L02-CUSTOM: the customized job did not stop through the verified path')
+  await waitFor(() => (alive(customHost.record.hostPid) ? undefined : true), 'L02-CUSTOM host exit', TIMEOUTS.process)
+  writeFileSync(plistPath, plistText, { mode: 0o600 })
+  recordPlistIdentity(label, plistPath)
+  report.rows.push({ id: 'L02-CUSTOM', status: 'PASS', extraEnv: 'D4L_CUSTOM_FLAG', runAtLoad: true,
+    manager: customStart.fields.manager, hostPid: customHost.record.hostPid })
 
   // ── L04 negative: loaded but NOT started is never Ready/launchd ─────────
   const ownBootstrap = runLaunchctlCommand(['bootstrap', `gui/${String(uid)}`, plistPath])

@@ -39,6 +39,7 @@ const CASE_NAMES = Object.freeze([
   'manual-client-reload.mjs',
   'reload-source-isolation.mjs',
   'managed-daemon-upgrade.mjs',
+  'launchd-managed-daemon-upgrade.mjs',
 ])
 
 function readCase(name) {
@@ -65,7 +66,7 @@ test('the upgrade smoke is a package script and parses as ESM', () => {
   assert.equal(result.status, 0, result.stderr)
 })
 
-test('the upgrade registry is the ONE frozen 4-case / 3-suite fact list in execution order', () => {
+test('the upgrade registry is the ONE frozen 5-case / 4-suite fact list in execution order', () => {
   const registry = listSelectableUpgradeCases()
   assert.ok(Object.isFrozen(registry), 'the registry must be frozen')
   assert.deepEqual(registry.map(entry => [entry.suite, entry.id]), [
@@ -73,24 +74,28 @@ test('the upgrade registry is the ONE frozen 4-case / 3-suite fact list in execu
     ['client-reload', 'client-reload.production-command'],
     ['client-reload', 'client-reload.target-source-isolation'],
     ['managed-daemon', 'managed-daemon.cross-build-upgrade-rollback'],
+    ['launchd-managed-daemon', 'launchd-managed-daemon.cross-build-upgrade'],
   ])
-  assert.equal(new Set(registry.map(entry => entry.id)).size, 4, 'case ids must be unique')
+  assert.equal(new Set(registry.map(entry => entry.id)).size, 5, 'case ids must be unique')
   for (const entry of registry) {
     assert.ok(Object.isFrozen(entry), `the registry entry ${entry.id} must be frozen`)
     assert.deepEqual(Object.keys(entry).sort(),
-      entry.defaultLane === false ? ['defaultLane', 'id', 'run', 'suite', 'title'] : ['id', 'run', 'suite', 'title'])
+      entry.defaultLane === false ? ['defaultLane', 'id', 'nativeScope', 'run', 'suite', 'title'] : ['id', 'run', 'suite', 'title'])
     assert.equal(typeof entry.run, 'function', `the registry entry ${entry.id} must name its real run`)
     assert.ok(entry.title.length > 0 && !/\bU0[1-9]\b/u.test(entry.title),
       'titles state a condition and observable behavior, never an internal Uxx code')
   }
-  // The default lane keeps its historical U01-U09 meaning: the native case is
-  // opt-in only and is never silently skipped or counted as covered.
+  assert.equal(listSelectableUpgradeCases().find(entry => entry.id === 'managed-daemon.cross-build-upgrade-rollback').nativeScope, 'REAL_SYSTEMD_USER_L6')
+  assert.equal(listSelectableUpgradeCases().find(entry => entry.id === 'launchd-managed-daemon.cross-build-upgrade').nativeScope, 'REAL_MACOS_GUI_L6')
+  // The default lane keeps its historical U01-U09 meaning: the native cases are
+  // opt-in only and are never silently skipped or counted as covered.
   assert.deepEqual(listDefaultUpgradeCases().map(entry => entry.id), [
     'upgrade.cross-build-compatibility',
     'client-reload.production-command',
     'client-reload.target-source-isolation',
   ])
   assert.equal(listSelectableUpgradeCases().find(entry => entry.id === 'managed-daemon.cross-build-upgrade-rollback').defaultLane, false)
+  assert.equal(listSelectableUpgradeCases().find(entry => entry.id === 'launchd-managed-daemon.cross-build-upgrade').defaultLane, false)
   assert.equal(selectedUpgradePassLine('upgrade.cross-build-compatibility'),
     'SPLIT_UPGRADE_SELECTED_PASS id=upgrade.cross-build-compatibility scope=SELECTABLE_ONLY')
 })
@@ -158,6 +163,7 @@ test('only an exclusively opt-in native selection may pair one package version',
   assert.equal(allowsSameArtifactVersion(pairing('--suite', 'client-reload')), false)
   assert.equal(allowsSameArtifactVersion(pairing('--case', 'managed-daemon.cross-build-upgrade-rollback')), true)
   assert.equal(allowsSameArtifactVersion(pairing('--suite', 'managed-daemon')), true)
+  assert.equal(allowsSameArtifactVersion(pairing('--case', 'launchd-managed-daemon.cross-build-upgrade')), true)
   assert.equal(allowsSameArtifactVersion(parseUpgradeArguments(['--list'])), false)
 })
 
@@ -179,9 +185,18 @@ test('a selected native verdict never becomes a pass unless it really qualified'
   assert.equal(wrongScope.failed, true)
   assert.ok(!wrongScope.lines.some(line => line.startsWith('SPLIT_UPGRADE_SELECTED_PASS')))
 
-  const qualified = projectSelectedUpgradeVerdicts([{ id: native, defaultLane: false, status: 'PASS', scope: 'REAL_SYSTEMD_USER_L6' }])
+  const qualified = projectSelectedUpgradeVerdicts([{ id: native, defaultLane: false, nativeScope: 'REAL_SYSTEMD_USER_L6', status: 'PASS', scope: 'REAL_SYSTEMD_USER_L6' }])
   assert.equal(qualified.failed, false)
   assert.deepEqual(qualified.lines, [selectedUpgradePassLine(native)])
+
+  // Another native case's scope never satisfies this case's registry scope.
+  const wrongNativeScope = projectSelectedUpgradeVerdicts([{ id: native, defaultLane: false, nativeScope: 'REAL_SYSTEMD_USER_L6', status: 'PASS', scope: 'REAL_MACOS_GUI_L6' }])
+  assert.equal(wrongNativeScope.failed, true)
+
+  const macNative = 'launchd-managed-daemon.cross-build-upgrade'
+  const macQualified = projectSelectedUpgradeVerdicts([{ id: macNative, defaultLane: false, nativeScope: 'REAL_MACOS_GUI_L6', status: 'PASS', scope: 'REAL_MACOS_GUI_L6' }])
+  assert.equal(macQualified.failed, false)
+  assert.deepEqual(macQualified.lines, [selectedUpgradePassLine(macNative)])
 
   // The historical default-lane cases keep their historical successful line.
   const historical = projectSelectedUpgradeVerdicts([{ id: 'upgrade.cross-build-compatibility', defaultLane: true, status: 'PASS' }])
@@ -386,6 +401,7 @@ test('the extracted upgrade modules resolve every free identifier', () => {
     'scripts/smoke/split-upgrade/manual-client-reload.mjs',
     'scripts/smoke/split-upgrade/reload-source-isolation.mjs',
     'scripts/smoke/split-upgrade/managed-daemon-upgrade.mjs',
+    'scripts/smoke/split-upgrade/launchd-managed-daemon-upgrade.mjs',
   ].map(file => join(ROOT, file))
   const program = ts.createProgram({
     rootNames: files,

@@ -1530,9 +1530,10 @@ export async function startManagedHostCandidate(
     const facts = collectLaunchdUnitFacts(options)
     const inspected = inspectOwnedLaunchdUnit(facts, launchdDeps)
     if (inspected.kind === 'none') return spawnHostCandidate(options)
-    if (inspected.unit.installBuild !== options.scope.buildId) {
-      throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the installed launchd plist belongs to another installed build')
-    }
+    // An owned plist of the SAME profile may carry an older install build: the
+    // build metadata is a recorded fact, never the plist owner (label + owner
+    // markers + canonical profile already proved above). The start below
+    // verifies the loaded source and the profile anchors itself.
     await startLaunchdService(facts, inspected.unit, launchdDeps)
     return () => undefined
   }

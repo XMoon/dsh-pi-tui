@@ -92,7 +92,8 @@ function fixture(t: TestContext): Fixture {
   writeFileSync(join(packageRoot, 'package.json'), `${JSON.stringify({ name: '@xmoon76/dsh-pi-tui', version: '0.5.7' })}\n`)
   writeFileSync(join(packageRoot, 'dist', 'index.mjs'), 'export const value = 1\n')
   writeFileSync(join(packageRoot, 'dist', 'local-host.mjs'), 'process.exit(0)\n')
-  // The official Profile layout: this lexical entry is what a fresh unit writes.
+  // The official Profile layout: this lexical entry is what a fresh unit/plist
+  // writes.
   const scopePackageDir = join(profileDir, 'node_modules', '@xmoon76')
   mkdirSync(scopePackageDir, { recursive: true, mode: 0o700 })
   symlinkSync(packageRoot, join(scopePackageDir, 'dsh-pi-tui'))
@@ -1684,6 +1685,212 @@ test('darwin restart stops the launchd job and starts a new instance through the
   assert.match(result.stdout, /^instance=44444444$/mu)
   assert.match(result.stdout, /^host=ready$/mu)
   assert.equal(launchctl.calls.filter(args => args[0] === 'bootout').length, 1)
+})
+
+test('darwin status reports an old-build plist as other-build without failing or stopping anything', { skip: DARWIN_SKIP }, async t => {
+  const fx = fixture(t)
+  const facts = launchdFactsOf(fx)
+  mkdirSync(join(fx.accountHome, 'Library', 'LaunchAgents'), { recursive: true, mode: 0o700 })
+  const oldBuild = 'e'.repeat(64)
+  writeFileSync(launchdPlistPathOf(fx), renderLaunchdPlist({ ...facts, buildId: oldBuild }), { mode: 0o600 })
+  // The running Host is the old build the old plist launched.
+  const record = darwinRecordOf(fx.scope, { buildId: oldBuild })
+  const launchctl = fakeLaunchd(fx, { loaded: true, state: 'running', pid: record.hostPid })
+  const before = readFileSync(launchdPlistPathOf(fx), 'utf8')
+  const result = await runDaemonControl({ verb: 'status' }, fx.profile, darwinDepsOf(fx, {
+    launchctl: launchctl.run,
+    readRecord: () => record,
+    inspectProcess: () => 'alive',
+    authenticate: async () => ({ record, cookie: 'c', identity: record }),
+  }))
+  assertCode(result, 0)
+  assert.match(result.stdout, /^host=ready$/mu)
+  assert.match(result.stdout, /^manager=launchd$/mu)
+  assert.match(result.stdout, /^compatibility=other-build$/mu)
+  assert.equal(readFileSync(launchdPlistPathOf(fx), 'utf8'), before, 'status never rewrites the old-build plist')
+  assert.equal(launchctl.calls.some(args => args[0] === 'bootstrap' || args[0] === 'kickstart' || args[0] === 'bootout'), false)
+})
+
+test('darwin install reuses an old-build owned plist byte-for-byte and never stops a Host', { skip: process.platform !== 'darwin' ? 'the Darwin admin seat requires macOS' : false }, async t => {
+  const fx = fixture(t)
+  const facts = launchdFactsOf(fx)
+  mkdirSync(join(fx.accountHome, 'Library', 'LaunchAgents'), { recursive: true, mode: 0o700 })
+  const oldBuild = 'e'.repeat(64)
+  writeFileSync(launchdPlistPathOf(fx), renderLaunchdPlist({ ...facts, buildId: oldBuild }), { mode: 0o600 })
+  const before = readFileSync(launchdPlistPathOf(fx), 'utf8')
+  const record = darwinRecordOf(fx.scope)
+  const launchctl = fakeLaunchd(fx, { loaded: false })
+  const result = await runDaemonControl({ verb: 'install' }, fx.profile, darwinDepsOf(fx, {
+    launchctl: launchctl.run,
+    readRecord: () => record,
+    inspectProcess: () => 'alive',
+    authenticate: async () => ({ record, cookie: 'c', identity: record }),
+  }))
+  assertCode(result, 0)
+  assert.equal(readFileSync(launchdPlistPathOf(fx), 'utf8'), before, 'an existing old-build owned plist is never rewritten')
+  assert.equal(launchctl.calls.some(args => args[0] === 'bootstrap' || args[0] === 'kickstart' || args[0] === 'bootout'), false,
+    'install never starts or stops the job')
+})
+
+test('darwin cold start migrates a loaded-but-idle old generated plist, then starts through launchd', { skip: process.platform !== 'darwin' ? 'the Darwin admin seat requires macOS' : false }, async t => {
+  const fx = fixture(t)
+  const facts = launchdFactsOf(fx)
+  mkdirSync(join(fx.accountHome, 'Library', 'LaunchAgents'), { recursive: true, mode: 0o700 })
+  const oldBuild = 'e'.repeat(64)
+  const oldEntry = join(fx.profile.packageRoot, 'dist', 'local-host.mjs')
+  const oldPlist = renderLaunchdPlist({ ...facts, hostEntryPath: oldEntry, buildId: oldBuild })
+  writeFileSync(launchdPlistPathOf(fx), oldPlist, { mode: 0o600 })
+  const launchctl = fakeLaunchd(fx, { loaded: true, state: 'not running', pid: undefined })
+  let current: LocalInstanceRecord | undefined
+  let ensured = 0
+  const result = await runDaemonControl({ verb: 'start' }, fx.profile, darwinDepsOf(fx, {
+    launchctl: launchctl.run,
+    readRecord: () => current,
+    inspectProcess: () => (current === undefined ? 'dead' : 'alive'),
+    authenticate: async record => ({ record, cookie: 'c', identity: record }),
+    ensureHost: async () => {
+      ensured += 1
+      current = darwinRecordOf(fx.scope)
+      return { record: current, cookie: 'c', identity: current }
+    },
+    sleep: async () => {},
+    now: () => 0,
+  }))
+  assertCode(result, 0)
+  assert.equal(ensured, 1, 'the cold start proceeds to the normal managed start after the migration')
+  const migrated = readFileSync(launchdPlistPathOf(fx), 'utf8')
+  assert.ok(migrated.includes(join(fx.profile.dir, 'node_modules', '@xmoon76', 'dsh-pi-tui', 'dist', 'local-host.mjs')),
+    'the migrated plist must carry the stable named entry')
+  assert.match(migrated, new RegExp(`<string>${fx.scope.buildId}</string>`, 'u'))
+  assert.equal(launchctl.calls.filter(args => args[0] === 'bootout').length, 1, 'the cached idle job is booted out before the patch')
+  assert.match(result.stdout, /^host=ready$/mu)
+})
+
+test('darwin restart applies the bounded migration only after the old kernel identity is proven gone', { skip: process.platform !== 'darwin' ? 'the Darwin admin seat requires macOS' : false }, async t => {
+  const fx = fixture(t)
+  const facts = launchdFactsOf(fx)
+  mkdirSync(join(fx.accountHome, 'Library', 'LaunchAgents'), { recursive: true, mode: 0o700 })
+  const oldBuild = 'e'.repeat(64)
+  const oldEntry = join(fx.profile.packageRoot, 'dist', 'local-host.mjs')
+  writeFileSync(launchdPlistPathOf(fx), renderLaunchdPlist({ ...facts, hostEntryPath: oldEntry, buildId: oldBuild }), { mode: 0o600 })
+  const oldRecord = darwinRecordOf(fx.scope)
+  const newRecord = darwinRecordOf(fx.scope, { instanceId: '44444444-4444-4444-8444-444444444444', hostPid: 6464 })
+  let alive = true
+  let current: LocalInstanceRecord | undefined = oldRecord
+  const launchctl = fakeLaunchd(fx, { loaded: true, state: 'running', pid: oldRecord.hostPid, onBootout: () => { alive = false } })
+  const result = await runDaemonControl({ verb: 'restart' }, fx.profile, darwinDepsOf(fx, {
+    launchctl: launchctl.run,
+    readRecord: () => current,
+    inspectProcess: record => (record.instanceId === oldRecord.instanceId ? (alive ? 'alive' : 'dead') : 'alive'),
+    authenticate: async record => ({ record, cookie: 'c', identity: record }),
+    readKernel: pid => {
+      if (pid === oldRecord.hostPid) return alive ? { kind: 'alive', identity: oldRecord.hostKernelIdentity } : { kind: 'gone' }
+      return { kind: 'alive', identity: newRecord.hostKernelIdentity }
+    },
+    ensureHost: async () => {
+      current = newRecord
+      return { record: newRecord, cookie: 'c', identity: newRecord }
+    },
+    sleep: async () => {},
+    now: () => 0,
+  }))
+  assertCode(result, 0)
+  assert.match(result.stdout, /^instance=44444444$/mu)
+  const migrated = readFileSync(launchdPlistPathOf(fx), 'utf8')
+  assert.match(migrated, /node_modules\/@xmoon76\/dsh-pi-tui\/dist\/local-host\.mjs/u)
+  assert.match(migrated, new RegExp(`<string>${fx.scope.buildId}</string>`, 'u'))
+})
+
+test('darwin restart refuses before stop when the old job identity is unmatched, leaving the plist untouched', { skip: process.platform !== 'darwin' ? 'the Darwin admin seat requires macOS' : false }, async t => {
+  const fx = fixture(t)
+  const facts = launchdFactsOf(fx)
+  mkdirSync(join(fx.accountHome, 'Library', 'LaunchAgents'), { recursive: true, mode: 0o700 })
+  const oldEntry = join(fx.profile.packageRoot, 'dist', 'local-host.mjs')
+  writeFileSync(launchdPlistPathOf(fx), renderLaunchdPlist({ ...facts, hostEntryPath: oldEntry, buildId: 'e'.repeat(64) }), { mode: 0o600 })
+  const before = readFileSync(launchdPlistPathOf(fx), 'utf8')
+  const record = darwinRecordOf(fx.scope)
+  const launchctl = fakeLaunchd(fx, { loaded: true, state: 'running', pid: 5151 })
+  const result = await runDaemonControl({ verb: 'restart' }, fx.profile, darwinDepsOf(fx, {
+    launchctl: launchctl.run,
+    readRecord: () => record,
+    inspectProcess: () => 'alive',
+    authenticate: async () => ({ record, cookie: 'c', identity: record }),
+  }))
+  assertCode(result, 3, /IDENTITY_OR_OWNERSHIP_REFUSED/u)
+  assert.equal(readFileSync(launchdPlistPathOf(fx), 'utf8'), before, 'a refused restart never patches the plist')
+  assert.equal(launchctl.calls.some(args => args[0] === 'bootout' || args[0] === 'bootstrap' || args[0] === 'kickstart'), false)
+})
+
+test('darwin uninstall removes an old-build owned plist and keeps logs, sessions and credentials', { skip: process.platform !== 'darwin' ? 'the Darwin admin seat requires macOS' : false }, async t => {
+  const fx = fixture(t)
+  const facts = launchdFactsOf(fx)
+  mkdirSync(join(fx.accountHome, 'Library', 'LaunchAgents'), { recursive: true, mode: 0o700 })
+  writeFileSync(launchdPlistPathOf(fx), renderLaunchdPlist({ ...facts, buildId: 'e'.repeat(64) }), { mode: 0o600 })
+  mkdirSync(facts.scopeDir, { recursive: true, mode: 0o700 })
+  const logs = launchdLogPaths(facts.scopeDir)
+  writeFileSync(logs.stdout, 'retained\n', { mode: 0o600 })
+  writeFileSync(logs.stderr, 'retained err\n', { mode: 0o600 })
+  const launchctl = fakeLaunchd(fx, { loaded: false })
+  const result = await runDaemonControl({ verb: 'uninstall' }, fx.profile, darwinDepsOf(fx, { launchctl: launchctl.run }))
+  assertCode(result, 0)
+  assert.equal(existsSync(launchdPlistPathOf(fx)), false, 'an old-build owned plist is explicitly uninstallable')
+  assert.equal(readFileSync(logs.stdout, 'utf8'), 'retained\n')
+  assert.equal(readFileSync(logs.stderr, 'utf8'), 'retained err\n')
+})
+
+test('darwin logs reads the verified loaded job declared custom sinks, not the default files', { skip: DARWIN_SKIP }, async t => {
+  const fx = fixture(t)
+  writeOwnedLaunchd(fx)
+  const record = darwinRecordOf(fx.scope)
+  const launchctl = fakeLaunchd(fx, {
+    loaded: true,
+    state: 'running',
+    pid: record.hostPid,
+    stdoutPath: '/Users/someone/elsewhere/custom.out.log',
+    stderrPath: '/Users/someone/elsewhere/custom.err.log',
+  })
+  const reads: string[] = []
+  const result = await runDaemonControl({ verb: 'logs', lines: 20 }, fx.profile, darwinDepsOf(fx, {
+    launchctl: launchctl.run,
+    readRecord: () => record,
+    inspectProcess: () => 'alive',
+    authenticate: async () => ({ record, cookie: 'c', identity: record }),
+    hostLogTail: async (path, lines) => {
+      reads.push(path)
+      assert.equal(lines, 20)
+      if (path === '/Users/someone/elsewhere/custom.out.log') return 'custom stdout\n'
+      if (path === '/Users/someone/elsewhere/custom.err.log') return 'custom stderr\n'
+      assert.fail(`logs must read only the loaded job's declared sinks, saw ${path}`)
+    },
+  }))
+  assertCode(result, 0)
+  assert.match(result.stdout, /custom stdout/u)
+  assert.match(result.stdout, /custom stderr/u)
+  assert.deepEqual(reads, ['/Users/someone/elsewhere/custom.out.log', '/Users/someone/elsewhere/custom.err.log'])
+})
+
+test('darwin logs fails closed when the verified loaded job declares no log sink', { skip: DARWIN_SKIP }, async t => {
+  const fx = fixture(t)
+  writeOwnedLaunchd(fx)
+  const record = darwinRecordOf(fx.scope)
+  const launchctl = fakeLaunchd(fx, { loaded: true, state: 'running', pid: record.hostPid })
+  // Remove the sink lines from the printed answer while keeping the job valid.
+  const base = launchctl.run
+  const run: LaunchctlRunner = async args => {
+    const result = await base(args)
+    if (args[0] === 'print' && args[1]?.endsWith(buildLaunchdLabel(fx.scope.scopeId)) === true && result.kind === 'exited') {
+      return { ...result, stdout: result.stdout.replace(/\tstdout path = .*\n/u, '').replace(/\tstderr path = .*\n/u, '') }
+    }
+    return result
+  }
+  const result = await runDaemonControl({ verb: 'logs', lines: 20 }, fx.profile, darwinDepsOf(fx, {
+    launchctl: run,
+    readRecord: () => record,
+    inspectProcess: () => 'alive',
+    authenticate: async () => ({ record, cookie: 'c', identity: record }),
+    hostLogTail: async () => { throw new Error('no sink must never fall back to a guessed file') },
+  }))
+  assertCode(result, 4, /LOG_SOURCE_UNAVAILABLE/u)
 })
 
 test('darwin uninstall removes only the verified job and plist, keeps the logs and never signals', { skip: process.platform !== 'darwin' ? 'the Darwin admin seat requires macOS' : false }, async t => {

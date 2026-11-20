@@ -71,10 +71,12 @@ import {
   installLaunchdUnit,
   launchdLogPaths,
   launchdServiceMatches,
+  prepareOwnedLaunchdForCurrentInstall,
   startLaunchdService,
   stopLaunchdService,
   uninstallLaunchdUnit,
   type LaunchdAdapterDeps,
+  type LaunchdLoadedService,
   type LaunchdServiceObservation,
   type LaunchdUnitFacts,
   type LaunchctlRunner,
@@ -416,6 +418,38 @@ function launchdUnitState(state: string): DaemonUnitState {
     case 'not running': return 'not-running'
     case 'spawn scheduled': return 'spawn-scheduled'
     default: return 'unknown'
+  }
+}
+
+/** The read-only migration preflight for an explicit Darwin CLI start/restart. */
+function inspectDarwinLaunchdMigration(snapshot: Snapshot, deps: DaemonControlDeps):
+  | { readonly kind: 'no-op'; readonly reason: 'user-managed' | 'current' }
+  | { readonly kind: 'migrate'; readonly namedEntry: string } {
+  const { launchdUnit, launchdFacts } = snapshot
+  if (launchdUnit === undefined || launchdFacts === undefined) {
+    throw new DaemonControlError('TRANSITION_UNCERTAIN', 'the launchd plist facts are unavailable; refusing an unverified migration')
+  }
+  try {
+    return prepareOwnedLaunchdForCurrentInstall(launchdFacts, launchdUnit, launchdDepsOf(deps), 'inspect').plan
+  } catch (error) {
+    throw toDaemonControlError(error)
+  }
+}
+
+/**
+ * Apply the ONE bounded generated-field migration after the old Host kernel
+ * identity and the loaded job have been proven gone. Only an explicit CLI
+ * start/restart reaches here; an ordinary TUI cold start never does.
+ */
+function applyDarwinLaunchdMigration(snapshot: Snapshot, deps: DaemonControlDeps): OwnedLaunchdUnit | undefined {
+  const { launchdUnit, launchdFacts } = snapshot
+  if (launchdUnit === undefined || launchdFacts === undefined) {
+    throw new DaemonControlError('TRANSITION_UNCERTAIN', 'the launchd plist facts are unavailable; refusing an unverified migration')
+  }
+  try {
+    return prepareOwnedLaunchdForCurrentInstall(launchdFacts, launchdUnit, launchdDepsOf(deps), 'apply').unit
+  } catch (error) {
+    throw afterCommittedAction(toDaemonControlError(error), 'launchd plist migration')
   }
 }
 
@@ -1216,6 +1250,30 @@ async function runStart(profile: DaemonControlProfile, deps: DaemonControlDeps):
     }
     if (pre.failure !== undefined) throw pre.failure
     if (pre.status.host !== 'stopped' && pre.status.host !== 'starting') throw refuseHostState(pre.status)
+    // Darwin explicit cold start: the ONLY place an old PRODUCT-GENERATED
+    // plist fragment may be migrated outside a restart. The preflight is
+    // read-only; a loaded running job with no authenticated Host is never
+    // booted out, and a genuinely idle loaded definition is removed with the
+    // proven `bootout` path BEFORE the file is patched. An ordinary TUI cold
+    // start never reaches this path.
+    if (platformOf(deps) === 'darwin' && pre.launchdUnit !== undefined) {
+      const plan = inspectDarwinLaunchdMigration(pre, deps)
+      if (plan.kind === 'migrate') {
+        if (pre.launchdService?.kind === 'unknown') {
+          throw new DaemonControlError('TRANSITION_UNCERTAIN', 'the launchd job state is not recognizable; refusing to migrate the profile plist')
+        }
+        if (pre.launchdService?.kind === 'loaded'
+          && (pre.launchdService.service.pid !== undefined || pre.launchdService.service.state !== 'not running')) {
+          throw new DaemonControlError('TRANSITION_UNCERTAIN', 'the launchd job is not idle; refusing to migrate the profile plist during a cold start')
+        }
+        assertNotAborted(deps.signal)
+        if (pre.launchdService?.kind === 'loaded') {
+          // Prove the cached definition is gone before patching the file.
+          await stopLaunchdService(pre.launchdFacts as LaunchdUnitFacts, pre.launchdUnit, launchdDepsOf(deps))
+        }
+        applyDarwinLaunchdMigration(pre, deps)
+      }
+    }
     // The long read-only snapshot above may have taken seconds. Shutdown that
     // arrived during it must be observed BEFORE creating the run directory or
     // committing any Host start.
@@ -1322,21 +1380,10 @@ async function runRestart(profile: DaemonControlProfile, deps: DaemonControlDeps
     if (pre.status.host !== 'ready' && pre.status.host !== 'stopped'
       && !serviceFailureRecovery && !verifiedUnitRestart && !verifiedLaunchdRestart) throw refuseHostState(pre.status)
     const oldInstance = pre.record?.instanceId
-    // macOS keeps its own cross-build refusal until the launchd sibling has its
-    // own migration contract (PR2). Linux adopts the CURRENT install through the
-    // bounded generated-field migration below; a unit from another build is a
-    // diagnostic fact, never an ownership verdict.
-    if (platformOf(deps) === 'darwin' && pre.launchdUnit !== undefined
-      && pre.launchdUnit.installBuild !== pre.scope.buildId) {
-      throw new DaemonControlError(
-        'IDENTITY_OR_OWNERSHIP_REFUSED',
-        'the profile LaunchAgent belongs to another installed build; removing or replacing it is deferred to the upgrade flow',
-      )
-    }
     const managerDeps = managerDepsOf(deps)
-    // Read-only preflight BEFORE any stop: a recognized generated entry that
-    // cannot be safely rewritten fails here, with the old Host still running.
-    // A user-custom command is a no-op and never blocks the restart.
+    // Linux: read-only preflight BEFORE any stop: a recognized generated entry
+    // that cannot be safely rewritten fails here, with the old Host still
+    // running. A user-custom command is a no-op and never blocks the restart.
     if (platformOf(deps) === 'linux' && pre.unit !== undefined) {
       try {
         await prepareOwnedProfileUnitForCurrentInstall({
@@ -1349,8 +1396,21 @@ async function runRestart(profile: DaemonControlProfile, deps: DaemonControlDeps
         throw toDaemonControlError(error)
       }
     }
+    // macOS: an explicit restart may migrate a PROVEN old generated plist
+    // fragment after the old Host and loaded job are proven gone. A loaded
+    // idle job is reloaded from the current on-disk user definition before
+    // the new start (see startLaunchdService).
+    const launchdMigration = platformOf(deps) === 'darwin' && pre.launchdUnit !== undefined
+      ? inspectDarwinLaunchdMigration(pre, deps)
+      : undefined
     assertNotAborted(deps.signal)
     await stopFromSnapshot(pre, deps)
+    // The old Host kernel identity and the loaded job are proven gone here;
+    // only now may the bounded generated-field migration touch the plist.
+    if (launchdMigration?.kind === 'migrate') {
+      assertNotAborted(deps.signal)
+      applyDarwinLaunchdMigration(pre, deps)
+    }
     try {
       assertNotAborted(deps.signal)
       const scope = scopeFromInstalledProfile({
@@ -1393,10 +1453,17 @@ async function runRestart(profile: DaemonControlProfile, deps: DaemonControlDeps
       if (oldInstance !== undefined && post.record?.instanceId === oldInstance) {
         throw new DaemonControlError('TRANSITION_UNCERTAIN', 'the restart did not produce a new Host instance')
       }
+      // A user-authored LaunchAgent command may deliberately run another
+      // compatible build. The restart itself succeeded, but the output must
+      // never claim the installed code was adopted: report the truthful
+      // diagnostic on stderr.
+      const buildNotice = platformOf(deps) === 'darwin' && post.status.compatibility === 'other-build'
+        ? 'dsh-pi-tui daemon: warning: Host restarted, but the running build differs from the installed profile; inspect the custom LaunchAgent ProgramArguments\n'
+        : ''
       return {
         code: 0,
         stdout: `previous=${oldInstance === undefined ? 'none' : oldInstance.slice(0, 8)}\n${formatDaemonStatus(post.status)}`,
-        stderr: RUNNING_WORK_NOTICE,
+        stderr: `${RUNNING_WORK_NOTICE}${buildNotice}`,
       }
     } catch (error) {
       throw afterCommittedAction(toDaemonControlError(error), 'Host restart')
@@ -1543,9 +1610,6 @@ async function runDarwinInstall(profile: DaemonControlProfile, deps: DaemonContr
       if (post.launchdUnit === undefined) {
         throw new DaemonControlError('TRANSITION_UNCERTAIN', 'the installed launchd plist could not be confirmed')
       }
-      if (post.launchdUnit.installBuild !== post.scope.buildId) {
-        throw new DaemonControlError('IDENTITY_OR_OWNERSHIP_REFUSED', 'the installed launchd plist belongs to another installed build')
-      }
       if (pre.processAlive && pre.record !== undefined
         && (!post.processAlive || post.record === undefined || post.record.instanceId !== pre.record.instanceId)) {
         throw new DaemonControlError('TRANSITION_UNCERTAIN', 'the running Host instance changed during the plist install')
@@ -1572,11 +1636,10 @@ async function runDarwinUninstall(profile: DaemonControlProfile, deps: DaemonCon
     if (pre.launchdFacts === undefined) {
       throw new DaemonControlError('TRANSITION_UNCERTAIN', 'the launchd plist facts are unavailable; refusing to uninstall')
     }
-    // Cross-build replacement is the upgrade flow's job. Never rewrite or
-    // remove a plist this installed build does not own.
-    if (pre.launchdUnit.installBuild !== pre.scope.buildId) {
-      throw new DaemonControlError('IDENTITY_OR_OWNERSHIP_REFUSED', 'the profile LaunchAgent belongs to another installed build; use the upgrade flow')
-    }
+    // A same-profile plist from an older installed build is still this
+    // Profile's own LaunchAgent: explicit uninstall must be able to remove it
+    // without installing the old package again. Ownership is already proven by
+    // the label/scope/profile identity above.
     const service = pre.launchdService
     if (service?.kind === 'unknown') {
       throw new DaemonControlError('TRANSITION_UNCERTAIN', 'the launchd job state is not recognizable; refusing to uninstall')
@@ -1770,7 +1833,7 @@ async function runDarwinLogs(
   const { launchdUnit, launchdFacts, launchdService, record, processAlive, authenticated } = snapshot
   const liveHost = processAlive && record !== undefined
   const loadedService = launchdService?.kind === 'loaded' ? launchdService.service : undefined
-  let launchdSource: LaunchdUnitFacts | undefined
+  let launchdSource: LaunchdLoadedService | undefined
   if (liveHost) {
     if (authenticated === undefined) {
       throw new DaemonControlError('LOG_SOURCE_UNAVAILABLE', 'the authenticated Host is unavailable; refusing to guess a log source')
@@ -1785,7 +1848,7 @@ async function runDarwinLogs(
       if (loadedService.pid !== record?.hostPid) {
         throw new DaemonControlError('LOG_SOURCE_UNAVAILABLE', 'the launchd job PID is not the authenticated Host; refusing to guess a log source')
       }
-      launchdSource = launchdFacts
+      launchdSource = loadedService
     } else if (snapshot.status.manager === 'process') {
       // The authenticated Host is independent. A loaded job that is actually
       // running/scheduled beside it is a conflicting supervisor; a merely
@@ -1819,7 +1882,7 @@ async function runDarwinLogs(
       if (!launchdServiceMatches(launchdFacts, launchdUnit, loadedService)) {
         throw new DaemonControlError('LOG_SOURCE_UNAVAILABLE', 'the launchd job does not match the profile plist; refusing to guess a log source')
       }
-      launchdSource = launchdFacts
+      launchdSource = loadedService
     } else if (launchdService?.kind === 'not-loaded') {
       // A stopped job leaves two possible historical sources (the retained
       // launchd streams and an earlier independent host.log) and no live
@@ -1829,10 +1892,14 @@ async function runDarwinLogs(
     }
   }
   if (launchdSource !== undefined) {
-    const logs = launchdLogPaths(launchdSource.scopeDir)
+    if (launchdSource.stdoutPath === undefined && launchdSource.stderrPath === undefined) {
+      throw new DaemonControlError('LOG_SOURCE_UNAVAILABLE', 'the verified launchd job declares no log sink for this profile')
+    }
+    // The verified loaded job's OWN declared sinks are the only log source:
+    // never substitute the product's default paths for a user configuration.
     const tail = deps.hostLogTail ?? tailHostLog
-    const stdout = await tail(logs.stdout, lines)
-    const stderr = await tail(logs.stderr, lines)
+    const stdout = launchdSource.stdoutPath === undefined ? undefined : await tail(launchdSource.stdoutPath, lines)
+    const stderr = launchdSource.stderrPath === undefined ? undefined : await tail(launchdSource.stderrPath, lines)
     const sections: string[] = []
     if (stdout !== undefined && stdout.trim() !== '') {
       sections.push(`[dsh-pi-tui daemon: launchd stdout]\n${sanitizeLogText(stdout).replace(/\n*$/u, '\n')}`)

@@ -34,6 +34,7 @@ import {
   openSync,
   readFileSync,
   realpathSync,
+  renameSync,
   statSync,
   unlinkSync,
   writeSync,
@@ -41,7 +42,7 @@ import {
 import { randomUUID } from 'node:crypto'
 import type { Stats } from 'node:fs'
 import { userInfo } from 'node:os'
-import { join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { LocalScopeError } from './local-scope.ts'
 
 /** The fixed manager label prefix; the scope id suffix names one profile. */
@@ -103,16 +104,25 @@ export type LaunchdUnitInspection =
   | { readonly kind: 'none' }
   | { readonly kind: 'owned'; readonly unit: OwnedLaunchdUnit }
 
-/** One parsed `launchctl print gui/<uid>/<label>` observation. */
+/** One parsed `launchctl print gui/<uid>/<label>` observation.
+ *
+ * The presentation/log fields (`workingDirectory`, `stdoutPath`, `stderrPath`)
+ * are user-owned runtime directives and may legitimately be absent from a
+ * job's printed facts; they are `undefined` then, which is NOT a foreign-source
+ * signal. Identity-relevant facts (type, absolute path, state, program,
+ * arguments, environment, pid) stay mandatory. */
 export interface LaunchdLoadedService {
   readonly type: string
   readonly path: string
   readonly state: string
   readonly program: string
   readonly arguments: readonly string[]
-  readonly workingDirectory: string
-  readonly stdoutPath: string
-  readonly stderrPath: string
+  /** User-owned; absent when launchd reports none. */
+  readonly workingDirectory?: string
+  /** User-owned; absent when launchd reports none. */
+  readonly stdoutPath?: string
+  /** User-owned; absent when launchd reports none. */
+  readonly stderrPath?: string
   readonly environment: Readonly<Record<string, string>>
   /** The live job PID; absent when the job has no running process. */
   readonly pid?: number
@@ -290,72 +300,81 @@ function requirePlistString(root: Record<string, unknown>, key: string): string 
   return value
 }
 
-/** Top-level plist keys that can start the job or override its fixed execution identity. */
-const UNSAFE_FIXED_KEYS = [
-  'WatchPaths',
-  'QueueDirectories',
-  'EnableGlobbing',
-  'StartInterval',
-  'StartCalendarInterval',
-  'StartOnMount',
-  'Sockets',
-  'MachServices',
-  'LaunchEvents',
-  'Program',
-  'BundleProgram',
-  'RootDirectory',
-  'UserName',
-  'GroupName',
-] as const
+/**
+ * Resolve the STABLE named entry below the official profile directory:
+ * `<profileRealpath>/node_modules/@xmoon76/dsh-pi-tui/dist/local-host.mjs`.
+ *
+ * The named path survives an official profile package upgrade (pnpm keeps the
+ * lexical path while the physical payload changes), unlike a versioned store
+ * path. The caller uses it ONLY when creating a FRESH plist or migrating a
+ * proven old generated entry; every other command keeps validating the real
+ * installed entry through `collectUnitFacts()`. The path must resolve to the
+ * very same physical file the official facts named, and the nearest manifest
+ * above the named entry must be this installed product package — otherwise the
+ * profile layout does not provide a stable entry and the operation fails closed.
+ */
+export function resolveNamedLaunchdEntry(facts: LaunchdUnitFacts): string {
+  const namedEntry = join(facts.profileRealpath, 'node_modules', '@xmoon76', 'dsh-pi-tui', 'dist', 'local-host.mjs')
+  let namedReal: string
+  let entryReal: string
+  try {
+    namedReal = realpathSync(namedEntry)
+    entryReal = realpathSync(facts.hostEntryPath)
+  } catch (error) {
+    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'launchd: the profile stable named entry is not readable', error)
+  }
+  if (namedReal !== entryReal) {
+    throw new LocalScopeError(
+      'HOST_MANAGER_UNIT_CONFLICT',
+      'launchd: the profile stable named entry does not resolve to the installed Host entry',
+    )
+  }
+  let manifest: unknown
+  try {
+    manifest = JSON.parse(readFileSync(join(dirname(dirname(namedReal)), 'package.json'), 'utf8'))
+  } catch (error) {
+    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'launchd: the profile stable named entry has no readable package identity', error)
+  }
+  if (manifest === null || typeof manifest !== 'object' || (manifest as { readonly name?: unknown }).name !== '@xmoon76/dsh-pi-tui') {
+    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'launchd: the profile stable named entry is not @xmoon76/dsh-pi-tui')
+  }
+  return namedEntry
+}
 
 /**
- * Prove the installed plist's FIXED launch definition before `bootstrap`.
+ * Prove the installed plist's PROFILE LAUNCH ANCHORS before `bootstrap`.
  *
  * The native plist decoder is the authority for the top-level semantics: XML
  * comments, character references, CDATA and tag whitespace all normalize to the
- * same keys/values. A literal text scan could see an unsafe key as absent while
- * launchd sees it present (and a `RunAtLoad=true` program executes during
- * bootstrap, before a post-load check). The native JSON output is therefore
- * validated here, with unsupported/undecodable input failing closed. Harmless
- * user runtime keys and comments remain user-owned.
+ * same keys/values. Only the facts that bind the job to THIS profile are
+ * checked: the exact `Label` and the three official environment anchors
+ * (`DSH_HOME`, `SPLIT_PROCESS_DSH_ANCHOR`, `SPLIT_PROCESS_PROFILE`). Every
+ * other runtime directive — `ProgramArguments`, `WorkingDirectory`, log
+ * sinks, `RunAtLoad`, `KeepAlive`, triggers, extra environment keys and
+ * comments — belongs to the user and launchd, and is executed as written; the
+ * caller proves the resulting Host through the official authentication.
  */
-export function assertLaunchdFileDefinition(facts: LaunchdUnitFacts, content: string): void {
+export function assertLaunchdProfileAnchors(facts: LaunchdUnitFacts, content: string): void {
   const reject = (reason: string): never => {
-    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', `launchd: the profile plist has a changed fixed launch definition (${reason}); refusing to bootstrap it`)
+    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', `launchd: the profile plist has a changed profile launch anchor (${reason}); refusing to bootstrap it`)
   }
   const root = decodeLaunchdPlist(content)
-  const value = (key: string): unknown => {
-    if (!Object.hasOwn(root, key)) reject(key)
-    return root[key]
-  }
   const text = (key: string): string => {
-    const candidate = value(key)
-    if (typeof candidate !== 'string') return reject(key)
-    return candidate
+    const value = root[key]
+    if (typeof value !== 'string') return reject(key)
+    return value
   }
-  const logs = launchdLogPaths(facts.scopeDir)
   if (text('Label') !== buildLaunchdLabel(facts.scopeId)) reject('Label')
-  const argv = value('ProgramArguments')
-  if (!Array.isArray(argv) || argv.length !== 2 || argv[0] !== facts.nodePath || argv[1] !== facts.hostEntryPath) reject('ProgramArguments')
-  if (text('WorkingDirectory') !== facts.profileRealpath) reject('WorkingDirectory')
-  if (text('StandardOutPath') !== logs.stdout) reject('StandardOutPath')
-  if (text('StandardErrorPath') !== logs.stderr) reject('StandardErrorPath')
-  if (value('Umask') !== LAUNCHD_UMASK) reject('Umask')
-  const environment = value('EnvironmentVariables')
+  const environment = root.EnvironmentVariables
   if (environment === null || typeof environment !== 'object' || Array.isArray(environment)) reject('EnvironmentVariables')
+  const env = environment as Record<string, unknown>
   const expectedEnvironment: Readonly<Record<string, string>> = {
     DSH_HOME: facts.dshHome,
     SPLIT_PROCESS_DSH_ANCHOR: facts.dshAnchor,
     SPLIT_PROCESS_PROFILE: facts.profile,
   }
-  const env = environment as Record<string, unknown>
-  const envKeys = Object.keys(env)
-  if (envKeys.length !== 3 || envKeys.some(key => env[key] !== expectedEnvironment[key])) reject('EnvironmentVariables')
-  for (const key of ['RunAtLoad', 'KeepAlive'] as const) {
-    if (Object.hasOwn(root, key) && root[key] !== false) reject(key)
-  }
-  for (const key of UNSAFE_FIXED_KEYS) {
-    if (Object.hasOwn(root, key)) reject(key)
+  for (const [key, value] of Object.entries(expectedEnvironment)) {
+    if (env[key] !== value) reject(`EnvironmentVariables.${key}`)
   }
 }
 
@@ -674,10 +693,14 @@ export function parseLaunchctlPrint(stdout: string): LaunchdLoadedService | unde
   const argumentLines = readLaunchctlBlock(lines, 'arguments')
   const environmentLines = readLaunchctlBlock(lines, 'environment')
   if (type === undefined || path === undefined || state === undefined || program === undefined
-    || workingDirectory === undefined || stdoutPath === undefined || stderrPath === undefined
     || argumentLines === undefined || environmentLines === undefined) return undefined
-  if (type !== 'LaunchAgent' || !path.startsWith('/') || !program.startsWith('/') || !workingDirectory.startsWith('/')
-    || !stdoutPath.startsWith('/') || !stderrPath.startsWith('/')) return undefined
+  if (type !== 'LaunchAgent' || !path.startsWith('/') || !program.startsWith('/')) return undefined
+  // The presentation/log fields are user-owned and OPTIONAL: an absent value is
+  // not a foreign-source signal. When launchd reports one it must still be an
+  // absolute path, or the print answer is ambiguous and fails closed.
+  for (const optional of [workingDirectory, stdoutPath, stderrPath]) {
+    if (optional !== undefined && !optional.startsWith('/')) return undefined
+  }
   const argumentsList: string[] = []
   for (const line of argumentLines) {
     if (line === '') return undefined
@@ -706,9 +729,9 @@ export function parseLaunchctlPrint(stdout: string): LaunchdLoadedService | unde
     state,
     program,
     arguments: argumentsList,
-    workingDirectory,
-    stdoutPath,
-    stderrPath,
+    ...(workingDirectory === undefined ? {} : { workingDirectory }),
+    ...(stdoutPath === undefined ? {} : { stdoutPath }),
+    ...(stderrPath === undefined ? {} : { stderrPath }),
     environment,
     ...(pid === undefined ? {} : { pid }),
   }
@@ -753,34 +776,41 @@ export async function inspectLaunchdService(
 }
 
 /**
- * True only when the loaded job was bootstrapped from THIS profile's exact
- * plist target and its fixed launch facts are the current installed facts.
- * User-owned runtime directives outside these facts are not identity.
+ * Answer ONE question: is the currently loaded `gui/<uid>/<label>` job
+ * bootstrapped from THIS profile's verified LaunchAgent plist and carrying the
+ * same target profile's runtime anchors?
+ *
+ * YES requires `service.type === 'LaunchAgent'`, the printed `path` to be the
+ * canonical target of the verified plist (a lexical alias is admitted only
+ * while it resolves to the same real file), and the three official profile
+ * environment anchors to match the current installed facts. Everything else —
+ * program, arguments, working directory, log sinks, `RunAtLoad`/`KeepAlive`,
+ * extra environment keys — is the user's own launchd configuration and is NOT
+ * identity. This is NEVER Host readiness and NEVER a PID authorization: the
+ * caller separately proves the real PID against the authenticated Host.
  */
 export function launchdServiceMatches(
   facts: LaunchdUnitFacts,
   unit: OwnedLaunchdUnit,
   service: LaunchdLoadedService,
 ): boolean {
-  const logs = launchdLogPaths(facts.scopeDir)
-  const injected = new Set(['OSLogRateLimit', 'XPC_SERVICE_NAME'])
-  const userEnvironment = Object.entries(service.environment).filter(([key]) => !injected.has(key))
-  return service.type === 'LaunchAgent'
-    && service.path === unit.resolvedPath
-    && service.program === facts.nodePath
-    && service.arguments.length === 2
-    && service.arguments[0] === facts.nodePath
-    && service.arguments[1] === facts.hostEntryPath
-    && service.workingDirectory === facts.profileRealpath
-    && service.stdoutPath === logs.stdout
-    && service.stderrPath === logs.stderr
-    && userEnvironment.length === 3
-    && userEnvironment.every(([key, value]) => {
-      if (key === 'DSH_HOME') return value === facts.dshHome
-      if (key === 'SPLIT_PROCESS_DSH_ANCHOR') return value === facts.dshAnchor
-      if (key === 'SPLIT_PROCESS_PROFILE') return value === facts.profile
-      return false
-    })
+  if (service.type !== 'LaunchAgent') return false
+  if (service.path === unit.resolvedPath) return sameLaunchdProfileAnchors(facts, service)
+  // launchd may print a lexical alias of the same canonical target; admit it
+  // only while the alias resolves to the very same real file as the captured
+  // plist identity, never to another same-named path.
+  try {
+    return realpathSync(service.path) === unit.resolvedPath && sameLaunchdProfileAnchors(facts, service)
+  } catch {
+    return false
+  }
+}
+
+/** The three official profile anchors of one loaded job environment. */
+function sameLaunchdProfileAnchors(facts: LaunchdUnitFacts, service: LaunchdLoadedService): boolean {
+  return service.environment.DSH_HOME === facts.dshHome
+    && service.environment.SPLIT_PROCESS_DSH_ANCHOR === facts.dshAnchor
+    && service.environment.SPLIT_PROCESS_PROFILE === facts.profile
 }
 
 /** Prove the user GUI domain is queryable before an install writes anything. */
@@ -949,15 +979,20 @@ export async function installLaunchdUnit(
   // job and any new file, so install must fail closed instead of conflating
   // them.
   const existing = inspectOwnedLaunchdUnit(facts, deps)
-  if (existing.kind === 'owned' && existing.unit.installBuild !== facts.buildId) {
-    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'launchd: the installed profile plist belongs to another installed build')
-  }
   const observed = await inspectLaunchdServiceByLabel(label, deps)
   if (observed.kind === 'unknown') {
     throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'launchd: the loaded job state of this label is unknown; refusing to install')
   }
   if (observed.kind === 'loaded') {
-    if (observed.service.path !== filePath && observed.service.path !== canonicalTarget) {
+    const sameCanonicalSource = (() => {
+      if (observed.service.path === filePath || observed.service.path === canonicalTarget) return true
+      try {
+        return realpathSync(observed.service.path) === canonicalTarget
+      } catch {
+        return false
+      }
+    })()
+    if (!sameCanonicalSource) {
       throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'launchd: this label is already loaded from another source; refusing to install')
     }
     if (existing.kind === 'none') {
@@ -968,18 +1003,23 @@ export async function installLaunchdUnit(
     }
   }
   if (existing.kind === 'owned') {
+    // An owned same-profile plist of an OLDER installed build is reused
+    // byte-for-byte: the install-build metadata is a recorded fact, never the
+    // plist owner (the label + owner markers + canonical profile identity
+    // above already proved ownership).
     return { label, filePath: existing.unit.filePath, created: false }
   }
-  const content = renderLaunchdPlist(facts)
+  // A FRESH plist uses the STABLE named entry below the official profile
+  // directory, so an official profile package upgrade does not orphan the
+  // generated path. This is the only place the named entry is resolved for a
+  // new file; existing owned plists are never rewritten here.
+  const content = renderLaunchdPlist({ ...facts, hostEntryPath: resolveNamedLaunchdEntry(facts) })
   const installed = installLaunchdFile({ dir, label, content })
   try {
     const verify = deps.verifyInstalledUnit ?? ((current: LaunchdUnitFacts) => inspectOwnedLaunchdUnit(current, deps))
     const verified = verify(facts)
     if (verified.kind !== 'owned') {
       throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'launchd: the installed profile plist could not be confirmed')
-    }
-    if (verified.unit.installBuild !== facts.buildId) {
-      throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'launchd: the installed profile plist belongs to another installed build')
     }
     return { label, filePath: verified.unit.filePath, created: installed.created }
   } catch (error) {
@@ -997,14 +1037,16 @@ async function kickstartLaunchdJob(unit: OwnedLaunchdUnit, deps: LaunchdAdapterD
 }
 
 /**
- * Start the installed job through launchd only: prove the canonical fixed
- * definition, inspect the current service, refuse a foreign/stale loaded
- * definition, `bootstrap` exactly once when the job is not loaded, then
- * `kickstart` exactly once when no process is running. A user-edited plist is
- * preserved on disk but is never bootstrapped: `RunAtLoad=true` can execute a
- * modified program during `bootstrap`, before a post-load check. The manager
- * request is never readiness; the caller still waits for the official
- * authenticated Host.
+ * Start the installed job through launchd only: prove the captured file
+ * identity and the profile launch anchors, inspect the current service,
+ * refuse a foreign/stale loaded definition, `bootstrap` exactly once when the
+ * job is not loaded, then `kickstart` exactly once when no process is running.
+ * The USER-OWNED definition is executed as written: `RunAtLoad`, `KeepAlive`,
+ * custom arguments, working directory, triggers and extra environment keys are
+ * legal launchd configuration and are not judged here; the caller proves the
+ * resulting Host through the official authentication (a custom command that
+ * never becomes a real Host fails there, with no detached fallback). The
+ * manager request is never readiness.
  */
 export async function startLaunchdService(
   facts: LaunchdUnitFacts,
@@ -1017,11 +1059,10 @@ export async function startLaunchdService(
   // mutation. Re-prove the captured file identity at the adapter boundary and
   // again immediately before each mutating request.
   assertLaunchdFileIdentity(unit, facts, deps)
-  // A user-edited plist can change RunAtLoad, KeepAlive or a trigger that makes
-  // launchd execute a modified program during bootstrap. Prove the fixed launch
-  // definition and reject those edits before any manager operation; harmless
-  // comments/runtime keys remain user-owned.
-  assertLaunchdFileDefinition(facts, unit.content)
+  // Prove only the profile launch anchors (Label + the three official env
+  // values). Everything else in the plist is the user's launchd
+  // configuration and is executed by launchd exactly as written.
+  assertLaunchdProfileAnchors(facts, unit.content)
   let observed = await inspectLaunchdService(unit, deps)
   if (observed.kind === 'unknown') {
     throw new LocalScopeError('HOST_MANAGER_START_FAILED', 'launchd: the loaded job state is not recognizable; refusing to start')
@@ -1171,4 +1212,236 @@ export async function uninstallLaunchdUnit(
   if (remaining.kind !== 'none') {
     throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'launchd: the profile plist could not be confirmed removed')
   }
+}
+
+// ── the ONE bounded generated-field migration (explicit CLI verbs only) ──────
+
+/** The exact `ProgramArguments` block this product's renderer has always written. */
+const GENERATED_PROGRAM_ARGUMENTS_SPAN = {
+  head: '  <key>ProgramArguments</key>\n  <array>\n    <string>',
+  tail: '</string>\n  </array>\n',
+} as const
+/** The exact `X-DshPiTuiInstallBuild` block this product's renderer writes. */
+const GENERATED_INSTALL_BUILD_SPAN = {
+  head: '  <key>X-DshPiTuiInstallBuild</key>\n  <string>',
+  tail: '</string>\n',
+} as const
+
+/** The read-only outcome of one `inspect`/`apply` migration decision. */
+export type LaunchdMigrationPlan =
+  | {
+    readonly kind: 'no-op'
+    /** `user-managed`: the argv is not the product's exact generated pair, so
+     *  the plist is executed as the user wrote it. `current`: the generated
+     *  entry already equals the current stable named entry. */
+    readonly reason: 'user-managed' | 'current'
+  }
+  | {
+    readonly kind: 'migrate'
+    /** The stable named entry the old generated `ProgramArguments[1]` must adopt. */
+    readonly namedEntry: string
+  }
+
+/** The result of one `prepareOwnedLaunchdForCurrentInstall` call. */
+export interface LaunchdMigrationResult {
+  readonly plan: LaunchdMigrationPlan
+  /** `apply` only: the re-read owned unit after the atomic replacement. */
+  readonly unit?: OwnedLaunchdUnit
+}
+
+/**
+ * Locate the product's EXACT generated `ProgramArguments` block: precisely two
+ * `<string>` children whose first value is the renderer's node executable form
+ * and whose second value is an installed product `dist/local-host.mjs` path of
+ * THIS profile. The lexical span must equal the renderer's exact bytes; any
+ * reordering, binary plist, wrapper, extra argument or another profile's path
+ * is not our generated block and returns `undefined`.
+ */
+function locateGeneratedProgramArguments(content: string, facts: LaunchdUnitFacts): { readonly oldEntry: string; readonly start: number; readonly end: number } | undefined {
+  const decoded = decodeLaunchdPlist(content)
+  const argv = decoded.ProgramArguments
+  if (!Array.isArray(argv) || argv.length !== 2 || argv.some(value => typeof value !== 'string')) return undefined
+  const [nodeValue, entryValue] = argv as [string, string]
+  // The generated block always named the SAME node executable shape the
+  // renderer used. Compare against the decoded semantic values, not bytes, so
+  // legal XML entity encoding in the old file still matches.
+  if (nodeValue !== facts.nodePath) return undefined
+  // The old generated entry is an installed product Host entry of this same
+  // profile layout: .../<packageRoot>/dist/local-host.mjs whose nearest package
+  // manifest is this product (not a wrapper, not another program).
+  if (!entryValue.endsWith('/dist/local-host.mjs')) return undefined
+  const nearestManifest = join(dirname(dirname(entryValue)), 'package.json')
+  let manifest: unknown
+  try {
+    manifest = JSON.parse(readFileSync(nearestManifest, 'utf8'))
+  } catch {
+    return undefined
+  }
+  if (manifest === null || typeof manifest !== 'object' || (manifest as { readonly name?: unknown }).name !== '@xmoon76/dsh-pi-tui') return undefined
+  // The lexical span must be the renderer's EXACT structure so the patch below
+  // replaces only bytes this product wrote.
+  const entryStart = content.indexOf(GENERATED_PROGRAM_ARGUMENTS_SPAN.head)
+  if (entryStart < 0) return undefined
+  const valueStart = entryStart + GENERATED_PROGRAM_ARGUMENTS_SPAN.head.length
+  const midTail = '</string>\n    <string>'
+  const firstTail = content.indexOf(midTail, valueStart)
+  if (firstTail < 0) return undefined
+  const secondStart = firstTail + midTail.length
+  const tailStart = content.indexOf(GENERATED_PROGRAM_ARGUMENTS_SPAN.tail, secondStart)
+  if (tailStart < 0) return undefined
+  const end = tailStart + GENERATED_PROGRAM_ARGUMENTS_SPAN.tail.length
+  const head = content.slice(entryStart, end)
+  // Byte-exact structural proof: the span re-parsed by the native decoder must
+  // return exactly the same two values with no other keys.
+  if (head !== `  <key>ProgramArguments</key>\n  <array>\n    <string>${nodeValue}</string>\n    <string>${entryValue}</string>\n  </array>\n`) return undefined
+  // No second ProgramArguments key may exist anywhere else (comments aside, a
+  // duplicate would decode differently and was already refused above; the
+  // lexical single-occurrence check keeps the patch span unambiguous).
+  if (content.indexOf('  <key>ProgramArguments</key>', entryStart + 1) >= 0) return undefined
+  return { oldEntry: entryValue, start: entryStart, end }
+}
+
+/** Locate the product's exact generated `X-DshPiTuiInstallBuild` block. */
+function locateGeneratedInstallBuild(content: string): { readonly start: number; readonly end: number } | undefined {
+  const start = content.indexOf(GENERATED_INSTALL_BUILD_SPAN.head)
+  if (start < 0) return undefined
+  const valueStart = start + GENERATED_INSTALL_BUILD_SPAN.head.length
+  const tailStart = content.indexOf(GENERATED_INSTALL_BUILD_SPAN.tail, valueStart)
+  if (tailStart < 0) return undefined
+  const end = tailStart + GENERATED_INSTALL_BUILD_SPAN.tail.length
+  const block = content.slice(start, end)
+  const value = block.slice(GENERATED_INSTALL_BUILD_SPAN.head.length, block.length - GENERATED_INSTALL_BUILD_SPAN.tail.length)
+  if (!/^[0-9a-f]{64}$/u.test(value)) return undefined
+  if (content.indexOf(GENERATED_INSTALL_BUILD_SPAN.head, start + 1) >= 0) return undefined
+  return { start, end }
+}
+
+/**
+ * The ONE bounded migration of an old PRODUCT-GENERATED plist fragment to the
+ * current install. `inspect` is read-only and may run before a stop; `apply`
+ * performs the atomic in-place replacement and is legal ONLY after the old
+ * Host kernel identity is proven gone and the loaded job is proven booted out.
+ *
+ * The ONLY bytes ever modified are the proven generated `ProgramArguments[1]`
+ * (old installed entry -> the current stable named entry) and, when the
+ * arguments actually migrate, the adjacent generated `X-DshPiTuiInstallBuild`
+ * value. A user-customized argv, a restructured XML, a binary plist or any
+ * other unrecognized shape is preserved byte-for-byte and reported
+ * `user-managed`: the plist is then executed exactly as the user wrote it and
+ * the resulting Host is authenticated (or truthfully reported `other-build`).
+ */
+export function prepareOwnedLaunchdForCurrentInstall(
+  facts: LaunchdUnitFacts,
+  unit: OwnedLaunchdUnit,
+  deps: LaunchdAdapterDeps,
+  mode: 'inspect' | 'apply',
+): LaunchdMigrationResult {
+  // Both modes re-prove the captured identity first: apply must never patch a
+  // file that changed since the caller captured it, and inspect must never
+  // describe a stale snapshot as the current one.
+  assertLaunchdFileIdentity(unit, facts, deps)
+  // Prove the profile anchors (Label + three official env values). A plist of
+  // another profile/scope is an identity refusal, not a migration decision.
+  assertLaunchdProfileAnchors(facts, unit.content)
+  const namedEntry = resolveNamedLaunchdEntry(facts)
+  const generated = locateGeneratedProgramArguments(unit.content, facts)
+  if (generated === undefined) return { plan: { kind: 'no-op', reason: 'user-managed' } }
+  if (generated.oldEntry === namedEntry) return { plan: { kind: 'no-op', reason: 'current' } }
+  const plan: LaunchdMigrationPlan = { kind: 'migrate', namedEntry }
+  if (mode === 'inspect') return { plan }
+  // apply: re-read the named plist and re-prove nothing changed under us.
+  const current = inspectOwnedLaunchdUnit(facts, deps)
+  if (current.kind !== 'owned'
+    || current.unit.filePath !== unit.filePath
+    || current.unit.content !== unit.content
+    || current.unit.device !== unit.device
+    || current.unit.inode !== unit.inode) {
+    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'launchd: the profile plist changed before the migration was applied')
+  }
+  const reGenerated = locateGeneratedProgramArguments(current.unit.content, facts)
+  if (reGenerated === undefined || reGenerated.oldEntry !== generated.oldEntry) {
+    return { plan: { kind: 'no-op', reason: 'user-managed' } }
+  }
+  let next = spliceString(current.unit.content, generated.start, generated.end, [
+    '  <key>ProgramArguments</key>\n  <array>\n    <string>',
+    encodePlistValue(facts.nodePath, 'node path'),
+    '</string>\n    <string>',
+    encodePlistValue(namedEntry, 'Host entry path'),
+    '</string>\n  </array>\n',
+  ].join(''))
+  // The install-build metadata moves WITH the migrated entry; a build bump
+  // without the path migration is worthless and is never written alone.
+  const buildSpan = locateGeneratedInstallBuild(next)
+  if (buildSpan !== undefined) {
+    next = spliceString(next, buildSpan.start, buildSpan.end, [
+      '  <key>X-DshPiTuiInstallBuild</key>\n  <string>',
+      encodePlistValue(facts.buildId, 'install build'),
+      '</string>\n',
+    ].join(''))
+  }
+  // Native decode + `plutil -lint` double verification BEFORE any write: a
+  // patched document that no native decoder accepts is never published.
+  decodeLaunchdPlist(next)
+  const written = replacePlistAtomic(current.unit.filePath, next)
+  // Re-verify the file we just wrote and return the fresh unit so the caller's
+  // later identity checks use the new (dev,ino,content).
+  const verified = inspectOwnedLaunchdUnit(facts, deps)
+  if (verified.kind !== 'owned' || verified.unit.content !== written) {
+    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'launchd: the migrated plist could not be confirmed after the replacement')
+  }
+  const decoded = decodeLaunchdPlist(verified.unit.content)
+  const argv = decoded.ProgramArguments
+  if (!Array.isArray(argv) || argv.length !== 2 || argv[1] !== namedEntry) {
+    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'launchd: the migrated plist does not decode to the stable named entry')
+  }
+  return { plan, unit: verified.unit }
+}
+
+/** Replace an exact byte span of one string. */
+function spliceString(content: string, start: number, end: number, replacement: string): string {
+  return content.slice(0, start) + replacement + content.slice(end)
+}
+
+/**
+ * Atomically replace one owned plist file in its own directory with the
+ * original file mode, through a same-directory temp file, native `plutil`
+ * validation, `fsync` and `rename`. The target must still be a regular
+ * non-symlink file; a replaced or vanished target is a hard refusal (never a
+ * blind overwrite).
+ */
+function replacePlistAtomic(filePath: string, content: string): string {
+  let originalMode: number
+  try {
+    const info = lstatSync(filePath)
+    if (!info.isFile() || info.isSymbolicLink()) {
+      throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'launchd: the profile plist is not a regular file for an in-place migration')
+    }
+    originalMode = info.mode & 0o777
+  } catch (error) {
+    if (error instanceof LocalScopeError) throw error
+    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'launchd: the profile plist could not be re-read before the migration', error)
+  }
+  const tempPath = join(dirname(filePath), `.${basename(filePath)}.${String(process.pid)}.${randomUUID()}.tmp`)
+  let fd: number | undefined
+  try {
+    fd = openSync(tempPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, originalMode)
+    fchmodSync(fd, originalMode)
+    const buffer = Buffer.from(content, 'utf8')
+    let offset = 0
+    while (offset < buffer.length) offset += writeSync(fd, buffer, offset, buffer.length - offset)
+    fsyncSync(fd)
+    closeSync(fd)
+    fd = undefined
+    const lint = spawnSync('/usr/bin/plutil', ['-lint', '-s', '--', tempPath], { timeout: 5_000 })
+    if (lint.error !== undefined || lint.status !== 0) {
+      throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'launchd: the migrated plist failed the native lint before publication')
+    }
+    renameSync(tempPath, filePath)
+  } catch (error) {
+    if (fd !== undefined) closeSync(fd)
+    try { unlinkSync(tempPath) } catch { /* the temp file may not exist */ }
+    if (error instanceof LocalScopeError) throw error
+    throw new LocalScopeError('HOST_MANAGER_START_FAILED', 'launchd: the migrated plist could not be installed atomically', error)
+  }
+  return content
 }
