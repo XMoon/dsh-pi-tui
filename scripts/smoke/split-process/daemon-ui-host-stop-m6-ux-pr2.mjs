@@ -20,10 +20,12 @@
  * @module split-process/daemon-ui-host-stop-m6-ux-pr2
  */
 
-import { writeFileSync } from 'node:fs'
+import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 import { SplitSmokeAssertionError } from '../../lib/split-smoke-diagnostics.mjs'
+import { alive, readStartIdentity } from '../../lib/split-smoke-processes.mjs'
+import { writeTerminalPng } from '../../lib/terminal-png.mjs'
 import { createC1Scene } from './c1-scene.mjs'
 import { submitLine } from './mcp-servers-fr3.mjs'
 
@@ -35,6 +37,51 @@ const sleep = ms => new Promise(resolve => { setTimeout(resolve, ms) })
 
 async function frameOf(client) {
   return (await client.viewport().catch(() => [])).join('\n')
+}
+
+/**
+ * Real COLOUR artifact of the CURRENT screen when the run asked for one
+ * (`SPLIT_PROCESS_PR2_SHOTS=<dir>`): the same xterm buffer the frames read, with
+ * every cell's foreground, background and attribute. Never a stripped frame.
+ */
+const SHOTS_DIR = process.env.SPLIT_PROCESS_PR2_SHOTS ?? ''
+let shotSequence = 0
+function captureIfRequested(client, name) {
+  if (SHOTS_DIR === '' || client.term === undefined) return
+  mkdirSync(SHOTS_DIR, { recursive: true })
+  shotSequence += 1
+  const slug = `${String(shotSequence).padStart(2, '0')}-${name.toLowerCase().replace(/[^a-z0-9]+/gu, '-')}`
+  const artifact = writeTerminalPng(client.term, join(SHOTS_DIR, `${slug}.png`))
+  console.error('PR2_SHOT', artifact.path, `${String(artifact.width)}x${String(artifact.height)}`)
+}
+
+/**
+ * The ONE Host process identity this run must prove gone: the PID and kernel
+ * starttime the Host itself published. A later PID owner with a DIFFERENT
+ * starttime is a reused PID, not the old Host.
+ */
+function recordedHostProcess(identity) {
+  assert(Number.isInteger(identity?.hostPid) && typeof identity?.hostStarttime === 'string',
+    `the Host identity carries no kernel process fact: ${JSON.stringify(identity)}`)
+  return { pid: identity.hostPid, starttime: identity.hostStarttime }
+}
+
+/**
+ * The recorded Host process REALLY exited. The authority is the OS fact, not a
+ * control-channel answer: an unreachable Host must never be read as a stopped
+ * one, which is exactly what a `status` probe failure would do.
+ */
+async function waitHostProcessGone(recorded, label, timeoutMs = 60_000) {
+  const started = Date.now()
+  for (;;) {
+    const current = readStartIdentity(recorded.pid)
+    if (!alive(recorded.pid) || current === undefined || current !== recorded.starttime) {
+      return { pid: recorded.pid, starttime: recorded.starttime, observed: current ?? null }
+    }
+    assert(Date.now() - started < timeoutMs,
+      `${label}: the recorded Host process is still alive (pid=${String(recorded.pid)} starttime=${String(current)})`)
+    await sleep(100)
+  }
 }
 
 async function waitForText(client, text, label, timeoutMs = 90_000) {
@@ -115,6 +162,7 @@ async function chooseBackend(client, target, label) {
   await waitForPattern(client, /Verified/u, `${label} ${target} verified`)
   await sleep(300)
   if ((await frameOf(client)).includes('Optional OS supervision')) {
+    captureIfRequested(client, `${label} install follow-up`)
     client.send('\x1b') // Not now — the install offer performs zero manager IO
     await sleep(300)
   }
@@ -136,6 +184,7 @@ async function closeSettings(client, label) {
 async function exitLeave(client, label) {
   client.send('/exit\r')
   await waitForText(client, 'Leave daemon Host running and exit', `${label} host-stop confirm`, 60_000)
+  captureIfRequested(client, `${label} host-stop confirm`)
   client.send('\r')
   const exit = await client.waitForExit(60_000)
   assert(exit.code === 0 && exit.signal === null, `${label} Leave exit was ${JSON.stringify(exit)}`)
@@ -180,6 +229,12 @@ async function saveBackend(client, target, label) {
 /** Run the Settings→exit whole-Host stop lifecycle. */
 export async function runDaemonUiHostStop(context) {
   const { trace, dshHome } = context
+  const columns = Number.parseInt(process.env.SPLIT_PROCESS_PR2_COLUMNS ?? '', 10)
+  const rows = Number.parseInt(process.env.SPLIT_PROCESS_PR2_ROWS ?? '', 10)
+  const geometry = {
+    ...(Number.isInteger(columns) ? { columns } : {}),
+    ...(Number.isInteger(rows) ? { rows } : {}),
+  }
   // Seed the Profile's persisted Backend as `daemon` BEFORE either process boots,
   // so the Client's ONE verified `direct` save is the real daemon→direct
   // conversion that arms the exit-time whole-Host stop confirm.
@@ -188,7 +243,7 @@ export async function runDaemonUiHostStop(context) {
   const { startC1Host, startC1Client, hostIdentityFacts, assertHostIdentityKept, dispose } = scene
   try {
     const { host } = await startC1Host('daemon-ui-host-stop', 'PR2 Host')
-    const { client: clientA } = await startC1Client('PR2 A')
+    const { client: clientA } = await startC1Client('PR2 A', {}, geometry)
     const { client: clientB } = await startC1Client('PR2 B')
     const before = await hostIdentityFacts(host)
 
@@ -228,11 +283,12 @@ export async function runDaemonUiHostStop(context) {
       `the confirmed Stop must not turn the expected disconnect into a Client failure: ${JSON.stringify(stopFailures)}`)
     trace('pr2.stop-no-failure', { failureRecords: 0 })
 
-    // The old Host is verified gone; the sibling Client lost that instance.
-    await waitForCondition(async () => {
-      try { return (await hostIdentityFacts(host)) === undefined } catch { return true }
-    }, 'PR2 Host stopped after the explicit Stop', 60_000)
-    trace('pr2.stop-gone', { hostVerifiedGone: true })
+    // The old Host PROCESS is verified gone by the OS: the exact PID/kernel
+    // starttime it published before the stop no longer exists. A control-
+    // channel probe is deliberately NOT the proof here — an unreachable Host
+    // must never be read as a stopped one.
+    const gone = await waitHostProcessGone(recordedHostProcess(before), 'PR2 Host stopped after the explicit Stop')
+    trace('pr2.stop-gone', { hostVerifiedGone: true, pid: gone.pid, pidReused: gone.observed !== null })
 
     // The explicit Stop destroyed B's old Host instance: B can no longer hold a
     // clean connection to it (its transport drops), so its exit is NOT a clean
@@ -262,14 +318,4 @@ export async function runDaemonUiHostStop(context) {
     leave: { hostKept: true, siblingKept: true },
     stop: { hostVerifiedGone: true, noTerminalTransportFailure: true, siblingLostInstance: true },
   }
-}
-
-/** A tiny bounded condition wait (the scene owns its own process backstop). */
-async function waitForCondition(predicate, label, timeoutMs) {
-  const started = Date.now()
-  while (Date.now() - started < timeoutMs) {
-    if (await predicate()) return
-    await sleep(150)
-  }
-  throw new SplitSmokeAssertionError(`${label}: the condition never settled`)
 }
