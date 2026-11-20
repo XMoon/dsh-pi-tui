@@ -126,13 +126,13 @@ function makePort(options: FixtureOptions = {}) {
     update: async () => ({ ok: true as const, value: {} }),
     replace: async () => ({ ok: true as const, value: {} }),
     mutate: async (ns: string, ops: readonly RemoteSettingsPathOp[], revision: number | undefined) => {
-      calls.push({ ns, ops: clone(ops), revision })
       if (holdNextMutation !== undefined) {
         const held = holdNextMutation
         holdNextMutation = undefined
         held.entered()
         await held.released
       }
+      calls.push({ ns, ops: clone(ops), revision })
       const target = namespaces.find(item => item.ns === ns)
       if (target === undefined) return { ok: false as const, error: { code: 'settings/absent', message: 'no section' } }
       if (revision !== target.revision) {

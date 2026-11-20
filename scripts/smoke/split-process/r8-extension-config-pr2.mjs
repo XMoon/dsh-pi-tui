@@ -96,9 +96,9 @@ export async function runExtensionConfigPr2(context) {
   try {
     const tarballA = packFixture(FIXTURE_NAMES.a, installation.manifest.version, workDir)
     const tarballB = packFixture(FIXTURE_NAMES.b, installation.manifest.version, workDir)
-    installPlugin(installation.dshInvocation, tarballA, context.workDir, context.env)
+    installPlugin(installation.dshInvocation, tarballA, context.workDir, installation.env)
     installedFixtureA = true
-    installPlugin(installation.dshInvocation, tarballB, context.workDir, context.env)
+    installPlugin(installation.dshInvocation, tarballB, context.workDir, installation.env)
     installedFixtureB = true
     // The official installed manifests are the package identity authority; the
     // probe receives their names and the shipped row ids must be derived from
@@ -184,7 +184,7 @@ export async function runExtensionConfigPr2(context) {
     try { await scene.dispose() } catch { /* runner owns the process backstop */ }
     for (const [name, installed] of [[sourceNames.a, installedFixtureA], [sourceNames.b, installedFixtureB]]) {
       if (!installed) continue
-      const removal = runDsh(installation.dshInvocation, ['plugin', '--profile', PROFILE, 'remove', name], context.workDir, context.env)
+      const removal = runDsh(installation.dshInvocation, ['plugin', '--profile', PROFILE, 'remove', name], context.workDir, installation.env)
       assert(removal.status === 0, `removing fixture ${name} from the shared qualification profile failed: ${removal.stderr ?? ''}`)
     }
   }
