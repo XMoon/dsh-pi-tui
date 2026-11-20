@@ -224,6 +224,7 @@ const CASE_REGISTRY = Object.freeze([
   }),
   Object.freeze({
     suite: 'daemon-control',
+    defaultLane: false,
     id: 'daemon-control.m6-ux-pr2-ui-host-stop',
     title: 'the real Settings/Exit UI Leave keeps the old Host and a sibling Client alive, and an explicit Stop stops it exactly once',
     run: runDaemonUiHostStop,
