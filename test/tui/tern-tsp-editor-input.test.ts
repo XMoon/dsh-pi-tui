@@ -2589,8 +2589,11 @@ test('a draft that arrives between idle Ctrl+C presses is cleared, never exited 
     await settle()
     assert.equal(harness.exitCount(), 0)
     assert.equal(lastEditorProps(harness.frames())?.text, '')
-    harness.tern.input.type('b') // the late paste-equivalent insertion
-    // reason: the new draft must be present before the second exit press.
+    // The late insert uses the PRODUCTION composer port (the application's
+    // async clipboard callback path), NOT a key: a key would itself disarm the
+    // window and could not witness the confirm-before-check bug.
+    harness.renderer.composer.insertIntoEditor('b')
+    // reason: the async insert must be present before the second exit press.
     await settle()
     harness.tern.input.type('\x03') // MUST clear 'b' and re-arm, not exit
     // reason: the second press's clear/re-arm is observed before the assert.
