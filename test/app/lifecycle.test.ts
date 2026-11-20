@@ -1944,3 +1944,15 @@ test('PR2: the detach hint replaces the not-stopped line only for a verified sto
   assert.match(ordinary, /The daemon Host was not stopped by this action\./u)
   assert.doesNotMatch(ordinary, /Daemon Host stop was not confirmed/u)
 })
+
+test('PR2: a close-time callback that invalidates the intent never executes the Host stop', () => {
+  const h = exitIntentHarness({ backend: 'daemon', activity: 'idle', hostStopEligible: true })
+  h.coordinator.request('slash')
+  assert.equal(h.current()?.kind, 'daemon-host-stop')
+  // The close synchronously restores another owner's focus and that callback
+  // changes the LIVE Profile facts (another Client reverted the save).
+  h.state.onClose = () => { h.state.hostStopEligible = false }
+  h.current()!.select('stop-host-and-exit')
+  assert.deepEqual(h.commits, [{ workStopped: false }],
+    'the verdict degrades to the ordinary detach; the Host stop is NOT executed')
+})

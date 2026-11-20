@@ -3150,12 +3150,15 @@ export class SettingsWorkspacePanel implements Component {
     const lines: string[] = []
     for (let i = 0; i < scrollViewport; i += 1) lines.push(content[offset + i] ?? '')
     // M6 UX PR2: the follow-up's actable rows earn their painted grant ONLY
-    // when THIS frame's granted viewport really shows BOTH of them — a clipped
-    // or scrolled-away row never lets Tab/Enter commit an install.
+    // when THIS frame's granted viewport really shows BOTH the risk copy AND
+    // BOTH candidate rows — a clipped or scrolled-away block never lets
+    // Tab/Enter/pointer commit an install. The check runs on the FINAL painted
+    // rows (after the width fit), never the pre-clip content.
     let serviceInstallActionsVisible = false
     if (this.serviceInstall !== undefined && this.serviceInstall.installable && this.serviceInstall.phase === 'asking') {
       const stripped = lines.map(line => line.replace(/\x1b\[[0-9;]*m/gu, ''))
-      serviceInstallActionsVisible = stripped.some(line => /\bNot now\b/u.test(line))
+      serviceInstallActionsVisible = stripped.some(line => /Optional OS supervision/u.test(line))
+        && stripped.some(line => /\bNot now\b/u.test(line))
         && stripped.some(line => /\bInstall service\b/u.test(line))
     }
     const painted = pinned === 1 ? this.layoutButtons(width, buttons) : { text: '', painted: [] }
@@ -3614,15 +3617,18 @@ export class SettingsWorkspacePanel implements Component {
         lines.push('')
         for (const action of ['not-now', 'install'] as const) {
           const label = action === 'not-now' ? 'Not now' : 'Install service'
-          if (this.serviceInstall.focus === action) {
-            lines.push(`${color.primary('> ')}${color.textStrong(label)}`)
-          } else {
-            lines.push(`  ${color.text(label)}`)
-          }
+          // The candidate rows are fitted to the pane width like every other
+          // painted line, so a row that does not fit WHOLE is never claimed as
+          // painted (the grant check below matches the complete label).
+          const row = this.serviceInstall.focus === action
+            ? `${color.primary('> ')}${color.textStrong(label)}`
+            : `  ${color.text(label)}`
+          lines.push(fit(row, width))
         }
         // The painted grant is NOT set here: this is only the content
         // projection, before the viewport clip. The grant is set by
-        // `detailLines` only when both rows really land on screen.
+        // `detailLines` only when the risk copy and both rows really land on
+        // screen WHOLE.
       }
     }
     return lines

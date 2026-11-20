@@ -244,6 +244,14 @@ export function createExitIntentCoordinator(deps: ExitIntentCoordinatorDeps): Ex
     if (disposed) return
     if (operationEpoch !== epoch) return
     if (!identityCurrent(identity)) return
+    // A Host-stop verdict must ALSO survive the close-time re-read: a close
+    // callback can change the Profile/readiness, and an unproven transition
+    // must never execute the stop (plan §3.3 — unknown is never verified).
+    if (hostStopRequested && !deps.facts.hostStopEligible()) {
+      safeDiag('info', 'host stop declined: the transition intent is no longer current at commit')
+      deps.commit({ workStopped })
+      return
+    }
     deps.commit(hostStopRequested
       ? { workStopped, hostStopRequested: true }
       : { workStopped })
