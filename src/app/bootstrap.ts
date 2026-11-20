@@ -981,6 +981,13 @@ export function applyRunnerWithRuntime(
             // local display preset — never a Profile default, never another
             // Session's or a subagent's view.
             installTurnPolicy: (agentCtx, agent) => {
+              // A Direct Agent created AFTER the runner lifecycle aborted (a
+              // late non-cooperative transition child) has no live runner
+              // scope: the Session event plane is gone, and subscribing would
+              // register an effect on an INACTIVE context (Cordis
+              // INACTIVE_EFFECT). Fail closed with no policy — the late owner
+              // is retired, never prompted.
+              if (ctx.fiber.uid === null) return { currentTurn: () => undefined }
               const latch = installTuiPromptTurnLatch(
                 { on: (_event, listener, listenerOptions) => ctx.on('session/event', listener, listenerOptions) },
                 agent.session,
