@@ -445,6 +445,7 @@ test('every registry entry declares a conservative platform list and the nine sh
   const shared = [
     'surface.sessionless-host-file-f5b',
     'surface.generic-file-upload-f4',
+    'surface.remote-git-branch-locality',
     'skills.sessionless-hot',
     'skills.live-hot',
     'skills.recovery',

@@ -664,10 +664,13 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
   /** M0: the workspace section (cwd/project/branch — project and cwd are
    * deliberately separate facts). `branchAllowed` is the LOCALITY gate: the
    * local `gitBranch(cwd)` derivation may only speak for a cwd on THIS
-   * process's own filesystem. A Remote child's Host cwd is not a Client
-   * path, so its branch is omitted rather than inferred (M3-5 PR1 §9.4). */
-  
-  const deriveWorkspaceStatus = (cwd: string, branchAllowed = true): WorkspaceStatus => {
+   * process's own filesystem. Every Remote LIVE Session — main AND child —
+   * carries a Host cwd that is not a Client path, so its branch is omitted
+   * rather than inferred; the sole Remote exception is Sessionless (no live
+   * Session), whose Client launch cwd IS a Client path and keeps its local
+   * branch (M3-5 PR1 §9.4). */
+
+  const deriveWorkspaceStatus = (cwd: string, branchAllowed: boolean): WorkspaceStatus => {
     const parts = cwd.split('/').filter(Boolean)
     const branch = branchAllowed ? gitBranch(cwd) : ''
     return {
@@ -854,8 +857,10 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
       : { plan: { effective: false } }
     // The display subject's workspace: the child SessionStatus' OWN cwd
     // (absent = '', never the parent's workspace). The local `gitBranch`
-    // derivation may speak only for a cwd on THIS process's filesystem — a
-    // Remote child's Host cwd is not one, so its branch is omitted.
+    // derivation may speak only for a cwd on THIS process's filesystem —
+    // every Remote LIVE Session (main AND child) carries a Host cwd that is
+    // not one, so its branch is omitted; only a Remote Sessionless surface's
+    // Client launch cwd keeps a local branch.
     const displayCwd = viewed === undefined ? liveCwd : (childStatus?.cwd ?? '')
     // The DISPLAY SUBJECT's unknown effective directory is stated in words
     // (plan §B2 UI: 不可用状态有文字) — for the child viewer too, whose slot
@@ -866,7 +871,15 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
         && (deps.liveAgent() !== undefined || deps.remote !== undefined)
         && deps.currentSessionId() !== undefined
       : childStatus?.cwd === undefined
-    const workspaceBase = deriveWorkspaceStatus(displayCwd, viewed === undefined || deps.remote === undefined)
+    // Direct and Remote-sessionless describe a directory on this Client.
+    // A Remote LIVE Session's cwd belongs to the Host and cannot authorize
+    // a read of this Client's .git/HEAD.
+    const liveBranchIsClientLocal = deps.remote === undefined
+      || deps.currentSessionId() === undefined
+    const displayBranchIsClientLocal = viewed === undefined
+      ? liveBranchIsClientLocal
+      : deps.remote === undefined
+    const workspaceBase = deriveWorkspaceStatus(displayCwd, displayBranchIsClientLocal)
     const workspace = cwdUnavailable ? { ...workspaceBase, cwdUnavailable: true } : workspaceBase
     // The Remote branch's event window is BOUNDED: its fold cannot count the
     // session's lifetime tokens, so the official `tokenUsage` projection (and
@@ -977,7 +990,11 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
         // footer cwd ITEM shortens for display itself); the legacy
         // display value (tail segments) is derived from it.
         cwd: liveCwd,
-        branch: gitBranch(liveCwd),
+        // The LIVE session owner's branch locality: a Remote LIVE Session
+        // never authorizes a Client `.git/HEAD` read of its Host cwd — output
+        // '' so the legacy merge / Extension sync CLEAR any old value rather
+        // than leaving it stale.
+        branch: liveBranchIsClientLocal ? gitBranch(liveCwd) : '',
         goal: goalText,
         turns: stats.turns,
         steps: stats.steps,

@@ -41,6 +41,7 @@ import { runOfficialWebComposition } from '../smoke/split-process/official-web-c
 import { runPtySessionWriteRecovery } from '../smoke/split-process/pty-session-write-recovery.mjs'
 import { runSessionlessHostFileF5B } from '../smoke/split-process/sessionless-host-file-f5b.mjs'
 import { runSessionlessDefaultModel } from '../smoke/split-process/sessionless-default-model.mjs'
+import { runRemoteGitBranchLocality } from '../smoke/split-process/remote-git-branch-locality.mjs'
 import { runSharedSessionInteractions } from '../smoke/split-process/shared-session-interactions.mjs'
 import { runHostRuntimeDisabled } from '../smoke/split-process/host-runtime-disabled.mjs'
 import { runHostUserShellF1 } from '../smoke/split-process/host-user-shell-f1.mjs'
@@ -190,6 +191,14 @@ const CASE_REGISTRY = Object.freeze([
     id: 'surface.sessionless-default-model',
     title: 'a real sessionless /model Save default persists the Host default, survives an independent Host restart and becomes the next Session fallback — with two Clients saving in real receive order',
     run: runSessionlessDefaultModel,
+  }),
+  Object.freeze({
+    suite: 'surface',
+    id: 'surface.remote-git-branch-locality',
+    title: 'a real split Client never presents its local Git HEAD as a live Host Session branch',
+    platforms: LINUX_DARWIN,
+    defaultLane: false,
+    run: runRemoteGitBranchLocality,
   }),
   Object.freeze({
     suite: 'multi-client',
