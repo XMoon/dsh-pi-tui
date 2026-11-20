@@ -577,6 +577,7 @@ test('a Settings workspace Confirm reaches the registered prompt section through
   // current Turn and the Focus assertions run inside a fresh one.
   turns.end()
   await commands.handler('display')({ rawInput: 'focus' })
+  // Bounded settle window: the /display commit must land before the frozen turn/start.
   await settle()
   turns.start()
   await waitForFrame(
@@ -594,6 +595,7 @@ test('a Settings workspace Confirm reaches the registered prompt section through
   // startup values, so the document mirror is not the authority here.)
   turns.end()
   await commands.handler('display')({ rawInput: 'full' })
+  // Bounded settle window: same display-commit before the frozen turn/start.
   await settle()
   turns.start()
   await waitForFrame(

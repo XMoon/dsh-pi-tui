@@ -674,10 +674,12 @@ export function applyRunnerWithRuntime(
         }),
         signal: lifecycleController.signal,
         // The Peer-lifetime revision scope: the Host stores one strictly
-        // increasing revision per authenticated Peer, and the Client Context
-        // outlives the qualification-only Surface replacement (which
-        // recreates the Runner/owner over the SAME Context and transport).
-        peerScope: ctx,
+        // increasing revision per authenticated Peer, and the Client
+        // CONNECTION root (passed through the mount seam) outlives the
+        // qualification-only Surface replacement — the runner's own plugin
+        // fiber is a FRESH object per Surface revision and would reset the
+        // counter into a `stale-revision` refusal.
+        peerScope: startupSettlement?.presencePeerScope ?? ctx,
         // The existing transport identity capture/compare pair: an ACK carried
         // by a superseded Connection generation or a replaced binding must
         // never confirm this Client's presence.

@@ -416,6 +416,15 @@ export interface RunnerStartupSettlement {
   surfaceReady(): void
   surfaceFailed(error: unknown): void
   /**
+   * M6 PR-C C3: the presence revision scope identity owned by the Client
+   * CONNECTION root (the client Context). The Host stores one strictly
+   * increasing revision per authenticated Peer, so the counter must SURVIVE
+   * the qualification-only Surface replacement — a fresh plugin fiber per
+   * revision is a fresh WeakMap key and would reset the counter into a
+   * `stale-revision` refusal. Absent on Direct (no presence owner exists).
+   */
+  presencePeerScope?: object
+  /**
    * M4 PR4: the split Client's ONE process-owned manual-reload request. It
    * returns the process preflight's synchronous decision; the caller
    * (the `/reload-client` command handler) has already made the Client-local
