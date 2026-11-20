@@ -20,11 +20,12 @@
  *      metadata, bootstraps/kickstarts the same plist, and produces H1 != H0
  *      with buildId=NEW while the user bytes stay intact; Session/credentials
  *      read back through the official product paths and one Host remains
- *   -> rollback fixture only: because the released pre-PR2 build cannot manage
- *      the PR2 stable-entry plist, the NEW service is explicitly uninstalled
- *      while the NEW build is installed before the OLD test payload is restored;
- *      the OLD build then installs and starts its own protected service. This is
- *      an internal fixture procedure, not a user downgrade requirement.
+ *   -> rollback fixture only: because the pre-PR2 development snapshot cannot
+ *      manage the PR2 stable-entry plist, the NEW service is explicitly
+ *      uninstalled while the NEW build is installed before the OLD test payload
+ *      is restored; the OLD build then installs and starts its own protected
+ *      service. This is an internal fixture procedure, not a user downgrade
+ *      requirement.
  *   -> `daemon uninstall` removes only the Profile plist.
  *
  * Strictly environment-gated: it runs only on a real non-root macOS account
