@@ -480,8 +480,10 @@ class RemoteConfigMirror {
   }
 
   /**
-   * Qualification-only deferral: when this narrow seam is set, an invalidation
-   * is HELD as a deferred fact instead of being applied. `readiness()` therefore
+   * Qualification-only deferral: when this narrow seam is set, EVERY
+   * invalidation source funnelled through this ONE entry (settings document,
+   * LLM adapters, permission presets, Connection generation) is HELD as a
+   * deferred fact instead of being applied. `readiness()` therefore
    * keeps reporting the last committed snapshot as ready and `read()` keeps its
    * value, while `describeFresh()` still forces a real authoritative describe.
    * This lets the real two-Client qualification prove that a fresh read — not a
@@ -503,10 +505,6 @@ class RemoteConfigMirror {
     this.scheduleRefresh()
   }
 
-  /** The qualification-only deferred invalidation count (0 in production). */
-  deferredInvalidationCount(): number {
-    return this.deferredInvalidations
-  }
 
   /**
    * The invalidation-triggered rerun. The promise is coalesced with any

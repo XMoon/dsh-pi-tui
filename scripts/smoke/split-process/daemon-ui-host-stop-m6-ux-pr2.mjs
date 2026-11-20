@@ -362,7 +362,10 @@ export async function runDaemonUiHostStopPath3(context) {
       `the production coordinator must record the fresh-read refusal; log tail=${JSON.stringify(clientLog.slice(-800))}`)
     assert(clientA.raw.includes('The daemon Host was not stopped by this action.'),
       `the hint must state the Host was not stopped; raw tail=${JSON.stringify(clientA.raw.slice(-500))}`)
-    trace('pr3.fresh-read-refused', { adminStops: 0 })
+    // "0 admin stops" is proven by the exit 0 + the hint + the unchanged
+    // kernel identity, not by this label: a real stop would kill the Host or
+    // return a non-zero/refused result.
+    trace('pr3.fresh-read-refused', { hostStillRunning: true })
 
     // ZERO admin stops: the old Host instance keeps its exact kernel identity.
     await assertHostIdentityKept(host, before, 'PR3 Host after the refused Stop')
