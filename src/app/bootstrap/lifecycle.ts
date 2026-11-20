@@ -324,10 +324,12 @@ export function createSurfaceLifecycle(deps: SurfaceLifecycleDeps): SurfaceLifec
       surface.whenRendererReleased(),
       whenRendererAcquired(),
     ]).then(() => undefined)
-    void release.then(
+    // The outcome slot only mirrors the published transaction, which every
+    // caller awaits; this observer never races or replaces it.
+    void release.then( // allowlist: mirror of the published transaction
       () => { rendererReleaseOutcome = 'released' },
       () => { rendererReleaseOutcome = 'failed' },
-    ) // allowlist: the outcome slot only mirrors the published transaction, which every caller awaits
+    )
     const composed = !batchFailed
       ? release
       : release.then(
