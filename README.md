@@ -130,7 +130,7 @@ dsh --profile pi-tui --continue            # 继续当前 Host Workspace 中最�
 
 ### Daemon（Linux / macOS，可选）
 
-使用 Daemon 的简明步骤、Client 退出与后台 Host 停止的区别，见 [Daemon 用户指南](docs/guides/daemon.md)；下文保留升级、回滚及 ACP 的详细说明。
+使用 Daemon 的简明步骤、Client 退出与后台 Host 停止的区别，见 [Daemon 用户指南](docs/guides/daemon.md)；下文保留升级及 ACP 的详细说明。
 
 候选版提供 Linux 与 macOS 本地 daemon 后端，**默认仍是 Direct**（进程内 TUI）。它不改变现有安装，只有显式选择后才生效：
 
@@ -148,19 +148,19 @@ dsh --profile pi-tui --continue            # 继续当前 Host Workspace 中最�
   dsh --profile pi-tui daemon uninstall
   ```
 
-**基础 Daemon 就是独立本地进程**：没有为本 Profile 显式安装服务定义时，公开的 daemon 冷启动直接启动独立 Host，不查询 user manager。Linux 上 `daemon install` 只为当前 Profile 创建/验证 systemd `--user` unit；macOS 上它只在 `~/Library/LaunchAgents` 创建/验证本 Profile 的用户级 LaunchAgent plist（`gui/<uid>` 域）。两者都不 start、不 enable、不重启现有 Host。macOS 的 LaunchAgent 默认 `RunAtLoad=false`、`KeepAlive=false`：显式安装不等于登录自启或崩溃自动重启；需要托管时用 `daemon start` 或一次显式 daemon 冷启动，停止走 `daemon stop`。`daemon uninstall` 只移除本 Profile 的服务定义；macOS 仅在 job 由该 plist 加载且进程身份由已认证 Host record 证明时 `bootout` 该 job，不停止独立 Host；没有该证明时运行中/启动中的 job 不会被 stop/restart/uninstall 猜测处理，只有 not-running 且无 PID 的定义可安全卸载。服务定义中的启动命令、环境与运行指令归用户和对应 manager 所有，产品不会改写用户内容；`daemon start` 只校验固定启动定义与已知触发项：程序/参数/工作目录/日志/环境/umask/`RunAtLoad`/`KeepAlive`/触发项被改动时拒绝启动并提示通过 launchctl 处理，注释与无害运行时键保留在磁盘上，绝不执行未知程序。`status` 是纯只读：无服务定义时不调用 manager；`systemd ActiveState=active` 或 `launchd state=running` 都不等于 Ready，Ready 仍以认证 Cookie、Host 身份回显和新鲜内核身份（Linux starttime / macOS schema 2）为准。`daemon logs` 在当前被证实的归属下读取 systemd journal、macOS 的两份 `launchd.stdout.log`/`launchd.stderr.log`（分别标明来源）或该 Profile 的 `host.log`；launchd job 卸载后（包括 plist 已移除但保留 launchd 日志时）没有可证明的当前来源，`daemon logs` 返回 `LOG_SOURCE_UNAVAILABLE`，不猜测保留的 launchd 日志或旧 `host.log`；只有这些 launchd 日志也不存在时才回退 `host.log`，需要时请直接读取保留文件。管理命令不会自动重启、停止或“抢救”Host。`stop`/`restart` 会中断当前 Session/Turn 的进行中工作，未结算写入不会自动重放；`install` 不会产生该中断。
+**基础 Daemon 就是独立本地进程**：没有为本 Profile 显式安装服务定义时，公开的 daemon 冷启动直接启动独立 Host，不查询 user manager。Linux 上 `daemon install` 只为当前 Profile 创建/验证 systemd `--user` unit；macOS 上它只在 `~/Library/LaunchAgents` 创建/验证本 Profile 的用户级 LaunchAgent plist（`gui/<uid>` 域）。两者都不 start、不 enable、不重启现有 Host。macOS 的 LaunchAgent 默认 `RunAtLoad=false`、`KeepAlive=false`：显式安装不等于登录自启或崩溃自动重启；需要托管时用 `daemon start` 或一次显式 daemon 冷启动，停止走 `daemon stop`。`daemon uninstall` 只移除本 Profile 的服务定义；macOS 仅在 job 由该 plist 加载且进程身份由已认证 Host record 证明时 `bootout` 该 job，不停止独立 Host；没有该证明时运行中/启动中的 job 不会被 stop/restart/uninstall 猜测处理，只有 not-running 且无 PID 的定义可安全卸载。服务定义中的启动命令、环境与运行指令归用户和对应 manager 所有，产品不会重绘用户内容；`daemon start`/`restart` 执行用户配置，仅在显式 start/restart 时对能证明由产品生成的旧启动字段做有界更新，注释、用户键与自定义参数保持不变。`status` 是纯只读：无服务定义时不调用 manager；`systemd ActiveState=active` 或 `launchd state=running` 都不等于 Ready，Ready 仍以认证 Cookie、Host 身份回显和新鲜内核身份（Linux starttime / macOS schema 2）为准。`daemon logs` 在当前被证实的归属下读取 systemd journal、macOS 的两份 `launchd.stdout.log`/`launchd.stderr.log`（分别标明来源）或该 Profile 的 `host.log`；launchd job 卸载后（包括 plist 已移除但保留 launchd 日志时）没有可证明的当前来源，`daemon logs` 返回 `LOG_SOURCE_UNAVAILABLE`，不猜测保留的 launchd 日志或旧 `host.log`；只有这些 launchd 日志也不存在时才回退 `host.log`，需要时请直接读取保留文件。管理命令不会自动重启、停止或“抢救”Host。`stop`/`restart` 会中断当前 Session/Turn 的进行中工作，未结算写入不会自动重放；`install` 不会产生该中断。
 
-**不同 install build 的显式升级（Linux systemd / macOS launchd；同一 DSH 运行时、同一 Profile）**：
+**同 DSH 运行时、同 Profile 的 PiTui 包更新**：包更新由官方插件命令负责，PiTui 不会因正常安装主动停止运行中的旧 Host：
 
-1. 结束所有进行中的 Turn，退出除管理命令外的 TUI Client，并备份 `DSH_HOME` 与 Profile（回滚与数据安全由用户负责）。
-2. `dsh --profile pi-tui daemon stop`，确认 `status` 为 `host=stopped` 且旧 Host 的 PID/内核身份已消失；不要跳过此步。
-3. **换包前**，用当前（拥有该 build 的）安装显式移除旧服务定义：`dsh --profile pi-tui daemon uninstall`。它只移除该 Profile 的 unit/plist，保留 symlink 源文件、drop-in、Profile 与数据；换包后新 build 不能移除旧 build 的服务定义（会以 exit 3 按冲突拒绝）。
-4. 用官方 Profile 命令换包，不要在 Host 运行中覆写安装：`dsh plugin --profile pi-tui -- add <新包路径或版本>`。
-5. 需要服务托管时先 `dsh --profile pi-tui daemon install` 安装新 build 的服务定义，再 `dsh --profile pi-tui daemon start`，等待新的认证 Ready Host 与新的 `instance`/PID；`status` 的 `compatibility` 应为 `compatible`。
+```sh
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@<version>
+```
 
-**回滚**（同一 DSH 运行时、同一 Profile）：① 保留新包/旧包与校验和，结束新 Host 上的 Turn；② `daemon stop` 并确认新 Host 已退出；③ **恢复旧包前**，用当前新安装显式 `daemon uninstall` 移除新 build 的服务定义（旧 build 同样不能删除新 build 的服务定义）；④ 用官方 Profile 命令恢复可信旧包；⑤ 需要服务托管时用旧 build `daemon install`，再 `daemon start`；确认旧 build 的 Ready Host 与 Session/凭据仍可读。回滚只承诺同一 DSH 运行时的包级恢复，不承诺跨 DSH 数据 schema 的原地降级；跨版本请使用独立备份目录并自行确认配对。
+兼容的新 Client 可以连接仍运行的旧 Host；需要采用新版 Host 静态代码时，显式执行 `dsh --profile pi-tui daemon restart`。`restart` 会中断当前 Host 的在途 Session/Turn/Job，等待旧 Host 的内核身份消失后才启动新 Host。Linux systemd unit / macOS LaunchAgent 中能证明由产品生成的旧启动字段只会在显式 start/restart 时有界更新，其余字节、注释和用户配置保持不变；用户自定义启动命令按原样执行，运行中的 Host 可能继续报告 `compatibility=other-build`。旧 build 元数据不要求先 `daemon uninstall` 才能 restart。
 
-自己编辑过 unit/symlink/drop-in（或 launchd plist）的用户：产品只保留这些字节，不会自动改写成新 build 的默认配置；如果旧启动命令、环境或 drop-in 让新 Host 无法认证，命令会如实失败，请按正常 systemd/launchd 操作自行修改。不要把本流程理解为零中断、自动回滚或任意数据原地降级。
+**不同 DSH 运行时 / 已发布的旧配对**：不要热升级。请先结束工作、退出旧 TUI/Host 并备份 Profile 与数据，再按发布说明与[兼容性指南](docs/guides/dsh-compatibility.md)安装受支持的 DSH/TUI 配对并冷启动；不承诺跨 DSH 数据 Schema 的原地降级。详细运维步骤见 [Daemon 用户指南](docs/guides/daemon.md)。
+
+自己编辑过 unit/symlink/drop-in（或 launchd plist）的用户：服务定义属于当前 Profile，这些内容归用户与对应 manager 所有，产品不会重绘用户文件，只在显式 start/restart 时对能证明由产品生成的旧启动字段做有界更新。如果旧启动命令、环境或 drop-in 让新 Host 无法认证，命令会如实失败，请按正常 systemd/launchd 操作自行修改。不要把更新流程理解为零中断、自动回滚或任意数据原地降级。
 
 ### 本地 ACP 客户端接入（Linux / macOS）
 

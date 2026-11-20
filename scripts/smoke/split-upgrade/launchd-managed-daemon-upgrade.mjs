@@ -4,8 +4,9 @@
  *
  * Two genuinely built packages of the SAME profile and DSH runtime are
  * installed in turn through the official `dsh plugin --profile ...` command.
- * Every Host transition goes through the EXISTING public `daemon` verbs; the
- * scene proves the user-controlled runbook and the failure boundaries:
+ * Every Host transition goes through the existing public `daemon` verbs; the
+ * scene proves the real new-Host adoption, Session/credential continuity and
+ * user-setting preservation:
  *
  *   OLD installed -> `daemon install` -> `daemon start` -> real authenticated
  *   H0 supervised by the user `gui/<uid>` LaunchAgent (plist PID == Host PID)
@@ -19,8 +20,11 @@
  *      metadata, bootstraps/kickstarts the same plist, and produces H1 != H0
  *      with buildId=NEW while the user bytes stay intact; Session/credentials
  *      read back through the official product paths and one Host remains
- *   -> official OLD reinstall does NOT restart H1; explicit `daemon restart`
- *      produces H2 buildId=OLD with user config and Session/cookie authority
+ *   -> rollback fixture only: because the released pre-PR2 build cannot manage
+ *      the PR2 stable-entry plist, the NEW service is explicitly uninstalled
+ *      while the NEW build is installed before the OLD test payload is restored;
+ *      the OLD build then installs and starts its own protected service. This is
+ *      an internal fixture procedure, not a user downgrade requirement.
  *   -> `daemon uninstall` removes only the Profile plist.
  *
  * Strictly environment-gated: it runs only on a real non-root macOS account

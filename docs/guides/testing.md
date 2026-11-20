@@ -428,7 +428,8 @@ PASS. WC-12 stays `DEFERRED_WITH_OWNER`; a PASS of the Browser/TUI subset does
 not claim the deferred real Tern GUI half.
 
 The Upgrade lane has its own strict selector over two genuinely different
-packaged builds pinned to the same exact DSH runtime:
+packaged builds pinned to the same exact DSH runtime (internal qualification
+samples, not a supported historical user release):
 
 ```sh
 pnpm smoke:split-upgrade -- --old <old.tgz> --new <new.tgz>   # complete U01-U09
@@ -437,23 +438,44 @@ pnpm smoke:split-upgrade -- --old <old.tgz> --new <new.tgz> --suite client-reloa
 pnpm smoke:split-upgrade -- --old <old.tgz> --new <new.tgz> --case upgrade.cross-build-compatibility
 ```
 
+The DEFAULT form is the complete U01-U09 qualification: it runs every
+default-lane registered case and emits only actual case results. Two OS native
+cases are selectable-only and never join the default lane —
+`managed-daemon.cross-build-upgrade-rollback` requires a real isolated Linux
+systemd user manager, and `launchd-managed-daemon.cross-build-upgrade` requires
+a real macOS `gui/<uid>` LaunchAgent. Run either explicitly:
+
+```sh
+pnpm smoke:split-upgrade -- --old <old.tgz> --new <new.tgz> \
+  --case managed-daemon.cross-build-upgrade-rollback
+pnpm smoke:split-upgrade -- --old <old.tgz> --new <new.tgz> \
+  --case launchd-managed-daemon.cross-build-upgrade
+```
+
+Both artifacts in every upgrade case are internal qualification packages built
+from this repository or the candidate under test, not a supported historical
+user release; the lane does not promise user upgrade or rollback compatibility
+with early unpublished development snapshots.
+
 `--list` prints `SPLIT_UPGRADE_SELECTABLE_CASES scope=SELECTABLE_ONLY` followed
 by one `suite=<suite> case=<id> title=<title>` line per registry entry in
-execution order (including the opt-in native
-`managed-daemon.cross-build-upgrade-rollback` case), without reading a tarball,
+execution order (including both opt-in native cases:
+`managed-daemon.cross-build-upgrade-rollback` and
+`launchd-managed-daemon.cross-build-upgrade`), without reading a tarball,
 creating a work root or installing DSH. `--case` and `--suite` run only the
 registered cases of that id/suite in their own work root and print one
 `SPLIT_UPGRADE_SELECTED_PASS id=<id> scope=SELECTABLE_ONLY` per executed case;
 their stdout and `--evidence` document are the partial `scope: SELECTABLE_ONLY`
-JSON carrying `selectedCases` and only the executed cases' facts. The opt-in
+JSON carrying `selectedCases` and only the executed cases' facts. Each opt-in
 native case only earns that line with a real
-`{status: PASS, scope: REAL_SYSTEMD_USER_L6}` verdict: a missing isolated
-systemd user-manager environment returns an honest `NOT_VERIFIED`, prints
-`SPLIT_UPGRADE_SELECTED_NOT_VERIFIED` instead and makes the lane exit nonzero.
-A selected run never emits `SPLIT_UPGRADE_SMOKE_PASS (cross-build-compatible)`,
+`{status: PASS, scope: REAL_SYSTEMD_USER_L6}` or
+`{status: PASS, scope: REAL_MACOS_GUI_L6}` verdict: a missing isolated systemd
+user-manager or macOS GUI launchd environment returns an honest `NOT_VERIFIED`,
+prints `SPLIT_UPGRADE_SELECTED_NOT_VERIFIED` instead and makes the lane exit
+nonzero. A selected run never emits `SPLIT_UPGRADE_SMOKE_PASS (cross-build-compatible)`,
 `status: PASS` or `verdict: cross-build-compatible`. Only the complete form (no
-selector) runs all three DEFAULT-lane registered cases; the opt-in native case
-never joins it, and the complete form may emit the historical full marker and
+selector) runs all three DEFAULT-lane registered cases; the opt-in native cases
+never join it, and the complete form may emit the historical full marker and
 `status: PASS`/`verdict: cross-build-compatible`. Unknown, repeated or combined
 selectors, a missing `--old`/`--new`, and a same-path, same-SHA or differently
 pinned pairing all fail closed before any work root, profile or DSH installation

@@ -12,10 +12,10 @@
  * a selector only runs the registered cases below and never claims the complete
  * cross-build compatibility.
  *
- * One opt-in native case lives in the same frozen registry with
+ * Two opt-in native cases live in the same frozen registry with
  * `defaultLane: false`: the full lane keeps its historical U01-U09 meaning, and
  * only an explicit `--case`/`--suite` selection can run the real-OS systemd
- * user-manager upgrade/rollback proof.
+ * user-manager or macOS LaunchAgent upgrade/rollback proof.
  *
  * @module split-upgrade-selection
  */
@@ -35,9 +35,10 @@ const SELECTABLE_SCOPE = 'SELECTABLE_ONLY'
  *
  * The order IS the execution order a suite or the full lane follows: the
  * cross-build case keeps the old Host/Turn together, then the two independent
- * Client-reload cases run in their own isolated profiles. The opt-in native
- * case is registered last: it never runs in the default lane and needs its own
- * real systemd user-manager environment.
+ * Client-reload cases run in their own isolated profiles. The two opt-in native
+ * cases are registered last: they never run in the default lane and each needs
+ * its own real OS manager environment (systemd user manager / macOS GUI
+ * launchd).
  */
 const CASE_REGISTRY = Object.freeze([
   Object.freeze({
@@ -61,7 +62,7 @@ const CASE_REGISTRY = Object.freeze([
   Object.freeze({
     suite: 'managed-daemon',
     id: 'managed-daemon.cross-build-upgrade-rollback',
-    title: 'two packed builds of one profile move old-to-new-to-old through the public daemon verbs, refusing a foreign install build before any stop',
+    title: 'the same-Profile systemd user service adopts the updated install through an explicit daemon restart and returns to the old test payload',
     defaultLane: false,
     nativeScope: 'REAL_SYSTEMD_USER_L6',
     run: runManagedDaemonUpgrade,
