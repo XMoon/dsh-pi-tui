@@ -23,7 +23,7 @@
  * @module @xmoon76/dsh-pi-tui/app/config/legacy-settings-migration
  */
 
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { resolveDisplayPreset, type PersistedDisplayInput } from '../../domain/display/preset.ts'
@@ -109,6 +109,30 @@ export async function readLegacyDocument(home: string): Promise<string | undefin
   if (existsSync(imported)) {
     try {
       return await readFile(imported, 'utf8')
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+    }
+  }
+  return undefined
+}
+
+/** Synchronous variant for a startup barrier that must decide whether any
+ * legacy value survives before it may continue without a write surface. Same
+ * read contract as {@link readLegacyDocument}: live file first, `.imported`
+ * backup second, ENOENT means absent, every other error propagates. */
+export function readLegacyDocumentSync(home: string): string | undefined {
+  const live = join(home, 'settings.yaml')
+  if (existsSync(live)) {
+    try {
+      return readFileSync(live, 'utf8')
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+    }
+  }
+  const imported = `${live}.imported`
+  if (existsSync(imported)) {
+    try {
+      return readFileSync(imported, 'utf8')
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
     }

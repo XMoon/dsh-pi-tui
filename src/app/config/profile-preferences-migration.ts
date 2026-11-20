@@ -37,6 +37,7 @@ import {
   legacyPresetDefault,
   legacySection,
   readLegacyDocument,
+  readLegacyDocumentSync,
   type LegacyPresetResolver,
   type MigrationDiagLike,
 } from './legacy-settings-migration.ts'
@@ -220,7 +221,7 @@ interface MigrationPlan {
  * a no-op composition may continue on canonical defaults, but any surviving
  * legacy value must fail the startup barrier instead of being silently lost.
  */
-async function legacyPreferencesPresent(input: ProfilePreferencesMigrationInput): Promise<boolean> {
+function legacyPreferencesPresent(input: ProfilePreferencesMigrationInput): boolean {
   let profileText = ''
   try {
     profileText = readFileSync(input.patchPath, 'utf8')
@@ -232,7 +233,7 @@ async function legacyPreferencesPresent(input: ProfilePreferencesMigrationInput)
     const section = sources.get(id)
     if (section !== undefined && Object.keys(section).length > 0) return true
   }
-  const legacyText = await readLegacyDocument(input.home)
+  const legacyText = readLegacyDocumentSync(input.home)
   if (legacyText === undefined) return false
   let document: unknown
   try {
@@ -261,7 +262,7 @@ export async function migrateProfileTuiPreferences(
   const { forms, configEditor, diag } = input
   if (forms === undefined || configEditor === undefined) {
     const reason = forms === undefined ? 'settings service unavailable' : 'config editor unavailable'
-    if (await legacyPreferencesPresent(input)) {
+    if (legacyPreferencesPresent(input)) {
       throw new TuiPreferencesMigrationError(
         'TUI_PREFERENCES_MIGRATION_UNAVAILABLE',
         `cannot migrate legacy TUI preferences: ${reason}; refusing to start with defaults`,
@@ -279,7 +280,7 @@ export async function migrateProfileTuiPreferences(
   const entry = configEditor.entries().find(candidate => candidate.options.id === TUI_PREFERENCES_NAMESPACE)
   if (entry === undefined) {
     const reason = `no "${TUI_PREFERENCES_NAMESPACE}" Loader entry in this composition`
-    if (await legacyPreferencesPresent(input)) {
+    if (legacyPreferencesPresent(input)) {
       throw new TuiPreferencesMigrationError(
         'TUI_PREFERENCES_MIGRATION_UNAVAILABLE',
         `cannot migrate legacy TUI preferences: ${reason}; refusing to start with defaults`,
