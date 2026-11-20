@@ -213,8 +213,8 @@ export async function runDaemonUiHostStop(context) {
     await closeSettings(clientA2, 'PR2 A2')
     await saveBackend(clientA2, 'Direct', 'PR2 A2')
     await closeSettings(clientA2, 'PR2 A2')
-    await exitStop(clientA2, 'PR2 A2')
-    trace('pr2.stop-exit', { exitCode: 0 })
+    const stopExit = await exitStop(clientA2, 'PR2 A2')
+    trace('pr2.stop-exit', { exitCode: stopExit.code })
 
     // The old Host is verified gone; the sibling Client lost that instance.
     await waitForCondition(async () => {
