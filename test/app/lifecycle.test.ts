@@ -1339,6 +1339,50 @@ test('exit intent: a Stop while a user shell runs never claims the shell stopped
   assert.deepEqual(h.commits, [{ workStopped: false }], 'the Agent idle proof does not prove the shell finished')
 })
 
+test('exit intent: a shell reminder on Stop-Unconfirmed keeps the safe option set', async () => {
+  const h = exitIntentHarness({ backend: 'daemon', activity: 'working' })
+  h.state.shell = true
+  h.state.stop = async () => ({ kind: 'unconfirmed', detail: 'the cancel was rejected' })
+  h.coordinator.request('slash')
+  h.current()!.select('stop-and-disconnect')
+  await new Promise<void>(resolve => setImmediate(resolve))
+  await new Promise<void>(resolve => setImmediate(resolve))
+  const unconfirmed = h.current()
+  assert.equal(unconfirmed?.phase, 'unconfirmed')
+  assert.equal(unconfirmed?.shellRunning, true, 'the unconfirmed seat carries the shell reminder')
+  assert.ok(unconfirmed?.body.some(paragraph => paragraph.includes('user shell')))
+  assert.deepEqual(unconfirmed?.options.map(option => option.id), ['disconnect-without-stop', 'stay'])
+  assert.equal(unconfirmed?.status, 'the cancel was rejected')
+  // The safe Disconnect detaches once and never re-opens a second Stop.
+  unconfirmed!.select('disconnect-without-stop')
+  assert.deepEqual(h.commits, [{ workStopped: false }])
+  assert.equal(h.stopCalls.length, 1, 'no second Agent cancel')
+})
+
+test('exit intent: a shell that starts after the Stop refreshes Unconfirmed, never Busy', async () => {
+  const h = exitIntentHarness({ backend: 'daemon', activity: 'working' })
+  h.state.stop = async () => ({ kind: 'unconfirmed', detail: 'the wait was aborted' })
+  h.coordinator.request('slash')
+  h.current()!.select('stop-and-disconnect')
+  await new Promise<void>(resolve => setImmediate(resolve))
+  await new Promise<void>(resolve => setImmediate(resolve))
+  assert.equal(h.current()?.phase, 'unconfirmed')
+  assert.equal(h.current()?.shellRunning, false)
+  // The shell starts AFTER the Stop request (the late ensureSession boundary).
+  h.state.shell = true
+  h.current()!.select('disconnect-without-stop')
+  assert.deepEqual(h.commits, [], 'the un-warned confirmation refreshes instead of committing')
+  assert.equal(h.stopCalls.length, 1, 'the refresh never re-offers a second cancel')
+  const refreshed = h.current()
+  assert.equal(refreshed?.phase, 'unconfirmed', 'the refusal facts are never replaced by a Busy choice')
+  assert.equal(refreshed?.shellRunning, true)
+  assert.equal(refreshed?.status, 'the wait was aborted', 'the refusal detail is preserved')
+  assert.deepEqual(refreshed?.options.map(option => option.id), ['disconnect-without-stop', 'stay'])
+  refreshed!.select('disconnect-without-stop')
+  assert.deepEqual(h.commits, [{ workStopped: false }])
+  assert.equal(h.stopCalls.length, 1)
+})
+
 test('exit intent: a committed session switch retires the open choice with zero action', () => {
   const h = exitIntentHarness({ backend: 'daemon', activity: 'working' })
   h.coordinator.request('slash')

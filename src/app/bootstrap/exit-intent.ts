@@ -230,7 +230,7 @@ export function createExitIntentCoordinator(deps: ExitIntentCoordinatorDeps): Ex
   /** Show the same-seat unconfirmed state; never a stopped claim. */
   const settleUnconfirmed = (detail: string): void => {
     if (disposed) return
-    open = exitChoiceUnconfirmed(detail, select, dismiss)
+    open = exitChoiceUnconfirmed(detail, select, dismiss, deps.facts.capture().shellRunning)
     presenter()?.update(open)
   }
 
@@ -275,8 +275,16 @@ export function createExitIntentCoordinator(deps: ExitIntentCoordinatorDeps): Ex
     // this choice opened (`ensureSession().then(shell.run)` in the submission
     // controller). The exit options are preserved (Owner decision), but the
     // user must SEE the shell reminder before acting: an un-warned confirmation
-    // refreshes the SAME family with the reminder instead of committing.
+    // refreshes the SAME phase with the reminder instead of committing. The
+    // refresh never leaves the current phase: an Unconfirmed seat keeps its
+    // refusal facts and its safe option set, and is never rebuilt into a Busy
+    // choice that re-offers a second Stop.
     if (facts.shellRunning && model.shellRunning !== true) {
+      if (model.phase === 'unconfirmed') {
+        open = exitChoiceUnconfirmed(model.status, select, dismiss, true)
+        presenter()?.update(open)
+        return
+      }
       openChoice(identity.kind, facts, backend)
       return
     }

@@ -74,7 +74,10 @@ confirmed. The daemon may still be working.` state with Keep/Stay, are never
 retried automatically and never auto-detach. If the captured owner becomes idle
 before confirmation, no cancel is sent and the exit proceeds on the same
 identity. While the wait is in flight the same seat shows the Stopping state and
-accepts no second selection.
+accepts no second selection. A running-user-shell reminder can appear on this
+Unconfirmed seat too, but it never rebuilds the seat into a Busy choice: the
+refusal facts and the safe option set stay, and the one safe detach performs
+exactly one final commit.
 
 **Every action must be really actable.** The choice is size-aware: an option is
 keyboard- and pointer-actable only while its complete label is painted AND the

@@ -207,14 +207,22 @@ export function exitChoiceUnconfirmed(
   detail: string | undefined,
   select: (option: ExitChoiceOption) => void,
   dismiss: () => void,
+  shellRunning = false,
 ): ExitChoiceModel {
   return {
     kind: 'daemon-busy',
     phase: 'unconfirmed',
     title: exitChoiceTitle('daemon-busy'),
-    body: ['Stop could not be confirmed. The daemon may still be working.'],
-    shortBody: 'Stop could not be confirmed.',
-    shellRunning: false,
+    body: shellRunning
+      ? [
+        'Stop could not be confirmed. The daemon may still be working.',
+        'A user shell is still running; leaving aborts it. Agent idle does not prove the shell finished.',
+      ]
+      : ['Stop could not be confirmed. The daemon may still be working.'],
+    shortBody: shellRunning
+      ? 'Stop could not be confirmed; a user shell is running.'
+      : 'Stop could not be confirmed.',
+    shellRunning,
     status: detail,
     options: viewOptions(['disconnect-without-stop', 'stay']),
     focus: 'disconnect-without-stop',
