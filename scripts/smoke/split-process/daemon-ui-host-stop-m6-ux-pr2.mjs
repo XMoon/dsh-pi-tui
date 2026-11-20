@@ -57,12 +57,17 @@ function recordedHostProcess(identity) {
 async function waitHostProcessGone(recorded, label, timeoutMs = 60_000) {
   const started = Date.now()
   for (;;) {
-    const current = readStartIdentity(recorded.pid)
-    if (!alive(recorded.pid) || current === undefined || current !== recorded.starttime) {
+    const running = alive(recorded.pid)
+    const current = running ? readStartIdentity(recorded.pid) : undefined
+    // Gone = the recorded PID no longer exists, or it now belongs to a process
+    // with a DIFFERENT kernel starttime (PID reuse). A live PID whose starttime
+    // cannot be read is UNKNOWN: `undefined` must never be read as gone.
+    if (!running || (current !== undefined && current !== recorded.starttime)) {
       return { pid: recorded.pid, starttime: recorded.starttime, observed: current ?? null }
     }
     assert(Date.now() - started < timeoutMs,
-      `${label}: the recorded Host process is still alive (pid=${String(recorded.pid)} starttime=${String(current)})`)
+      `${label}: the recorded Host process is still alive or its kernel identity is unreadable `
+      + `(pid=${String(recorded.pid)} starttime=${String(current ?? 'unreadable')})`)
     await sleep(100)
   }
 }
