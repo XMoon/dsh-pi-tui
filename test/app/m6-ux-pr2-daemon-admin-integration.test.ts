@@ -43,19 +43,23 @@ const recorded = (code: number): DaemonControlResult => ({ code, stdout: '', std
 // ── the port is a pure profile-bound wrapper ────────────────────────────────
 
 test('the port forwards each authorized verb to the bound run seam with the SAME identity', async () => {
-  const calls: Array<{ verb: ProfileDaemonAdminVerb; profile: DaemonControlProfile }> = []
-  const admin = createProfileDaemonAdmin(PROFILE_A, {
-    run: async (verb) => {
-      calls.push({ verb, profile: PROFILE_A })
-      return recorded(0)
-    },
-  })
-  assert.equal(admin.profile, 'profile-a')
-  const install = await admin.run('install')
-  const stop = await admin.run('stop')
-  assert.deepEqual(calls.map(call => call.verb), ['install', 'stop'])
-  assert.ok(calls.every(call => call.profile === PROFILE_A), 'every call is bound to the captured Profile')
-  assert.deepEqual([install.code, stop.code], [0, 0], 'the existing result is forwarded unchanged')
+  const calls: Array<{ verb: ProfileDaemonAdminVerb; boundProfile: string }> = []
+  // ONE run seam shared by two ports proves the binding is per-port, not a
+  // global: each port reports its OWN captured identity.
+  const run = async (verb: ProfileDaemonAdminVerb, admin: { readonly profile: string }): Promise<DaemonControlResult> => {
+    calls.push({ verb, boundProfile: admin.profile })
+    return recorded(0)
+  }
+  const adminA = createProfileDaemonAdmin(PROFILE_A, { run: verb => run(verb, adminA) })
+  const adminB = createProfileDaemonAdmin(PROFILE_B, { run: verb => run(verb, adminB) })
+  assert.equal(adminA.profile, 'profile-a')
+  assert.equal(adminB.profile, 'profile-b')
+  assert.deepEqual(await adminA.run('install'), recorded(0))
+  assert.deepEqual(await adminB.run('stop'), recorded(0))
+  assert.deepEqual(calls, [
+    { verb: 'install', boundProfile: 'profile-a' },
+    { verb: 'stop', boundProfile: 'profile-b' },
+  ], 'each port drives only its own bound Profile identity')
 })
 
 test('the port never mutates the captured Profile and exposes no extra verbs', () => {

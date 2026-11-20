@@ -1936,8 +1936,9 @@ test('PR2: the detach hint replaces the not-stopped line only for a verified sto
     workStopped: false,
     hostStop: { confirmed: false, detail: 'IDENTITY_OR_OWNERSHIP_REFUSED: the unit is foreign' },
   })
-  assert.match(refused, /The daemon Host was not stopped by this action\./u)
   assert.match(refused, /Daemon Host stop was not confirmed: IDENTITY_OR_OWNERSHIP_REFUSED/u)
+  assert.doesNotMatch(refused, /The daemon Host was not stopped by this action\./u,
+    'an unconfirmed stop is NOT proven "not stopped": only the truthful wording')
 
   const ordinary = formatDaemonDetachHint({ profile: 'pi-tui', sessionId: 'session-a', workStopped: false })
   assert.match(ordinary, /The daemon Host was not stopped by this action\./u)

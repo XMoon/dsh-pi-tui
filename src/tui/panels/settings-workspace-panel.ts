@@ -800,6 +800,9 @@ interface DetailProjection {
   readonly optionRegion?: DetailRegionProjection
   /** Whether this frame paints the selected candidate's identity-bearing head. */
   readonly confirmCandidateVisible: boolean
+  /** Whether THIS frame really paints BOTH actable follow-up candidate rows
+   *  inside the granted viewport (never a clipped/off-screen action). */
+  readonly serviceInstallActionsVisible: boolean
 }
 
 /** The TEN category ids that always exist, in their visible order. `extensions`
@@ -2866,6 +2869,7 @@ export class SettingsWorkspacePanel implements Component {
       const detail = this.detailLines(pane.width, contentRows)
       detailProjection = detail
       this.paintedChoiceCandidateVisible = detail.confirmCandidateVisible
+      this.paintedServiceInstallActions = detail.serviceInstallActionsVisible
       const buttonRow = contentTop + Math.max(0, contentRows - 1)
       for (const painted of detail.buttons) {
         itemHits.push({
@@ -2986,6 +2990,7 @@ export class SettingsWorkspacePanel implements Component {
     }
     const detail = this.detailLines(width, viewport)
     this.paintedChoiceCandidateVisible = detail.confirmCandidateVisible
+    this.paintedServiceInstallActions = detail.serviceInstallActionsVisible
     panes.detail = {
       x: 0,
       width,
@@ -3144,6 +3149,15 @@ export class SettingsWorkspacePanel implements Component {
     this.detailOffset = offset
     const lines: string[] = []
     for (let i = 0; i < scrollViewport; i += 1) lines.push(content[offset + i] ?? '')
+    // M6 UX PR2: the follow-up's actable rows earn their painted grant ONLY
+    // when THIS frame's granted viewport really shows BOTH of them — a clipped
+    // or scrolled-away row never lets Tab/Enter commit an install.
+    let serviceInstallActionsVisible = false
+    if (this.serviceInstall !== undefined && this.serviceInstall.installable && this.serviceInstall.phase === 'asking') {
+      const stripped = lines.map(line => line.replace(/\x1b\[[0-9;]*m/gu, ''))
+      serviceInstallActionsVisible = stripped.some(line => /\bNot now\b/u.test(line))
+        && stripped.some(line => /\bInstall service\b/u.test(line))
+    }
     const painted = pinned === 1 ? this.layoutButtons(width, buttons) : { text: '', painted: [] }
     if (pinned === 1) {
       // The note rides beside the painted buttons when it fits WHOLE, and keeps
@@ -3153,7 +3167,15 @@ export class SettingsWorkspacePanel implements Component {
       const decorated = painted.text === '' ? noteInk : noteInk === '' ? painted.text : `${painted.text}  ${noteInk}`
       lines.push(fit(visibleWidth(decorated) <= width ? decorated : painted.text, width))
     }
-    return { lines, content, viewport: scrollViewport, buttons: painted.painted, optionRows: [], confirmCandidateVisible: false }
+    return {
+      lines,
+      content,
+      viewport: scrollViewport,
+      buttons: painted.painted,
+      optionRows: [],
+      confirmCandidateVisible: false,
+      serviceInstallActionsVisible,
+    }
   }
 
   /** Compose facts, optional heading, candidate viewport and pinned buttons.
@@ -3258,6 +3280,7 @@ export class SettingsWorkspacePanel implements Component {
         },
       }),
       confirmCandidateVisible,
+      serviceInstallActionsVisible: false,
     }
   }
 
@@ -3597,9 +3620,9 @@ export class SettingsWorkspacePanel implements Component {
             lines.push(`  ${color.text(label)}`)
           }
         }
-        // THIS frame really painted both actable actions: only now may the
-        // keyboard commit one (the pointer grant is the button row's own).
-        this.paintedServiceInstallActions = true
+        // The painted grant is NOT set here: this is only the content
+        // projection, before the viewport clip. The grant is set by
+        // `detailLines` only when both rows really land on screen.
       }
     }
     return lines
@@ -6147,10 +6170,15 @@ export class SettingsWorkspacePanel implements Component {
         this.leaveDetailTo('rows')
         return
       case 'service-install':
-        // The painted button IS the single explicit confirmation. The id must
-        // still be the row this frame selected (a newer row has already
-        // withdrawn the follow-up).
-        if (this.serviceInstall !== undefined && target.id === 'startup-backend') {
+        // The painted button IS the single explicit confirmation, but the
+        // follow-up's risk copy must be on screen too: the same painted grant
+        // the keyboard uses gates the pointer, so a clipped/hidden block can
+        // never be confirmed blindly. The id must still be the row this frame
+        // selected (a newer row has already withdrawn the follow-up).
+        if (this.serviceInstall !== undefined && target.id === 'startup-backend'
+          && this.paintedServiceInstallActions
+          && this.lastRenderWidth === this.intents.columns()
+          && this.lastRenderRows === this.intents.rows()) {
           this.takeColumnFocus('detail')
           this.beginServiceInstall()
         }

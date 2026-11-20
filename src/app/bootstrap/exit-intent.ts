@@ -352,6 +352,16 @@ export function createExitIntentCoordinator(deps: ExitIntentCoordinatorDeps): Ex
       return
     }
     if (option === 'stop-host-and-exit') {
+      // The verdict is only valid while the LIVE Profile facts still prove the
+      // daemon→direct transition. A revert by another Client, a stale/unknown
+      // configuration or a Direct re-read must NOT execute the Host stop: the
+      // exit degrades to the ordinary detach (plan §3.3 — never treat unknown
+      // as verified).
+      if (!identityCurrent(identity) || !deps.facts.hostStopEligible()) {
+        safeDiag('info', 'host stop declined: the transition intent is no longer current')
+        commitAfterClose(identity, pendingHostStopWorkStopped, epoch)
+        return
+      }
       commitAfterClose(identity, pendingHostStopWorkStopped, epoch, true)
       return
     }

@@ -495,16 +495,23 @@ export function applyRunnerWithRuntime(
       } | undefined
       if (profileContext?.name !== undefined && profileContext.dir !== undefined
         && profileContext.home !== undefined && profileContext.installAnchor !== undefined) {
-        const adminProfile = resolveDirectDaemonAdminProfile({
-          name: profileContext.name,
-          dir: profileContext.dir,
-          home: profileContext.home,
-          installAnchor: profileContext.installAnchor,
-        })
-        if (adminProfile !== undefined) {
-          profileDaemonAdmin = createProfileDaemonAdmin(adminProfile, {
-            run: profileDaemonAdminRun(adminProfile),
+        // A failure to PROVE the installed bundle is a capability refusal, not
+        // a startup failure: the TUI must still launch and simply offer no
+        // install/stop action (fail closed, never a guessed identity).
+        try {
+          const adminProfile = resolveDirectDaemonAdminProfile({
+            name: profileContext.name,
+            dir: profileContext.dir,
+            home: profileContext.home,
+            installAnchor: profileContext.installAnchor,
           })
+          if (adminProfile !== undefined) {
+            profileDaemonAdmin = createProfileDaemonAdmin(adminProfile, {
+              run: profileDaemonAdminRun(adminProfile),
+            })
+          }
+        } catch (error) {
+          diag.info('daemon admin capability unavailable', { error: safeErrorMessage(error) })
         }
       }
     }
@@ -3445,16 +3452,22 @@ export function applyRunnerWithRuntime(
       // process-local admin port the Settings follow-up uses. It runs ONLY for
       // a confirmed verdict, after the terminal restore; the control plane's
       // own pre/post proof is the ONLY success source, and the result feeds
-      // both the truthful hint and the exit code.
+      // both the truthful hint and the exit code. A thrown call still records
+      // the truthful "not confirmed" state so the hint never claims a stop.
       ...(profileDaemonAdmin === undefined
         ? {}
         : {
             adminStop: async () => {
-              const result = await profileDaemonAdmin!.run('stop')
-              exitHostStop = result.code === 0
-                ? { confirmed: true }
-                : { confirmed: false, detail: adminStopRefusalDetail(result) }
-              return result
+              try {
+                const result = await profileDaemonAdmin!.run('stop')
+                exitHostStop = result.code === 0
+                  ? { confirmed: true }
+                  : { confirmed: false, detail: adminStopRefusalDetail(result) }
+                return result
+              } catch (error) {
+                exitHostStop = { confirmed: false, detail: 'the management call failed before the control plane reported a result' }
+                throw error
+              }
             },
           }),
     })

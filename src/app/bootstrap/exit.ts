@@ -59,10 +59,11 @@ export function formatDaemonDetachHint(facts: {
     'Disconnected from dsh-pi-tui (daemon client).',
     ...(facts.hostStop?.confirmed === true
       ? ['Daemon Host stopped for this Profile.']
-      : ['The daemon Host was not stopped by this action.']),
-    ...(facts.hostStop?.confirmed === false && facts.hostStop.detail !== undefined
-      ? [`Daemon Host stop was not confirmed: ${facts.hostStop.detail}`]
-      : []),
+      : facts.hostStop?.confirmed === false
+        // An unconfirmed stop (refusal/timeout/unknown) is NOT a proven
+        // "not stopped": say exactly that, and never the ordinary detach line.
+        ? [`Daemon Host stop was not confirmed${facts.hostStop.detail === undefined ? '' : `: ${facts.hostStop.detail}`}`]
+        : ['The daemon Host was not stopped by this action.']),
     ...(facts.workStopped ? ['Current work: stopped.'] : []),
   ]
   const sessionId = facts.sessionId.trim()
