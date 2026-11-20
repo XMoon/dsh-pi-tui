@@ -5136,6 +5136,14 @@ export function applyRunnerWithRuntime(
         }
       }
     }
+    // M6 compatible-cross-build UX: ONE non-blocking info notice on the
+    // INITIAL physical Surface mount of a Client that authenticated a Host
+    // with a different PiTui build. It runs BEFORE every startup notice path
+    // below — including the CLI Session Browser admission — so any real
+    // startup error/notice replaces it in the PiTui single notify slot.
+    if (compatibleOtherBuild && startupSettlement?.authenticatedBuilds?.initialSurface === true) {
+      surface.display.notify(COMPATIBLE_OTHER_BUILD_NOTICE, 'info')
+    }
     // CLI startup Browser: the ONE admission AFTER `command.register(...)` and
     // BEFORE the first `bindRendererInput()`. The request is consumed exactly
     // once; the opener resolves on presenter/lease admission, never on the
@@ -5154,14 +5162,6 @@ export function applyRunnerWithRuntime(
       if (refusal !== undefined && refusal !== '') {
         surface.display.notify(`session browser unavailable: ${refusal}`, 'error')
       }
-    }
-    // M6 compatible-cross-build UX: ONE non-blocking info notice on the
-    // INITIAL physical Surface mount of a Client that authenticated a Host
-    // with a different PiTui build. It runs BEFORE the ordinary startup
-    // notices below, so a real launch/resume failure keeps its priority (the
-    // PiTui notify line is replaced by the later error).
-    if (compatibleOtherBuild && startupSettlement?.authenticatedBuilds?.initialSurface === true) {
-      surface.display.notify(COMPATIBLE_OTHER_BUILD_NOTICE, 'info')
     }
     if (surfaceNotice !== undefined) {
       surface.display.notify(surfaceNotice, 'error')

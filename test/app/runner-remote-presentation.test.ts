@@ -3984,3 +3984,41 @@ test('M6 compatible cross-build: a real startup resume failure keeps priority ov
     await fixture.dispose()
   }
 })
+
+test('M6 compatible cross-build: a startup Session Browser refusal keeps priority over the info notice', async (t) => {
+  const life = testLifecycle(t)
+  // A real PiTui fullscreen-lease refusal: the Workspace opener throws
+  // synchronously, exactly like a blocking modal / foreign workspace owning
+  // the one fullscreen lease, so the CLI startup Browser admission returns a
+  // real error result.
+  const originalOpenWorkspace = TuiApp.prototype.openSessionWorkspace
+  TuiApp.prototype.openSessionWorkspace = function patchedOpenSessionWorkspace(): never {
+    throw new Error('a blocking workspace owns the surface')
+  }
+  life.defer(() => { TuiApp.prototype.openSessionWorkspace = originalOpenWorkspace })
+  const fixture = await mountRemoteRunner(life, {
+    sessionLaunch: { kind: 'browse' },
+    startupSettlement: {
+      surfaceReady: () => {},
+      surfaceFailed: () => {},
+      authenticatedBuilds: {
+        clientBuildId: 'client-build-a',
+        hostBuildId: 'host-build-b',
+        initialSurface: true,
+      },
+    },
+  })
+  try {
+    await waitFor('the startup browser refusal notice',
+      () => fixture.vt.getViewport().join('\n').includes('session browser unavailable'), 20_000)
+    const app = fixture.runnerApp() as unknown as { notifyTextForTest(): string }
+    assert.match(app.notifyTextForTest(), /session browser unavailable: session workspace unavailable: a blocking workspace owns the surface/u,
+      'the browser refusal remains the visible single notify line')
+    assert.doesNotMatch(app.notifyTextForTest(), /compatible Host with a different PiTui build/u,
+      'the compatible-build info must be emitted before the browser refusal, not after it')
+    assert.match(fixture.vt.getViewport().join('\n'), /✗ session browser unavailable: session workspace unavailable/u,
+      'the refusal paints in the error role')
+  } finally {
+    await fixture.dispose()
+  }
+})
