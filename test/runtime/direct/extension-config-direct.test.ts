@@ -314,8 +314,6 @@ test('missing service, missing row and malformed projections are honest non-read
 
   const noRow = new DirectExtensionConfigsConfig(contextWith(new SettingsFixture([])))
   assert.equal(noRow.read(PACKAGE_A).kind, 'unavailable')
-  const opened = noRow.read(PACKAGE_A)
-  if (opened.kind === 'available') throw new Error('unreachable')
   assert.equal((await noRow.mutate(PACKAGE_A, [{ op: 'set', path: ['label'], value: 1 }], 0, {})).kind, 'rejected')
 
   const badRevision = new SettingsFixture([{ ns: NS_A, value: { data: 1 }, base: {}, user: {}, revision: -1 }])

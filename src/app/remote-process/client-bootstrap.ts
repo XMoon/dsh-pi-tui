@@ -844,6 +844,12 @@ async function startSurfaceLocalClient(
       ...(promptSerializer === undefined ? {} : { promptSerializer }),
     })
     composition.onQualification?.({ op: 'startup-stage', stage: 'application-ready', revision: revision.id })
+    // Qualification-only: exercise the per-package extension-config port on
+    // THIS revision's production application. Production never sets the env.
+    if (process.env.SPLIT_PROCESS_CLIENT_EXTENSION_CONFIG_PROBE === '1') {
+      const { runExtensionConfigProbe } = await import('./extension-config-probe.ts')
+      composition.onQualification?.(await runExtensionConfigProbe(revision.application.selected.backend.config))
+    }
     signal?.throwIfAborted()
     // T59 qualification input: force the NEW revision's UI mount to fail after
     // the old revision was already retired. Production never sets this.

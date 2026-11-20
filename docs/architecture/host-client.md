@@ -1037,6 +1037,34 @@ value as current; `false` is a real value and the row is absent when the Host
 does not serve the namespace. Page drafts, dirty state and pointer state remain
 Client-local.
 
+### Per-package extension configuration authority
+
+`ConfigPort.extensionConfigs` is the narrow semantic sub-domain for one
+opted-in npm package's profile-owned Config carrier row. The caller supplies
+the official package manifest `name`; the adapter derives the row id through
+the single `extensionConfigRowId` rule and never accepts a namespace, row id
+or profile path. It grants no install, selection or execution authority: it
+addresses only a row the official composition already mounted.
+
+`read()` projects the official Settings form's `value.data`, `base.data` and
+`user.data` into detached JSON values — preserving `null`, `false`, `0`,
+arrays and absent data — with the exact revision and an opaque Host
+generation; `userDataPresent` is own-field presence at `user.data`, never
+value inequality. A missing row is `unavailable`, a non-current Remote mirror
+is `stale`, and an unreadable descriptor is `unreadable`; none is replaced by
+an empty default.
+
+A write is ONE official revision-checked Settings mutation whose paths are
+relative to `data`, dispatched at the caller's captured generation and
+revision. Direct reads the in-process Settings authority; Remote uses the ONE
+existing settings mirror and re-checks generation and revision inside the
+serialized dispatch queue. `accepted` requires the official write to settle
+AND a fresh authoritative read-back to serve the same generation; a
+dispatched failure whose settlement cannot be observed is
+`outcome-unconfirmed` and is never retried. There is no second store, mirror,
+write counter or Client-side optimistic value, and no namespace, path or
+secret crosses the port.
+
 ### MCP server management (ONE Host manager)
 
 The ONE official Host MCP manager (`@deepseek-ai/dsh-mcp-manager`,

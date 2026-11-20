@@ -58,6 +58,7 @@ import { runMcpServersFr3 } from '../smoke/split-process/mcp-servers-fr3.mjs'
 import { runMcpServersFr4 } from '../smoke/split-process/mcp-servers-fr4.mjs'
 import { runSubagentSettingsFr5A } from '../smoke/split-process/subagent-settings-fr5a.mjs'
 import { runHostNumericSettingsFr5B } from '../smoke/split-process/host-numeric-settings-fr5b.mjs'
+import { runExtensionConfigPr2 } from '../smoke/split-process/r8-extension-config-pr2.mjs'
 import { runWebStartupPreference } from '../smoke/split-process/web-startup-preference.mjs'
 import { runProfilePreferencesQualification } from '../smoke/split-process/profile-preferences.mjs'
 import { runF2AccountComposition } from '../smoke/split-process/account-composition.mjs'
@@ -375,6 +376,13 @@ const CASE_REGISTRY = Object.freeze([
     id: 'host-settings.fr5b',
     title: 'two authenticated Split Clients save the migrated General preferences, the session-log switch, the Agent-loop page and the active-shell caps, and refuse a stale two-Client revision',
     run: runHostNumericSettingsFr5B,
+  }),
+  Object.freeze({
+    suite: 'host-settings',
+    defaultLane: false,
+    id: 'host-settings.r8-extension-config-pr2',
+    title: 'two packed third-party packages installed by the official plugin command read/write independent per-package extension Config rows through the production Remote ConfigPort on a real Host and surface Client, refuse a stale revision and leave the canonical preferences row untouched',
+    run: runExtensionConfigPr2,
   }),
   Object.freeze({
     suite: 'host-settings',
