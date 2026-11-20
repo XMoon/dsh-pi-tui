@@ -3,9 +3,11 @@
  *
  * The two process entries are internal qualification surfaces, not public
  * commands: a launcher starts one OS process per role and drives it with
- * newline-delimited JSON on stdin, while the process reports structured JSON
- * lines on stdout. This module owns only that protocol and the Linux process
- * start identity; it carries no application state.
+ * newline-delimited JSON on stdin. With `DSH_PI_TUI_ENTRY_RECORDS=1` the
+ * process reports that structured qualification protocol as JSON lines on
+ * stdout; without it the default sink keeps only the concise Host production
+ * log. This module owns only that protocol and the Linux process start
+ * identity; it carries no application state.
  *
  * @module app/remote-process/entry-control
  */
@@ -16,9 +18,86 @@ import { readProcessStarttime } from './local-scope.ts'
 /** One structured record sink owned by the process entry. */
 export type EntryRecordSink = (record: Record<string, unknown>) => void
 
-/** The default JSONL sink: the qualification control channel on stdout. */
+/** The single opt-in for the raw M4-A0 JSONL stream, frozen at process start. */
+const ENTRY_RECORDS_ENABLED = process.env.DSH_PI_TUI_ENTRY_RECORDS === '1'
+
+/** The longest free-text fragment the default Host production log prints. */
+const MAX_ENTRY_LOG_TEXT = 1024
+
+/** One existing string field as a single bounded log line fragment. */
+function logText(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined
+  const text = value.replace(/[\r\n]+/gu, ' ')
+  return text.length <= MAX_ENTRY_LOG_TEXT ? text : text.slice(0, MAX_ENTRY_LOG_TEXT)
+}
+
+/**
+ * The default sink's Host production projection.
+ *
+ * A Host runs with its stdout/stderr redirected into the user-visible
+ * `host.log`/journal/launchd stream, so the default sink writes a few readable
+ * lifecycle lines instead of the qualification JSON. Only an actual Host
+ * process owns production messages; every other record is qualification data
+ * and stays silent unless the explicit JSONL opt-in is set.
+ */
+function hostProductionLine(record: Record<string, unknown>): { readonly stdout: boolean; readonly text: string } | undefined {
+  if (record.processRole !== 'host') return undefined
+  switch (record.m4a0) {
+    case 'ready':
+      return { stdout: true, text: `dsh-pi-tui host: ready (profile=${String(record.profile)}, pid=${String(record.pid)})` }
+    case 'failure': {
+      const phase = logText(record.phase)
+      const code = logText(record.code)
+      const context = [phase === undefined ? undefined : `[phase=${phase}]`, code === undefined ? undefined : `[code=${code}]`]
+        .filter(part => part !== undefined)
+        .join(' ')
+      return {
+        stdout: false,
+        text: `dsh-pi-tui host: startup failed${context === '' ? '' : ` ${context}`}: ${logText(record.error) ?? ''}`,
+      }
+    }
+    case 'cleanup-failure': {
+      const step = logText(record.step)
+      const context = step === undefined ? '' : ` [step=${step}]`
+      return { stdout: false, text: `dsh-pi-tui host: cleanup failed${context}: ${logText(record.error) ?? ''}` }
+    }
+    case 'diagnostic': {
+      const code = logText(record.code) ?? 'unknown'
+      const failure = logText(record.failure) ?? 'unknown'
+      const state = logText(record.state)
+      const detail = state === undefined ? failure : `${failure}, state=${state}`
+      return { stdout: false, text: `dsh-pi-tui host: warning ${code} (${detail})` }
+    }
+    case 'diag': {
+      if (record.level !== 'warn' && record.level !== 'error') return undefined
+      const message = logText(record.message) ?? 'unknown message'
+      return { stdout: false, text: `dsh-pi-tui host: ${record.level}: ${message}` }
+    }
+    case 'web-autostart':
+      return { stdout: true, text: 'dsh-pi-tui host: web autostart enabled' }
+    case 'acp-autostart':
+      return { stdout: true, text: 'dsh-pi-tui host: ACP autostart enabled' }
+    case 'cleanup':
+      return { stdout: true, text: 'dsh-pi-tui host: stopped' }
+    default:
+      return undefined
+  }
+}
+
+/**
+ * The default sink: the qualification JSONL control channel when explicitly
+ * enabled, otherwise the minimal readable Host production log. An explicitly
+ * provided sink always receives every record unchanged.
+ */
 const stdoutRecordSink: EntryRecordSink = record => {
-  process.stdout.write(`${JSON.stringify(record)}\n`)
+  if (ENTRY_RECORDS_ENABLED) {
+    process.stdout.write(`${JSON.stringify(record)}\n`)
+    return
+  }
+  const line = hostProductionLine(record)
+  if (line === undefined) return
+  const stream = line.stdout ? process.stdout : process.stderr
+  stream.write(`${line.text}\n`)
 }
 
 /** One structured line emitted by a process entry. */

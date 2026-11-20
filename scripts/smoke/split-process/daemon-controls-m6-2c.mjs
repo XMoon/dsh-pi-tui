@@ -370,8 +370,17 @@ export async function runDaemonControlSystemdLifecycle({ installation, trace, ds
     const warm = runDaemon(installation, ['start'])
     const warmStatus = assertStatus(warm, { host: 'ready' }, 'daemon start warm reuse')
     assert(warmStatus.instance === ready.instance && warmStatus.pid === ready.pid, 'a warm start must reuse the same Host instance')
+    // The registry+authentication Ready is committed before the Host's readable
+    // ready record; the journal is the only observable proof that the default
+    // sink has flushed. Bounded wait, never a fixed sleep.
+    await waitFor(() => {
+      const probe = runDaemon(installation, ['logs', '--lines', '20'])
+      return probe.status === 0 && /dsh-pi-tui host: ready/u.test(probe.stdout) ? true : undefined
+    }, 'the default Host ready journal line', 10_000)
     const logs = runDaemon(installation, ['logs', '--lines', '20'])
     assert(logs.status === 0 && logs.stdout.trim() !== '', 'daemon logs must read the owned unit journal')
+    assert(/dsh-pi-tui host: ready/u.test(logs.stdout), 'the default systemd Host journal must carry the readable ready line')
+    assert(!/"m4a0"|ownerEntries|profile-booted|services/u.test(logs.stdout), 'the default systemd Host journal must not carry qualification JSON')
     const stopped = runDaemon(installation, ['stop'])
     assertStatus(stopped, { host: 'stopped' }, 'daemon stop')
     await waitFor(() => hostPids(dshHome).length === 0, 'the stopped Host exit', 30_000)
@@ -515,10 +524,16 @@ export async function runDaemonControlProcessFallback({ installation, trace, dsh
     assertNoDirectOnlyPendingWarnings(readyStatus, 'the basic ready status')
     assert(existsSync(hostLog), 'the fallback Host must write its private host.log')
     assert((statSync(hostLog).mode & 0o777) === 0o600, 'the fallback host.log must be 0600')
+    // The Host publishes its registry identity before the readable ready record;
+    // wait for the record itself so the following one-shot log read is deterministic.
+    await waitFor(() => (readFileSync(hostLog, 'utf8').includes('dsh-pi-tui host: ready') ? true : undefined),
+      'the default Host ready log line', 10_000)
     const logHashBefore = createHash('sha256').update(readFileSync(hostLog)).digest('hex')
     const logs = runDaemon(installation, ['logs', '--lines', '20'])
     assert(logs.status === 0, `the fallback logs must read the private host.log: ${logs.stderr.slice(-300)}`)
     assertNoDirectOnlyPendingWarnings(logs, 'the basic logs')
+    assert(/dsh-pi-tui host: ready/u.test(logs.stdout), 'the default fallback Host log must carry the readable ready line')
+    assert(!/"m4a0"|ownerEntries|profile-booted|services/u.test(logs.stdout), 'the default fallback Host log must not carry qualification JSON')
     const logHashAfter = createHash('sha256').update(readFileSync(hostLog)).digest('hex')
     assert(logHashBefore === logHashAfter, 'reading the private Host log must not change it')
     const stopped = runDaemon(installation, ['stop'])
