@@ -214,7 +214,7 @@ async function directAgentOn(
       installTurnPolicy: (agentCtx, agent) => {
         const latch = installTuiPromptTurnLatch(
           { on: (event, listener, listenerOptions) => ctx.on(event, listener, listenerOptions) },
-          agent.session.id,
+          agent.session,
           () => ({ eligible: true, focus: view.focus }),
         )
         agentCtx.effect(() => () => latch.dispose(), 'parity-direct-turn-latch')

@@ -623,7 +623,7 @@ export async function runCrossBuildCompatibility(context) {
         hostBuildIdKept: hostABefore.buildId === oldBuildId,
         clientBundleDifferent: newArtifact.manifest.version !== oldArtifact.manifest.version,
         clientBuildIdDifferent: newBuildId !== oldBuildId,
-        protocol: 'dsh-pi-tui/local/1',
+        protocol: 'dsh-pi-tui/local/2',
         dshVersion: targetDshVersion,
         transport: 'connected',
         rpcRequestId: crossBuildRpcRequestId,
@@ -865,7 +865,7 @@ export async function runCrossBuildCompatibility(context) {
       // Historical Full evidence compatibility summary. This is measured by the
       // cross-build case only; selected U08/U09 runs never receive this block.
       fragment.compatibility = {
-        protocol: 'dsh-pi-tui/local/1',
+        protocol: 'dsh-pi-tui/local/2',
         dshVersion: targetDshVersion,
         oldBuildId,
         newBuildId,

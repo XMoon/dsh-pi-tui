@@ -123,7 +123,7 @@ export function installHostAgentPrompt(
     {
       on: (event, listener, listenerOptions) => options.ctx.on(event, listener, listenerOptions),
     },
-    sessionId,
+    agent.session,
     () => options.voters.snapshotVoters(agent.session),
   )
   const live: TuiPromptLiveStates = {

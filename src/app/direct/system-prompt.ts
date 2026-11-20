@@ -66,7 +66,7 @@ export function installProgressUpdatesPrompt(
   displayState: DisplayState,
   state: ProgressUpdatesState,
 ): () => void {
-  return installProgressUpdatesSection(systemPrompt, liveDisplayTurnPolicy(displayState), state)
+  return installProgressUpdatesSection(systemPrompt, liveDisplayTurnPolicy(displayState), () => state)
 }
 
 /** Register the response-style section; each assembly reads the live state. */
@@ -74,7 +74,7 @@ export function installResponseStylePrompt(systemPrompt: SystemPromptLike, state
   return installResponseStyleSection(
     systemPrompt,
     { currentTurn: () => ({ eligible: true, focus: false }) },
-    state,
+    () => state,
   )
 }
 
@@ -84,7 +84,7 @@ export function installGitAttributionPrompt(systemPrompt: SystemPromptLike, stat
   return installGitAttributionSection(
     systemPrompt,
     { currentTurn: () => ({ eligible: true, focus: false }) },
-    state,
+    () => state,
   )
 }
 
@@ -128,19 +128,19 @@ export function installDirectTuiSystemPromptSections(agentCtx: Context, sections
     if (progressUpdatesState !== undefined && (turn !== undefined || displayState !== undefined)) {
       disposers.push(turn === undefined
         ? installProgressUpdatesPrompt(systemPrompt, displayState!, progressUpdatesState)
-        : installProgressUpdatesSection(systemPrompt, turn, progressUpdatesState))
+        : installProgressUpdatesSection(systemPrompt, turn, () => progressUpdatesState))
     } else if (progressUpdatesState !== undefined) {
       diag?.warn('progress updates prompt unavailable', { reason: 'display state missing' })
     }
     if (responseStyleState !== undefined) {
       disposers.push(turn === undefined
         ? installResponseStylePrompt(systemPrompt, responseStyleState)
-        : installResponseStyleSection(systemPrompt, turn, responseStyleState))
+        : installResponseStyleSection(systemPrompt, turn, () => responseStyleState))
     }
     if (gitAttributionState !== undefined) {
       disposers.push(turn === undefined
         ? installGitAttributionPrompt(systemPrompt, gitAttributionState)
-        : installGitAttributionSection(systemPrompt, turn, gitAttributionState))
+        : installGitAttributionSection(systemPrompt, turn, () => gitAttributionState))
     }
   }
   if (displayState !== undefined) {

@@ -40,9 +40,20 @@ export type TuiPromptVoterSampler = () => TuiPromptTurnSnapshot
 export interface TuiPromptTurnBoundarySource {
   on(
     event: 'session/event',
-    listener: (session: { readonly id: string }, event: { readonly type: string }) => void,
+    listener: (
+      session: { readonly id: string },
+      event: { readonly type: string; readonly data?: unknown },
+    ) => void,
     options?: { readonly global?: boolean },
   ): () => void
+}
+
+/** The Turn number of one boundary event (`turn/start`/`turn/end` data). */
+function turnNumberOf(event: { readonly data?: unknown }): number | undefined {
+  const data = event.data
+  if (typeof data !== 'object' || data === null) return undefined
+  const turn = (data as { readonly turn?: unknown }).turn
+  return typeof turn === 'number' ? turn : undefined
 }
 
 /** One installed latch: the policy plus the exact Session it follows. */
@@ -56,45 +67,52 @@ export interface TuiPromptTurnLatch extends TuiPromptTurnPolicy {
 }
 
 /**
- * Install the per-Turn latch for ONE Session on the Host's synchronous
- * `session/event` plane.
+ * Install the per-Turn latch for ONE exact Session object on the Host's
+ * synchronous `session/event` plane.
  *
- * Filtering is by the EXACT durable Session id: another Session's Turn can
- * never move this Agent's frozen policy. The listener is registered on the
- * Agent's own scope by the caller, so it unwinds with the Agent.
+ * Filtering is by the EXACT Session OBJECT (never a string id): a replaced
+ * same-id Session can never move this Agent's frozen policy. The frozen
+ * snapshot is cleared only by the `turn/end` of the SAME Turn number it was
+ * frozen at — a late or foreign end boundary can never clear another Turn.
+ * The listener is registered on the Agent's own scope by the caller, so it
+ * unwinds with the Agent.
  *
  * @param source - the Host event plane (`ctx.on('session/event', ...)`).
- * @param sessionId - the exact durable Session this Agent drives.
+ * @param session - the exact Session object this Agent drives (`agent.session`).
  * @param sample - the current-viewer sampler (called once per Turn).
  * @returns the latch; `currentTurn()` is `undefined` between Turns.
  */
 export function installTuiPromptTurnLatch(
   source: TuiPromptTurnBoundarySource,
-  sessionId: string,
+  session: { readonly id: string },
   sample: TuiPromptVoterSampler,
 ): TuiPromptTurnLatch {
   let frozen: TuiPromptTurnSnapshot | undefined
+  let frozenTurn: number | undefined
   let disposed = false
-  const disposeListener = source.on('session/event', (session, event) => {
-    if (session.id !== sessionId) return
+  const disposeListener = source.on('session/event', (eventSession, event) => {
+    if (eventSession !== session) return
     if (event.type === 'turn/start') {
       // ONCE per Turn, at the synchronous publication: the sampler answers
-      // the CURRENT viewers and the result is frozen until turn/end.
+      // the CURRENT viewers and the result is frozen until this Turn ends.
       frozen = sample()
+      frozenTurn = turnNumberOf(event)
       return
     }
-    if (event.type === 'turn/end') {
+    if (event.type === 'turn/end' && frozenTurn !== undefined && turnNumberOf(event) === frozenTurn) {
       frozen = undefined
+      frozenTurn = undefined
     }
   }, { global: true })
   return {
-    sessionId,
+    sessionId: session.id,
     currentTurn: () => frozen,
     snapshot: () => frozen,
     dispose: () => {
       if (disposed) return
       disposed = true
       frozen = undefined
+      frozenTurn = undefined
       disposeListener()
     },
   }

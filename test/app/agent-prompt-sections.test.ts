@@ -175,33 +175,70 @@ test('the frozen Turn snapshot owns eligibility and Focus; the preference axes s
   }
 })
 
-test('the latch samples ONCE at turn/start, freezes for the Turn, and clears at turn/end', () => {
+test('the live preference providers are re-read per assembly even when they return FRESH state objects', async () => {
+  // The Split Host shape: every accessor call parses the canonical refs into
+  // a NEW state object. Capturing the object at registration would freeze the
+  // values for the Agent's whole lifetime (the regression this pins).
+  const mounted = await mountRegistry()
+  try {
+    let progress: 'off' | 'milestones' | 'frequent' = 'frequent'
+    const disposers = installTuiPromptSections({
+      systemPrompt: mounted.registry,
+      turn: { currentTurn: () => ({ eligible: true, focus: false }) },
+      live: {
+        progressUpdates: () => ({ mode: progress }),
+        responseStyle: () => ({ style: 'concise' as const }),
+        gitAttribution: () => ({ mode: 'product' as const }),
+      },
+    })
+    try {
+      let prompt = await mounted.render()
+      assert.match(prompt, /# Progress updates: Frequent/u)
+      progress = 'off'
+      prompt = await mounted.render()
+      assert.match(prompt, /# Progress updates: Off/u,
+        'a fresh state object per accessor call reaches the next assembly')
+      assert.doesNotMatch(prompt, /# Progress updates: Frequent/u)
+    } finally {
+      for (const dispose of disposers) dispose()
+    }
+  } finally {
+    await mounted.dispose()
+  }
+})
+
+test('the latch samples ONCE at turn/start, freezes for the Turn, and clears only at the matching turn/end', () => {
   // A minimal synchronous event plane matching the official `session/event`
   // contract (the real one is covered by the assembly test below).
-  const listeners: Array<(session: { id: string }, event: { type: string }) => void> = []
+  const listeners: Array<(session: { id: string }, event: { type: string; data?: unknown }) => void> = []
   const source = {
-    on: (_event: 'session/event', listener: (session: { id: string }, event: { type: string }) => void) => {
+    on: (_event: 'session/event', listener: (session: { id: string }, event: { type: string; data?: unknown }) => void) => {
       listeners.push(listener)
       return () => { listeners.splice(listeners.indexOf(listener), 1) }
     },
   }
+  const sessionA = { id: 'session-a' }
+  const sessionB = { id: 'session-b' }
   let samples = 0
   let next: { eligible: boolean; focus: boolean } = { eligible: true, focus: false }
-  const latch = installTuiPromptTurnLatch(source, 'session-a', () => {
+  const latch = installTuiPromptTurnLatch(source, sessionA, () => {
     samples += 1
     return next
   })
   try {
-    const emit = (sessionId: string, type: string): void => {
-      for (const listener of [...listeners]) listener({ id: sessionId }, { type })
+    const emit = (session: { id: string }, type: string, turn: number): void => {
+      for (const listener of [...listeners]) listener(session, { type, data: { turn } })
     }
     assert.equal(latch.currentTurn(), undefined, 'between Turns there is no policy')
     // Another Session's boundary never moves this latch.
-    emit('session-b', 'turn/start')
+    emit(sessionB, 'turn/start', 1)
     assert.equal(latch.currentTurn(), undefined)
     assert.equal(samples, 0, 'a foreign Session never samples this Agent')
+    // A REPLACED same-id Session object never moves this latch either.
+    emit({ id: 'session-a' }, 'turn/start', 1)
+    assert.equal(samples, 0, 'a replaced same-id Session never samples this Agent')
     // The first real boundary samples ONCE and freezes.
-    emit('session-a', 'turn/start')
+    emit(sessionA, 'turn/start', 1)
     assert.deepEqual(latch.currentTurn(), { eligible: true, focus: false })
     assert.equal(samples, 1)
     // A later viewer change must NOT move the frozen Turn.
@@ -209,18 +246,62 @@ test('the latch samples ONCE at turn/start, freezes for the Turn, and clears at 
     assert.deepEqual(latch.currentTurn(), { eligible: true, focus: false },
       'the sampled policy is frozen for exactly this Turn')
     assert.equal(samples, 1, 'the sampler is called once per Turn')
+    // A stale (wrong Turn number) or replaced-object end boundary must NOT
+    // clear the frozen Turn.
+    emit(sessionA, 'turn/end', 2)
+    emit({ id: 'session-a' }, 'turn/end', 1)
+    assert.deepEqual(latch.currentTurn(), { eligible: true, focus: false },
+      'only the exact matching turn/end clears the frozen Turn')
+    // The exact matching turn/end clears.
+    emit(sessionA, 'turn/end', 1)
+    assert.equal(latch.currentTurn(), undefined, 'the matching turn/end clears the latch')
     // The next Turn resamples the CURRENT viewers.
-    emit('session-a', 'turn/end')
-    assert.equal(latch.currentTurn(), undefined, 'turn/end clears the latch')
-    emit('session-a', 'turn/start')
+    emit(sessionA, 'turn/start', 2)
     assert.deepEqual(latch.currentTurn(), { eligible: false, focus: true })
     assert.equal(samples, 2)
     // Disposal removes exactly this listener and clears the policy.
     latch.dispose()
-    emit('session-a', 'turn/end')
-    emit('session-a', 'turn/start')
+    emit(sessionA, 'turn/end', 2)
+    emit(sessionA, 'turn/start', 3)
     assert.equal(samples, 2, 'a disposed latch never samples again')
     assert.equal(listeners.length, 0, 'the listener was removed')
+  } finally {
+    latch.dispose()
+  }
+})
+
+test('a remounted latch never reconstructs a Turn that started before it existed', () => {
+  // Plan §8.5 (Host remount): an already-open Turn has no authoritative
+  // previous Focus snapshot — the latch must FAIL CLOSED (no TUI policy for
+  // the remainder of that Turn), never reconstruct one from current views.
+  const listeners: Array<(session: { id: string }, event: { type: string; data?: unknown }) => void> = []
+  const source = {
+    on: (_event: 'session/event', listener: (session: { id: string }, event: { type: string; data?: unknown }) => void) => {
+      listeners.push(listener)
+      return () => { listeners.splice(listeners.indexOf(listener), 1) }
+    },
+  }
+  const sessionA = { id: 'session-a' }
+  const emit = (session: { id: string }, type: string, turn: number): void => {
+    for (const listener of [...listeners]) listener(session, { type, data: { turn } })
+  }
+  // The Turn (turn 1) is ALREADY open when the latch installs mid-Turn.
+  let samplingAllowed = false
+  const latch = installTuiPromptTurnLatch(source, sessionA, () => {
+    if (!samplingAllowed) throw new Error('a remounted latch must never sample an already-open Turn')
+    return { eligible: true, focus: false }
+  })
+  try {
+    assert.equal(latch.currentTurn(), undefined,
+      'no snapshot is reconstructed for a Turn that started before the latch existed')
+    // The already-open Turn's own end boundary changes nothing.
+    emit(sessionA, 'turn/end', 1)
+    assert.equal(latch.currentTurn(), undefined)
+    // The NEXT Turn freezes normally from the current viewers.
+    samplingAllowed = true
+    emit(sessionA, 'turn/start', 2)
+    assert.deepEqual(latch.currentTurn(), { eligible: true, focus: false },
+      'the next Turn samples at its own boundary like any other')
   } finally {
     latch.dispose()
   }
@@ -261,7 +342,7 @@ test('the latch freezes the snapshot a real Session boundary publishes, and the 
     let viewers: Array<'focus' | 'full'> = ['focus']
     const latch = installTuiPromptTurnLatch(
       { on: (event, listener, options) => host.ctx.on(event, listener, options) },
-      'c2-turn-latch-session',
+      agent.session as unknown as { readonly id: string },
       () => ({ eligible: viewers.length > 0, focus: viewers.includes('focus') }),
     )
     const registry = agent.ctx.get('systemPrompt') as unknown as SystemPromptLike

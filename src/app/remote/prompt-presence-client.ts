@@ -11,7 +11,7 @@
  *
  * ```text
  * a monotonic Client revision (never reset within one owner lifetime)
- * the last COMMITTED view (applied ACK only; a lost ACK is unconfirmed)
+ * the last COMMITTED view (applied ACK only; a lost/stale ACK is unconfirmed)
  * one serialized, coalesced sync chain, so two rapid local changes cannot
  * reorder, and a superseded desired view is never replayed
  * ```
@@ -22,15 +22,20 @@
  *   sends the LATEST desired view and drops the intermediate ones. Presence is
  *   a projection of the current fact, never a replay log. A stale late ACK
  *   never marks the current revision accepted (the ACK's revision must match
- *   the dispatch that produced it).
+ *   the dispatch that produced it), and an ACK carried by a SUPERSEDED
+ *   transport generation/binding is `unconfirmed` — the record lives on the
+ *   connection it was acknowledged on. An unconfirmed outcome retires the
+ *   local commitment.
  * - The committed view is only what the Host acknowledged. A refused call
  *   leaves the DESIRED view intact for the next attempt but never claims it
- *   committed; a lost ACK is `unconfirmed`, never `applied`.
+ *   committed.
  * - `ackCurrentView()` is the submission prerequisite: it dispatches the
- *   CURRENT local view and awaits the authoritative ACK before this Client
- *   submits its own new turn. Every submission re-projects presence onto the
- *   CURRENT connection, so a silent transport reconnect self-heals. Staleness
- *   of the submission's own scope stays the ordinary fence's business.
+ *   CURRENT local view and confirms only when the committed view IS the
+ *   current local view — a display change or navigation during the await
+ *   re-syncs (bounded) before the Client submits its own new Turn. Every
+ *   submission re-projects presence onto the CURRENT connection, so a silent
+ *   transport reconnect self-heals. Staleness of the submission's own scope
+ *   stays the ordinary fence's business. Nothing is ever replayed.
  * - The resolved Session id is always the exact durable id the Client actually
  *   shows, or `null`. An empty string is never sent: the two are distinct wire
  *   facts.
@@ -46,6 +51,8 @@
  */
 
 import type { DisplayPreset } from '../../domain/display/preset.ts'
+import type { Diag } from '../../runtime/process/diagnostics.ts'
+import { runDetached } from '../../runtime/process/tasks.ts'
 import type {
   RemotePromptPresenceAck,
   RemotePromptPresenceCapability,
@@ -64,9 +71,10 @@ export type PromptPresenceSyncOutcome =
   /** The Host refused BEFORE committing (a definite pre-commit answer). */
   | { readonly kind: 'refused'; readonly reason: PromptPresenceRefusal }
   /**
-   * The call was dispatched and its authoritative answer never arrived (a
-   * lost ACK, cancellation, or a transport failure). The Host may or may not
-   * have committed the view: this Client must NOT claim it did.
+   * The call was dispatched and its authoritative answer never arrived or was
+   * invalidated (a lost ACK, cancellation, transport failure or a superseded
+   * transport generation/binding). The Host may or may not have committed the
+   * view: this Client must NOT claim it did.
    */
   | { readonly kind: 'unconfirmed' }
 
@@ -87,6 +95,18 @@ export type PromptPresenceAckOutcome =
   /** No ACK evidence: the submission must not be sent (unknown outcome). */
   | { readonly kind: 'unconfirmed' }
 
+/**
+ * The transport identity probe (the existing `sessionFacts` capture/compare
+ * pair): an ACK carried by a superseded Connection generation or a replaced
+ * binding must never confirm presence.
+ */
+export interface PromptPresenceTransportProbe {
+  /** The transport identity of the CURRENT connection for one Session. */
+  capture(sessionId: string): unknown
+  /** Whether the captured identity is still the current one. */
+  isCurrent(sessionId: string, token: unknown): boolean
+}
+
 export interface PromptPresenceClientOptions {
   /** The mounted private presence capability (never undefined here). */
   readonly capability: RemotePromptPresenceCapability
@@ -94,6 +114,10 @@ export interface PromptPresenceClientOptions {
   readonly localView: () => PromptPresenceLocalView
   /** The owner lifetime (the runner lifecycle). */
   readonly signal: AbortSignal
+  /** The transport identity probe (absent = no generation fencing). */
+  readonly transport?: PromptPresenceTransportProbe
+  /** The runner diagnostics channel (the owned-task sink). */
+  readonly diag: Diag
 }
 
 /** One latest-wins presence owner over the private wire capability. */
@@ -112,14 +136,15 @@ export interface PromptPresenceClient {
   /**
    * The submission prerequisite: dispatch the CURRENT view and await the
    * authoritative ACK for the exact currently committed Session before this
-   * Client submits its own new turn. Never retries on its own.
+   * Client submits its own new Turn. A local change during the await re-syncs
+   * (bounded); nothing is ever replayed automatically.
    */
   ackCurrentView(): Promise<PromptPresenceAckOutcome>
   /**
    * Re-project the CURRENT view after a synchronous local change (a
-   * navigation commit or a display mutation). Fire-and-forget: the dispatch
-   * never throws, and any unconfirmed outcome is re-projected at the next
-   * `ackCurrentView` gate.
+   * navigation commit or a display mutation). Owned fire-and-forget: the
+   * dispatch never throws, and any unconfirmed outcome is re-projected at the
+   * next `ackCurrentView` gate.
    */
   resample(): void
   /** Whether a sync is currently in flight (the reload/exit gate reads it). */
@@ -128,11 +153,15 @@ export interface PromptPresenceClient {
   dispose(): void
 }
 
+/** The bounded settle of one `ackCurrentView` (a rapidly-changing view is
+ *  reported unconfirmed instead of spinning). */
+const ACK_SETTLE_ROUNDS = 3
+
 /**
  * Build the Client-local presence owner over the mounted capability.
  */
 export function createPromptPresenceClient(options: PromptPresenceClientOptions): PromptPresenceClient {
-  const { capability, localView, signal } = options
+  const { capability, localView, signal, transport, diag } = options
   const lifetime = new AbortController()
   let nextRevision = 1
   let committed: (PromptPresenceLocalView & { revision: number }) | undefined
@@ -145,11 +174,18 @@ export function createPromptPresenceClient(options: PromptPresenceClientOptions)
   let disposed = false
   let active = 0
 
+  /** The transport identity of one view's connection (absent when sessionless). */
+  const tokenFor = (view: PromptPresenceLocalView): { sessionId: string; token: unknown } | undefined => {
+    if (transport === undefined || view.viewedSessionId === null) return undefined
+    return { sessionId: view.viewedSessionId, token: transport.capture(view.viewedSessionId) }
+  }
+
   /** Make ONE dispatch for one exact view (never throws). */
   const dispatch = async (view: PromptPresenceLocalView): Promise<PromptPresenceSyncOutcome> => {
     const revision = nextRevision
     nextRevision += 1
     active += 1
+    const captured = tokenFor(view)
     try {
       let answer: Awaited<ReturnType<RemotePromptPresenceCapability['syncView']>>
       try {
@@ -157,15 +193,28 @@ export function createPromptPresenceClient(options: PromptPresenceClientOptions)
       } catch {
         // A transport failure, cancellation or thrown boundary validation:
         // no ACK evidence exists, so the outcome is the truthful UNKNOWN.
+        committed = undefined
         return { kind: 'unconfirmed' }
       }
-      if (answer.ok === false) return { kind: 'unconfirmed' }
+      if (answer.ok === false) {
+        committed = undefined
+        return { kind: 'unconfirmed' }
+      }
       const value = answer.value
       if (value.kind === 'refused') return { kind: 'refused', reason: value.reason }
       // The ACK carries the Host's committed revision; it must be the one this
       // call sent, otherwise the wire answered about another call (a stale late
       // ACK must never mark the current revision accepted).
-      if (value.revision !== revision) return { kind: 'unconfirmed' }
+      if (value.revision !== revision) {
+        committed = undefined
+        return { kind: 'unconfirmed' }
+      }
+      // The record lives on the connection that acknowledged it: an ACK carried
+      // by a superseded Connection generation or a replaced binding is UNKNOWN.
+      if (captured !== undefined && transport !== undefined && !transport.isCurrent(captured.sessionId, captured.token)) {
+        committed = undefined
+        return { kind: 'unconfirmed' }
+      }
       committed = { viewedSessionId: view.viewedSessionId, displayPreset: view.displayPreset, revision }
       return { kind: 'applied', revision }
     } finally {
@@ -206,8 +255,14 @@ export function createPromptPresenceClient(options: PromptPresenceClientOptions)
   }
 
   /** The teardown sequence: best-effort withdraw, then the local retirement. */
-  const retire = (): void => {
-    void enqueue({ viewedSessionId: null, displayPreset: localView().displayPreset }).then(dispose, dispose)
+  function retire(): void {
+    runDetached('prompt presence withdraw', async () => {
+      try {
+        await enqueue({ viewedSessionId: null, displayPreset: localView().displayPreset })
+      } finally {
+        dispose()
+      }
+    }, { diag })
   }
   if (signal.aborted) retire()
   else signal.addEventListener('abort', retire, { once: true })
@@ -218,12 +273,25 @@ export function createPromptPresenceClient(options: PromptPresenceClientOptions)
     sync: () => enqueue(localView()),
     withdraw: () => enqueue({ viewedSessionId: null, displayPreset: localView().displayPreset }),
     ackCurrentView: async (): Promise<PromptPresenceAckOutcome> => {
-      const outcome = await enqueue(localView())
-      if (outcome.kind === 'applied') return { kind: 'confirmed' }
-      if (outcome.kind === 'refused') return { kind: 'refused' }
+      for (let round = 0; round < ACK_SETTLE_ROUNDS; round += 1) {
+        const outcome = await enqueue(localView())
+        if (outcome.kind === 'refused') return { kind: 'refused' }
+        if (outcome.kind === 'unconfirmed') return { kind: 'unconfirmed' }
+        // Applied: confirm only when the committed view IS the current local
+        // view — a display change or navigation during the await re-syncs
+        // before this Client submits its own new Turn.
+        const now = localView()
+        if (committed !== undefined
+          && committed.viewedSessionId === now.viewedSessionId
+          && committed.displayPreset === now.displayPreset) {
+          return { kind: 'confirmed' }
+        }
+      }
       return { kind: 'unconfirmed' }
     },
-    resample: () => { void enqueue(localView()) },
+    resample: () => {
+      runDetached('prompt presence resample', () => enqueue(localView()).then(() => undefined), { diag })
+    },
     inFlight: () => active > 0,
     dispose,
   }

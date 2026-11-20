@@ -673,6 +673,14 @@ export function applyRunnerWithRuntime(
           displayPreset: displayState.preset,
         }),
         signal: lifecycleController.signal,
+        // The existing transport identity capture/compare pair: an ACK carried
+        // by a superseded Connection generation or a replaced binding must
+        // never confirm this Client's presence.
+        transport: {
+          capture: (sessionId) => override.presentation.sessionFacts.captureTransportToken(sessionId),
+          isCurrent: (sessionId, token) => override.presentation.sessionFacts.isTransportTokenCurrent(sessionId, token),
+        },
+        diag,
       })
     if (promptPresence !== undefined) {
       // Resample AFTER the synchronous navigation commit (the coalesced
@@ -965,7 +973,7 @@ export function applyRunnerWithRuntime(
             installTurnPolicy: (agentCtx, agent) => {
               const latch = installTuiPromptTurnLatch(
                 { on: (event, listener, listenerOptions) => ctx.on(event, listener, listenerOptions) },
-                agent.session.id,
+                agent.session,
                 () => ({
                   eligible: ownership.currentSessionId() === agent.session.id,
                   focus: isFocusDisplayPreset(displayState.preset),

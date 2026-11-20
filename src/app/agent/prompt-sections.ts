@@ -141,42 +141,47 @@ export function turnFocusText(
   return focusPromptText(turnDisplay(turn))
 }
 
-/** Register the progress-updates section under one Turn policy. */
+/**
+ * Register the progress-updates section under one Turn policy. The state is a
+ * PROVIDER read at every assembly: a preference change is seen by the next
+ * model step without re-composition (the Host reads the canonical refs per
+ * call; Direct passes its live holder).
+ */
 export function installProgressUpdatesSection(
   systemPrompt: SystemPromptLike,
   turn: TuiPromptTurnPolicy,
-  state: ProgressUpdatesState,
+  state: () => ProgressUpdatesState,
 ): () => void {
   return systemPrompt.section({
     name: PROGRESS_UPDATES_SECTION_NAME,
     order: PROGRESS_UPDATES_SECTION_ORDER,
-    text: () => turnProgressText(turn.currentTurn(), state),
+    text: () => turnProgressText(turn.currentTurn(), state()),
   })
 }
 
-/** Register the response-style section under one Turn policy. */
+/** Register the response-style section; each assembly reads the live state. */
 export function installResponseStyleSection(
   systemPrompt: SystemPromptLike,
   turn: TuiPromptTurnPolicy,
-  state: ResponseStyleState,
+  state: () => ResponseStyleState,
 ): () => void {
   return systemPrompt.section({
     name: RESPONSE_STYLE_SECTION_NAME,
     order: RESPONSE_STYLE_SECTION_ORDER,
-    text: () => turnResponseStyleText(turn.currentTurn(), state),
+    text: () => turnResponseStyleText(turn.currentTurn(), state()),
   })
 }
 
-/** Register the git-attribution section under one Turn policy. */
+/** Register the git-attribution section; each assembly reads the live state. */
 export function installGitAttributionSection(
   systemPrompt: SystemPromptLike,
   turn: TuiPromptTurnPolicy,
-  state: GitAttributionState,
+  state: () => GitAttributionState,
 ): () => void {
   return systemPrompt.section({
     name: GIT_ATTRIBUTION_SECTION_NAME,
     order: GIT_ATTRIBUTION_SECTION_ORDER,
-    text: () => turnGitAttributionText(turn.currentTurn(), state),
+    text: () => turnGitAttributionText(turn.currentTurn(), state()),
   })
 }
 
@@ -212,9 +217,9 @@ export interface TuiPromptSectionInput {
 export function installTuiPromptSections(input: TuiPromptSectionInput): readonly (() => void)[] {
   const { systemPrompt, turn, live } = input
   return [
-    installProgressUpdatesSection(systemPrompt, turn, live.progressUpdates()),
-    installResponseStyleSection(systemPrompt, turn, live.responseStyle()),
-    installGitAttributionSection(systemPrompt, turn, live.gitAttribution()),
+    installProgressUpdatesSection(systemPrompt, turn, live.progressUpdates),
+    installResponseStyleSection(systemPrompt, turn, live.responseStyle),
+    installGitAttributionSection(systemPrompt, turn, live.gitAttribution),
     installFocusSection(systemPrompt, turn),
   ]
 }

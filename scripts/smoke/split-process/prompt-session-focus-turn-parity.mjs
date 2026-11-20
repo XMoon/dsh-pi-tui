@@ -120,6 +120,12 @@ export async function runPromptSessionFocusTurnParity(context) {
     assert(alive(aReady.pid) && alive(bReady.pid) && aReady.pid !== bReady.pid,
       'PP the two Clients must be two live distinct business PIDs')
     await clientB.waitForScreen('pp-a-seed', 'PP B read A\'s durable history', 120_000)
+    // Establish B's OWN local display preset explicitly and by OBSERVATION:
+    // A's `/display focus` persists to the shared Profile, so B must never
+    // inherit it. The A=Focus/B=Full premise of every row below rests on these
+    // two observed local states, never on the shared Profile value.
+    clientB.send('/display full\r')
+    await clientB.waitForScreen('Display: full.', 'PP B applied the Full display preset', 60_000)
 
     // B queues its own message while the Turn runs, then steers the queued
     // occurrence into the running Turn (the official empty-draft Ctrl+S).

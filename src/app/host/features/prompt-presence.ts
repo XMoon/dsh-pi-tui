@@ -176,7 +176,10 @@ export class PiTuiPromptPresenceHostService extends TypertRemoteService {
       peerSignal: invocation.peer.signal,
     }
     this.records.set(peerId, record)
-    this.watchPeerLifetime(invocation)
+    // ONE retirement observer per Peer lifetime (never per sync): the peer
+    // record is replaced on every later revision, but the observer is
+    // installed exactly on the peer's FIRST accepted call.
+    if (current === undefined) this.watchPeerLifetime(invocation)
     return { kind: 'applied', revision }
   }
 

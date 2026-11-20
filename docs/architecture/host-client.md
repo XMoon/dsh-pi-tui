@@ -451,23 +451,28 @@ The ACP transport and bounded connection/session-view contract are owned by
 
 ### Local protocol and version evolution
 
-`dsh-pi-tui/local/1` is the required Host/Client wire contract. It is
-independent of the `@xmoon76/dsh-pi-tui` package version and build fingerprint.
-Both sides must name exactly this protocol and the same DSH runtime version;
-the exact paired DSH version is owned by the package manifest, compatibility
-matrix and release data, not by this document.
+`dsh-pi-tui/local/2` is the required Host/Client wire contract. It is
+independent of the `@xmoon76/dsh-pi-tui` package version and build fingerprint:
+two builds that both name `local/2` interoperate across versions. Both sides
+must name exactly this protocol and the same DSH runtime version; the exact
+paired DSH version is owned by the package manifest, compatibility matrix and
+release data, not by this document. `local/2` is the protocol baseline of the
+first Split-mode opening (package 0.5.7); `local/1` pairs are refused at
+connect with `HOST_PROTOCOL_INCOMPATIBLE`, and a refusal never stops, replaces
+or mutates the live Host or its running Turns.
 
-A v1 peer guarantees the required official Session, Turn, Job, Question and
+A v2 peer guarantees the required official Session, Turn, Job, Question and
 Approval semantics plus this package's current required private Remotes (file
-references and terminal progress). Optional read-only functionality may be
-added without a protocol bump only when its consumers degrade safely: losing it
-must not lose, rewrite or duplicate a business write, and a genuinely
-unregistered optional Remote is classified by the official
+references, terminal progress and session-view presence — the last one feeds
+the prompt admission gate and is REQUIRED, never degraded). Optional read-only
+functionality may be added without a protocol bump only when its consumers
+degrade safely: losing it must not lose, rewrite or duplicate a business write,
+and a genuinely unregistered optional Remote is classified by the official
 `gateway/invocation-unavailable` answer, never by turning every network,
 authentication or service failure into "unsupported". A breaking change to a
 required wire API, or a new Client that cannot work without an RPC an old Host
 does not have, requires the next protocol version. Capability registries,
-version negotiation and probe-by-trial-write are not part of v1.
+version negotiation and probe-by-trial-write are not part of v2.
 
 Client admission and Host self-publication are different decisions: a Client
 compares only the protocol and exact DSH runtime, while the Host must publish
@@ -929,10 +934,13 @@ A Split Client re-projects its view after every navigation commit and every
 display mutation, and its prompt admission (ordinary, steer and queued) awaits
 the current revision's Host ACK before the Client starts its own new Turn; a
 refused or unconfirmed presence refuses that submission truthfully and never
-replays it. Another Client is never delayed by an unACKed change — the Turn
-samples the most recent ACKed roster at its start. The durable `displayPreset`
-profile value is a startup preference only; it is never a Focus voter, and a
-Web/ACP-only Session stays on the official prompt.
+replays it. `syncView` is part of the required `dsh-pi-tui/local/2` baseline:
+a same-protocol Host always serves it and the admission gate never degrades,
+while a different-protocol Host is refused at connect. Another Client is never
+delayed by an unACKed change — the Turn samples the most recent ACKed roster at
+its start. The durable `displayPreset` profile value is a startup preference
+only; it is never a Focus voter, and a Web/ACP-only Session stays on the
+official prompt.
 
 Regression anchors: `test/app/agent-prompt-sections.test.ts` (frozen Turn on
 real Session boundaries),
