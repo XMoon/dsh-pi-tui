@@ -48,6 +48,17 @@ function detach(value: unknown, seen: Set<object>): unknown | typeof INVALID_EXT
   return detached
 }
 
+/** Detach one caller-supplied Config value into an owned JSON-only tree. */
+export function detachExtensionConfigValue(value: unknown): ExtensionConfigDataProjection {
+  // An absent `data` field is a successful `undefined`, not a non-JSON value:
+  // the carrier row is mountable with no document.
+  if (value === undefined) return { kind: 'ok', value: undefined }
+  const detached = detach(value, new Set())
+  return detached === INVALID_EXTENSION_CONFIG_DATA
+    ? { kind: 'invalid', reason: 'the extension configuration value is not JSON' }
+    : { kind: 'ok', value: detached }
+}
+
 /**
  * Project one descriptor layer's `data` field into a detached JSON value.
  * An absent layer or absent `data` is a successful `undefined`; an unreadable
@@ -58,14 +69,27 @@ export function projectExtensionConfigData(layer: unknown): ExtensionConfigDataP
   if (typeof layer !== 'object' || layer === null || Array.isArray(layer)) {
     return { kind: 'invalid', reason: 'the official Host settings layer is not a plain form projection' }
   }
-  const data: unknown = Reflect.get(layer, 'data')
-  // An absent own `data` field is a successful `undefined`, not a non-JSON
-  // value: the carrier row is mountable with no document.
-  if (data === undefined) return { kind: 'ok', value: undefined }
-  const detached = detach(data, new Set())
-  return detached === INVALID_EXTENSION_CONFIG_DATA
-    ? { kind: 'invalid', reason: 'the official Host extension configuration data is not JSON' }
-    : { kind: 'ok', value: detached }
+  return detachExtensionConfigValue(Reflect.get(layer, 'data'))
+}
+
+/**
+ * The first non-JSON `set` value in one write batch, or undefined when every
+ * caller value can cross the official Settings JSON boundary unchanged.
+ *
+ * This is a transport-boundary check, not a second schema: field names,
+ * paths and volatility remain the official Settings validator's authority.
+ * It exists so the Remote wire's JSON encoding cannot silently turn a Date,
+ * Map, BigInt or cycle into a different stored value while Direct rejects it.
+ */
+export function extensionConfigDataOpsRejection(
+  ops: readonly { readonly op: 'set' | 'unset'; readonly path: readonly string[]; readonly value?: unknown }[],
+): string | undefined {
+  for (const op of ops) {
+    if (op.op !== 'set') continue
+    const detached = detachExtensionConfigValue(op.value)
+    if (detached.kind === 'invalid') return detached.reason
+  }
+  return undefined
 }
 
 /** Whether one descriptor layer owns the `data` field (own-property presence,

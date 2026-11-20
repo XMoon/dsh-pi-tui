@@ -129,7 +129,11 @@ import type {
   ExtensionConfigsConfig,
 } from '../config-port.ts'
 import { extensionConfigRowId } from '../../domain/extension-config/row-id.ts'
-import { extensionConfigUserDataPresent, projectExtensionConfigData } from '../../domain/extension-config/data.ts'
+import {
+  extensionConfigDataOpsRejection,
+  extensionConfigUserDataPresent,
+  projectExtensionConfigData,
+} from '../../domain/extension-config/data.ts'
 import { CANONICAL_TUI_SETTINGS_NS } from '../config-port.ts'
 import {
   baseDictKeysOf,
@@ -2824,6 +2828,8 @@ export class DirectExtensionConfigsConfig implements ExtensionConfigsConfig {
       return { kind: 'rejected', reason: 'the Host settings authority changed; refresh before saving' }
     }
     if (ops.length === 0) return { kind: 'rejected', reason: 'no settings fields were staged' }
+    const invalidValue = extensionConfigDataOpsRejection(ops)
+    if (invalidValue !== undefined) return { kind: 'rejected', reason: invalidValue }
     const read = readDirectDescriptors(this.ctx)
     if (read.kind !== 'ready') return { kind: 'rejected', reason: read.reason }
     const namespace = extensionConfigRowId(packageName)

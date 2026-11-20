@@ -125,7 +125,11 @@ import type {
   ExtensionConfigsConfig,
 } from '../config-port.ts'
 import { extensionConfigRowId } from '../../domain/extension-config/row-id.ts'
-import { extensionConfigUserDataPresent, projectExtensionConfigData } from '../../domain/extension-config/data.ts'
+import {
+  extensionConfigDataOpsRejection,
+  extensionConfigUserDataPresent,
+  projectExtensionConfigData,
+} from '../../domain/extension-config/data.ts'
 import {
   baseDictKeysOf,
   classifyMcpServerProvenance,
@@ -3350,6 +3354,8 @@ class RemoteExtensionConfigsConfig implements ExtensionConfigsConfig {
       return { kind: 'rejected', reason: 'the Host authority changed; refresh before saving' }
     }
     if (ops.length === 0) return { kind: 'rejected', reason: 'no settings fields were staged' }
+    const invalidValue = extensionConfigDataOpsRejection(ops)
+    if (invalidValue !== undefined) return { kind: 'rejected', reason: invalidValue }
     const namespace = extensionConfigRowId(packageName)
     const current = this.mirror.namespace(namespace)
     if (current === undefined) {

@@ -334,6 +334,20 @@ test('missing service, missing row and malformed projections are honest non-read
   assert.equal((await config.mutate(PACKAGE_A, [], read.revision, read.generation)).kind, 'rejected')
 })
 
+test('a non-JSON set value is rejected before any official dispatch', async () => {
+  const settings = new SettingsFixture(defaultDescriptors())
+  const config = new DirectExtensionConfigsConfig(contextWith(settings))
+  const opened = config.read(PACKAGE_A)
+  assert.equal(opened.kind, 'ready')
+  if (opened.kind !== 'ready') return
+  const circular: Record<string, unknown> = {}
+  circular.self = circular
+  for (const value of [new Date(), 1n, Number.NaN, circular]) {
+    assert.equal((await config.mutate(PACKAGE_A, [{ op: 'set', path: ['value'], value }], opened.revision, opened.generation)).kind, 'rejected')
+  }
+  assert.equal(settings.mutations.length, 0)
+})
+
 test('DirectConfigPort wires the same extension sub-domain', () => {
   const settings = new SettingsFixture(defaultDescriptors())
   const port = new DirectConfigPort(contextWith(settings), undefined, () => undefined)

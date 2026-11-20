@@ -197,6 +197,15 @@ test('the generated settings Remote and the production ConfigPort read/write two
   assert.deepEqual(bFinal.effective, { label: 'bravo', limit: 9 })
   assert.deepEqual(plane.userConfig(NS_B), { data: { label: 'bravo', limit: 9 } })
 
+  // The accepted-write lifetime is the EXISTING shared one: it is observable
+  // synchronously from the caller-visible port and settles once.
+  const pending = config.extensionConfigs.mutate(PACKAGE_A, [
+    { op: 'set', path: ['label'], value: 'alpha-3' },
+  ], aFinal.revision, aFinal.generation)
+  assert.equal(config.hasUnsettledWrites(), true)
+  assert.deepEqual(await pending, { kind: 'accepted' })
+  assert.equal(config.hasUnsettledWrites(), false)
+
   // A real Host write after the port read makes the captured revision stale.
   const staleRead = config.extensionConfigs.read(PACKAGE_A)
   assert.equal(staleRead.kind, 'ready')
@@ -211,6 +220,19 @@ test('the generated settings Remote and the production ConfigPort read/write two
   assert.equal(external.kind, 'ready')
   if (external.kind !== 'ready') return
   assert.equal((external.effective as { label: string }).label, 'external')
+
+  // The official Settings JSON constraint is the only value validator: a Date
+  // never enters the USER patch and cannot pollute any row.
+  const beforeBad = config.extensionConfigs.read(PACKAGE_A)
+  assert.equal(beforeBad.kind, 'ready')
+  if (beforeBad.kind !== 'ready') return
+  assert.equal((await config.extensionConfigs.mutate(PACKAGE_A, [
+    { op: 'set', path: ['bad'], value: new Date() },
+  ], beforeBad.revision, beforeBad.generation)).kind, 'rejected')
+  const afterBad = config.extensionConfigs.read(PACKAGE_A)
+  assert.equal(afterBad.kind, 'ready')
+  if (afterBad.kind !== 'ready') return
+  assert.deepEqual(afterBad.effective, beforeBad.effective)
 
   // The carrier row id is derived from the real package name, not a caller URI.
   assert.equal(config.extensionConfigs.read('@r8-pr1-fixture/missing').kind, 'unavailable')
