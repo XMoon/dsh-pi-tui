@@ -177,9 +177,6 @@ export class DaemonCoordinator {
   private readonly spawnImpl: SpawnImpl
   private readonly entry: string
   private readonly env: NodeJS.ProcessEnv
-  /** The Profile this child launch belongs to, from the SAME controlled child
-   *  environment `buildChildEnvironment()` wrote (never an inherited guess). */
-  private readonly profileName: string
   private readonly appExit: (code: number) => void
   private readonly diag: Diag
   /** A sanitized human line for the supervisor TTY when the Client cannot be
@@ -207,11 +204,6 @@ export class DaemonCoordinator {
     this.spawnImpl = options.spawnImpl
     this.entry = options.entry
     this.env = options.env
-    const profileName = options.env.SPLIT_PROCESS_PROFILE
-    if (profileName === undefined || profileName === '') {
-      throw new Error('pi-tui daemon launcher: the child environment must carry SPLIT_PROCESS_PROFILE')
-    }
-    this.profileName = profileName
     this.appExit = options.appExit
     this.diag = options.diag
     this.reportFatal = options.reportFatal ?? (() => {})
@@ -257,7 +249,7 @@ export class DaemonCoordinator {
       // spawn errno code is safe to name; everything else is fixed text.
       const errno = (error as { code?: unknown }).code
       const safeErrno = typeof errno === 'string' && /^[A-Z][A-Z0-9_]{1,31}$/u.test(errno) ? ` (${errno})` : ''
-      this.reportFatal(`dsh-pi-tui: could not start the daemon Client process${safeErrno}; the Host was not started. Reinstall the profile and re-run: DSH_PI_TUI_BACKEND=daemon dsh --profile ${shellQuote(this.profileName)}`)
+      this.reportFatal(`dsh-pi-tui: could not start the daemon Client process${safeErrno}; the Host was not started. Reinstall the profile and re-run: DSH_PI_TUI_BACKEND=daemon dsh --profile ${shellQuote(this.env.SPLIT_PROCESS_PROFILE!)}`)
     }
     this.appExit(code)
   }
