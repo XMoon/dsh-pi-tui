@@ -104,8 +104,10 @@ export function discoverClientExtension(input: DiscoverClientExtensionInput): Cl
   const { package: pkg, selectedBundle, effectiveRows } = input
   const meta = pkg.manifest.dshPiTui
   if (meta === undefined) return { kind: 'not-opted-in' }
-  if (!isRecord(meta)) return { kind: 'invalid-opt-in', reason: 'dshPiTui metadata is not an object' }
+  // An unselected package is not part of the active profile at all, so no
+  // declaration defect can matter here: the profile has no opt-in for it.
   if (!selectedBundle) return { kind: 'not-opted-in' }
+  if (!isRecord(meta)) return { kind: 'invalid-opt-in', reason: 'dshPiTui metadata is not an object' }
   if (meta.manifestVersion !== CLIENT_MANIFEST_VERSION) {
     return { kind: 'invalid-opt-in', reason: `dshPiTui.manifestVersion is not ${String(CLIENT_MANIFEST_VERSION)}` }
   }

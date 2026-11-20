@@ -92,6 +92,10 @@ test('a plain DSH Host package without dshPiTui is never a Client extension', ()
 
 test('an installed but unselected package contributes no Client opt-in', () => {
   assert.deepEqual(discover(identity('@r8-pr1-fixture/a'), [rowFor('@r8-pr1-fixture/a')], false), { kind: 'not-opted-in' })
+  // A malformed declaration cannot matter for a package the active profile does
+  // not select: it still has no opt-in in this profile.
+  const malformed = identity('@r8-pr1-fixture/a', { dshPiTui: 'garbage' })
+  assert.deepEqual(discover(malformed, [], false), { kind: 'not-opted-in' })
 })
 
 test('an opted-in package with a wrong manifestVersion loses Client qualification', () => {
