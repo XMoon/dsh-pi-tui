@@ -147,6 +147,12 @@ export function buildChildEnvironment(
   return env
 }
 
+/** POSIX-safe single-argument quoting for the copy-paste fatal line. */
+function shellQuote(value: string): string {
+  if (/^[A-Za-z0-9_@%+=:,./-]+$/u.test(value)) return value
+  return `'${value.replace(/'/gu, `'\\''`)}'`
+}
+
 /** The child-exit mapping: a real code, or 128+signal when the child was signalled. */
 function exitCodeFor(code: number | null, signal: NodeJS.Signals | null): number {
   if (code !== null) return code
@@ -243,7 +249,7 @@ export class DaemonCoordinator {
       // spawn errno code is safe to name; everything else is fixed text.
       const errno = (error as { code?: unknown }).code
       const safeErrno = typeof errno === 'string' && /^[A-Z][A-Z0-9_]{1,31}$/u.test(errno) ? ` (${errno})` : ''
-      this.reportFatal(`dsh-pi-tui: could not start the daemon Client process${safeErrno}; the Host was not started. Reinstall the profile and re-run: DSH_PI_TUI_BACKEND=daemon dsh --profile pi-tui`)
+      this.reportFatal(`dsh-pi-tui: could not start the daemon Client process${safeErrno}; the Host was not started. Reinstall the profile and re-run: DSH_PI_TUI_BACKEND=daemon dsh --profile ${shellQuote(this.env.SPLIT_PROCESS_PROFILE!)}`)
     }
     this.appExit(code)
   }

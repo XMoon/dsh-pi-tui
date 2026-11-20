@@ -45,6 +45,8 @@ function mount(t: TestContext, args: string[], config?: Config): Mounted {
   const ctx = new Context()
   ctx.provide('cmdlineArgs', { get: () => args })
   ctx.provide('appExit', ((code: number) => { exitCodes.push(code) }) as never)
+  // The official Profile Loader identity; startup recovery text must use it.
+  ctx.provide('profileContext', ({ name: 'tui-custom' }) as never)
   ctx.provide('appReady', ({
     onReady: (listener: () => void) => { listeners.push(listener); return () => {} },
   }) as never)
@@ -261,6 +263,8 @@ test('daemon readiness without a mounted Coordinator exits nonzero with an actio
       assert.deepEqual(exitCodes, [1], 'a missing launcher row must exit nonzero')
       assert.match(text, /daemon launcher row did not mount/u)
       assert.match(text, /tuiDaemonStartup/u)
+      assert.match(text, /DSH_PI_TUI_BACKEND=daemon dsh --profile tui-custom/u)
+      assert.doesNotMatch(text, /--profile pi-tui/u, 'the recovery command must not fall back to the default Profile')
     })
   })
 })

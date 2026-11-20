@@ -242,12 +242,30 @@ export function bundleVersionLabel(since: string): string {
   }
 }
 
+/** The official Profile identity composed by the DSH Profile Loader for this
+ * process. Startup messages must name the Profile the user actually launched;
+ * the fixed `pi-tui` help examples are not a runtime identity. */
+function runningProfileName(ctx: Context): string {
+  const name = (ctx.get('profileContext') as { readonly name?: unknown } | undefined)?.name
+  if (typeof name !== 'string' || name === '') {
+    throw new Error('dsh-pi-tui startup: ctx.profileContext.name is required')
+  }
+  return name
+}
+
+/** POSIX-safe single-argument quoting for a copy-paste recovery command. This
+ * module is a zero-dependency island, so the one small formatter stays here. */
+function shellQuoteProfile(profile: string): string {
+  if (/^[A-Za-z0-9_@%+=:,./-]+$/u.test(profile)) return profile
+  return `'${profile.replace(/'/gu, `'\\''`)}'`
+}
+
 /** The actionable compatibility notice printed when the installed harness
  * falls in an incompatible range. `entry` MUST be the entry
  * {@link harnessCompatEntryFor} matched for `installed`. The notice is
  * advisory: DSH Loader mounts profile entries concurrently, so this row cannot
  * guarantee that its output precedes another row's import failure. */
-export function incompatibleHarnessMessage(installed: string, entry: HarnessCompatEntry): string {
+export function incompatibleHarnessMessage(installed: string, entry: HarnessCompatEntry, profile: string): string {
   const recovery: string[] = []
   if (entry.upgradeDsh !== undefined) {
     recovery.push(
@@ -258,7 +276,7 @@ export function incompatibleHarnessMessage(installed: string, entry: HarnessComp
   if (entry.fallbackTui !== undefined) {
     recovery.push(
       'Or keep your current Harness and use the compatible TUI line:',
-      `  dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@${entry.fallbackTui}`,
+      `  dsh plugin --profile ${shellQuoteProfile(profile)} -- add @xmoon76/dsh-pi-tui@${entry.fallbackTui}`,
     )
   }
   if (entry.guidance !== undefined) recovery.push(entry.guidance)
@@ -267,7 +285,7 @@ export function incompatibleHarnessMessage(installed: string, entry: HarnessComp
     `but this installation is running dsh ${installed}.`,
     '',
     ...(recovery.length === 0 ? [] : ['Choose one:', '', ...recovery]),
-    'Then re-run: dsh --profile pi-tui',
+    `Then re-run: dsh --profile ${shellQuoteProfile(profile)}`,
   ].join('\n')
 }
 
@@ -477,25 +495,25 @@ function resolveBackendDecision(config: Config | undefined): { kind: 'ok'; backe
  *  mounted. The launcher row is missing, failed or still pending on
  *  `tuiDaemonStartup`; DSH treats that as an optional plugin failure, so the
  *  explicitly requested launch owns the verdict. */
-function coordinatorNotMountedMessage(): string {
+function coordinatorNotMountedMessage(profile: string): string {
   return [
     `dsh-pi-tui ${bundleVersionLabel(CURRENT_DSH_REQUIREMENT.since)} was invoked for the daemon backend, but the daemon launcher row did not mount.`,
     'The pi-tui-daemon-launcher row failed to import/apply or stayed pending on tuiDaemonStartup (see the loader warnings above); DSH app-boot treats that as an optional plugin failure.',
-    'This installation cannot start the daemon TUI; reinstall the profile or fix its composition, then re-run: DSH_PI_TUI_BACKEND=daemon dsh --profile pi-tui',
+    `This installation cannot start the daemon TUI; reinstall the profile or fix its composition, then re-run: DSH_PI_TUI_BACKEND=daemon dsh --profile ${shellQuoteProfile(profile)}`,
   ].join('\n')
 }
 
 /**
  * The actionable error for a committed startup whose TUI surface never
- * mounted. The launcher proved the tree booted, but `--profile pi-tui` asked
- * for this surface, so the outcome is an error rather than an optional plugin
+ * mounted. The launcher proved the tree booted, but this Profile asked for
+ * this surface, so the outcome is an error rather than an optional plugin
  * warning.
  */
-function surfaceNotMountedMessage(): string {
+function surfaceNotMountedMessage(profile: string): string {
   return [
-    `dsh-pi-tui ${bundleVersionLabel(CURRENT_DSH_REQUIREMENT.since)} was invoked with --profile pi-tui, but the required TUI surface did not mount.`,
+    `dsh-pi-tui ${bundleVersionLabel(CURRENT_DSH_REQUIREMENT.since)} was invoked with --profile ${shellQuoteProfile(profile)}, but the required TUI surface did not mount.`,
     'The tui-app row failed to import/apply or stayed pending on a dependency (see the loader warnings above); DSH app-boot treats that as an optional plugin failure.',
-    'This installation cannot run the terminal UI; reinstall the profile or fix its composition, then re-run: dsh --profile pi-tui',
+    `This installation cannot run the terminal UI; reinstall the profile or fix its composition, then re-run: dsh --profile ${shellQuoteProfile(profile)}`,
   ].join('\n')
 }
 
@@ -813,7 +831,7 @@ export function apply(ctx: Context, config?: Config): void {
     if (installed !== undefined) {
       const entry = harnessCompatEntryFor(installed)
       if (entry !== undefined) {
-        const message = incompatibleHarnessMessage(installed, entry)
+        const message = incompatibleHarnessMessage(installed, entry, runningProfileName(ctx))
         process.stderr.write(`\n${message}\n\n`)
       }
     }
@@ -864,7 +882,7 @@ export function apply(ctx: Context, config?: Config): void {
         // and owns no startup verdict: the running application keeps running.
         if (!registrationReturned) return
         if (surfaceMounted) return
-        process.stderr.write(`\n${surfaceNotMountedMessage()}\n\n`)
+        process.stderr.write(`\n${surfaceNotMountedMessage(runningProfileName(ctx))}\n\n`)
         ctx.get('appExit')?.(1)
       })
       registrationReturned = true
@@ -909,7 +927,7 @@ function publishDaemonService(ctx: Context, values: TuiDaemonStartupValues): voi
   const installed = installedDshVersion()
   if (installed !== undefined) {
     const entry = harnessCompatEntryFor(installed)
-    if (entry !== undefined) process.stderr.write(`\n${incompatibleHarnessMessage(installed, entry)}\n\n`)
+    if (entry !== undefined) process.stderr.write(`\n${incompatibleHarnessMessage(installed, entry, runningProfileName(ctx))}\n\n`)
   }
   let coordinatorMounted = false
   const ready = ctx.get('appReady')
@@ -921,7 +939,7 @@ function publishDaemonService(ctx: Context, values: TuiDaemonStartupValues): voi
       // startup and delivers no verdict.
       if (!registrationReturned) return
       if (coordinatorMounted) return
-      process.stderr.write(`\n${values.kind === 'control' ? controlNotMountedMessage() : coordinatorNotMountedMessage()}\n\n`)
+      process.stderr.write(`\n${values.kind === 'control' ? controlNotMountedMessage() : coordinatorNotMountedMessage(runningProfileName(ctx))}\n\n`)
       ctx.get('appExit')?.(1)
     })
     registrationReturned = true

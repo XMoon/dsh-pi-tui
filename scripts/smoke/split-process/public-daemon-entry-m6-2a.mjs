@@ -14,7 +14,7 @@
 
 import { spawn, spawnSync } from 'node:child_process'
 import { currentPtyScriptArgv } from '../../lib/pty-script.mjs'
-import { readFileSync, readdirSync, writeFileSync, existsSync, unlinkSync, openSync } from 'node:fs'
+import { readFileSync, readdirSync, writeFileSync, existsSync, unlinkSync, openSync, mkdirSync, symlinkSync } from 'node:fs'
 import { join } from 'node:path'
 
 import xterm from '@xterm/headless'
@@ -337,12 +337,12 @@ export async function runPublicDaemonEntry({ installation, trace }) {
 /** Drive the REAL `dsh --profile pi-tui` CLI under a PTY with an xterm screen
  *  parser, for the public session-launch and signal acceptance subscenarios. */
 class RealDshScreen {
-  constructor(installation, backend, args, extraEnv = {}) {
+  constructor(installation, backend, args, extraEnv = {}, profileName = 'pi-tui') {
     this.installation = installation
     this.records = { raw: '' }
     this.term = new xterm.Terminal({ cols: 100, rows: 30, disableStdin: true, allowProposedApi: true })
     const { dshInvocation, env, profileDir } = installation
-    const command = `${shellQuote(dshInvocation[0])} ${shellQuote(dshInvocation[1])} --profile pi-tui${args.map(a => ' ' + shellQuote(a)).join('')}`
+    const command = `${shellQuote(dshInvocation[0])} ${shellQuote(dshInvocation[1])} --profile ${shellQuote(profileName)}${args.map(a => ' ' + shellQuote(a)).join('')}`
     const pty = currentPtyScriptArgv(command)
     this.child = spawn(pty.program, pty.args, {
       cwd: profileDir,
@@ -661,6 +661,57 @@ async function runSceneAcceptance(installation, trace) {
       // Soft-stop A is already exited; B.dispose kills the shared isolated set.
       if (b !== undefined) await b.dispose()
       else { try { process.kill(-a.child.pid, 'SIGTERM') } catch { /* gone */ } killIsolatedProcesses(installation.dshHome) }
+    }
+  }
+
+  // A15 Custom Profile: the REAL public CLI must carry the official
+  // `--profile tui-custom` name through the installed Split Client into the
+  // detach hint, and the printed command must reconnect to the same Host and
+  // persisted Session. The one-time directory alias points at the SAME
+  // installed profile data: this scene proves the Launcher passes the chosen
+  // name, never independent Profile-directory/Host isolation.
+  {
+    const profilesRoot = join(installation.dshHome, 'profiles')
+    const aliasDir = join(profilesRoot, 'tui-custom')
+    mkdirSync(profilesRoot, { recursive: true })
+    symlinkSync(installation.profileDir, aliasDir, 'dir')
+    let first
+    let resumed
+    try {
+      first = new RealDshScreen(installation, 'daemon', ['--session', seeded.sessionId], {}, 'tui-custom')
+      await first.waitForAny(['hello stub scene', 'stub answer', seeded.shortId], 'A15 custom-profile session', 90_000)
+      const hostsBefore = hostPids(installation.dshHome)
+      assert(hostsBefore.length === 1, `A15: expected one Host for the custom Profile, saw ${hostsBefore.length}`)
+      const hostBefore = hostsBefore[0]
+      first.send('/exit\r')
+      const exit = await Promise.race([first.exit, sleep(60_000).then(() => ({ code: 'timeout', signal: null }))])
+      assert(exit.code === 0, `A15: /exit exited ${JSON.stringify(exit)}`)
+      const raw = first.records.raw.replace(/\r\n/gu, '\n')
+      const at = raw.lastIndexOf('Disconnected from dsh-pi-tui (daemon client).')
+      assert(at !== -1,
+        `A15: the daemon detach block was not printed; tail: ${raw.replace(/[\u0000-\u001f\u007f]/gu, ' ').slice(-1200)}`)
+      const block = raw.slice(at)
+      assert(block.includes(`DSH_PI_TUI_BACKEND=daemon dsh --profile tui-custom --session ${seeded.sessionId}`),
+        'A15: the resume command did not name the real Profile and the canonical Session')
+      for (const verb of ['status', 'logs', 'stop']) {
+        assert(block.includes(`dsh --profile tui-custom daemon ${verb}`),
+          `A15: daemon ${verb} did not name the real Profile`)
+      }
+      assert(!block.includes('--profile pi-tui'), 'A15: the detach block contained the default Profile')
+      assert(block.includes('The daemon Host was not stopped by this action.'),
+        'A15: an ordinary detach claimed a Host stop')
+      assert(processCounts(installation.dshHome).client === 0, 'A15: the Client was still alive after /exit')
+      // Recover through the SAME printed public command: same Host, same Session.
+      resumed = new RealDshScreen(installation, 'daemon', ['--session', seeded.sessionId], {}, 'tui-custom')
+      await resumed.waitForAny(['hello stub scene', 'stub answer', seeded.shortId], 'A15 custom-profile resume', 90_000)
+      const hostsAfter = hostPids(installation.dshHome)
+      assert(hostsAfter.length === 1 && hostsAfter[0] === hostBefore,
+        `A15: the custom-profile resume did not reuse the same Host (before=${String(hostBefore)}, after=${hostsAfter.join(',')})`)
+      out.customProfileRecovery = 'PASS'
+    } finally {
+      if (resumed !== undefined) await resumed.dispose()
+      else if (first !== undefined) await first.dispose()
+      try { unlinkSync(aliasDir) } catch { /* absent */ }
     }
   }
 
