@@ -1104,7 +1104,7 @@ jobs:
       # candidate. Playwright Chromium lives in an isolated tools directory and
       # never enters the product tarball or the runtime dependency graph.
       - name: Install the isolated Playwright Chromium qualification tools
-        if: ${{ inputs.split_process_case == '' }}
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.split_process_case == '' }}
         run: |
           set -euo pipefail
           TOOLS="$RUNNER_TEMP/m5-web-product-tools"
