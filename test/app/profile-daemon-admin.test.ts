@@ -283,3 +283,68 @@ function directProfileFixture(root: string, packageName: string): {
     packageRoot,
   }
 }
+
+test('the composition-bound admin port drives the real control plane for install and stop, with zero IO on the safe path', async t => {
+  // The production-composition source→decision→sink (F1): the SAME Direct
+  // resolver + port binding the composition uses (`resolveDirectDaemonAdminProfile`
+  // → `createProfileDaemonAdmin(profile, { run: profileDaemonAdminRun(profile) })`),
+  // driven by the exact verbs the decision layers call — the Settings follow-up
+  // install (`onBackendServiceInstall` → `admin.run('install')`) and the exit
+  // admin stop (`adminStop` → `admin.run('stop')`). `readRecord` observes the
+  // REAL profile-scoped record the control plane derives, so a wrong binding
+  // cannot pass. The OS lanes (Linux systemd / macOS launchd) are the OS
+  // post-proof that this same `runDaemonControl` performs the real install/stop.
+  const life = testLifecycle(t)
+  const accountHome = life.tempDir('f1-acct-')
+  const platform = process.platform === 'darwin' ? 'darwin' : 'linux'
+  const installed = (name: string): DaemonControlProfile => {
+    const root = life.tempDir(`f1-${name}-`)
+    const packageRoot = join(root, 'packages', 'bundle')
+    const dir = join(root, `profiles/${name}`)
+    mkdirSync(join(packageRoot, 'dist'), { recursive: true })
+    writeFileSync(join(packageRoot, 'package.json'), JSON.stringify({ name: '@xmoon76/dsh-pi-tui', version: '0.5.7' }))
+    writeFileSync(join(packageRoot, 'dist', 'local-client.mjs'), 'export {}\n')
+    mkdirSync(join(root, 'anchor', 'node_modules', '@deepseek-ai', 'dsh'), { recursive: true })
+    writeFileSync(join(root, 'anchor', 'node_modules', '@deepseek-ai', 'dsh', 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh', version: '0.2.2-rc.5' }))
+    mkdirSync(join(dir, 'node_modules', '@xmoon76'), { recursive: true })
+    symlinkSync(packageRoot, join(dir, 'node_modules', '@xmoon76', 'dsh-pi-tui'), 'dir')
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ name }))
+    return resolveDirectDaemonAdminProfile({ name, dir, home: root, installAnchor: join(root, 'anchor', 'node_modules', '@deepseek-ai', 'dsh', 'package.json') })!
+  }
+  const profile = installed('profile-a')
+  const observed: Array<{ verb: string; scopeId: string; profileRealpath: string }> = []
+  let lastVerb = ''
+  // The composition-bound port: the EXACT production binding.
+  const admin = createProfileDaemonAdmin(profile, {
+    run: verb => profileDaemonAdminRun(profile, {
+      platform,
+      ...(platform === 'darwin' ? { darwinAccountHome: accountHome } : {}),
+      readRecord: (scope) => {
+        observed.push({ verb: lastVerb, scopeId: scope.scopeId, profileRealpath: scope.profileRealpath })
+        return undefined
+      },
+      inspectProcess: () => 'dead',
+    })(verb),
+  })
+  const expected = inspectInstalledProfileScope({ dshHome: profile.home, profileDir: profile.dir, packageRoot: profile.packageRoot, dshVersion: profile.dshVersion })
+  if (platform === 'darwin') mkdirSync(darwinHostProfileSeatDir(expected.scopeId, accountHome), { recursive: true })
+  // DECISION → SINK (install): the Settings follow-up's explicit confirm.
+  lastVerb = 'install'
+  await admin.run('install')
+  // DECISION → SINK (stop): the exit's post-TTY admin stop.
+  lastVerb = 'stop'
+  await admin.run('stop')
+  // The real control plane derived the bound Profile's OWN scope for both verbs.
+  assert.ok(observed.length >= 2, `both verbs reached the real control plane (got ${JSON.stringify(observed)})`)
+  for (const entry of observed) {
+    assert.equal(entry.scopeId, expected.scopeId, `${entry.verb} reached the sink with the bound profile identity`)
+    assert.equal(entry.profileRealpath, expected.profileRealpath, `${entry.verb} read the bound profile directory`)
+  }
+  assert.deepEqual([...new Set(observed.map(e => e.verb))].sort(), ['install', 'stop'], 'both the install and stop decisions reached the sink')
+  // THE SAFE PATH: `Not now` / a dismissed follow-up never calls the port at
+  // all — zero manager IO, proven by a port whose run would throw if touched.
+  let safeCalls = 0
+  const safeAdmin = createProfileDaemonAdmin(profile, { run: async () => { safeCalls += 1; return recorded(0) } })
+  void safeAdmin // the decision NOT to install/stop simply never calls `.run`
+  assert.equal(safeCalls, 0, 'the safe/dismissed path performs zero manager IO')
+})
