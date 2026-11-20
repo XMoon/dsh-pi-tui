@@ -472,22 +472,22 @@ test('losing the recoverable target withdraws the old resume exactly once and re
   assert.deepEqual(startPhases(remoteShaped.entries()), ['state', 'session', 'release', 'state', 'session'])
 })
 
-test('a Remote Session is reported without any resume argv and only after qualification', async (t) => {
+test('a Session projection without a resume target is reported without -- and only after qualification', async (t) => {
   const fixture = createHerdrCliFixture(t)
   const reporter = reporterOf(fixture, false)
   reporter.publish({ state: 'idle' })
   reporter.observeSession({ sessionId: SESSION_A })
   // An UNqualified reporter has no dispatch path at all (both calls return
   // before `enqueue`), so this negative needs no observation window.
-  assert.deepEqual(fixture.entries(), [], 'an unqualified Remote Client must spawn nothing')
+  assert.deepEqual(fixture.entries(), [], 'an unqualified Client must spawn nothing')
 
   reporter.setQualified(true)
-  await fixture.waitFor(entries => sessionStarts(fixture).length === 1, 'the Remote Session A')
+  await fixture.waitFor(entries => sessionStarts(fixture).length === 1, 'the Session A')
   reporter.observeSession({ sessionId: SESSION_T })
-  await fixture.waitFor(entries => sessionStarts(fixture).length === 2, 'the Remote Session T')
+  await fixture.waitFor(entries => sessionStarts(fixture).length === 2, 'the Session T')
   assert.deepEqual(fixture.sessions(), [{ sessionId: SESSION_A }, { sessionId: SESSION_T }])
   for (const entry of sessionStarts(fixture)) {
-    assert.equal(resumeArgvOf(entry), undefined, 'Remote must never carry a resume argv')
+    assert.equal(resumeArgvOf(entry), undefined, 'the reporter never invents a resume argv')
     assert.equal(entry.argv?.includes('--'), false)
   }
   assert.equal(starts(fixture, 'release-agent').length, 0)
@@ -680,7 +680,7 @@ test('a first state-registration failure is repaired by a Session-only change', 
   assert.deepEqual(phases, ['state', 'state', 'session'],
     `the Session-only change must re-register the Pane first; the log is ${JSON.stringify(phases)}`)
   assert.deepEqual(fixture.sessions(), [{ sessionId: SESSION_B }],
-    'the Remote-shaped Session is reported without a resume argv')
+    'a Session projection without a resume target is reported without a resume argv')
 })
 
 test('dispose during an in-flight cleanup release never starts a second one', async (t) => {

@@ -24,7 +24,11 @@ import {
 import { createSessionOwnershipCore, type SessionOwnershipCore } from '../../src/app/session/ownership-core.ts'
 import type { SessionOwnerRef } from '../../src/app/session/subject.ts'
 import { createHerdrReporter, type HerdrReporter } from '../../src/client/herdr/reporter.ts'
-import { herdrSessionProjection, type HerdrSessionProjection } from '../../src/client/herdr/session.ts'
+import {
+  herdrSessionProjection,
+  type HerdrResumeTarget,
+  type HerdrSessionProjection,
+} from '../../src/client/herdr/session.ts'
 import { createHerdrCliFixture, type HerdrCliEntry, type HerdrCliFixture } from '../support/herdr-cli-fixture.ts'
 
 const SESSION_R = `session-${'1'.repeat(32)}`
@@ -56,10 +60,14 @@ interface Observation {
 /**
  * Compose the SAME adapter `applyRunnerWithRuntime` installs: one subscription
  * to the official scope invalidation, an initial sample of the CURRENT owner
- * and the production projection function. `remote` selects the Remote shape
- * (undefined Direct profile) without inventing a second flag.
+ * and the production projection function. `target` is the explicit resume
+ * target the composition derives from its authoritative Profile fact (Direct
+ * `hostRunningProfile` or the Split Client's `profileDaemonAdmin.profile`).
  */
-function compose(t: Parameters<typeof createHerdrCliFixture>[0], options: { readonly remote?: boolean } = {}): Observation {
+function compose(
+  t: Parameters<typeof createHerdrCliFixture>[0],
+  target: HerdrResumeTarget = { kind: 'direct', profile: 'pi-tui' },
+): Observation {
   const fixture = createHerdrCliFixture(t, { sessionDelayMs: 10 })
   const reporter = createHerdrReporter(fixture.env, true)
   assert.ok(reporter !== undefined, 'the fixture must create the real reporter')
@@ -79,9 +87,8 @@ function compose(t: Parameters<typeof createHerdrCliFixture>[0], options: { read
     setQualified: qualified => reporter.setQualified(qualified),
     dispose: () => reporter.dispose(),
   }
-  const directProfile = options.remote === true ? undefined : 'pi-tui'
   const publishCurrent = (): void => {
-    recording.observeSession(herdrSessionProjection(ownership.currentSessionId(), directProfile))
+    recording.observeSession(herdrSessionProjection(ownership.currentSessionId(), target))
   }
   const unsubscribe = ownership.subscribeScopeInvalidation(publishCurrent)
   publishCurrent()
@@ -224,6 +231,29 @@ test('all four production commit shapes report the committed canonical Session a
   for (let index = 1; index < seqs.length; index += 1) assert.ok(seqs[index] > seqs[index - 1])
 })
 
+test('a daemon Client reports the pinned seven-argument argv and follows A to B through the real reporter', async (t) => {
+  const observation = compose(t, { kind: 'daemon', profile: 'tui-custom' })
+  observation.reporter.publish({ state: 'idle' })
+  await observation.waitForStates(1, 'the initial idle state')
+
+  ordinary(observation.ownership, SESSION_A, owner('daemon-a'))
+  await observation.waitForSessions(1, 'the daemon Session A')
+  ordinary(observation.ownership, SESSION_B, owner('daemon-b'))
+  await observation.waitForSessions(2, 'the daemon Session B')
+  await settleQueue(observation, 'the queue after daemon A and B')
+
+  const facts = observation.fixture.sessions()
+  assert.deepEqual(facts.map(fact => fact.sessionId), [SESSION_A, SESSION_B],
+    'the delivered Session sequence is the committed A then B')
+  for (const fact of facts) {
+    assert.deepEqual(fact.resumeArgv,
+      ['env', 'DSH_PI_TUI_BACKEND=daemon', 'dsh', '--profile', 'tui-custom', '--session', fact.sessionId],
+      'the daemon Client reports the exact public daemon argv after --')
+  }
+  assert.equal(facts.some(fact => fact.resumeArgv?.includes('pi-tui')), false,
+    'the default Profile never leaks into the daemon resume argv')
+})
+
 test('a startup resume committed before the observer install is sampled once', async (t) => {
   const ownership = createSessionOwnershipCore({ isSurfaceDisposed: () => false, resetForGeneration: () => {} })
   resume(ownership, SESSION_R, owner('startup-resume'))
@@ -241,7 +271,7 @@ test('a startup resume committed before the observer install is sampled once', a
     dispose: () => reporter.dispose(),
   }
   const publishCurrent = (): void => {
-    recording.observeSession(herdrSessionProjection(ownership.currentSessionId(), 'pi-tui'))
+    recording.observeSession(herdrSessionProjection(ownership.currentSessionId(), { kind: 'direct', profile: 'pi-tui' }))
   }
   // Drain the commit's coalesced notification BEFORE subscribing, so the ONLY
   // thing that can deliver the pre-install resume to the observer is the
@@ -385,7 +415,7 @@ test('a failed cleanup withdrawal is retried by the next real owner commit and t
   assert.ok(reporter !== undefined)
   const ownership = createSessionOwnershipCore({ isSurfaceDisposed: () => false, resetForGeneration: () => {} })
   const publishCurrent = (): void => {
-    reporter.observeSession(herdrSessionProjection(ownership.currentSessionId(), 'pi-tui'))
+    reporter.observeSession(herdrSessionProjection(ownership.currentSessionId(), { kind: 'direct', profile: 'pi-tui' }))
   }
   ownership.subscribeScopeInvalidation(publishCurrent)
   // The install-time sample is what the composition performs after subscribing.
@@ -439,7 +469,7 @@ test('a first registration failure is repaired by a Session-only commit with no 
   assert.ok(reporter !== undefined)
   const ownership = createSessionOwnershipCore({ isSurfaceDisposed: () => false, resetForGeneration: () => {} })
   ownership.subscribeScopeInvalidation(() => {
-    reporter.observeSession(herdrSessionProjection(ownership.currentSessionId(), 'pi-tui'))
+    reporter.observeSession(herdrSessionProjection(ownership.currentSessionId(), { kind: 'direct', profile: 'pi-tui' }))
   })
   fixture.env.HERDR_FAKE_EXIT_CODE = '3'
   reporter.publish({ state: 'idle' })

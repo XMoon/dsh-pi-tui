@@ -14,7 +14,7 @@
 
 import { spawn, spawnSync } from 'node:child_process'
 import { currentPtyScriptArgv } from '../../lib/pty-script.mjs'
-import { readFileSync, readdirSync, writeFileSync, existsSync, unlinkSync, openSync, mkdirSync, symlinkSync } from 'node:fs'
+import { readFileSync, readdirSync, writeFileSync, existsSync, unlinkSync, openSync, mkdirSync, symlinkSync, chmodSync } from 'node:fs'
 import { join } from 'node:path'
 
 import xterm from '@xterm/headless'
@@ -82,6 +82,69 @@ async function waitScreenCount(screen, needle, n, label, timeoutMs) {
 /** The live detached Host PIDs for this isolated DSH home. */
 function hostPids(dshHome) {
   return findIsolatedProcesses(dshHome).filter(pid => classify(pid) === 'host')
+}
+
+/** The fake Herdr CLI: append ONE tab-separated line with the real argv. */
+const FAKE_HERDR_CLI = `#!/bin/sh
+{
+  printf 'start\\t%s' "$PPID"
+  for arg in "$@"; do printf '\\t%s' "$arg"; done
+  printf '\\n'
+} >> "$HERDR_FAKE_LOG"
+`
+
+/** One parsed fake-CLI invocation. */
+function readHerdrInvocations(logPath) {
+  if (!existsSync(logPath)) return []
+  const text = readFileSync(logPath, 'utf8')
+  const lines = text.split('\n')
+  // A line that has no terminating newline is still being appended: it is not
+  // observable evidence yet.
+  if (lines.at(-1) !== '') lines.pop()
+  return lines.filter(line => line !== '').map((line) => {
+    const [phase, rawPpid, ...argv] = line.split('\t')
+    assert(phase === 'start' && rawPpid !== undefined, `A16 the fake Herdr CLI wrote a malformed line: ${JSON.stringify(line)}`)
+    return { ppid: Number(rawPpid), argv }
+  })
+}
+
+/** Wait for a bounded predicate over the current fake-CLI log. */
+async function waitForHerdrLog(logPath, predicate, label, timeoutMs = 120_000) {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    if (predicate(readHerdrInvocations(logPath))) return
+    if (Date.now() > deadline) {
+      throw new SplitSmokeAssertionError(
+        `A16 ${label} did not occur within ${String(timeoutMs)}ms; the log is:\n${existsSync(logPath) ? readFileSync(logPath, 'utf8') : '(missing)'}`,
+      )
+    }
+    await sleep(50)
+  }
+}
+
+/** The value after one required flag in a reported Herdr argv. */
+function argAfter(argv, flag, label) {
+  const index = argv.indexOf(flag)
+  assert(index >= 0 && argv[index + 1] !== undefined, `${label}: missing ${flag} in ${JSON.stringify(argv)}`)
+  return argv[index + 1]
+}
+
+/** Every fake invocation belongs to the declared Pane/source/agent with a
+ *  strictly increasing seq; the reporter's parent must be a real Client PID,
+ *  never the Host process. */
+function assertHerdrPaneInvocations(invocations, paneId, clientPids, label) {
+  let lastSeq
+  for (const { ppid, argv } of invocations) {
+    assert(argv[0] === 'pane', `${label}: unexpected subcommand ${JSON.stringify(argv)}`)
+    assert(argv[2] === paneId, `${label}: the Pane ${JSON.stringify(paneId)} log received ${JSON.stringify(argv)}`)
+    assert(argAfter(argv, '--source', label) === 'dsh-pi-tui', `${label}: wrong source in ${JSON.stringify(argv)}`)
+    assert(argAfter(argv, '--agent', label) === 'dsh-pi-tui', `${label}: wrong agent in ${JSON.stringify(argv)}`)
+    const seq = Number(argAfter(argv, '--seq', label))
+    assert(Number.isSafeInteger(seq), `${label}: no integer seq in ${JSON.stringify(argv)}`)
+    if (lastSeq !== undefined) assert(seq > lastSeq, `${label}: seq ${seq} is not after ${lastSeq}`)
+    lastSeq = seq
+    assert(clientPids.includes(ppid), `${label}: the reporter parent ${ppid} was not a live Client PID (${clientPids.join(',')})`)
+  }
 }
 
 /** The real `dsh` supervisor PID (the CLI process, not the Host/Client). */
@@ -337,12 +400,14 @@ export async function runPublicDaemonEntry({ installation, trace }) {
 /** Drive the REAL `dsh --profile pi-tui` CLI under a PTY with an xterm screen
  *  parser, for the public session-launch and signal acceptance subscenarios. */
 class RealDshScreen {
-  constructor(installation, backend, args, extraEnv = {}, profileName = 'pi-tui') {
+  constructor(installation, backend, args, extraEnv = {}, profileName = 'pi-tui', rawCommand = undefined) {
     this.installation = installation
     this.records = { raw: '' }
     this.term = new xterm.Terminal({ cols: 100, rows: 30, disableStdin: true, allowProposedApi: true })
     const { dshInvocation, env, profileDir } = installation
-    const command = `${shellQuote(dshInvocation[0])} ${shellQuote(dshInvocation[1])} --profile ${shellQuote(profileName)}${args.map(a => ' ' + shellQuote(a)).join('')}`
+    const command = rawCommand === undefined
+      ? `${shellQuote(dshInvocation[0])} ${shellQuote(dshInvocation[1])} --profile ${shellQuote(profileName)}${args.map(a => ' ' + shellQuote(a)).join('')}`
+      : rawCommand.map(part => shellQuote(part)).join(' ')
     const pty = currentPtyScriptArgv(command)
     this.child = spawn(pty.program, pty.args, {
       cwd: profileDir,
@@ -670,11 +735,29 @@ async function runSceneAcceptance(installation, trace) {
   // persisted Session. The one-time directory alias points at the SAME
   // installed profile data: this scene proves the Launcher passes the chosen
   // name, never independent Profile-directory/Host isolation.
+  // A16 (inside this same scene) builds on the SAME installed profile: the
+  // resumed Client runs inside a complete Herdr Pane environment and reports
+  // its daemon resume argv to a real executable fake Herdr CLI; that CAPTURED
+  // argv must then run through the REAL public `dsh` entry and reopen the same
+  // canonical Session on the same Host.
   {
     const profilesRoot = join(installation.dshHome, 'profiles')
     const aliasDir = join(profilesRoot, 'tui-custom')
     mkdirSync(profilesRoot, { recursive: true })
     symlinkSync(installation.profileDir, aliasDir, 'dir')
+    const unique = `${String(process.pid)}-${Date.now().toString(36)}`
+    const fakeHerdrPath = join(installation.workDir, `herdr-daemon-a16-${unique}.sh`)
+    const herdrLogPath = join(installation.workDir, `herdr-daemon-a16-${unique}.log`)
+    const paneId = `herdr-m6-2a-pane-${unique}`
+    writeFileSync(fakeHerdrPath, FAKE_HERDR_CLI, { mode: 0o755 })
+    chmodSync(fakeHerdrPath, 0o755)
+    const paneEnv = {
+      HERDR_ENV: '1',
+      HERDR_PANE_ID: paneId,
+      HERDR_BIN_PATH: fakeHerdrPath,
+      HERDR_SOCKET_PATH: join(installation.workDir, `herdr-daemon-a16-${unique}.sock`),
+      HERDR_FAKE_LOG: herdrLogPath,
+    }
     let first
     let resumed
     try {
@@ -702,16 +785,76 @@ async function runSceneAcceptance(installation, trace) {
         'A15: an ordinary detach claimed a Host stop')
       assert(processCounts(installation.dshHome).client === 0, 'A15: the Client was still alive after /exit')
       // Recover through the SAME printed public command: same Host, same Session.
-      resumed = new RealDshScreen(installation, 'daemon', ['--session', seeded.sessionId], {}, 'tui-custom')
+      // The resumed Client is ALSO the A16 Herdr Pane owner: only this Client
+      // receives the Pane environment, so the reported state/session commands
+      // are attributable to this Client's local reporter.
+      resumed = new RealDshScreen(installation, 'daemon', ['--session', seeded.sessionId], paneEnv, 'tui-custom')
       await resumed.waitForAny(['hello stub scene', 'stub answer', seeded.shortId], 'A15 custom-profile resume', 90_000)
       const hostsAfter = hostPids(installation.dshHome)
       assert(hostsAfter.length === 1 && hostsAfter[0] === hostBefore,
         `A15: the custom-profile resume did not reuse the same Host (before=${String(hostBefore)}, after=${hostsAfter.join(',')})`)
       out.customProfileRecovery = 'PASS'
+
+      // ── A16: real Herdr publish -> captured argv -> public CLI replay ────
+      await waitForHerdrLog(herdrLogPath, (entries) => {
+        const stateAt = entries.findIndex(entry => entry.argv[1] === 'report-agent')
+        const sessionAt = entries.findIndex(entry => entry.argv[1] === 'report-agent-session')
+        return stateAt >= 0 && sessionAt > stateAt
+      }, 'A16 the reported state before the Session')
+      const herdrEntries = readHerdrInvocations(herdrLogPath)
+      const clientPids = findIsolatedProcesses(installation.dshHome).filter(pid => classify(pid) === 'client')
+      assertHerdrPaneInvocations(herdrEntries, paneId, clientPids, 'A16')
+      const sessionReports = herdrEntries.filter(entry => entry.argv[1] === 'report-agent-session')
+      assert(sessionReports.length >= 1, 'A16: no report-agent-session was recorded')
+      const reportArgv = sessionReports[0].argv
+      assert(argAfter(reportArgv, '--agent-session-id', 'A16') === seeded.sessionId,
+        'A16: the reported agent-session-id was not the seeded canonical Session')
+      const separator = reportArgv.indexOf('--')
+      assert(separator >= 0, `A16: the Session report carried no -- resume argv: ${JSON.stringify(reportArgv)}`)
+      const resumeArgv = reportArgv.slice(separator + 1)
+      const expectedResumeArgv = ['env', 'DSH_PI_TUI_BACKEND=daemon', 'dsh', '--profile', 'tui-custom', '--session', seeded.sessionId]
+      assert(JSON.stringify(resumeArgv) === JSON.stringify(expectedResumeArgv),
+        `A16: the reported resume argv was ${JSON.stringify(resumeArgv)}, expected ${JSON.stringify(expectedResumeArgv)}`)
+      assert(!resumeArgv.includes('pi-tui'), 'A16: the default Profile leaked into the reported resume argv')
+
+      // Replay the CAPTURED array through the REAL public CLI. A released
+      // install has `dsh` on PATH; only this replayed subprocess prepends the
+      // isolated harness bin directory.
+      const harnessBin = join(installation.harnessDir, 'node_modules', '.bin')
+      const replayed = new RealDshScreen(installation, undefined, [], { PATH: `${harnessBin}:${installation.env.PATH ?? ''}` }, 'pi-tui', resumeArgv)
+      await replayed.waitForAny(['hello stub scene', 'stub answer', seeded.shortId], 'A16 daemon resume replay', 90_000)
+      const hostsDuringReplay = hostPids(installation.dshHome)
+      assert(hostsDuringReplay.length === 1 && hostsDuringReplay[0] === hostBefore,
+        `A16: the reported resume command did not reuse the same Host (before=${String(hostBefore)}, during=${hostsDuringReplay.join(',')})`)
+      const countsDuringReplay = processCounts(installation.dshHome)
+      assert(countsDuringReplay.host === 1 && countsDuringReplay.client === 2,
+        `A16: expected the original and replayed daemon Clients on one Host, saw ${JSON.stringify(countsDuringReplay)}`)
+      assert((await resumed.viewport()).includes(seeded.shortId),
+        'A16: the original Client lost its current Session while the reported command ran')
+      replayed.send('/exit\r')
+      const replayExit = await Promise.race([replayed.exit, sleep(60_000).then(() => ({ code: 'timeout', signal: null }))])
+      assert(replayExit.code === 0, `A16: the replayed Client /exit exited ${JSON.stringify(replayExit)}`)
+      const replayRaw = replayed.records.raw.replace(/\r\n/gu, '\n')
+      assert(replayRaw.includes(seeded.sessionId),
+        `A16: the replayed Client did not open the canonical Session; tail: ${replayRaw.replace(/[\u0000-\u001f\u007f]/gu, ' ').slice(-1200)}`)
+      const hostsAfterReplay = hostPids(installation.dshHome)
+      assert(hostsAfterReplay.length === 1 && hostsAfterReplay[0] === hostBefore,
+        'A16: the replayed Client exit stopped or replaced the Host')
+      assert(processCounts(installation.dshHome).client === 1, 'A16: the original Client did not survive the replay exit')
+      assert(!resumed.exited, 'A16: the original Client exited during the replay')
+      out.herdrDaemonRecovery = 'PASS'
+      trace('m6-2a-herdr-daemon-recovery', {
+        hostPid: hostBefore,
+        paneId,
+        sessionId: seeded.sessionId,
+        resumeArgv,
+      })
     } finally {
       if (resumed !== undefined) await resumed.dispose()
       else if (first !== undefined) await first.dispose()
       try { unlinkSync(aliasDir) } catch { /* absent */ }
+      try { unlinkSync(fakeHerdrPath) } catch { /* absent */ }
+      try { unlinkSync(herdrLogPath) } catch { /* absent */ }
     }
   }
 

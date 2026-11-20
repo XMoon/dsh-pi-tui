@@ -94,7 +94,7 @@ import { runDetached, runOwned } from '../runtime/process/tasks.ts'
 import { captureScheduleSessionSwitch, openScheduleWorkspace } from './schedule/runtime.ts'
 import { FileHistorySearchSource } from '../client/history/search.ts'
 import { createHerdrReporter } from '../client/herdr/reporter.ts'
-import { herdrSessionProjection } from '../client/herdr/session.ts'
+import { herdrSessionProjection, type HerdrResumeTarget } from '../client/herdr/session.ts'
 import { safeErrorMessage } from '../runtime/process/errors.ts'
 import { DraftImageStore } from '../client/media/image/draft-store.ts'
 import { DraftFileStore } from '../client/media/attachment/file-draft.ts'
@@ -870,9 +870,13 @@ export function applyRunnerWithRuntime(
     const herdrReporter = createHerdrReporter(process.env, override === undefined, diag)
     /**
      * H2: the ONE Client-local bridge from the committed main-owner Session to
-     * the H1 reporter. The Direct branch pins the ACTUAL running profile once;
-     * the Split Client deliberately passes `undefined`, so it can never publish
-     * a resume command that would create a new Direct Host.
+     * the H1 reporter. The Direct branch pins the ACTUAL running profile once.
+     * The Split Client uses the SAME process-local `profileDaemonAdmin.profile`
+     * the Client entry derived from its officially verified Profile options,
+     * and reports a daemon resume command that pins the daemon backend: the
+     * Profile may later be saved back to Direct, while the Hosted Session this
+     * recover target belongs to still lives. Without that port only the
+     * Session id is reported — the default Profile is never guessed.
      *
      * The owner notification is the official `SessionOwnershipCore` scope
      * invalidation (coalesced after every successful create/resume/switch/fork
@@ -881,9 +885,13 @@ export function applyRunnerWithRuntime(
      * immediately following notification.
      */
     if (herdrReporter !== undefined) {
-      const directProfile = override === undefined ? hostRunningProfile(ctx) : undefined
+      const resumeTarget: HerdrResumeTarget | undefined = override === undefined
+        ? { kind: 'direct', profile: hostRunningProfile(ctx) }
+        : profileDaemonAdmin === undefined
+          ? undefined
+          : { kind: 'daemon', profile: profileDaemonAdmin.profile }
       const observeCurrentSession = (): void => {
-        herdrReporter.observeSession(herdrSessionProjection(ownership.currentSessionId(), directProfile))
+        herdrReporter.observeSession(herdrSessionProjection(ownership.currentSessionId(), resumeTarget))
       }
       const unsubscribe = ownership.subscribeScopeInvalidation(observeCurrentSession)
       let observing = true
