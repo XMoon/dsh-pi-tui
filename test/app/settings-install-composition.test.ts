@@ -21,6 +21,7 @@ import { join } from 'node:path'
 import test from 'node:test'
 
 import { createSettingsCommands } from '../../src/tui/commands/settings.ts'
+import { SettingsWorkspacePanel } from '../../src/tui/panels/settings-workspace-panel.ts'
 import { DirectConfigPort, type HostContextLike } from '../../src/runtime/direct/config-direct.ts'
 import {
   createProfileDaemonAdmin,
@@ -36,15 +37,44 @@ function settingsService(initial: { backend: string }, revision = 1) {
   let value: Record<string, unknown> = { ...initial }
   let user: Record<string, unknown> = {}
   let rev = revision
+  let mutationCount = 0
   return {
     describe: () => [{ ns: 'tui-startup', value: { ...value }, user: { ...user }, revision: rev }],
     mutate: async (_ns: string, ops: readonly { op: string; path: readonly string[]; value: unknown }[]) => {
+      mutationCount += 1
       for (const op of ops) {
         if (op.op === 'set') { value = { ...value, [op.path.join('.')]: op.value }; user = { ...user, [op.path.join('.')]: op.value } }
       }
       rev += 1
     },
+    mutateCount: () => mutationCount,
   }
+}
+
+const PANEL_SNAPSHOT: any = {
+  configReadiness: 'ready',
+  capturedAt: 0,
+  rows: [{
+    id: 'startup-backend',
+    category: 'general',
+    label: 'Backend',
+    summary: 'Direct',
+    value: 'Direct',
+    scope: 'DSH Host profile · next cold launch',
+    freshness: 'ready',
+    description: 'Which backend a new launch runs',
+    edit: {
+      field: 'startup-backend',
+      primary: 'persisted',
+      runtime: 'Applies on next launch; current TUI/Host remains unchanged',
+      persisted: 'Direct',
+      revision: 1,
+      options: [
+        { value: 'Direct', label: 'Direct', available: true, current: true },
+        { value: 'Daemon', label: 'Daemon', available: true, current: false },
+      ],
+    },
+  }],
 }
 
 function host(services: Record<string, unknown>): HostContextLike {
@@ -53,7 +83,7 @@ function host(services: Record<string, unknown>): HostContextLike {
 
 /** Build the real composition: official Direct config + production admin port +
  *  the captured production Settings handlers. */
-function buildComposition(t: test.TestContext) {
+function buildComposition(t: test.TestContext, mode: 'capture' | 'panel' = 'capture') {
   const life = testLifecycle(t)
   const accountHome = life.tempDir('p1-acct-')
   const platform = process.platform === 'darwin' ? 'darwin' : 'linux'
@@ -81,9 +111,35 @@ function buildComposition(t: test.TestContext) {
   const config = new DirectConfigPort(host({ settings: service }), undefined, () => undefined)
   let capturedCommit: ((req: unknown) => Promise<unknown>) | undefined
   let capturedInstall: ((settle: (r: { ok: boolean; detail?: string }) => void) => void) | undefined
+  let livePanel: SettingsWorkspacePanel | undefined
   const app: any = {
     isDisposed: () => false, requestRender: () => {}, notify: () => {},
-    openSettingsWorkspace: (_spec: unknown, options: any) => { capturedCommit = options.onCommit; capturedInstall = options.onBackendServiceInstall; return { close: () => {}, release: () => {} } },
+    openSettingsWorkspace: (spec: any, options: any) => {
+      if (mode === 'panel') {
+        // The production panel class with the SAME options `settings.ts`
+        // produced: `onBackendServiceInstall` is passed through unchanged (only
+        // `onCommit` needs the panel's settle adapter, exactly like TuiApp).
+        livePanel = new SettingsWorkspacePanel({ readSnapshot: () => PANEL_SNAPSHOT }, {
+          rows: () => 60,
+          columns: () => 120,
+          requestRender: () => {},
+          notice: () => undefined,
+          aboutVersionFacts: { tui: '0.5.7', dsh: '0.2.2-rc.5' },
+          onClose: () => {},
+          onCopy: () => {},
+          onCommit: (request: any, settle: any) => {
+            void Promise.resolve(options.onCommit(request)).then(settle, error => {
+              settle({ outcome: 'not-saved', reason: error instanceof Error ? error.message : String(error) })
+            })
+          },
+          ...(options.onBackendServiceInstall === undefined ? {} : { onBackendServiceInstall: options.onBackendServiceInstall }),
+        }, { initialRowId: 'startup-backend' })
+        return { close: () => {}, release: () => {} }
+      }
+      capturedCommit = options.onCommit
+      capturedInstall = options.onBackendServiceInstall
+      return { close: () => {}, release: () => {} }
+    },
     openModelsWorkspace: () => ({ close: () => {} }), openAccountWorkspace: () => ({ close: () => {} }), openAuthWorkspace: () => ({ close: () => {} }),
   }
   const transitions: Array<string | undefined> = []
@@ -110,7 +166,15 @@ function buildComposition(t: test.TestContext) {
     recordExtensionError: () => {}, clearExtensionError: () => {}, captureExtensionHealthRef: (() => undefined) as any,
   })
   registrars.openPluginsWorkspace()
-  return { capturedCommit: () => capturedCommit!, capturedInstall: () => capturedInstall!, observed, expected, transitions }
+  return {
+    capturedCommit: () => capturedCommit!,
+    capturedInstall: () => capturedInstall!,
+    observed,
+    expected,
+    transitions,
+    panel: () => livePanel,
+    mutations: () => service.mutateCount(),
+  }
 }
 
 test('the Settings verified direct→daemon confirmation drives the production install sink with the bound Profile identity', async t => {
@@ -135,4 +199,58 @@ test('the safe Not-now path through the real Settings route performs zero manage
   // invoked, so the real admin sink sees zero manager IO — the real reachable
   // route, not a void-created port.
   assert.equal(c.observed.length, 0, 'Not now reaches no manager IO through the real route')
+})
+
+// ── N2: the REAL panel input -> production command handler -> admin sink ─────
+
+const stripAnsi = (line: string): string => line.replace(/\x1b\[[0-9;]*m/gu, '').trimEnd()
+const panelText = (panel: SettingsWorkspacePanel): string => panel.render(120).map(stripAnsi).join('\n')
+const settleTick = (): Promise<void> => new Promise(resolve => setImmediate(resolve))
+
+/** Paint one frame (the painted risk grant needs a real render), then send a key. */
+function pressPanel(panel: SettingsWorkspacePanel, key: string): void {
+  panel.render(120)
+  panel.handleInput(key)
+}
+
+/** Drive the real panel from the Backend row to the verified install follow-up. */
+async function driveToFollowUp(panel: SettingsWorkspacePanel): Promise<void> {
+  pressPanel(panel, '\r') // Backend row -> Detail, the value choice opens
+  pressPanel(panel, '\x1b[B') // move the candidate to Daemon
+  pressPanel(panel, '\r') // Confirm -> production commit
+  await settleTick()
+  await settleTick()
+  assert.match(panelText(panel), /Optional OS supervision/u, 'the verified commit painted the follow-up')
+  // The grant is earned by a PAINTED frame that contains the whole risk block.
+  panel.render(120)
+}
+
+test('the REAL Settings panel input drives the production install sink exactly once (N2)', async t => {
+  const c = buildComposition(t, 'panel')
+  const panel = c.panel()
+  assert.ok(panel !== undefined, 'the production SettingsWorkspacePanel was mounted')
+  await driveToFollowUp(panel)
+  // Tab moves the focus to `Install service`; Enter is the ONE confirmation.
+  // The install only reaches the sink when the panel's painted risk+action
+  // grant is true (a refused grant is proven by the short-viewport test), so
+  // the assertion below is the EFFECT, not a callback count.
+  pressPanel(panel, '\t')
+  pressPanel(panel, '\r')
+  await settleTick()
+  assert.equal(c.observed.length, 1, `exactly one install reached the real control plane: ${JSON.stringify(c.observed)}`)
+  assert.equal(c.observed[0]!.verb, 'install')
+  assert.equal(c.observed[0]!.scopeId, c.expected.scopeId, 'the sink drove the bound Profile identity')
+  assert.equal(c.observed[0]!.profileRealpath, c.expected.profileRealpath)
+})
+
+test('the REAL panel `Not now` performs zero install IO and no extra settings write (N2)', async t => {
+  const c = buildComposition(t, 'panel')
+  const panel = c.panel()
+  assert.ok(panel !== undefined)
+  await driveToFollowUp(panel)
+  const writesBefore = c.mutations()
+  pressPanel(panel, '\r') // Enter on the default `Not now`
+  await settleTick()
+  assert.deepEqual(c.observed, [], 'Not now reaches no manager IO')
+  assert.equal(c.mutations(), writesBefore, 'Not now performs no additional settings write')
 })

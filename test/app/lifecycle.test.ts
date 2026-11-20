@@ -13,6 +13,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { createExitController, daemonResumeBackendOverride, formatDaemonDetachHint } from '../../src/app/bootstrap/exit.ts'
 import { createExitIntentCoordinator, type ExitIntentCoordinator, type StopCurrentWorkOutcome } from '../../src/app/bootstrap/exit-intent.ts'
+import { createSurfaceLifecycle } from '../../src/app/bootstrap/lifecycle.ts'
 import { createExitIntentFacts } from '../../src/app/bootstrap/exit-facts.ts'
 import type { ExitChoiceModel, SurfaceExitChoiceSeam } from '../../src/app/surface/exit-choice.ts'
 import type { LiveSessionScope, SessionScope } from '../../src/app/session/scope.ts'
@@ -2115,4 +2116,59 @@ test('the proven terminal restore is what admits the ONE admin stop', async () =
   requestExit({ hostStopRequested: true })
   assert.equal(await exitDone, 0)
   assert.equal(calls.adminStop, 1)
+})
+
+// ── N1: the teardown publishes its TTY-release half ─────────────────────────
+
+/** The narrow teardown face with only the hooks this mapping test exercises. */
+function teardownSurface(options: { readonly rendererReleaseFails?: boolean } = {}) {
+  const noop = (): void => {}
+  return new Proxy({
+    whenRendererReleased: () => options.rendererReleaseFails === true
+      ? Promise.reject(new Error('the renderer still owns the tty'))
+      : Promise.resolve(),
+    dispose: noop,
+  }, { get: (target, key) => Reflect.get(target, key) ?? noop }) as never
+}
+
+function releaseLifecycle(options: { readonly rendererReleaseFails?: boolean } = {}) {
+  let cleaned = false
+  return createSurfaceLifecycle({
+    diag: createDiag({ filePath: undefined, stderrLevel: 'off', sinks: [{ write: () => {} }] }),
+    isCleanedUp: () => cleaned,
+    markCleanedUp: () => { cleaned = true },
+    surface: teardownSurface(options),
+    abortLifecycle: () => {},
+    disposeExitIntent: () => {},
+    disposeViewer: () => {},
+    clearDraftImages: () => {},
+    clearDraftFiles: () => {},
+    disposeCommandCatalog: () => {},
+    cancelDeferredStatus: () => {},
+    disposeFooterCommand: () => {},
+    disposeLocalShell: () => {},
+    disposePastedImageIntake: () => {},
+    disposeHerdrReporter: () => {},
+    disposeRemoteProgressGeneration: () => {},
+    retireOwnedSession: async () => ({}) as never,
+    disposeSelectedTransport: async () => {},
+    registerDisposal: () => {},
+    whenRendererAcquired: () => Promise.resolve(),
+  })
+}
+
+test('the lifecycle reports the TTY-release half separately from the batch', async () => {
+  {
+    const lifecycle = releaseLifecycle()
+    assert.equal(lifecycle.surfaceReleased(), undefined, 'before the teardown nothing is proven')
+    await lifecycle.disposeSurface()
+    await new Promise(resolve => setImmediate(resolve))
+    assert.equal(lifecycle.surfaceReleased(), 'released', 'a settled release is the positive postcondition')
+  }
+  {
+    const lifecycle = releaseLifecycle({ rendererReleaseFails: true })
+    await Promise.resolve(lifecycle.disposeSurface()).catch(() => undefined)
+    await new Promise(resolve => setImmediate(resolve))
+    assert.equal(lifecycle.surfaceReleased(), 'failed', 'a rejected release is NOT a granted terminal')
+  }
 })
