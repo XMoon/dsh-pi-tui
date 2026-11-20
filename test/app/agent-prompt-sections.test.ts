@@ -53,6 +53,7 @@ import {
   type TuiPromptTurnPolicy,
 } from '../../src/app/agent/prompt-sections.ts'
 import { installTuiPromptTurnLatch } from '../../src/app/agent/turn-policy.ts'
+import { HostAgentPromptOwner } from '../../src/app/host/features/agent-prompt.ts'
 import { installDirectTuiSystemPromptSections } from '../../src/app/direct/system-prompt.ts'
 
 /** The four fixed identities every backend must register. */
@@ -438,4 +439,66 @@ test('the live-display compatibility policy keeps every Turn eligible', () => {
   assert.deepEqual(policy.currentTurn(), { eligible: true, focus: true })
   const full = liveDisplayTurnPolicy({ preset: 'full' })
   assert.deepEqual(full.currentTurn(), { eligible: true, focus: false })
+})
+test('the Host prompt owner releases every observer and section at dispose, and remounts cleanly (RFL-004 lifecycle)', () => {
+  // ONE roster-observer pair per owner lifetime: dispose() releases the
+  // agent/created + agent/disposed listeners and unregisters every installed
+  // section; a late roster event installs nothing; a remount is a fresh owner.
+  const listeners = new Map<string, Array<(payload: { agent: unknown }) => void>>()
+  const emit = (event: string, agent: unknown): void => {
+    for (const listener of [...listeners.get(event) ?? []]) listener({ agent })
+  }
+  const ctx = {
+    on(event: string, listener: (payload: { agent: unknown }) => void) {
+      listeners.set(event, [...listeners.get(event) ?? [], listener])
+      return () => {
+        listeners.set(event, (listeners.get(event) ?? []).filter(entry => entry !== listener))
+      }
+    },
+    effect(fn: () => () => void) {
+      fn()
+    },
+    reflect: { get: () => ({ list: () => [makeAgent('a1')] }) },
+  }
+  const registered: string[] = []
+  const unregistered: string[] = []
+  const makeAgent = (id: string): unknown => ({
+    id,
+    session: { id, header: { origin: 'user' } },
+    ctx: {
+      get: (name: string) => (name === 'systemPrompt' ? {
+        section: (spec: { name: string }) => {
+          registered.push(`${id}:${spec.name}`)
+          return () => { unregistered.push(`${id}:${spec.name}`) }
+        },
+        assemble: async () => ({ sections: [] }),
+      } : undefined),
+    },
+  })
+  const options = {
+    ctx,
+    voters: { snapshotVoters: () => ({ eligible: false, focus: false }) },
+    preferences: {
+      progressUpdates: () => ({ mode: 'off' }),
+      responseStyle: () => ({ style: 'concise' }),
+      gitAttribution: () => ({ mode: 'product' }),
+    },
+  }
+  const owner = new HostAgentPromptOwner(ctx as never, options as never)
+  owner.installLiveAgents()
+  assert.equal(registered.length, 4, 'the four sections install once on the live Agent')
+  emit('agent/created', makeAgent('a2'))
+  assert.equal(registered.length, 8, 'a later Agent installs through the roster event')
+  owner.dispose()
+  assert.equal(listeners.get('agent/created')?.length, 0, 'dispose releases the created observer')
+  assert.equal(listeners.get('agent/disposed')?.length, 0, 'dispose releases the disposed observer')
+  assert.equal(unregistered.length, 8, 'dispose unregisters every installed section')
+  emit('agent/created', makeAgent('a3'))
+  assert.equal(registered.length, 8, 'a disposed owner never installs again')
+  // A remount is a fresh owner over the same Host state.
+  const remounted = new HostAgentPromptOwner(ctx as never, options as never)
+  remounted.installLiveAgents()
+  assert.equal(registered.length, 12, 'the remounted owner installs on the live Agent exactly once')
+  remounted.dispose()
+  assert.equal(unregistered.length, 12, 'the remounted owner releases everything it installed')
 })
