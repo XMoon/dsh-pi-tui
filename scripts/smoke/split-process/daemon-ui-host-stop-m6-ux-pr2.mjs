@@ -96,8 +96,11 @@ async function chooseBackend(client, target, label) {
     } catch {
       continue
     }
-    for (let step = 0; step < 6 && !wanted.test(await frameOf(client)); step += 1) {
-      client.send('\x1b[B')
+    // The choice opens with the focus on the CURRENT candidate and the list
+    // CLAMPS (no wrap): the other value may be above OR below it, so probe both
+    // directions instead of assuming a list order.
+    for (let step = 0; step < 8 && !wanted.test(await frameOf(client)); step += 1) {
+      client.send(step % 2 === 0 ? '\x1b[A' : '\x1b[B')
       await sleep(250)
     }
     if (wanted.test(await frameOf(client))) break
@@ -150,6 +153,26 @@ async function exitStop(client, label) {
   return exit
 }
 
+/**
+ * One verified Backend save end to end. A settings refresh may invalidate the
+ * open value modal; a fresh Settings lease is the only deterministic recovery,
+ * so retry the WHOLE open+navigate+choose instead of racing one frame.
+ */
+async function saveBackend(client, target, label) {
+  for (let round = 0; round < 3; round += 1) {
+    try {
+      await openBackendDetail(client, label)
+      await chooseBackend(client, target, label)
+      return
+    } catch {
+      try { client.send('\x1b') } catch {}
+      await closeSettings(client, label)
+      await sleep(500)
+    }
+  }
+  throw new SplitSmokeAssertionError(`${label}: the ${target} Backend save never settled`)
+}
+
 /** Run the Settings→exit whole-Host stop lifecycle. */
 export async function runDaemonUiHostStop(context) {
   const { trace, dshHome } = context
@@ -169,8 +192,7 @@ export async function runDaemonUiHostStop(context) {
     // Not now: zero manager IO), then — after reopening Settings — a verified
     // daemon→direct save that records the transient exit intent. `/exit` then
     // takes the whole-Host stop confirm.
-    await openBackendDetail(clientA, 'PR2 A')
-    await chooseBackend(clientA, 'Direct', 'PR2 A')
+    await saveBackend(clientA, 'Direct', 'PR2 A')
     await closeSettings(clientA, 'PR2 A')
     await exitLeave(clientA, 'PR2 A')
     trace('pr2.leave-exit', { exitCode: 0 })
@@ -187,11 +209,9 @@ export async function runDaemonUiHostStop(context) {
     const { client: clientA2 } = await startC1Client('PR2 A2')
     // A already persisted `direct`; A2 must first restore `daemon` and then save
     // `direct` again — that measurement is the real daemon→direct conversion.
-    await openBackendDetail(clientA2, 'PR2 A2')
-    await chooseBackend(clientA2, 'Daemon', 'PR2 A2')
+    await saveBackend(clientA2, 'Daemon', 'PR2 A2')
     await closeSettings(clientA2, 'PR2 A2')
-    await openBackendDetail(clientA2, 'PR2 A2')
-    await chooseBackend(clientA2, 'Direct', 'PR2 A2')
+    await saveBackend(clientA2, 'Direct', 'PR2 A2')
     await closeSettings(clientA2, 'PR2 A2')
     await exitStop(clientA2, 'PR2 A2')
     trace('pr2.stop-exit', { exitCode: 0 })
