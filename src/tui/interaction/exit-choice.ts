@@ -129,7 +129,13 @@ export class ExitChoicePanel implements Component, Focusable {
     if (this.disposed) return
     // While the daemon Stop is in flight the choice is LOCKED: no key can
     // dispatch a second cancel or turn the wait into an exit.
-    if (this.model.phase === 'stopping' || this.model.phase === 'verifying') return
+    if (this.model.phase === 'stopping') return
+    // The verification wait is non-repeatable but WITHDRAWABLE: Esc/Ctrl-C
+    // abandons it (never a Host stop); no other key can submit or re-trigger.
+    if (this.model.phase === 'verifying') {
+      if (matchesKey(data, 'escape') || matchesKey(data, 'ctrl+c')) this.model.dismiss()
+      return
+    }
     if (matchesKey(data, 'escape') || matchesKey(data, 'ctrl+c')) {
       // Any intervening gesture cancels a pending pointer press: the release
       // can only ever complete the gesture the user CURRENTLY sees.

@@ -1976,3 +1976,20 @@ test('a close-time callback that invalidates the intent never executes the Host 
   assert.deepEqual(h.commits, [{ workStopped: false }],
     'the verdict degrades to the ordinary detach; the Host stop is NOT executed')
 })
+
+test('a stale identity during the verification wait retires the seat instead of locking exits', async () => {
+  const h = exitIntentHarness({ backend: 'daemon', activity: 'idle', hostStopEligible: true })
+  h.coordinator.request('slash')
+  // The identity goes stale while the fresh authoritative read is pending.
+  h.state.scopeCurrent = false
+  h.coordinator.retireIfStale()
+  await tick()
+  // The abandoned wait is closed, never left as an inoperable locked seat.
+  assert.equal(h.current(), undefined, 'the stale verification seat is closed')
+  assert.deepEqual(h.commits, [], 'a stale identity never commits an exit')
+  // A later exit is not blocked by the abandoned wait.
+  h.state.scopeCurrent = true
+  h.coordinator.request('slash')
+  await tick()
+  assert.equal(h.current()?.kind, 'daemon-host-stop', 'a fresh exit still reaches the confirm')
+})

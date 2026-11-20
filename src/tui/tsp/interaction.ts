@@ -1935,7 +1935,13 @@ export function createTspInteractionSeat(options: TspInteractionSeatOptions): Ts
     const model = exitChoice
     if (model === undefined) return false
     // A Stop in flight locks the window: no key dispatches a second cancel.
-    if (model.phase === 'stopping' || model.phase === 'verifying') return true
+    if (model.phase === 'stopping') return true
+    // The verification wait is non-repeatable but WITHDRAWABLE: Esc/Ctrl-C
+    // abandons it (never a Host stop); no other key submits or re-triggers.
+    if (model.phase === 'verifying') {
+      if (key.name === 'escape' || (key.ctrl === true && key.name === 'c')) model.dismiss()
+      return true
+    }
     if (key.name === 'escape' || (key.ctrl === true && key.name === 'c')) {
       model.select('stay')
       return true

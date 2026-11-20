@@ -297,7 +297,14 @@ export function createExitIntentCoordinator(deps: ExitIntentCoordinatorDeps): Ex
       } catch {
         ok = false
       }
-      if (disposed || stopWait !== controller || operationEpoch !== epoch) return
+      // Abandon cleanly if this wait is no longer live (a newer operation, a
+      // retire, a dispose, or the identity went stale): clear the guard and
+      // CLOSE the now-stale seat so it never locks future exits (RFL-010).
+      if (disposed || stopWait !== controller || operationEpoch !== epoch || !identityCurrent(identity)) {
+        if (stopWait === controller) stopWait = undefined
+        if (!disposed && open !== undefined) closeChoice()
+        return
+      }
       stopWait = undefined
       if (!ok) {
         safeDiag('info', 'host stop declined: the fresh authoritative Backend read did not confirm the transition')
@@ -335,6 +342,10 @@ export function createExitIntentCoordinator(deps: ExitIntentCoordinatorDeps): Ex
     const identity: CapturedChoice = { kind: 'daemon-host-stop', backend, scope: facts.scope, live: facts.live, transportToken: facts.transportToken }
     const controller = new AbortController()
     stopWait = controller
+    // Publish the captured identity BEFORE the seat is shown, so a scope or
+    // transport change during the pending read can retire this wait
+    // (retireIfStale) instead of leaving it locked forever.
+    captured = identity
     open = exitChoiceVerifying(select, dismiss)
     presenter()?.open(open)
     // The update callback may synchronously dismiss (a Host modal) and start a
@@ -350,7 +361,15 @@ export function createExitIntentCoordinator(deps: ExitIntentCoordinatorDeps): Ex
       } catch {
         ok = false
       }
-      if (disposed || stopWait !== controller || operationEpoch !== epoch) return
+      // The read settled. If this wait is no longer the live one (a newer
+      // operation, a retire, a dispose, or the identity went stale), abandon it
+      // cleanly: clear the guard and CLOSE the now-stale seat so it can never
+      // lock future exits (RFL-010).
+      if (disposed || stopWait !== controller || operationEpoch !== epoch || !identityCurrent(identity)) {
+        if (stopWait === controller) stopWait = undefined
+        if (!disposed && open !== undefined) closeChoice()
+        return
+      }
       stopWait = undefined
       if (!ok) {
         safeDiag('info', 'host stop not offered: the fresh authoritative Backend read did not confirm the transition')
@@ -360,7 +379,10 @@ export function createExitIntentCoordinator(deps: ExitIntentCoordinatorDeps): Ex
       // Still THIS operation (the pre-open check above is not enough: the read
       // itself takes time): only a current, undismissed decision opens the
       // confirm. This is the dangerous revival gate.
-      if (disposed || operationEpoch !== epoch || !identityCurrent(identity)) return
+      if (disposed || operationEpoch !== epoch || !identityCurrent(identity)) {
+        if (!disposed && open !== undefined) closeChoice()
+        return
+      }
       openHostStopChoice(facts, backend, workStopped)
     }, {
       diag: deps.diag,
