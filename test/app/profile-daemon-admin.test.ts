@@ -130,11 +130,17 @@ test('the PRODUCTION run seam passes the bound Profile into the real control pla
   }
   await run(profileA)('stop')
   await run(profileB)('stop')
-  assert.equal(observed.length, 2, `the real control plane consumed both bound profiles (got ${JSON.stringify(observed)})`)
-  assert.notEqual(observed[0]!.scopeId, observed[1]!.scopeId,
-    'each bound Profile derives its own scope identity — a wrong binding cannot pass')
-  assert.notEqual(observed[0]!.profileRealpath, observed[1]!.profileRealpath,
+  // The control plane may read the profile-scoped record more than once per
+  // verb (pre/post snapshot); the contract is that BOTH bound profiles reached
+  // it and each derived its OWN scope identity.
+  const scopeIds = [...new Set(observed.map(entry => entry.scopeId))]
+  assert.equal(scopeIds.length, 2,
+    `the real control plane consumed both bound profiles (got ${JSON.stringify(observed)})`)
+  const realpaths = [...new Set(observed.map(entry => entry.profileRealpath))]
+  assert.equal(realpaths.length, 2,
     'the control plane read each bound profile directory — the actual sink identity')
+  assert.deepEqual([...new Set(observed.map(entry => entry.name))].sort(), ['profile-a', 'profile-b'],
+    'each bound Profile reached the control plane')
 })
 
 test('the port performs NO manager IO at construction and while idle', async () => {
