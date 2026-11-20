@@ -498,7 +498,7 @@ test('subscribe forwards every ingress sink and passes the hydrated revision as 
 
   capture.sinks.onWindowRefoldRequired('child-1')
   capture.sinks.onSessionSnapshotChanged('child-1')
-  capture.sinks.onProjectionsChanged('child-1')
+  capture.sinks.onProjectionsChanged('child-1', ['model'])
   assert.deepEqual(calls, ['refold', 'snapshot', 'projections'])
   view.release()
 })

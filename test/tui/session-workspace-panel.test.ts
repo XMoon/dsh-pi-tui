@@ -1873,6 +1873,10 @@ test('Peek is pinned to a Session row, exposes its full identity, and refuses Fo
   const peek = h.view()
   assert.ok(peek.includes(`Session ID: ${OTHER}`), `Peek names the full sanitized Session id:\n${peek}`)
   assert.ok(peek.includes('Workspace: Beta'), 'Peek keeps the official Workspace identity')
+  // The row's cwd is the immutable creation directory: it is labelled
+  // `Created in`, never presented as the current working directory.
+  assert.ok(peek.includes('Created in: /ws/project'), `Peek names the creation directory separately:\n${peek}`)
+  assert.ok(!peek.includes('cwd:'), 'Peek never labels the creation directory as the current cwd')
 })
 
 test('the inline Add editor stays single-flight, keeps failures, and returns to the tree', async () => {
@@ -3431,7 +3435,7 @@ test('the Peek bar is the only exit: the removed local row is inert and Open res
   // page key nor Down can scroll past the last full page.
   h.vt.sendInput('\x1b[6~')
   await h.paint()
-  assert.ok(h.view().includes('cwd:'), `PageDown lands on the next page without skipping rows:\n${h.view()}`)
+  assert.ok(h.view().includes('Created in:'), `PageDown lands on the next page without skipping rows:\n${h.view()}`)
   for (let step = 0; step < 5; step += 1) {
     h.vt.sendInput('\x1b[B')
     await h.paint()

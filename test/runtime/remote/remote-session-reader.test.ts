@@ -490,7 +490,7 @@ test('turnOutline reads the official binding projection without any history fetc
   assert.equal(new RemoteSessionReader(source, generation.source).turnOutline('s'), undefined)
 })
 
-test('sessionStatus reads the exact binding projections plus the list-row cwd fact', () => {
+test('sessionStatus reads the effective workingDirectory projection with the list-row cwd as its creation fallback', () => {
   const generation = createObservableGenerationHarness()
   const values = {
     modelSelection: { lastUsed: { provider: 'p', model: 'm1' }, next: { provider: 'p', model: 'm2', reasoningEffort: 'high' } },
@@ -498,14 +498,17 @@ test('sessionStatus reads the exact binding projections plus the list-row cwd fa
     contextBreakdown: { systemTokens: 10, toolsTokens: 20, messageTokens: 870 },
     tokenUsage: { uncachedInputTokens: 1, outputTokens: 2, cacheReadTokens: 3, cacheWriteTokens: 4 },
     todos: [{ content: 't', status: 'in_progress' as const }],
+    // The official effective directory B. The list row below keeps the
+    // immutable CREATION directory A; the status must report B, not A.
+    workingDirectory: '/host/effective',
   }
   const source = remoteSource({
-    state: state(['s'], { s: listRow('s', 1, { cwd: '/host/ws' }) }),
+    state: state(['s'], { s: listRow('s', 1, { cwd: '/host/creation' }) }),
     bindings: { s: binding(values) },
   })
   assert.deepEqual(new RemoteSessionReader(source, generation.source).sessionStatus('s'), {
     sessionId: 's',
-    cwd: '/host/ws',
+    cwd: '/host/effective',
     model: { provider: 'p', model: 'm2', reasoningEffort: 'high' },
     context: {
       projectedTokens: 900,
@@ -515,6 +518,51 @@ test('sessionStatus reads the exact binding projections plus the list-row cwd fa
     todos: [{ content: 't', status: 'in_progress' }],
     usage: { uncachedInputTokens: 1, outputTokens: 2, cacheReadTokens: 3, cacheWriteTokens: 4 },
   })
+})
+
+test('sessionStatus falls back to the SAME Session creation cwd only for a legal null/absent workingDirectory', () => {
+  const generation = createObservableGenerationHarness()
+  // The official projection's LEGAL null means "no recorded value": the same
+  // Session's list-row creation cwd is the fallback (never another session's).
+  const nullValue = remoteSource({
+    state: state(['s'], { s: listRow('s', 1, { cwd: '/host/creation' }) }),
+    bindings: { s: binding({ workingDirectory: null }) },
+  })
+  assert.equal(new RemoteSessionReader(nullValue, generation.source).sessionStatus('s')?.cwd, '/host/creation')
+  // Absence (capability/read unavailable) takes the same fallback.
+  const absent = remoteSource({
+    state: state(['s'], { s: listRow('s', 1, { cwd: '/host/creation' }) }),
+    bindings: { s: binding({}) },
+  })
+  assert.equal(new RemoteSessionReader(absent, generation.source).sessionStatus('s')?.cwd, '/host/creation')
+  // An empty string is not a usable directory: fall back, never present ''.
+  const empty = remoteSource({
+    state: state(['s'], { s: listRow('s', 1, { cwd: '/host/creation' }) }),
+    bindings: { s: binding({ workingDirectory: '' }) },
+  })
+  assert.equal(new RemoteSessionReader(empty, generation.source).sessionStatus('s')?.cwd, '/host/creation')
+})
+
+test('sessionStatus never borrows another Session workingDirectory', () => {
+  const generation = createObservableGenerationHarness()
+  const source = remoteSource({
+    state: state(['s', 'other'], {
+      s: listRow('s', 1, { cwd: '/host/s-creation' }),
+      other: listRow('other', 2, { cwd: '/host/other-creation' }),
+    }),
+    bindings: {
+      s: binding({ workingDirectory: '/host/s-effective' }),
+      other: binding({ workingDirectory: '/host/other-effective' }),
+    },
+  })
+  const reader = new RemoteSessionReader(source, generation.source)
+  assert.equal(reader.sessionStatus('s')?.cwd, '/host/s-effective')
+  assert.equal(reader.sessionStatus('other')?.cwd, '/host/other-effective')
+  // No binding and a lost Connection stay unavailable — never a fabricated cwd
+  // from the list row or the Client process.
+  assert.equal(reader.sessionStatus('no-binding'), undefined)
+  generation.set(undefined)
+  assert.equal(reader.sessionStatus('s'), undefined)
 })
 
 test('sessionStatus reads only the addressed session — no parent/main fallback, no invented facts', () => {
@@ -609,7 +657,7 @@ test('the live status projection list is EXACTLY what the status reads (no stati
     // 'piTuiPerformance' joined in TPS plan PR-2: the bundled Host projection
     // is the performance authority, and a pushed frame must refresh the R5/All
     // figures with every other status key (never a static render).
-    ['agentPreset', 'contextBreakdown', 'contextPressure', 'goal', 'modelSelection', 'permissions', 'piTuiPerformance', 'plan', 'title', 'todos', 'tokenUsage'].sort(),
+    ['agentPreset', 'contextBreakdown', 'contextPressure', 'goal', 'modelSelection', 'permissions', 'piTuiPerformance', 'plan', 'title', 'todos', 'tokenUsage', 'workingDirectory'].sort(),
   )
   // Projections whose change the status does not consume stay OUT: their own
   // consumer establishes the subscription it needs.

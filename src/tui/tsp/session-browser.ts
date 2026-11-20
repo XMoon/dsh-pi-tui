@@ -600,7 +600,9 @@ function detailReader(
         ['Session ID', row.id],
         ['Title', title],
         ['State', rowStateText(panel, row)],
-        ['Workspace', row.cwd === undefined ? 'Unknown workspace' : row.cwd],
+        // `row.cwd` is the immutable Session-header creation directory, NOT
+        // the Session's current working directory and NOT a Workspace identity.
+        ['Created in', row.cwd === undefined ? 'Unknown' : row.cwd],
       ],
     },
     {

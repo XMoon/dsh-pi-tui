@@ -442,16 +442,20 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
    */
   
   /**
-   * The OFFICIAL cwd fact of the live session (Remote branch: the list-row
-   * cwd). `undefined` when a LIVE session's official row carries none —
-   * the status presentation then OMITS the cwd fact rather than copying the
-   * Client cwd (Host/Client cwd equivalence is forbidden). Never consumed
-   * by execution paths (the shell/history owners keep their own fallback).
+   * The OFFICIAL cwd fact of the live session. `undefined` when a LIVE
+   * session's official facts carry none — the status presentation then OMITS
+   * the cwd fact rather than copying the Client cwd (Host/Client cwd
+   * equivalence is forbidden). Never consumed by execution paths (the
+   * shell/history owners keep their own fallback).
    *
-   * Direct reads the SESSION STATUS projection of THIS session (S2/PR-B):
-   * its `cwd` is the official effective working directory, which follows a
-   * committed `working-directory/change`. The immutable header cwd is only
-   * the reader's own fallback when no value is recorded.
+   * Both branches read the official EFFECTIVE working directory from the
+   * Session status projection of THIS session (S2/PR-B): Direct from the
+   * Host's `workingDirectory` projection; Remote from the same official
+   * projection over the exact retained binding, with the Session list row's
+   * immutable creation cwd as the reader's fallback only when no value is
+   * recorded. A committed `working-directory/change` therefore moves the
+   * footer/welcome/title facts, and the header cwd is never treated as the
+   * current directory.
    */
   const sessionCwdFact = (): string | undefined => {
     const agent = deps.liveAgent()

@@ -1190,7 +1190,7 @@ test('Details preserves search state, scrolls its own body, and emits read-only 
     ['Session ID', 'session-content'],
     ['Title', 'Unrelated title'],
     ['State', 'Persisted session'],
-    ['Workspace', '/workspace/other'],
+    ['Created in', '/workspace/other'],
   ], 'Identity carries the row\'s own complete facts in order')
   assert.deepEqual(grids.get('activity'), [
     ['Created', new Date(10).toISOString()],
@@ -1476,7 +1476,7 @@ test('native Session: a pane WITHOUT the kv kind still opens the complete text D
   // Every original fact, in the original order, complete — the pre-`kv` shape.
   for (const fact of [
     'Identity', 'Session ID', 'session-current', 'Title', 'Current title',
-    'State', 'Current session', 'Workspace', '/workspace/project',
+    'State', 'Current session', 'Created in', '/workspace/project',
     'Activity', 'Created', new Date(10).toISOString(), 'Updated', new Date(100).toISOString(),
     'Lineage', 'Parent session', 'No parent session',
     'Configuration', 'Agent preset', 'reviewer',

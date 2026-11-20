@@ -160,6 +160,11 @@ const STATUS_PROJECTION_KEYS = [
   'agentPreset',
   'title',
   'goal',
+  // The official effective-directory projection (string | null). This is the
+  // CURRENT working directory, distinct from the immutable Session-header cwd
+  // the list row reports; the status read must follow it so a committed
+  // `working-directory/change` reaches the footer/welcome/OSC 0 facts.
+  'workingDirectory',
   // M3-4 PR4 §6.1: the committed permission value rides the SAME live
   // channel — a successful permission write is committed by the pushed
   // projection (the footer's preset row repaints from it, never an
@@ -339,11 +344,21 @@ export class RemoteSessionReader implements SessionReader {
     // adding a key here (and to the DTO) cannot leave the live channel behind.
     const values: Record<string, unknown> = {}
     for (const key of STATUS_PROJECTION_KEYS) values[key] = projections.faceOf(key).getSnapshot()
-    return detachedSessionStatus(sessionId, values, this.cwdOf(sessionId))
+    // The effective directory is the official `workingDirectory` projection of
+    // THIS retained binding. A legal `null`/absent value means "no recorded
+    // value" and keeps the same Session's immutable creation cwd (the list
+    // row), never another Session's directory and never the Client cwd.
+    const workingDirectory = values.workingDirectory
+    const effectiveCwd = typeof workingDirectory === 'string' && workingDirectory !== ''
+      ? workingDirectory
+      : this.cwdOf(sessionId)
+    return detachedSessionStatus(sessionId, values, effectiveCwd)
   }
 
-  /** The official Client list-row cwd fact for one session (undefined when
-   *  the row carries none — never a main-session or client-side guess). */
+  /** The official Client list-row cwd fact for one session — the Session's
+   *  immutable CREATION directory, used only as the fallback when the
+   *  `workingDirectory` projection records no value. Undefined when the row
+   *  carries none — never a main-session or client-side guess. */
   private cwdOf(sessionId: string): string | undefined {
     const snapshot = this.sessions.list.getSnapshot()
     if (snapshot.phase !== 'ready') return undefined

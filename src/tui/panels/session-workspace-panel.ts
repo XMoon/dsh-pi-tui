@@ -2398,7 +2398,9 @@ export class SessionWorkspacePanel implements Component {
     lines.push(line('Title', title))
     lines.push(line('Session ID', sanitizedPhysicalLine(row.id), 'dim'))
     lines.push(line('Workspace', this.membershipLabel(fact)))
-    lines.push(line('cwd', row.cwd === undefined ? 'Unknown' : sanitizedPhysicalLine(row.cwd), 'dim'))
+    // `row.cwd` is the immutable Session-header creation directory, NOT the
+    // Session's current working directory and NOT a Workspace identity.
+    lines.push(line('Created in', row.cwd === undefined ? 'Unknown' : sanitizedPhysicalLine(row.cwd), 'dim'))
     lines.push(line('Preset', row.preset === undefined ? 'Unknown' : sanitizedPhysicalLine(row.preset)))
     lines.push(line('Updated', formatSessionAge(row.updatedAt), 'dim'))
     lines.push(line('Running', fact?.running === true ? 'Yes' : fact?.running === false ? 'No' : 'Unknown'))

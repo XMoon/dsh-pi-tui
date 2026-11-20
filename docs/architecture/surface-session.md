@@ -281,8 +281,12 @@ is not a fallback. TSP keeps its own native Presenter over the same owner (see
   returning requires the physical bar segment or `Enter`.
 - **`Space` is a read-only Peek.** It opens a plain-text detail of the selected
   painted Session row (full Session id, identity, official Workspace
-  membership, cwd, preset, updated, running, pending, source) and nothing else:
-  no Agent, no Question/Approval form, no Session `open`/`retain`, no writer and
+  membership, `Created in` = the immutable Session header cwd, preset, updated,
+  running, pending, source) and nothing else:
+  `Created in` is the Session's creation directory; it is neither the Session's
+  current working directory nor a Workspace membership identity.
+  The Peek carries no Agent, no Question/Approval form, no Session
+  `open`/`retain`, no writer and
   no Host call. Folder, New, Add and Show more rows have no Peek and never
   inherit the last Session. `Esc` returns to the previous focus with the same
   selection, query and scroll; `Enter` activates the PINNED Session — returning
