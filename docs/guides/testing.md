@@ -373,11 +373,12 @@ pnpm smoke:split-upgrade -- --old <old.tgz> --new <new.tgz> [--evidence <file>]
 ```
 
 The GitHub Actions `CI` workflow also accepts an optional
-`split_process_case` dispatch input: when set on an npm-mode branch dispatch,
-the Linux Split job runs that ONE registered case instead of the full lane
-(the ordinary empty input keeps the full lane unchanged). This is the
-repeatable Linux evidence path for a selectable-only case that cannot run on
-a developer's non-Linux host.
+`split_process_case` dispatch input: when set together with
+`run_split_process: true` on an npm-mode branch dispatch, the Linux Split job
+runs that ONE registered case instead of the full lane (the ordinary empty
+input keeps the full lane unchanged). This is the repeatable Linux evidence
+path for a selectable-only case that cannot run on a developer's non-Linux
+host.
 
 `--list` prints the full selectable registry — including the selectable-only
 native cases — (`SPLIT_PROCESS_SELECTABLE_CASES scope=SELECTABLE_ONLY`) with a
