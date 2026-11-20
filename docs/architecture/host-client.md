@@ -1088,9 +1088,11 @@ through that Client's EXISTING official Cordis Loader. The semantic owner is
   reused. A same-PID byte change is never re-imported; the old entry stays
   active and the package becomes `reload-required`.
 - Direct mounts these entries in its own Host-process Loader as ephemeral
-  Client runtime entries — never as profile `cordis.patch.yml` rows. A Split
-  Client mounts them in its own Client Context/Loader; closing one Client
-  releases only that Client's entries.
+  Client runtime entries — never as profile `cordis.patch.yml` rows. The Host
+  Plugin Manager projection excludes `pi-tui-client-*` entries: they are
+  Client runtime facts, not manageable profile plugins. A Split Client mounts
+  them in its own Client Context/Loader; closing one Client releases only
+  that Client's entries.
 - The Plugin Manager's committed-explicit-refresh callback drives an
   incremental reconcile. It is a process-local method pointing at the CURRENT
   surface revision; there is no polling, Gateway callback or cross-process

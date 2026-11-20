@@ -31,6 +31,7 @@ import type {
   PluginVersionList,
   RegistryAttempt,
 } from '@deepseek-ai/dsh-plugin-manager'
+import { isClientExtensionEntryId } from '../domain/extension-config/client-entry.ts'
 import type {
   PluginBundleFact,
   PluginBundleRowFact,
@@ -176,7 +177,13 @@ export interface PluginManagerSnapshotInput {
 export function detachPluginManagerSnapshot(input: PluginManagerSnapshotInput): PluginManagerSnapshot {
   return Object.freeze({
     bundles: Object.freeze(input.bundles.map(detachBundle)),
-    plugins: Object.freeze(input.plugins.map(detachPlugin)),
+    // A Direct process mounts opted-in `./tui` packages as ephemeral
+    // Client-local Loader entries. They are not profile plugin rows and are
+    // never addressable through the Host Plugin Manager; surfacing them here
+    // would put a Client runtime fact into the Host authority inventory.
+    plugins: Object.freeze(input.plugins
+      .filter(plugin => !isClientExtensionEntryId(String(plugin.entryId)))
+      .map(detachPlugin)),
     registries: detachRegistries(input.registries),
     exemptions: detachExemptions(input.exemptions),
     exemptionWarnings: Object.freeze([...input.exemptions.warnings]),

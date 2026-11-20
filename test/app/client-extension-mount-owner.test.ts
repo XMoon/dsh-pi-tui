@@ -450,3 +450,33 @@ test('a dispose during an in-flight Config refresh publishes no entry and leaves
   assert.deepEqual(harness.owner.observation(), [])
   assert.equal(Object.hasOwn(harness.loader.store, `pi-tui-client-${extensionConfigRowId(a.name).slice('pi-tui-extcfg-'.length)}`), false)
 })
+
+test('an unverifiable conditional ./tui export becomes reload-required instead of a false ACTIVE claim', async (t) => {
+  const { life, root } = await packagePair(t)
+  const conditional = writePackage(root, `${FIXTURE_ROOT}/conditional`, contributingTui('a'))
+  const manifestPath = join(conditional.dir, 'package.json')
+  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
+  manifest.exports = { './tui': { import: './dist/tui.mjs' } }
+  writeFileSync(manifestPath, `${JSON.stringify(manifest, undefined, 2)}\n`)
+  const harness = await mountHarness(t, [conditional], { life, root, baseUrl: pathToFileURL(join(root, 'package.json')).href })
+  await harness.owner.reconcile(snapshotOf([conditional]))
+  assert.equal(harness.owner.observation().find(entry => entry.packageName === conditional.name)?.phase, 'active')
+  await harness.owner.reconcile(snapshotOf([conditional]))
+  const observed = harness.owner.observation().find(entry => entry.packageName === conditional.name)
+  assert.equal(observed?.phase, 'reload-required')
+  assert.match(observed?.reason ?? '', /cannot be verified/u)
+})
+
+test('a non-candidate observation disappears when its bundle is no longer selected', async (t) => {
+  const { life, root } = await packagePair(t)
+  const plain = writePackage(root, `${FIXTURE_ROOT}/plain-observation`, `export const name = 'plain-observation'\nexport function apply() {}\n`)
+  const manifestPath = join(plain.dir, 'package.json')
+  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
+  Reflect.deleteProperty(manifest, 'dshPiTui')
+  writeFileSync(manifestPath, `${JSON.stringify(manifest, undefined, 2)}\n`)
+  const harness = await mountHarness(t, [plain], { life, root, baseUrl: pathToFileURL(join(root, 'package.json')).href })
+  await harness.owner.reconcile(snapshotOf([plain]))
+  assert.equal(harness.owner.observation().find(entry => entry.packageName === plain.name)?.phase, 'not-opted-in')
+  await harness.owner.reconcile(snapshotOf([plain], new Set([plain.name])))
+  assert.deepEqual(harness.owner.observation(), [])
+})

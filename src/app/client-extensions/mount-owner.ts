@@ -39,6 +39,7 @@ import type { Loader } from '@deepseek-ai/cordis-plugin-loader'
 import type { ExtensionConfigsConfig } from '../../runtime/config-port.ts'
 import type { PluginManagerSnapshot } from '../../runtime/plugin-manager-port.ts'
 import type { Diag } from '../../runtime/process/diagnostics.ts'
+import { clientExtensionEntryId } from '../../domain/extension-config/client-entry.ts'
 import {
   discoverCurrentClientExtensions,
   type CurrentClientExtension,
@@ -47,12 +48,6 @@ import {
 
 /** Cordis `FiberState.ACTIVE` (the enum is a const enum with no runtime value). */
 const FIBER_ACTIVE = 2
-
-/** The stable Client entry-id prefix (`pi-tui-client-<32 hex>`). */
-const CLIENT_ENTRY_PREFIX = 'pi-tui-client-'
-/** The validated Config-row prefix whose suffix IS the package hash. */
-const CONFIG_ROW_PREFIX = 'pi-tui-extcfg-'
-const CONFIG_ROW_SUFFIX = /^[0-9a-f]{32}$/u
 
 /**
  * Bound on ONE third-party plugin's activation. A missing Cordis dependency
@@ -118,21 +113,6 @@ interface MountedEntry {
   readonly configRevision: number
   readonly configValue: unknown
   readonly codeIdentity: string | undefined
-}
-
-/**
- * Compute the only allowed Client entry id for one validated Config row id.
- * A malformed hash is a real local wiring/programming error and fails loud.
- */
-export function clientExtensionEntryId(configRowId: string): string {
-  if (!configRowId.startsWith(CONFIG_ROW_PREFIX)) {
-    throw new Error(`client extension: invalid Config row id "${configRowId}"`)
-  }
-  const suffix = configRowId.slice(CONFIG_ROW_PREFIX.length)
-  if (!CONFIG_ROW_SUFFIX.test(suffix)) {
-    throw new Error(`client extension: invalid Config row id hash "${configRowId}"`)
-  }
-  return `${CLIENT_ENTRY_PREFIX}${suffix}`
 }
 
 /** One bounded activation wait over the REAL fiber lifecycle. */
@@ -289,7 +269,16 @@ export function createClientExtensionMountOwner(
       if (!isCurrent(epoch)) return
     }
 
-    // 2. Record the PiTui-only outcome of every enabled non-candidate.
+    // 2. Drop observations for packages that are no longer part of the
+    // current enabled outcome set (a never-mounted package that was disabled
+    // must not leave a stale non-active observation behind).
+    const current = new Set(outcomes.map(outcome =>
+      outcome.kind === 'unresolved' ? outcome.bundleName : outcome.packageName))
+    for (const packageName of [...observations.keys()]) {
+      if (!current.has(packageName) && !mounted.has(packageName)) observations.delete(packageName)
+    }
+
+    // 3. Record the PiTui-only outcome of every enabled non-candidate.
     for (const outcome of outcomes) {
       if (outcome.kind === 'candidate') continue
       const packageName = outcome.kind === 'unresolved' ? outcome.bundleName : outcome.packageName
@@ -301,7 +290,7 @@ export function createClientExtensionMountOwner(
     }
     if (candidates.size === 0) return
 
-    // 3. One Settings refresh per reconcile, then one read per candidate.
+    // 4. One Settings refresh per reconcile, then one read per candidate.
     try {
       await config.refresh()
     } catch (error) {
@@ -326,13 +315,26 @@ export function createClientExtensionMountOwner(
         // A changed file cannot be reloaded in the same PID: Node's ESM cache
         // still serves the old module. Keep the verified old entry and expose
         // the actionable state instead of faking a new version.
-        const appliedIdentity = knownCodeIdentity.get(packageName)
-        if (appliedIdentity !== undefined && identity !== undefined && appliedIdentity !== identity) {
+        if (identity === undefined) {
+          // A non-file or conditional-export package cannot be byte-verified.
+          // Never guess "same": the old entry stays live and the user gets the
+          // conservative restart signal instead of a false ACTIVE claim.
           setObservation({
             packageName,
             phase: 'reload-required',
             entryId: previous.entryId,
-            codeIdentity: appliedIdentity,
+            ...(knownCodeIdentity.get(packageName) === undefined ? {} : { codeIdentity: knownCodeIdentity.get(packageName) }),
+            reason: 'the installed ./tui bytes cannot be verified; restart this Client to reload them',
+          })
+          continue
+        }
+        const appliedIdentity = knownCodeIdentity.get(packageName)
+        if (appliedIdentity !== identity) {
+          setObservation({
+            packageName,
+            phase: 'reload-required',
+            entryId: previous.entryId,
+            ...(appliedIdentity === undefined ? {} : { codeIdentity: appliedIdentity }),
             reason: 'the installed ./tui bytes differ from the running entry; restart this Client to load them',
           })
           continue
@@ -372,15 +374,17 @@ export function createClientExtensionMountOwner(
       // A package disabled earlier in this SAME process still has its old
       // module in Node's cache. Re-enabling with changed bytes must not claim
       // the new file as ACTIVE.
-      const knownIdentity = knownCodeIdentity.get(packageName)
-      if (knownIdentity !== undefined && identity !== undefined && knownIdentity !== identity) {
-        setObservation({
-          packageName,
-          phase: 'reload-required',
-          codeIdentity: knownIdentity,
-          reason: 'the installed ./tui bytes differ from the code this Client already loaded; restart this Client to load them',
-        })
-        continue
+      if (knownCodeIdentity.has(packageName)) {
+        const knownIdentity = knownCodeIdentity.get(packageName)
+        if (knownIdentity === undefined || identity === undefined || knownIdentity !== identity) {
+          setObservation({
+            packageName,
+            phase: 'reload-required',
+            ...(knownIdentity === undefined ? {} : { codeIdentity: knownIdentity }),
+            reason: 'the installed ./tui bytes differ from (or cannot be verified against) the code this Client already loaded; restart this Client',
+          })
+          continue
+        }
       }
 
       const entryId = clientExtensionEntryId(configRowId)

@@ -1288,3 +1288,28 @@ test('update version eligibility is a pure Host-list narrowing, never an eligibi
     incompatible: { name: 'pkg', version: '1.1.0', runtimeVersion: '0.2.2-rc.1', requirements: { 'engines.dsh': '>=9' } },
   }) ?? '', /rejects DSH/u)
 })
+
+test('a Direct ephemeral Client ./tui entry never reaches the Host Plugin Manager inventory', () => {
+  const mapped = detachPluginManagerSnapshot({
+    bundles: [],
+    plugins: [
+      {
+        entryId: 'pi-tui-client-d7fa9de1d5de190a92d683a273637c09',
+        moduleName: '@r8-pr1-fixture/a/tui',
+        enabled: true,
+        fiberPhase: 'active',
+        readOnlyReason: 'unaddressable',
+      },
+      {
+        entryId: 'ordinary-host-row',
+        moduleName: '@r8-pr1-fixture/plain/host',
+        enabled: true,
+        fiberPhase: 'active',
+        readOnlyReason: 'unaddressable',
+      },
+    ],
+    registries: { registry: null, fallbackRegistries: [], resolved: null },
+    exemptions: { exemptions: {}, warnings: [] },
+  } as never)
+  assert.deepEqual(mapped.plugins.map(plugin => plugin.entryId), ['ordinary-host-row'])
+})
