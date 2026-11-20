@@ -115,32 +115,42 @@ test('the PRODUCTION run seam passes the bound Profile into the real control pla
   })
   const profileA = mkProfile('profile-a')
   const profileB = mkProfile('profile-b')
+  // The OFFICIAL scope identity each bound Profile must reach the sink with.
+  const expectedScope = (profile: DaemonControlProfile) => inspectInstalledProfileScope({
+    dshHome: profile.home,
+    profileDir: profile.dir,
+    packageRoot: profile.packageRoot,
+    dshVersion: profile.dshVersion,
+  })
+  const expectedA = expectedScope(profileA)
+  const expectedB = expectedScope(profileB)
+  assert.notEqual(expectedA.scopeId, expectedB.scopeId, 'the two official identities are distinct')
   if (platform === 'darwin') {
     // Pre-create each profile's admin seat directory so the real control plane
     // binds its seat and reaches the profile-scoped record read.
-    for (const profile of [profileA, profileB]) {
-      const scope = inspectInstalledProfileScope({
-        dshHome: profile.home,
-        profileDir: profile.dir,
-        packageRoot: profile.packageRoot,
-        dshVersion: profile.dshVersion,
-      })
+    for (const scope of [expectedA, expectedB]) {
       mkdirSync(darwinHostProfileSeatDir(scope.scopeId, accountHome), { recursive: true })
     }
   }
-  await run(profileA)('stop')
-  await run(profileB)('stop')
-  // The control plane may read the profile-scoped record more than once per
-  // verb (pre/post snapshot); the contract is that BOTH bound profiles reached
-  // it and each derived its OWN scope identity.
-  const scopeIds = [...new Set(observed.map(entry => entry.scopeId))]
-  assert.equal(scopeIds.length, 2,
-    `the real control plane consumed both bound profiles (got ${JSON.stringify(observed)})`)
-  const realpaths = [...new Set(observed.map(entry => entry.profileRealpath))]
-  assert.equal(realpaths.length, 2,
-    'the control plane read each bound profile directory — the actual sink identity')
-  assert.deepEqual([...new Set(observed.map(entry => entry.name))].sort(), ['profile-a', 'profile-b'],
-    'each bound Profile reached the control plane')
+  // Run through the PRODUCTION PORT, not the seam directly: the port binds the
+  // displayed Profile to its admin sink. `createProfileDaemonAdmin(profile, {run})`
+  // must route to the SAME profile it displays.
+  const portA = createProfileDaemonAdmin(profileA, { run: verb => run(profileA)(verb) })
+  const portB = createProfileDaemonAdmin(profileB, { run: verb => run(profileB)(verb) })
+  await portA.run('stop')
+  await portB.run('stop')
+  // Each bound Profile reached the control plane with its OWN official identity:
+  // name→scope must match, so an A/B swap (each producing the other's scope) or
+  // a wrong binding cannot pass.
+  assert.equal(observed.filter(e => e.name === 'profile-a').length > 0, true, 'profile-a reached the sink')
+  assert.equal(observed.filter(e => e.name === 'profile-b').length > 0, true, 'profile-b reached the sink')
+  for (const entry of observed) {
+    const expected = entry.name === 'profile-a' ? expectedA : expectedB
+    assert.equal(entry.scopeId, expected.scopeId,
+      `${entry.name} reached the control plane with its own official scope identity`)
+    assert.equal(entry.profileRealpath, expected.profileRealpath,
+      `${entry.name} reached the control plane with its own official profile directory`)
+  }
 })
 
 test('the port performs NO manager IO at construction and while idle', async () => {

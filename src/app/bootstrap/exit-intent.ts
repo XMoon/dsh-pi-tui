@@ -277,11 +277,19 @@ export function createExitIntentCoordinator(deps: ExitIntentCoordinatorDeps): Ex
    */
   const verifyThenAcceptStop = (identity: CapturedChoice, workStopped: boolean, epoch: number): void => {
     if (disposed) return
-    // Non-repeatable: the verifying seat owns every key (no second submission).
-    open = exitChoiceVerifying(select, dismiss)
-    presenter()?.update(open)
+    // Publish the guard BEFORE painting: a synchronous Host-modal preemption in
+    // the update callback must not let the later read run as if still current.
     const controller = new AbortController()
     stopWait = controller
+    open = exitChoiceVerifying(select, dismiss)
+    presenter()?.update(open)
+    // The update callback may synchronously dismiss (a Host modal) and start a
+    // NEWER operation: abort this verification rather than read/commit for a
+    // decision the user already withdrew.
+    if (disposed || stopWait !== controller || operationEpoch !== epoch) {
+      if (stopWait === controller) stopWait = undefined
+      return
+    }
     runOwned('exit intent host-stop verify', async () => {
       let ok = false
       try {
@@ -289,7 +297,7 @@ export function createExitIntentCoordinator(deps: ExitIntentCoordinatorDeps): Ex
       } catch {
         ok = false
       }
-      if (disposed || stopWait !== controller) return
+      if (disposed || stopWait !== controller || operationEpoch !== epoch) return
       stopWait = undefined
       if (!ok) {
         safeDiag('info', 'host stop declined: the fresh authoritative Backend read did not confirm the transition')
@@ -320,10 +328,21 @@ export function createExitIntentCoordinator(deps: ExitIntentCoordinatorDeps): Ex
     workStopped: boolean,
   ): void => {
     if (disposed) return
-    open = exitChoiceVerifying(select, dismiss)
-    presenter()?.update(open)
+    // Capture THIS operation's epoch and publish the guard BEFORE painting: a
+    // newer request/dismiss must win, and a synchronous Host-modal preemption in
+    // the update callback must not revive this withdrawn decision later.
+    const epoch = operationEpoch
+    const identity: CapturedChoice = { kind: 'daemon-host-stop', backend, scope: facts.scope, live: facts.live, transportToken: facts.transportToken }
     const controller = new AbortController()
     stopWait = controller
+    open = exitChoiceVerifying(select, dismiss)
+    presenter()?.update(open)
+    // The update callback may synchronously dismiss (a Host modal) and start a
+    // NEWER operation: abort this verification rather than revive it.
+    if (disposed || stopWait !== controller || operationEpoch !== epoch) {
+      if (stopWait === controller) stopWait = undefined
+      return
+    }
     runOwned('exit intent host-stop verify', async () => {
       let ok = false
       try {
@@ -331,13 +350,17 @@ export function createExitIntentCoordinator(deps: ExitIntentCoordinatorDeps): Ex
       } catch {
         ok = false
       }
-      if (disposed || stopWait !== controller) return
+      if (disposed || stopWait !== controller || operationEpoch !== epoch) return
       stopWait = undefined
       if (!ok) {
         safeDiag('info', 'host stop not offered: the fresh authoritative Backend read did not confirm the transition')
-        commitAfterClose({ kind: 'daemon-host-stop', backend, scope: facts.scope, live: facts.live, transportToken: facts.transportToken }, workStopped, operationEpoch)
+        commitAfterClose(identity, workStopped, epoch)
         return
       }
+      // Still THIS operation (the pre-open check above is not enough: the read
+      // itself takes time): only a current, undismissed decision opens the
+      // confirm. This is the dangerous revival gate.
+      if (disposed || operationEpoch !== epoch || !identityCurrent(identity)) return
       openHostStopChoice(facts, backend, workStopped)
     }, {
       diag: deps.diag,
@@ -345,7 +368,7 @@ export function createExitIntentCoordinator(deps: ExitIntentCoordinatorDeps): Ex
       onError: (error) => {
         if (stopWait === controller) stopWait = undefined
         safeDiag('error', 'host stop verification failed', { error: safeErrorMessage(error) })
-        if (!disposed) commitAfterClose({ kind: 'daemon-host-stop', backend, scope: facts.scope, live: facts.live, transportToken: facts.transportToken }, workStopped, operationEpoch)
+        if (!disposed && operationEpoch === epoch) commitAfterClose(identity, workStopped, epoch)
       },
     })
   }

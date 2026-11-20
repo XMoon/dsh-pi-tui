@@ -264,3 +264,19 @@ test('the follow-up survives the settle refresh and stays inside the SAME lease'
   // The settle's own refresh repaints; the follow-up must still be there.
   assert.match(renderText(panel), /Optional OS supervision/u)
 })
+
+test('the follow-up never grants an install before the risk copy has been read', () => {
+  // A short viewport where the whole risk block + both actions do not share one
+  // frame: the install must not be grantable until every risk line has been
+  // scrolled into view (RFL-002), even though the action labels are reachable.
+  const { panel, settlements, installCalls } = setup({ rows: 10, onBackendServiceInstall: () => {} })
+  press(panel, '\r')
+  press(panel, '\x1b[B')
+  press(panel, '\r')
+  settlements[0]!({ outcome: 'verified', followUp: { kind: 'daemon-service-install', installable: true } })
+  panel.render(120)
+  panel.handleInput('\t')
+  panel.render(120)
+  panel.handleInput('\r')
+  assert.equal(installCalls(), 0, 'a jump to the actions before the risk is read never grants an install')
+})

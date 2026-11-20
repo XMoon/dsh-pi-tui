@@ -3518,7 +3518,13 @@ export function applyRunnerWithRuntime(
         // command to stop.
         hostStopIntentCurrent: () => selectedRuntime.kind === 'remote'
           && backendExitTransition === 'daemon-to-direct'
-          && profileDaemonAdmin !== undefined,
+          && profileDaemonAdmin !== undefined
+          // The close-time freshness re-check: it does NOT replace the fresh
+          // read (hostStopEligible does that before the verdict), but it catches
+          // the fresh result being invalidated DURING the close (a
+          // settings/document-updated or disconnect that leaves the config
+          // stale): an unready config must never commit the Host stop.
+          && backend.config.configReadiness() === 'ready',
         hostStopEligible: async () => {
           if (selectedRuntime.kind !== 'remote') return false
           if (backendExitTransition !== 'daemon-to-direct') return false

@@ -1236,6 +1236,12 @@ export class SettingsWorkspacePanel implements Component {
    *  projection: the grant requires the WHOLE block on screen, not just its
    *  heading. Reset before each `detailContent` call. */
   private serviceInstallBlock: { readonly start: number; readonly end: number } | undefined
+  /** M6 UX PR2: the follow-up risk-copy line range (heading + blast-radius
+   *  sentences) that must be READ before an install may be granted. */
+  private serviceInstallRisk: { readonly start: number; readonly end: number } | undefined
+  /** The risk line indices already scrolled into view (a jump past them does
+   *  NOT mark them read). Latched read = every risk line seen at least once. */
+  private serviceInstallRiskSeen = new Set<number>()
   /** The lazily built embedded Plugin Manager page (ONE instance per open,
    *  kept across Categories/content focus changes until the category really
    *  changes or this workspace is disposed). */
@@ -3154,16 +3160,27 @@ export class SettingsWorkspacePanel implements Component {
     const lines: string[] = []
     for (let i = 0; i < scrollViewport; i += 1) lines.push(content[offset + i] ?? '')
     // M6 UX PR2: the follow-up's actable rows earn their painted grant ONLY when
-    // BOTH complete action labels really land inside the granted viewport. The
-    // risk copy is scroll-reachable (readable) in the same pane; a clipped or
-    // scrolled-away action label never grants an install (plan §3.2 "only a
-    // complete label is clickable"), and a tiny screen that cannot host both
-    // complete labels degrades to no install rather than a hidden action.
+    // the WHOLE risk copy has been READ (every risk line scrolled into view at
+    // least once — a jump/End past it does NOT count) AND both complete action
+    // labels land in the granted viewport. This satisfies plan §3.2 ("only a
+    // complete label is clickable") and G3 (risk fully readable before the
+    // trigger), while staying scroll-reachable on short screens (G8/RFL-006).
     let serviceInstallActionsVisible = false
     if (this.serviceInstall !== undefined && this.serviceInstall.installable && this.serviceInstall.phase === 'asking') {
+      // Mark the risk lines currently in view as seen (accumulates across
+      // renders; a jump past them never marks them).
+      const risk = this.serviceInstallRisk
+      let riskRead = false
+      if (risk !== undefined) {
+        const lo = Math.max(offset, risk.start)
+        const hi = Math.min(offset + scrollViewport, risk.end)
+        for (let i = lo; i < hi; i += 1) this.serviceInstallRiskSeen.add(i)
+        riskRead = this.serviceInstallRiskSeen.size >= (risk.end - risk.start)
+      }
       const shown = lines.map(line => line.replace(/\x1b\[[0-9;]*m/gu, ''))
-      serviceInstallActionsVisible = shown.some(line => /\bNot now\b/u.test(line))
+      const actionsVisible = shown.some(line => /\bNot now\b/u.test(line))
         && shown.some(line => /\bInstall service\b/u.test(line))
+      serviceInstallActionsVisible = riskRead && actionsVisible
     }
     const painted = pinned === 1 ? this.layoutButtons(width, buttons) : { text: '', painted: [] }
     if (pinned === 1) {
@@ -3613,9 +3630,13 @@ export class SettingsWorkspacePanel implements Component {
       }
       lines.push('')
       lines.push(color.textStrong('Optional OS supervision'))
+      const riskStart = lines.length - 1
       wrapLine('Daemon works without installing a service.')
       wrapLine("Install creates this Profile's user service only; it does not start,")
       wrapLine('enable, restart, stop or migrate any running Host.')
+      // The risk copy (heading + blast-radius sentences) is what must be READ
+      // before an install is granted; its line range drives the seen-tracking.
+      this.serviceInstallRisk = { start: riskStart, end: lines.length }
       if (this.serviceInstall.phase === 'installing') {
         lines.push(fit(color.textDim('Status'), labelWidth) + color.textDim('Installing service…'))
       } else if (this.serviceInstallResult !== undefined) {
@@ -5559,6 +5580,8 @@ export class SettingsWorkspacePanel implements Component {
         focus: 'not-now',
       }
       this.serviceInstallResult = undefined
+      this.serviceInstallRisk = undefined
+      this.serviceInstallRiskSeen = new Set<number>()
     }
     this.refresh()
   }
@@ -5596,6 +5619,8 @@ export class SettingsWorkspacePanel implements Component {
   private clearServiceInstall(): void {
     this.serviceInstall = undefined
     this.serviceInstallResult = undefined
+    this.serviceInstallRisk = undefined
+    this.serviceInstallRiskSeen = new Set<number>()
     this.paintedServiceInstallActions = false
   }
 
