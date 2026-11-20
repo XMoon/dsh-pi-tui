@@ -182,10 +182,15 @@ export function fakeAgent(
   agentOptions: { provider?: string; model?: string; reasoningEffort?: string } = { provider: 'p', model: 'm' },
 ): Agent {
   // A small structural Agent context is sufficient for the Direct setup
-  // callbacks.
+  // callbacks. It models the official Agent-scope `effect` (M6 PR-C C2): the
+  // per-Turn latch disposes with the Agent exactly as in production.
+  const effectDisposers: Array<() => void> = []
   const agentContext = {
     get: () => undefined,
     on: () => () => {},
+    effect: (fn: () => () => void) => {
+      effectDisposers.push(fn())
+    },
   }
   // cancel is idempotent and BREAKS a pending whenIdle (the real Agent
   // contract): a cancelled agent's whenIdle settles immediately, which is

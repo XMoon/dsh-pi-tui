@@ -120,17 +120,41 @@ export interface PromptPresenceClientOptions {
   readonly localView: () => PromptPresenceLocalView
   /** The owner lifetime (the runner lifecycle). */
   readonly signal: AbortSignal
+  /**
+   * An identity object that lives exactly as long as the authenticated
+   * Peer/Connection — the shared Client Context across Surface revisions.
+   * The Host stores ONE strictly increasing revision per Peer, so the counter
+   * must SURVIVE a same-Peer Surface replacement (the qualification-only HMR
+   * path recreates the Runner/owner over the same Context and transport): a
+   * per-owner reset would be refused `stale-revision` and block every later
+   * prompt.
+   */
+  readonly peerScope: object
   /** The transport identity probe (absent = no generation fencing). */
   readonly transport?: PromptPresenceTransportProbe
   /** The runner diagnostics channel (the owned-task sink). */
   readonly diag: Diag
 }
 
+/** One per-Peer presence revision scope (keyed by the Peer-lifetime identity). */
+interface PresenceRevisionScope {
+  next: number
+}
+const presenceRevisionScopes = new WeakMap<object, PresenceRevisionScope>()
+function presenceRevisionScopeOf(peerScope: object): PresenceRevisionScope {
+  const existing = presenceRevisionScopes.get(peerScope)
+  if (existing !== undefined) return existing
+  const scope: PresenceRevisionScope = { next: 1 }
+  presenceRevisionScopes.set(peerScope, scope)
+  return scope
+}
+
 /** One latest-wins presence owner over the private wire capability. */
 export interface PromptPresenceClient {
   /** The last Host-committed view, or `undefined` before any applied ACK. */
   committed(): (PromptPresenceLocalView & { readonly revision: number }) | undefined
-  /** The highest revision this owner has ever dispatched. */
+  /** The Peer scope's highest assigned revision (shared across the Peer's
+   *  Surface revisions). */
   revision(): number
   /**
    * Declare the CURRENT local view to the Host. Coalesced: concurrent calls
@@ -167,14 +191,15 @@ const ACK_SETTLE_ROUNDS = 3
  * Build the Client-local presence owner over the mounted capability.
  */
 export function createPromptPresenceClient(options: PromptPresenceClientOptions): PromptPresenceClient {
-  const { capability, localView, signal, transport, diag } = options
+  const { capability, localView, signal, peerScope, transport, diag } = options
   const lifetime = new AbortController()
-  let nextRevision = 1
+  /** The Peer-lifetime revision scope (survives a same-Peer Surface replacement). */
+  const revisions = presenceRevisionScopeOf(peerScope)
   let committed: (PromptPresenceLocalView & { revision: number }) | undefined
   /** The transport identity the committed ACK rode on (retired with it). */
   let committedToken: unknown
-  /** The coalesced desired view; `undefined` = nothing pending. */
-  let desired: PromptPresenceLocalView | undefined
+  /** One coalesced desired dispatch; `undefined` = nothing pending. */
+  let desired: { readonly view: PromptPresenceLocalView; readonly revision: number } | undefined
   /** One chain step awaiting its start; concurrent enqueues coalesce into it. */
   let queued = false
   let chain: Promise<unknown> = Promise.resolve()
@@ -189,10 +214,9 @@ export function createPromptPresenceClient(options: PromptPresenceClientOptions)
     return token === undefined ? undefined : { sessionId: view.viewedSessionId, token }
   }
 
-  /** Make ONE dispatch for one exact view (never throws). */
-  const dispatch = async (view: PromptPresenceLocalView): Promise<PromptPresenceSyncOutcome> => {
-    const revision = nextRevision
-    nextRevision += 1
+  /** Make ONE dispatch for one exact desired view (never throws). */
+  const dispatch = async (item: { readonly view: PromptPresenceLocalView; readonly revision: number }): Promise<PromptPresenceSyncOutcome> => {
+    const { view, revision } = item
     active += 1
     try {
       const captured = tokenFor(view)
@@ -260,7 +284,14 @@ export function createPromptPresenceClient(options: PromptPresenceClientOptions)
    * local changes can never reorder on the wire.
    */
   const enqueue = (view: PromptPresenceLocalView): Promise<PromptPresenceSyncOutcome> => {
-    desired = view
+    // The revision is assigned in ENQUEUE order on the Peer scope: the
+    // numbers always follow local intent order (a same-Peer Surface
+    // replacement continues the scope), so even a late reordering on the
+    // wire can never make a superseded view outrank a newer one — the Host
+    // applies the highest revision and refuses lower ones.
+    const revision = revisions.next
+    revisions.next += 1
+    desired = { view, revision }
     if (queued && queuedAttempt !== undefined) return queuedAttempt
     queued = true
     const attempt = chain.then(() => {
@@ -299,7 +330,7 @@ export function createPromptPresenceClient(options: PromptPresenceClientOptions)
 
   return {
     committed: () => committed,
-    revision: () => nextRevision - 1,
+    revision: () => revisions.next - 1,
     sync: () => enqueue(localView()),
     withdraw: () => enqueue({ viewedSessionId: null, displayPreset: localView().displayPreset }),
     ackCurrentView: async (): Promise<PromptPresenceAckOutcome> => {

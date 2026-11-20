@@ -265,6 +265,7 @@ test('the submission sink holds the prompt until the CURRENT view revision is AC
     },
     localView: () => view,
     signal: new AbortController().signal,
+    peerScope: {},
     diag: { debug: () => {}, info: () => {}, warn: () => {}, error: () => {}, dispose: () => {} },
   })
   const harness = gateHarness({ ack: () => owner.ackCurrentView() })
@@ -283,5 +284,54 @@ test('the submission sink holds the prompt until the CURRENT view revision is AC
       'the prompt dispatches only after the superseding sync drains')
   } finally {
     owner.dispose()
+  }
+})
+
+test('a same-Peer Surface replacement admits its first prompt through the sink (RFL-012)', async () => {
+  // The qualification-only Surface replacement recreates the Runner/owner
+  // over the SAME Peer scope: the old Surface's higher-revision teardown
+  // withdrawal must never push the replacement's first submission into a
+  // `stale-revision` refusal.
+  const peerScope = {}
+  const view: PromptPresenceLocalView = { viewedSessionId: 'session-gate', displayPreset: 'focus' }
+  const calls: number[] = []
+  const capability = {
+    syncView: (_viewedSessionId: string | null, _displayPreset: string, revision: number) => {
+      calls.push(revision)
+      return Promise.resolve({ ok: true as const, value: { kind: 'applied' as const, revision } })
+    },
+  }
+  const abort1 = new AbortController()
+  const surface1 = createPromptPresenceClient({
+    capability,
+    localView: () => view,
+    signal: abort1.signal,
+    peerScope,
+    diag: { debug: () => {}, info: () => {}, warn: () => {}, error: () => {}, dispose: () => {} },
+  })
+  try {
+    assert.deepEqual(await surface1.sync(), { kind: 'applied', revision: 1 })
+    abort1.abort()
+    await new Promise(resolveWait => setImmediate(resolveWait))
+    await new Promise(resolveWait => setImmediate(resolveWait))
+    assert.deepEqual(calls, [1, 2], 'the old Surface withdrew on the same scope')
+    const abort2 = new AbortController()
+    const surface2 = createPromptPresenceClient({
+      capability,
+      localView: () => view,
+      signal: abort2.signal,
+      peerScope,
+      diag: { debug: () => {}, info: () => {}, warn: () => {}, error: () => {}, dispose: () => {} },
+    })
+    try {
+      const harness = gateHarness({ ack: () => surface2.ackCurrentView() })
+      await harness.submit('please run')
+      assert.deepEqual(harness.dispatched, ['session-gate'],
+        'the first prompt after the replacement is admitted (never stale-revision refused)')
+    } finally {
+      abort2.abort()
+    }
+  } finally {
+    surface1.dispose()
   }
 })

@@ -65,6 +65,7 @@ test('the owner dispatches the current view once and records the ACKed view', as
     capability,
     localView: () => view,
     signal: new AbortController().signal,
+    peerScope: {},
     diag: DIAG,
   })
   try {
@@ -84,6 +85,7 @@ test('concurrent local changes coalesce into ONE dispatch of the LATEST view', a
     capability,
     localView: () => view,
     signal: new AbortController().signal,
+    peerScope: {},
     diag: DIAG,
   })
   try {
@@ -94,7 +96,9 @@ test('concurrent local changes coalesce into ONE dispatch of the LATEST view', a
     assert.equal(calls.length, 1, 'a superseded desired view is never replayed')
     assert.equal(calls[0]?.displayPreset, 'focus', 'the LATEST view is the one dispatched')
     for (const outcome of outcomes) {
-      assert.deepEqual(outcome, { kind: 'applied', revision: 1 },
+      // The coalesced dispatch carried the LATEST desired view's revision
+      // (rev 1 was superseded before dispatch; the gaps are harmless).
+      assert.deepEqual(outcome, { kind: 'applied', revision: 2 },
         'both waiters resolve with the outcome of the dispatch that carried the latest view')
     }
     assert.equal(owner.committed()?.displayPreset, 'focus')
@@ -110,6 +114,7 @@ test('a stale ACK (wrong revision) is unconfirmed and never records a committed 
     capability,
     localView: () => view,
     signal: new AbortController().signal,
+    peerScope: {},
     diag: DIAG,
   })
   try {
@@ -129,6 +134,7 @@ test('an ACK carried by a superseded transport is unconfirmed and retires the co
     capability,
     localView: () => view,
     signal: new AbortController().signal,
+    peerScope: {},
     transport: {
       capture: () => ({ generation: 1, binding: {} }),
       isCurrent: () => current,
@@ -156,6 +162,7 @@ test('a refused ACK propagates the exact reason and never retries automatically'
     capability,
     localView: () => view,
     signal: new AbortController().signal,
+    peerScope: {},
     diag: DIAG,
   })
   try {
@@ -178,6 +185,7 @@ test('ackCurrentView confirms only when the ACKed view is still the current loca
     capability,
     localView: () => view,
     signal: new AbortController().signal,
+    peerScope: {},
     diag: DIAG,
   })
   try {
@@ -201,6 +209,7 @@ test('ackCurrentView gives up as unconfirmed when the view keeps changing (bound
     capability,
     localView: () => view,
     signal: new AbortController().signal,
+    peerScope: {},
     diag: DIAG,
   })
   try {
@@ -219,6 +228,7 @@ test('an unconfirmed presence refuses the gate without any automatic retry', asy
     capability,
     localView: () => view,
     signal: new AbortController().signal,
+    peerScope: {},
     diag: DIAG,
   })
   try {
@@ -236,6 +246,7 @@ test('ackCurrentView is local (no wire call) while the committed view is still c
     capability,
     localView: () => view,
     signal: new AbortController().signal,
+    peerScope: {},
     transport: {
       capture: () => ({ generation: 1, binding: {} }),
       isCurrent: () => true,
@@ -262,6 +273,7 @@ test('a transport reconnect self-heals: the stale committed view re-projects on 
     capability,
     localView: () => view,
     signal: new AbortController().signal,
+    peerScope: {},
     transport: {
       capture: () => ({ generation, binding: {} }),
       isCurrent: (_sessionId, token) => (token as { generation: number }).generation === generation,
@@ -292,6 +304,7 @@ test('the owner withdraws its view and stops dispatching after the lifecycle abo
     capability,
     localView: () => view,
     signal: abort.signal,
+    peerScope: {},
     diag: DIAG,
   })
   const gateBefore = await owner.ackCurrentView()
@@ -317,6 +330,7 @@ test('a view without its exact main-view retain is never projected, and the refu
     capability,
     localView: () => view,
     signal: new AbortController().signal,
+    peerScope: {},
     transport: {
       capture: () => ({ generation: 1, binding: {} }),
       isCurrent: () => true,
@@ -347,6 +361,7 @@ test('a main-view release DURING the round trip leaves the ACK unconfirmed (RFL-
     capability,
     localView: () => view,
     signal: new AbortController().signal,
+    peerScope: {},
     transport: {
       capture: () => ({ generation: 1, binding: {} }),
       isCurrent: () => true,
@@ -379,6 +394,7 @@ test('the gate never confirms a stale view while a superseding dispatch is in fl
     capability,
     localView: () => view,
     signal: new AbortController().signal,
+    peerScope: {},
     diag: DIAG,
   })
   try {
@@ -405,4 +421,52 @@ test('the gate never confirms a stale view while a superseding dispatch is in fl
   } finally {
     owner.dispose()
   }
+})
+
+test('the revision scope survives a same-Peer Surface replacement (RFL-012)', async () => {
+  // One Peer lifetime = one Connection = the shared Client Context. The
+  // qualification-only Surface replacement recreates the Runner/owner over
+  // the SAME scope, so the replacement must CONTINUE the revision scope: its
+  // first view is accepted (never `stale-revision`), and the old Surface's
+  // teardown withdrawal can never outrank it (numbers follow intent order).
+  const peerScope = {}
+  const view: PromptPresenceLocalView = { viewedSessionId: 'session-x', displayPreset: 'focus' }
+  const { calls, capability } = fakeCapability(ackOf)
+  const abort1 = new AbortController()
+  const surface1 = createPromptPresenceClient({
+    capability,
+    localView: () => view,
+    signal: abort1.signal,
+    peerScope,
+    diag: DIAG,
+  })
+  assert.deepEqual(await surface1.sync(), { kind: 'applied', revision: 1 })
+  // Surface 1 retires; its teardown withdrawal rides the SAME scope.
+  abort1.abort()
+  await new Promise(resolveWait => setImmediate(resolveWait))
+  await new Promise(resolveWait => setImmediate(resolveWait))
+  const withdrawn = calls.at(-1)
+  assert.equal(withdrawn?.viewedSessionId, null, 'the old Surface withdraws at teardown')
+  assert.equal(withdrawn?.revision, 2, 'the withdrawal continues the SAME Peer revision scope')
+  // The replacement Surface (same Peer) mounts and sends its view.
+  const abort2 = new AbortController()
+  const surface2 = createPromptPresenceClient({
+    capability,
+    localView: () => view,
+    signal: abort2.signal,
+    peerScope,
+    diag: DIAG,
+  })
+  assert.deepEqual(await surface2.sync(), { kind: 'applied', revision: 3 },
+    'the same-Peer replacement is accepted, never stale-revision refused')
+  assert.deepEqual(await surface2.ackCurrentView(), { kind: 'confirmed' },
+    'the first prompt after a Surface replacement is admitted')
+  // Teardown negative: the retired Surface never dispatches again, so its
+  // stale numbers can never re-enter the wire.
+  const before = calls.length
+  await surface1.sync()
+  assert.equal(calls.length, before, 'a retired Surface never dispatches')
+  abort2.abort()
+  await new Promise(resolveWait => setImmediate(resolveWait))
+  await new Promise(resolveWait => setImmediate(resolveWait))
 })

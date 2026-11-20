@@ -457,7 +457,12 @@ function mountAttempt(options: { readonly port?: SubmissionComposerPort } = {}):
   }
   let controller!: ReturnType<typeof createSubmissionController>
   controller = createSubmissionController(new Proxy(deps, {
-    get: (target, key) => (key in target ? target[key as string] : inert),
+    // The Direct fixture models optional seams EXPLICITLY: a permissive Proxy
+    // must never advertise the Remote-only presence gate (`ackPromptView`) as
+    // present — the steer path would reach an inert stub and never the writer.
+    get: (target, key) => (key in target
+      ? target[key as string]
+      : key === 'ackPromptView' ? undefined : inert),
   }) as never)
   controllerRef = controller
   return {
