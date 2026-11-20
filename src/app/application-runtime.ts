@@ -285,8 +285,9 @@ export interface RemoteLiveIngressFactory {
       onWindowRefoldRequired: (sessionId: string, reason?: 'paging' | 'recovery') => void
       onSessionSnapshotChanged: (sessionId: string) => void
       /** The official PROJECTION store changed: the only channel carrying
-       *  projection-owned current values (the Session snapshot never does). */
-      onProjectionsChanged: (sessionId: string) => void
+       *  projection-owned current values (the Session snapshot never does).
+       *  `changedKeys` is the real key set of this coalesced batch. */
+      onProjectionsChanged: (sessionId: string, changedKeys: readonly string[]) => void
     },
     /** The caller's hydrate/read baseline: the committed revision plus the
      *  EXACT transport identity it was fenced under. A rollover/replacement or

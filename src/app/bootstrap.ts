@@ -2310,17 +2310,32 @@ export function applyRunnerWithRuntime(
           if (id !== ownership.currentSessionId() || cleanedUp) return
           surface.refreshPendingInput()
         },
-        onProjectionsChanged: (id) => {
+        onProjectionsChanged: (id, changedKeys) => {
           // The official projection faces carry current values the Session
           // snapshot NEVER does (the Session snapshot has no projection
           // values): a model/preset/title/goal/todos/usage/context change made
           // by the Host or another Client must reach this surface now, not at
-          // the next unrelated refresh. Re-apply the projection-owned facts and
-          // refresh the status/welcome from the official sources.
+          // the next unrelated refresh.
           if (id !== ownership.currentSessionId() || cleanedUp) return
-          presentation.applySessionCurrentFacts(id)
+          // Re-apply only the `title`/`goal`/`todos` current facts this path
+          // owns. The commit writes `sessionTitle` through the app, whose
+          // setter always fires the title-change callback; running it for
+          // unrelated high-frequency projections (tokenUsage/context/...)
+          // would rewrite OSC 0 on every such frame. `status.refresh()` below
+          // still paints every other projection fact.
+          if (changedKeys.includes('title') || changedKeys.includes('goal') || changedKeys.includes('todos')) {
+            presentation.applySessionCurrentFacts(id)
+          }
           status.refresh()
           status.updateWelcomeCard()
+          // The effective working directory owns the OSC 0 identity fallback:
+          // refresh it only when THIS batch really carried the
+          // `workingDirectory` projection. The projection notification cannot
+          // assume the `working-directory/change` event has already routed
+          // (the two channels publish independently), and unrelated
+          // token/context updates must never rewrite the title. OSC 7 stays
+          // Remote fail-closed: no `refreshTerminalCwd()` here.
+          if (changedKeys.includes('workingDirectory')) status.refreshTerminalTitle()
           // The ingress also follows the official `inbox` projection: a queued
           // or steering occurrence written by ANOTHER Client reaches the ONE
           // pending pane only after that projection value lands, so re-join the

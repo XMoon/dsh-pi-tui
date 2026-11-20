@@ -779,6 +779,133 @@ test('sessionStatus serves the retained session facts and stays absent for unret
   assert.equal(fixture.override.presentation.submissionPresentation.snapshot('no-such-session'), undefined)
 })
 
+test('a Remote resume and live change follow the effective Host working directory while the creation cwd and Workspace membership stay put', async (t) => {
+  const life = testLifecycle(t)
+  const mainId = 'm6-remote-effective-cwd'
+  const hostPreset = 'm6-remote-effective-cwd-preset'
+  const host = await mountRemotePresentationHost(life, hostPreset)
+  // Three distinct absolute directories inside the ONE fixture private root:
+  // A = the Session's immutable creation directory, B = the effective cwd the
+  // Runner must first resume into, C = the same Session's later live cwd.
+  const creationCwd = join(host.anchorDir, 'cwd-alpha')
+  const firstEffectiveCwd = join(host.anchorDir, 'cwd-beta')
+  const liveEffectiveCwd = join(host.anchorDir, 'cwd-gamma')
+  for (const directory of [creationCwd, firstEffectiveCwd, liveEffectiveCwd]) mkdirSync(directory, { recursive: true })
+  const agent = await host.harness.create(SessionId(mainId), undefined, { cwd: creationCwd })
+  // The official Workspace MEMBERSHIP is seeded at the creation path A — the
+  // effective directory B/C must never replace it.
+  const registry = host.ctx.get('workspaceRegistry') as {
+    create(path: string): Promise<{
+      attachSession(id: unknown): Promise<void>
+      readonly sessionIds: readonly unknown[]
+    }>
+  }
+  const workspace = await registry.create(creationCwd)
+  await workspace.attachSession(SessionId(mainId))
+  // Commit B through the REAL Host working-directory service BEFORE the
+  // Remote runner first resumes: the first status/footer/OSC 0 read is the
+  // official projection, not a list-row/header re-read at mount time.
+  await host.ctx.workingDirectory.set(agent, firstEffectiveCwd)
+  assert.equal(agent.session.header.cwd, creationCwd, 'the durable Session header keeps the creation directory A')
+  assert.equal(host.ctx.workingDirectory.get(agent.session), firstEffectiveCwd)
+
+  const osc0Frames: string[] = []
+  const originalIsTTY = Object.getOwnPropertyDescriptor(process.stdout, 'isTTY')
+  const originalWrite = Object.getOwnPropertyDescriptor(process.stdout, 'write')
+  // `setTerminalTitle` writes OSC 0 to process.stdout and is a no-op off a
+  // TTY: the capture exists only for this protected window and restores the
+  // original descriptors below.
+  Object.defineProperty(process.stdout, 'isTTY', { configurable: true, value: true })
+  Object.defineProperty(process.stdout, 'write', {
+    configurable: true,
+    value: (data: string | Uint8Array): boolean => {
+      if (typeof data === 'string' && data.includes('\x1b]0;')) osc0Frames.push(data)
+      return true
+    },
+  })
+  let fixture: Awaited<ReturnType<typeof mountRemoteRunner>> | undefined
+  try {
+    fixture = await mountRemoteRunner(life, { presetId: hostPreset, resumeSessionId: mainId, host })
+    const mounted = fixture
+    const footer = (): string => (mounted.runnerApp() as { footerRenderRowsForTest(): readonly string[] })
+      .footerRenderRowsForTest().join('\n')
+    const lastOsc0Title = (): string | undefined => {
+      const frame = osc0Frames.at(-1)
+      if (frame === undefined) return undefined
+      return /\x1b\]0;([^\x07]*)\x07/u.exec(frame)?.[1]
+    }
+
+    // FIRST REMOTE RESUME: the official `workingDirectory` projection B is the
+    // status/footer fact and the session-title-less OSC 0 identity fallback.
+    await waitFor('first resume status reports the effective cwd B', () =>
+      mounted.override.presentation.sessionFacts.sessionStatus(mainId)?.cwd === firstEffectiveCwd, 20_000)
+    await waitFor('first resume footer reports B', () => footer().includes('anchor/cwd-beta'), 20_000)
+    await waitFor('first resume OSC 0 fallback is B', () =>
+      lastOsc0Title() === 'dsh · anchor/cwd-beta', 20_000)
+
+    // The creation fact and Workspace membership are NOT overwritten at any
+    // stage: the official list row still reports A.
+    const firstRows = await mounted.aggregate.selected.backend.sessionReader.list(undefined)
+    assert.equal(firstRows?.find(row => row.id === mainId)?.cwd, creationCwd,
+      'SessionReader.list keeps the creation directory A')
+    assert.ok(workspace.sessionIds.map(String).includes(mainId),
+      'official Workspace membership still contains the Session at the creation path')
+
+    // An UNRELATED projection (token usage) refreshes the status but must not
+    // rewrite OSC 0: only the `workingDirectory` key owns that refresh. The
+    // check runs on the settled initial batch (no cwd change is in flight).
+    await new Promise<void>(resolve => setImmediate(resolve))
+    const osc0BeforeTokenChange = osc0Frames.length
+    {
+      const session = host.ctx.sessions.get(SessionId(mainId)) as unknown as {
+        append(type: string, data: unknown, options?: { surfaceOp?: 'append' }): void
+      }
+      session.append('turn/start', { turn: 1 })
+      session.append('step/start', { turn: 1, step: 1 })
+      session.append('assistant/message', {
+        turn: 1, step: 1,
+        message: {
+          id: 'a-token-only', role: 'assistant',
+          content: [{ type: 'text', text: 'token projection only' }],
+          source: { kind: 'model', provider: 'smoke', model: 'smoke' },
+        },
+        stream: [], usage: { inputTokens: 10, outputTokens: 5 },
+      }, { surfaceOp: 'append' })
+      session.append('step/end', { turn: 1, step: 1 })
+      session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+    }
+    await waitFor('the unrelated tokenUsage projection landed', () =>
+      mounted.override.presentation.sessionFacts.sessionStatus(mainId)?.usage?.outputTokens === 5, 20_000)
+    // One event-loop turn flushes the coalesced projection microtask (a
+    // microtask is guaranteed to run before a macrotask).
+    await new Promise<void>(resolve => setImmediate(resolve))
+    assert.equal(osc0Frames.length, osc0BeforeTokenChange,
+      'an unrelated tokenUsage/context projection notification never rewrites OSC 0')
+
+    // LIVE CHANGE in the SAME resumed Session: commit C through the real Host
+    // service; the official Client projection drives status/footer/OSC 0.
+    await host.ctx.workingDirectory.set(agent, liveEffectiveCwd)
+    await waitFor('live status reports the effective cwd C', () =>
+      mounted.override.presentation.sessionFacts.sessionStatus(mainId)?.cwd === liveEffectiveCwd, 20_000)
+    await waitFor('live footer reports C', () => footer().includes('anchor/cwd-gamma'), 20_000)
+    await waitFor('live OSC 0 fallback is C', () =>
+      lastOsc0Title() === 'dsh · anchor/cwd-gamma', 20_000)
+    assert.equal(agent.session.header.cwd, creationCwd, 'the header stays A after the live change')
+    assert.equal(host.ctx.workingDirectory.get(agent.session), liveEffectiveCwd)
+    const liveRows = await mounted.aggregate.selected.backend.sessionReader.list(undefined)
+    assert.equal(liveRows?.find(row => row.id === mainId)?.cwd, creationCwd,
+      'the list row stays the creation directory A after the live change')
+    assert.ok(workspace.sessionIds.map(String).includes(mainId),
+      'Workspace membership is unchanged by the live effective-directory change')
+  } finally {
+    if (originalWrite === undefined) delete (process.stdout as { write?: unknown }).write
+    else Object.defineProperty(process.stdout, 'write', originalWrite)
+    if (originalIsTTY === undefined) delete (process.stdout as { isTTY?: unknown }).isTTY
+    else Object.defineProperty(process.stdout, 'isTTY', originalIsTTY)
+    await fixture?.dispose()
+  }
+})
+
 test('live assistant transient output streams through the official eventSource ingress', async (t) => {
   const life = testLifecycle(t)
   const mainId = 'm3-4-pr2-live'
