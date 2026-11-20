@@ -28,6 +28,22 @@ function markdownFiles(root) {
   return found.sort()
 }
 
+/** Ignore balanced, same-length Markdown backtick spans on a link-scanned line. */
+function withoutInlineCode(line) {
+  const runs = [...line.matchAll(/`+/gu)]
+  let visible = ''
+  let from = 0
+  for (let i = 0; i < runs.length; i++) {
+    const opener = runs[i]
+    const closer = runs.findIndex((run, j) => j > i && run[0].length === opener[0].length)
+    if (closer < 0) continue
+    visible += line.slice(from, opener.index)
+    from = runs[closer].index + runs[closer][0].length
+    i = closer
+  }
+  return visible + line.slice(from)
+}
+
 /** Check exactly one index row per document and existing repository-local links. */
 export function checkDocsTree(root = ROOT) {
   const failures = []
@@ -59,7 +75,7 @@ export function checkDocsTree(root = ROOT) {
         continue
       }
       if (fenced !== null) continue
-      for (const match of line.matchAll(/\]\(([^)]+)\)/gu)) {
+      for (const match of withoutInlineCode(line).matchAll(/\]\(([^)]+)\)/gu)) {
         const raw = match[1].trim().replace(/^<|>$/gu, '').split(/\s+["']/u)[0]
         if (raw === '' || raw.startsWith('#') || raw.startsWith('/')
           || /^[a-z][a-z\d+.-]*:/iu.test(raw)) continue

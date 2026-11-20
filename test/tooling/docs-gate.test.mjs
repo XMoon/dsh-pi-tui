@@ -42,6 +42,19 @@ test('finds missing index entries, duplicate owners and broken links', (t) => {
   assert.match(failures, /missing local link: \.\/unknown\.md/u)
 })
 
+test('ignores inline-code link examples but checks adjacent real links', (t) => {
+  const root = fixture(t)
+  const tick = String.fromCharCode(96)
+  writeFileSync(join(root, 'docs/guides/user.md'),
+    '# User guide\n\nExample: ' + tick + '[demo](./not-installed.md)' + tick
+    + ' is syntax; see [index](../README.md).\n'
+    + 'Double: ' + tick.repeat(2) + tick + '[demo](./also-not-installed.md)'
+    + tick + tick.repeat(2) + ' and [missing](./really-missing.md).\n')
+  assert.deepEqual(checkDocsTree(root), [
+    'docs/guides/user.md:4: missing local link: ./really-missing.md',
+  ])
+})
+
 test('ignores Markdown examples in fenced blocks and external links', (t) => {
   const root = fixture(t)
   writeFileSync(join(root, 'docs/guides/user.md'),
