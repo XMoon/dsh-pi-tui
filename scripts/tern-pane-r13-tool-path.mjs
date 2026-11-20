@@ -309,13 +309,15 @@ export default async function (h) {
     }
 
     // ── the "never" invariants of this state (EXACT text matches; the absolute
-    // path CONTAINS `src/a.ts`, so a substring test would be a false positive) ──
-    const forbidden = [...(forbiddenTexts ?? [])]
+    // path CONTAINS `src/a.ts`, so a substring test would be a false positive).
+    // The mount-time root is forbidden in EVERY state, and `barePathForbidden`
+    // adds the bare relative path as a prohibited EXACT output of this state ──
+    const forbidden = ['/r13/launch-A', ...(barePathForbidden ? ['src/a.ts'] : []), ...(forbiddenTexts ?? [])]
     const allTexts = snap.nodes.map(node => String(node.text ?? ''))
     const offenders = allTexts.filter(text => forbidden.some(bad => text === bad
       || (bad === '/r13/launch-A' && text.includes(bad))))
     h.check(`[${state}] never ${barePathForbidden ? 'a bare src/a.ts or ' : ''}the mount-time root /r13/launch-A`,
-      offenders.length === 0, JSON.stringify(offenders))
+      offenders.length === 0, JSON.stringify({ forbidden, offenders }))
 
     // ── the geometry oracle: what the CLIENT actually shows ──
     // Full paints the path on the card target (no Work container, no Action
@@ -471,7 +473,7 @@ export default async function (h) {
     return evaluate(state, seq, expected, options)
   }
 
-  const c = await runCase(1, 'cwd=C', 'C', ABS_B, WORKSPACE_C, { forbiddenTexts: [] })
+  const c = await runCase(1, 'cwd=C', 'C', ABS_B, WORKSPACE_C, { barePathForbidden: true })
   h.check('[C] the absolute path is fully visible through every clipping ancestor at 1280x800 light',
     c.proven, JSON.stringify(c.visible.actionHead.box))
   h.capture('03-C-1280x800-light', 'C: workspace /r13/workspace-C — the B path stays absolute')

@@ -819,3 +819,89 @@ test('R13 D4: an unchanged workspace root never churns descriptor stamps', () =>
       `${preset}: an unchanged root re-derives byte-identical stamps`)
   }
 })
+
+test('R13 D5: an adopted nested Preparing carries the root through its OWN stamp part', () => {
+  // The Work members are Thinking-only: no durable tool row carries a path, so
+  // the enclosing stamp's ONLY cwd dependency is the adopted Preparing's own
+  // `preparingStampOf` part. Removing that part at any call site below is the
+  // regression these assertions must catch (a masked stamp would let the
+  // journal retain a stale nested path).
+  const folder = apply([
+    ev('turn/start', { turn: 1 }, 0),
+    ev('step/start', { turn: 1, step: 0 }, 1),
+    userMessage(2, 'user-r13-adopted', 'watch the adopted preview'),
+    reasoningMessage(3, 'think-r13', 'planning the next read', undefined, 0),
+  ])
+  const messages = folder.messages()
+  assert.deepEqual(r13WorkOwners(messages).length, 1, 'the reasoning row forms ONE Work span')
+  const adopted = [R13_PREVIEW]
+
+  // (a) Compact: the top-level Work descriptor IS the enclosing block. Its
+  // stamp must move with the root while every member stamp stays root-free.
+  const compactAt = (cwd: string | undefined) => describeTranscriptMainBlocksForPreset(messages, new TranscriptNodeKeys(), {
+    preset: 'compact',
+    scopePrefix: 's1-',
+    window: LATEST_WINDOW,
+    turnActivities: folder.turnActivities(),
+    preparingPreviews: adopted,
+    expandedWorkOwners: new Set(r13WorkOwners(messages)),
+    ...(cwd === undefined ? {} : { cwd }),
+  })
+  const workB = compactAt(R13_WORKSPACE_B).find(descriptor => descriptor.key.includes('work-'))
+  const workC = compactAt(R13_WORKSPACE_C).find(descriptor => descriptor.key.includes('work-'))
+  assert.ok(workB !== undefined && workC !== undefined, 'the adopted preview rides the trailing Work')
+  assert.notDeepEqual(workC.stamp, workB.stamp,
+    'Compact: the adopted Preparing invalidates the Work stamp on its own')
+  assert.equal(r13PathTextOf(r13TextsOf(workB.materialize())), 'src/a.ts',
+    'Compact: the nested Preparing row uses the committed workspace root')
+  assert.equal(r13PathTextOf(r13TextsOf(workC.materialize())), R13_ABS_B,
+    'Compact: another root keeps the absolute nested Preparing row')
+
+  // (b) Focus: the adopted Preparing rides the EXPANDED nested Work. The root
+  // stamp is the journal input that must move (the nested Work descriptor is
+  // never a top-level journal entry; its own stamp part is redundant with the
+  // root's Preparing part by construction — see the mutation evidence). The
+  // materialized nested row must follow the root either way.
+  const focusNestedAt = (cwd: string | undefined) => describeTranscriptMainBlocksForPreset(messages, new TranscriptNodeKeys(), {
+    preset: 'focus',
+    scopePrefix: 's1-',
+    window: LATEST_WINDOW,
+    turnActivities: folder.turnActivities(),
+    preparingPreviews: adopted,
+    expandedFocusTurns: new Set([1]),
+    expandedWorkOwners: new Set(r13WorkOwners(messages)),
+    ...(cwd === undefined ? {} : { cwd }),
+  })
+  const rootNestedB = focusNestedAt(R13_WORKSPACE_B).find(descriptor => descriptor.key.includes('focus-'))
+  const rootNestedC = focusNestedAt(R13_WORKSPACE_C).find(descriptor => descriptor.key.includes('focus-'))
+  assert.ok(rootNestedB !== undefined && rootNestedC !== undefined)
+  assert.notDeepEqual(rootNestedC.stamp, rootNestedB.stamp,
+    'Focus: the adopted Preparing invalidates the root stamp the journal reads')
+  assert.equal(r13PathTextOf(r13TextsOf(rootNestedB.materialize())), 'src/a.ts',
+    'Focus: the nested Preparing row uses the committed workspace root')
+  assert.equal(r13PathTextOf(r13TextsOf(rootNestedC.materialize())), R13_ABS_B,
+    'Focus: another root keeps the absolute nested Preparing row')
+
+  // (c) Focus COLLAPSED root with a root-level Preparing (no nested Work
+  // carrier, no action): the root's own `preparingStampOf` part ISOLATES the
+  // focusRootDescriptor call site — the only cwd input of this stamp.
+  const rootOnlyFolder = apply([
+    ev('turn/start', { turn: 1 }, 0),
+    ev('step/start', { turn: 1, step: 0 }, 1),
+    userMessage(1, 'user-r13-root-preview', 'watch the root preview'),
+  ])
+  const rootOnlyMessages = rootOnlyFolder.messages()
+  const focusRootAt = (cwd: string | undefined) => describeTranscriptMainBlocksForPreset(rootOnlyMessages, new TranscriptNodeKeys(), {
+    preset: 'focus',
+    scopePrefix: 's1-',
+    window: LATEST_WINDOW,
+    turnActivities: rootOnlyFolder.turnActivities(),
+    preparingPreviews: adopted,
+    ...(cwd === undefined ? {} : { cwd }),
+  })
+  const collapsedB = focusRootAt(R13_WORKSPACE_B).find(descriptor => descriptor.key.includes('focus-'))
+  const collapsedC = focusRootAt(R13_WORKSPACE_C).find(descriptor => descriptor.key.includes('focus-'))
+  assert.ok(collapsedB !== undefined && collapsedC !== undefined, 'the root-level Preparing rides the Focus root')
+  assert.notDeepEqual(collapsedC.stamp, collapsedB.stamp,
+    'Focus: the root Preparing part invalidates the COLLAPSED root stamp')
+})

@@ -4999,6 +4999,7 @@ const R13_LAUNCH_ROOT = '/r13/launch-A'
 const R13_WORKSPACE_B = '/r13/workspace-B'
 const R13_WORKSPACE_C = '/r13/workspace-C'
 const R13_ABS_B = `${R13_WORKSPACE_B}/src/a.ts`
+const R13_ABS_C = `${R13_WORKSPACE_C}/src/c.ts`
 
 const r13Targets = (harness: Harness): string[] => mountedNodes(harness)
   .filter(node => node.k === 'tool')
@@ -5182,10 +5183,34 @@ test('R13 L4-D: only the formal display commit publishes a status-only root chan
     assert.ok(!r13Targets(harness).includes('src/a.ts'), 'hydration retires the old relative target')
     assert.ok(!r13Targets(harness).includes(R13_ABS_B), 'hydration retires the old absolute target too')
     harness.replaceMain()
-    r13DurableRead(harness, 'r13-after-hydration')
-    await r13CommitWorkspace(harness, { cwd: R13_WORKSPACE_C })
+    // The REPLACEMENT source carries paths under three roots: the retired
+    // workspace B (a stale-root leak would abbreviate it), the mount root
+    // launch-A (a fallback leak would abbreviate it) and the incoming
+    // workspace C (the post-commit positive).
+    harness.route(ev('turn/start', { turn: 1 }, 0))
+    harness.route(userMessage(1, 'r13 replacement source', 'user-r13-replacement'))
+    harness.route(ev('tool/call', {
+      turn: 1, step: 0, callId: ToolCallId('r13-b-path'), name: 'read',
+      arguments: JSON.stringify({ file_path: R13_ABS_B }),
+    }, 2))
+    harness.route(ev('tool/call', {
+      turn: 1, step: 1, callId: ToolCallId('r13-a-path'), name: 'read',
+      arguments: JSON.stringify({ file_path: `${R13_LAUNCH_ROOT}/src/x.ts` }),
+    }, 3))
+    harness.route(ev('tool/call', {
+      turn: 1, step: 2, callId: ToolCallId('r13-c-path'), name: 'read',
+      arguments: JSON.stringify({ file_path: R13_ABS_C }),
+    }, 4))
     harness.surface.paintNow()
-    await awaitWireFact(() => r13Targets(harness).includes(R13_ABS_B), 'the new source uses the new root')
+    await awaitWireFact(() => r13Targets(harness).length === 3, 'the replacement source tool cards')
+    // BEFORE the new source's first formal status commit the effective root is
+    // UNKNOWN: every path stays absolute — neither the retired B root nor the
+    // launch root may abbreviate the incoming transcript.
+    assert.deepEqual(r13Targets(harness).sort(), [`${R13_LAUNCH_ROOT}/src/x.ts`, R13_ABS_B, R13_ABS_C].sort(),
+      'the pre-commit frame keeps every path absolute')
+    await r13CommitWorkspace(harness, { cwd: R13_WORKSPACE_C })
+    assert.deepEqual(r13Targets(harness).sort(), [`${R13_LAUNCH_ROOT}/src/x.ts`, R13_ABS_B, 'src/c.ts'].sort(),
+      'the first formal C commit relativizes only the path the new root owns')
     assert.ok(!r13Targets(harness).includes('src/a.ts'), 'the retired B root is never reused')
 
     // A late formal commit on a disposed renderer paints nothing.
@@ -5199,6 +5224,92 @@ test('R13 L4-D: only the formal display commit publishes a status-only root chan
     assert.equal(harness.tern.frames.length, framesAfterDispose,
       'a disposed renderer paints no late status frame')
   } finally {
+    await harness.session.close()
+  }
+})
+
+test('R13 L4-E: a Preparing-only projection refreshes on a status-only commit', async () => {
+  const harness = await mountTspHarness({ displayState: { preset: 'full' }, legacyCwd: R13_LAUNCH_ROOT })
+  try {
+    await r13CommitWorkspace(harness, { cwd: R13_WORKSPACE_B })
+    // A live tool call whose arguments are still streaming: the transcript
+    // holds NO durable message at all — only the live Preparing preview.
+    harness.route(ev('turn/start', { turn: 1 }, 0))
+    harness.route(ev('step/start', { turn: 1, step: 0 }, 1))
+    harness.surface.applyAssistantInput({
+      kind: 'chunk', sessionId: SESSION_ID, attemptId: 'r13-preview-only', turn: 1, step: 0,
+      time: T0 + 2,
+      chunk: {
+        type: 'tool-call-delta', index: 0, id: 'r13-preview-only-read', name: 'read',
+        argumentsDelta: JSON.stringify({ file_path: R13_ABS_B }),
+      },
+    } as never)
+    harness.surface.paintNow()
+    await awaitWireFact(() => mountedNodes(harness).some(node => node.id.includes('preparing-r13-preview-only-read')),
+      'the preview-only Preparing row')
+    assert.deepEqual(r13Targets(harness), [], 'the fixture holds no durable tool card')
+    assert.ok(mountedNodes(harness).some(node => node.p['text'] === ' · src/a.ts'),
+      'the Preparing summary uses the committed B root')
+    // The status-only root change must re-derive even a Preparing-only
+    // projection: the refresh condition may not require a durable message.
+    await r13CommitWorkspace(harness, { cwd: R13_WORKSPACE_C })
+    assert.ok(mountedNodes(harness).some(node => node.p['text'] === ` · ${R13_ABS_B}`),
+      'the status-only commit repaints the Preparing-only row')
+    assert.ok(!mountedNodes(harness).some(node => node.p['text'] === ' · src/a.ts'),
+      'the stale B-relative summary is gone')
+  } finally {
+    await harness.dispose()
+    await harness.session.close()
+  }
+})
+
+test('R13 L4-F: an adopted nested Preparing repaints through the journal on a status-only commit', async () => {
+  const harness = await mountTspHarness({ displayState: { preset: 'compact' }, legacyCwd: R13_LAUNCH_ROOT })
+  try {
+    harness.surface.bindRendererInput()
+    await r13CommitWorkspace(harness, { cwd: R13_WORKSPACE_B })
+    // A Thinking-only Work (no durable tool row carries a path) plus one live
+    // Preparing preview of the SAME turn: the trailing Work adopts it, so the
+    // enclosing Work descriptor stamp is the only carrier of the root.
+    harness.route(ev('turn/start', { turn: 1 }, 0))
+    harness.route(ev('step/start', { turn: 1, step: 0 }, 1))
+    harness.route(userMessage(2, 'r13 adopted preview', 'user-r13-adopted-live'))
+    harness.route(ev('assistant/message', {
+      turn: 1, step: 0,
+      message: {
+        id: MessageId('think-r13-adopted'), role: 'assistant',
+        content: [{ type: 'reasoning', text: 'planning the next read' }],
+        source: { kind: 'model', provider: 'p', model: 'm' }, stream: [],
+      },
+    }, 3))
+    harness.surface.applyAssistantInput({
+      kind: 'chunk', sessionId: SESSION_ID, attemptId: 'r13-adopted-live', turn: 1, step: 0,
+      time: T0 + 4,
+      chunk: {
+        type: 'tool-call-delta', index: 0, id: 'r13-adopted-read', name: 'read',
+        argumentsDelta: JSON.stringify({ file_path: R13_ABS_B }),
+      },
+    } as never)
+    harness.surface.paintNow()
+    await awaitWireFact(() => mountedSections(harness).some(node => String(node.p['key']).includes('work-')),
+      'the adopted Work section')
+    const workId = mountedSections(harness).find(node => String(node.p['key']).includes('work-'))!.id
+    // Open the EXISTING Work head (control-injected toggle) to materialize the
+    // nested Preparing row the journal retains.
+    harnessFreeInput(harness.tern, {
+      ev: 'toggle', sf: harness.tern.frames.at(-1)!.sf, id: workId, collapsed: false, raw: {},
+    })
+    await awaitWireFact(() => mountedNodes(harness).some(node => node.p['text'] === ' · src/a.ts'),
+      'the nested adopted Preparing row at B')
+    // Status-only B -> C with no transcript event: the enclosing Work stamp
+    // must carry the adopted preview root, or the journal keeps the stale row.
+    await r13CommitWorkspace(harness, { cwd: R13_WORKSPACE_C })
+    await awaitWireFact(() => mountedNodes(harness).some(node => node.p['text'] === ` · ${R13_ABS_B}`),
+      'the nested adopted Preparing row at C')
+    assert.ok(!mountedNodes(harness).some(node => node.p['text'] === ' · src/a.ts'),
+      'the journal did not retain the stale B-relative nested row')
+  } finally {
+    await harness.dispose()
     await harness.session.close()
   }
 })
