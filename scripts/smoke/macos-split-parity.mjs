@@ -2400,6 +2400,8 @@ async function runD4LaunchdScene({ installation, workRoot, report, start, projec
   const plistEntry = /<key>ProgramArguments<\/key>\s*<array>\s*<string>[^<]+<\/string>\s*<string>([^<]+)<\/string>/u.exec(plistText)
   assert(plistEntry !== null && existsSync(plistEntry[1]) && plistEntry[1].endsWith('/dist/local-host.mjs'),
     'L02: ProgramArguments must name an existing installed dist/local-host.mjs')
+  assert(plistEntry[1] === join(realpathSync(profileDir), 'node_modules', '@xmoon76', 'dsh-pi-tui', 'dist', 'local-host.mjs'),
+    `L02: a FRESH plist must name the stable profile package entry, saw ${plistEntry[1]}`)
   assert(!/daemonize|--daemon|<string>\/bin\/sh<\/string>/u.test(plistText), 'L02: the job must not wrap the Host in a shell or daemonize flag')
   assert(plistText.includes(`<string>${realpathSync(profileDir)}</string>`), 'L02: WorkingDirectory must be the canonical profile')
   assert(plistText.includes('<key>X-DshPiTuiOwner</key>\n  <string>local-host-launchd-v1</string>'), 'L02: missing owner metadata')
@@ -2507,9 +2509,13 @@ async function runD4LaunchdScene({ installation, workRoot, report, start, projec
   // a legal RunAtLoad=true must reach launchd and still produce the real
   // foreground Host. The default plist bytes are restored afterwards so the
   // L04-NEG2/L03 lifecycle keeps its original premise.
+  const customStdout = join(workRoot, 'd4l-custom.stdout.log')
+  const customStderr = join(workRoot, 'd4l-custom.stderr.log')
   const customPlist = plistText
     .replace('    <key>SPLIT_PROCESS_PROFILE</key>', '    <key>D4L_CUSTOM_FLAG</key>\n    <string>on</string>\n    <key>SPLIT_PROCESS_PROFILE</key>')
     .replace('<key>RunAtLoad</key>\n  <false/>', '<key>RunAtLoad</key>\n  <true/>')
+    .replace(/<key>StandardOutPath<\/key>\n  <string>[^<]*<\/string>/u, `<key>StandardOutPath</key>\n  <string>${customStdout}</string>`)
+    .replace(/<key>StandardErrorPath<\/key>\n  <string>[^<]*<\/string>/u, `<key>StandardErrorPath</key>\n  <string>${customStderr}</string>`)
     .replace('</dict>\n</plist>', '</dict>\n<!-- D4L user runtime comment -->\n</plist>')
   assert(customPlist !== plistText, 'L02-CUSTOM: could not build the user-customized plist fixture')
   writeFileSync(plistPath, customPlist, { mode: 0o600 })
@@ -2527,6 +2533,9 @@ async function runD4LaunchdScene({ installation, workRoot, report, start, projec
   const customStop = daemonOk(['stop'], 'L02-CUSTOM stop')
   assert(/^host=stopped$/mu.test(customStop.result.stdout), 'L02-CUSTOM: the customized job did not stop through the verified path')
   await waitFor(() => (alive(customHost.record.hostPid) ? undefined : true), 'L02-CUSTOM host exit', TIMEOUTS.process)
+  for (const customLog of [customStdout, customStderr]) {
+    if (existsSync(customLog)) unlinkSync(customLog)
+  }
   writeFileSync(plistPath, plistText, { mode: 0o600 })
   recordPlistIdentity(label, plistPath)
   report.rows.push({ id: 'L02-CUSTOM', status: 'PASS', extraEnv: 'D4L_CUSTOM_FLAG', runAtLoad: true,

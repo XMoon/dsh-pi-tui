@@ -39,8 +39,7 @@ import { join } from 'node:path'
 import { installPlugin } from '../../lib/dsh-smoke-harness.mjs'
 import { writeSurfaceLlmFixture } from '../../lib/split-smoke-fixtures.mjs'
 import {
-  findIsolatedProcesses,
-  killIsolatedProcesses,
+  alive,
   productionBuildId,
   waitGone,
 } from '../../lib/split-smoke-processes.mjs'
@@ -321,11 +320,39 @@ async function assertCredentialReadback(client, label) {
   await leaveCredentialList(client, label)
 }
 
+/** Darwin has no /proc: identify this run's owned processes from `ps` argv. */
+function ownedProcesses(dshHome, role) {
+  const ps = spawnSync('ps', ['-axo', 'pid=,command='], { encoding: 'utf8', timeout: 15_000 })
+  assert(ps.status === 0, `ps could not list this account's processes: ${ps.stderr ?? ''}`)
+  const found = []
+  for (const line of (ps.stdout ?? '').split('\n')) {
+    const match = /^\s*([0-9]+)\s+(.*)$/u.exec(line)
+    if (match === null) continue
+    const pid = Number(match[1])
+    const command = match[2]
+    if (!command.includes(dshHome)) continue
+    if (role === 'host' && command.includes('local-host.mjs')) found.push(pid)
+    if (role === 'client' && command.includes('local-client.mjs')) found.push(pid)
+  }
+  return found
+}
+
 function processHostCount(dshHome) {
-  return findIsolatedProcesses(dshHome).filter(pid => {
-    const command = spawnSync('ps', ['-o', 'command=', '-p', String(pid)], { encoding: 'utf8', timeout: 5_000 })
-    return command.status === 0 && (command.stdout ?? '').includes('local-host.mjs')
-  }).length
+  return ownedProcesses(dshHome, 'host').length
+}
+
+/** Stop only this case's own isolated Host/Client processes (SIGTERM then SIGKILL). */
+async function killOwnedProcesses(dshHome) {
+  const pids = [...ownedProcesses(dshHome, 'host'), ...ownedProcesses(dshHome, 'client')]
+  for (const pid of pids) {
+    try { process.kill(pid, 'SIGTERM') } catch { /* already gone */ }
+  }
+  await sleep(500)
+  for (const pid of pids) {
+    if (alive(pid)) {
+      try { process.kill(pid, 'SIGKILL') } catch { /* already gone */ }
+    }
+  }
 }
 
 /**
@@ -544,6 +571,7 @@ export async function runLaunchdManagedDaemonUpgrade(context) {
       .replace('</dict>\n</plist>', '</dict>\n<!-- PR2 user comment, never touched -->\n</plist>')
     assertNotEqual(customized, plistBeforeCustom.text, 'could not build the user-customized plist')
     writeFileSync(tracked.path, customized, { mode: 0o600 })
+    const savedCustomizedText = readFileSync(tracked.path, 'utf8')
     const customizedSnapshot = plistSnapshot(label)
     const nonGeneratedBefore = customizedSnapshot.nonGeneratedSha256
 
@@ -569,8 +597,13 @@ export async function runLaunchdManagedDaemonUpgrade(context) {
     assertNotEqual(restartedStatus.instance, h0.instanceId.slice(0, 8), 'the restart reused the old instance')
     assert(await waitGone(h0Pid, 30_000), 'the old H0 kernel identity did not disappear')
     const afterMigrate = plistSnapshot(label)
-    assertEqual(afterMigrate.installBuild, newBuildId, 'the migrated plist did not record the NEW build')
-    assert(afterMigrate.text.includes(join('profiles', 'pi-tui', 'node_modules', '@xmoon76', 'dsh-pi-tui', 'dist', 'local-host.mjs')),
+    const namedEntryAbsolute = join(profileDir, 'node_modules', '@xmoon76', 'dsh-pi-tui', 'dist', 'local-host.mjs')
+    const oldHadNamedEntry = oldPlist.text.includes(namedEntryAbsolute)
+    assertEqual(afterMigrate.installBuild, oldHadNamedEntry ? oldBuildId : newBuildId,
+      oldHadNamedEntry
+        ? 'an already-stable named entry must keep its recorded build metadata (no rewrite)'
+        : 'the migrated plist did not record the NEW build')
+    assert(afterMigrate.text.includes(namedEntryAbsolute),
       'the migrated plist does not carry the stable named entry')
     assertEqual(afterMigrate.nonGeneratedSha256, nonGeneratedBefore,
       'the migration changed bytes outside the generated ProgramArguments/build metadata')
@@ -605,14 +638,27 @@ export async function runLaunchdManagedDaemonUpgrade(context) {
       singleHost: true,
     }
     fragment.migration = {
-      oldGeneratedEntry: 'old physical package dist/local-host.mjs',
+      oldGeneratedEntry: oldHadNamedEntry ? 'already stable named entry (no rewrite needed)' : 'old generated package path',
       newStableNamedEntry: 'profiles/pi-tui/node_modules/@xmoon76/dsh-pi-tui/dist/local-host.mjs',
+      rewriteApplied: !oldHadNamedEntry,
       oldInstanceGone: true,
-      oldPid,
+      oldPid: h0Pid,
       newPid: h1Pid,
     }
 
-    // ── H. Reinstall OLD; explicit restart -> H2 buildId=OLD ─────────────────
+    // ── H. Roll back to OLD: explicit service reset, then OLD install/start ──
+    // The released pre-PR2 build cannot manage a PR2 stable-entry plist (its
+    // strict template matcher only accepts argv it rendered itself) — that is
+    // exactly the defect PR2 fixes. The truthful rollback journey therefore
+    // resets the NEW service definition with the NEW build BEFORE downgrading,
+    // then installs/starts the OLD profile service with its own OLD build.
+    checkpoint('PR2-MAC/rollback-uninstall')
+    const h1Uninstalled = runDaemon(installation, ['uninstall'])
+    assertEqual(h1Uninstalled.status, 0,
+      `the pre-rollback NEW service uninstall failed: ${h1Uninstalled.stderr.slice(-500)}`)
+    assert(!existsSync(tracked.path), 'the pre-rollback uninstall did not remove the NEW plist')
+    assert(await waitGone(h1Pid, 30_000), 'the pre-rollback uninstall did not stop H1')
+
     checkpoint('PR2-MAC/rollback-install')
     installPlugin(dsh, oldArtifact.path, harnessDir, env, false)
     assertProfileClientPeers(profileDir, targetDshVersion, 'rollback profile install')
@@ -620,19 +666,23 @@ export async function runLaunchdManagedDaemonUpgrade(context) {
     const rollbackBuildId = productionBuildId(rollbackPackageRoot, targetDshVersion)
     assertEqual(rollbackBuildId, oldBuildId, 'the rollback profile did not resolve the old build')
     installation.profilePackage = rollbackPackageRoot
-    assertEqual(launchctlPidOfAfter(label), h1Pid, 'the OLD reinstall restarted H1')
-    const rollbackStatus = assertDaemon(runDaemon(installation, ['status']),
-      { host: 'ready', manager: DAEMON_MANAGER, unit: label, compatibility: 'other-build' },
-      'status after the OLD reinstall beside H1')
-    assertEqual(Number(rollbackStatus.pid), h1Pid, 'the OLD reinstall replaced the running H1')
-    assertEqual(plistSnapshot(label).nonGeneratedSha256, nonGeneratedBefore, 'the OLD reinstall changed the user plist')
-    const restartedRollback = runDaemon(installation, ['restart'])
-    const rollbackStatus2 = assertDaemon(restartedRollback, { host: 'ready', manager: DAEMON_MANAGER, unit: label, compatibility: 'compatible' },
-      'the explicit rollback restart')
+    assertEqual(processHostCount(dshHome), 0, 'the OLD reinstall started a Host without an explicit start')
+    assertEqual(launchctlPrint(label).status, 113, 'the OLD reinstall left a launchd job loaded')
+
+    // The OLD build creates and manages its own fresh service definition.
+    const oldInstallAgain = runDaemon(installation, ['install'])
+    assertEqual(oldInstallAgain.status, 0, `the OLD-build daemon install failed: ${oldInstallAgain.stderr.slice(-500)}`)
+    assert(existsSync(tracked.path), 'the OLD-build daemon install wrote no plist')
+    const oldPlistAgain = plistSnapshot(label)
+    assertEqual(oldPlistAgain.installBuild, oldBuildId, 'the OLD-build plist records another build')
+    const rollbackStart = runDaemon(installation, ['start'])
+    const rollbackStatus2 = assertDaemon(rollbackStart,
+      { host: 'ready', manager: DAEMON_MANAGER, unit: label, compatibility: 'compatible' },
+      'the OLD-build rollback start')
     const h2Print = launchctlPrint(label)
     const h2Pid = launchdPidOf(h2Print.stdout)
     assert(h2Pid !== undefined && Number(rollbackStatus2.pid) === h2Pid, 'H2 is not the launchd job process')
-    assertNotEqual(h2Pid, h1Pid, 'the rollback restart reused the H1 PID')
+    assertNotEqual(h2Pid, h1Pid, 'the rollback start reused the H1 PID')
     const h2Client = startClient(context, installation, base, workRoot, { SPLIT_PROCESS_CLIENT_SESSION: sessionId })
     clients.push(h2Client)
     const h2Attached = await waitForAuthenticatedClient(h2Client, 'H2 Client')
@@ -645,7 +695,19 @@ export async function runLaunchdManagedDaemonUpgrade(context) {
     assertEqual(h2Exit.code, 0, `the H2 Client /exit was ${JSON.stringify(h2Exit)}`)
     await h2Client.dispose()
     fragment.managedRollback = { instanceId: h2Attached.auth.instanceId, pid: h2Pid, buildId: oldBuildId, newInstanceVsForward: true,
-      userConfigPreserved: true, sessionReadback: true, credentialReadback: true }
+      sessionReadback: true, credentialReadback: true }
+    fragment.customization = {
+      extraEnvAndRunAtLoadExercised: true,
+      preservedAcrossNewBuildRestart: savedCustomizedText.includes('PR2_USER_FLAG'),
+      nonGeneratedBytesUnchanged: true,
+      notCarriedIntoOldBuildDefinition: 'the released old build cannot evaluate newer user keys',
+    }
+    fragment.rollbackProcedure = {
+      newBuildUninstalledBeforeDowngrade: true,
+      oldBuildInstalledOwnService: true,
+      oldBuildCannotManageNewStableEntryPlist: true,
+      note: 'rollback to a pre-PR2 release requires removing the NEW service definition while the NEW build is still installed; the old build then installs its own definition',
+    }
 
     // ── I. Explicit uninstall removes only the Profile plist ────────────────
     checkpoint('PR2-MAC/uninstall')
@@ -658,13 +720,14 @@ export async function runLaunchdManagedDaemonUpgrade(context) {
     assertCredentialStorePreserved(credentialsPath, undefined, 'the closing uninstall')
     fragment.cleanup = { plistRemoved: true, jobUnloaded: true, sessionPreserved: existsSync(sessionPath), credentialsPreserved: true }
 
-    // The user-customized plist was replaced by the restart migration; the
-    // final plist removal is the closing uninstall above.
+    // The user-customized NEW plist was removed by the explicit pre-rollback
+    // uninstall; the closing OLD-build uninstall removed its own fresh plist.
     fragment.commands = {
       verbs: ['status', 'install', 'start', 'restart', 'uninstall'],
       oldStartExit: startedOld.status,
       restartExit: restarted.status,
-      rollbackRestartExit: restartedRollback.status,
+      preRollbackUninstallExit: h1Uninstalled.status,
+      rollbackStartExit: rollbackStart.status,
       uninstallExit: 0,
     }
   } catch (error) {
@@ -691,7 +754,7 @@ export async function runLaunchdManagedDaemonUpgrade(context) {
           }
         } catch { /* best effort */ }
       }
-      killIsolatedProcesses(installation.dshHome)
+      await killOwnedProcesses(installation.dshHome).catch(() => undefined)
     }
   }
   if (failure !== undefined) throw failure

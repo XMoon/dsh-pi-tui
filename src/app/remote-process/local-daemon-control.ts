@@ -1807,14 +1807,17 @@ export function sanitizeLogText(text: string): string {
 }
 
 /**
- * Darwin log source: a verified loaded LaunchAgent governs the profile and its
- * private `launchd.stdout.log` / `launchd.stderr.log` are read as two
+ * Darwin log source: a verified loaded LaunchAgent governs the profile, and the
+ * stdout/stderr sinks THAT JOB DECLARES in `launchctl print` are read as two
  * separately bounded, separately labelled streams (never presented as one
- * time-merged log). A job that is installed but NOT loaded does not govern an
- * independent Host, so that Host keeps reading `host.log`. After the launchd
- * job has stopped there is no live authority proving whether the retained
- * launchd streams or an earlier `host.log` is the most recent Host; the source
- * is unprovable and the command fails closed instead of guessing a file.
+ * time-merged log). A verified loaded job that declares no sink makes the
+ * command return `LOG_SOURCE_UNAVAILABLE`; the product's default private file
+ * names are never substituted for a user configuration. A job that is
+ * installed but NOT loaded does not govern an independent Host, so that Host
+ * keeps reading `host.log`. After the launchd job has stopped there is no live
+ * authority proving whether the retained launchd streams or an earlier
+ * `host.log` is the most recent Host; the source is unprovable and the command
+ * fails closed instead of guessing a file.
  */
 async function runDarwinLogs(
   scope: LocalScope,

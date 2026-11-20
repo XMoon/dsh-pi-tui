@@ -1250,12 +1250,37 @@ export interface LaunchdMigrationResult {
 }
 
 /**
+ * True when one decoded old `ProgramArguments[1]` value is a product Host
+ * entry of THIS profile, not a user wrapper/another program. The stable named
+ * entry and a pnpm versioned store path are recognizable even after the old
+ * physical package was pruned by an official upgrade; a still-readable product
+ * manifest is accepted for other legal shared-store layouts. A path from
+ * another profile's pristine `node_modules` is not the product-store shape and
+ * is never admitted without a readable product manifest.
+ */
+function isProductHostEntryPath(entryValue: string, facts: LaunchdUnitFacts): boolean {
+  const suffix = '/node_modules/@xmoon76/dsh-pi-tui/dist/local-host.mjs'
+  if (!entryValue.endsWith(suffix)) return false
+  if (entryValue === join(facts.profileRealpath, 'node_modules', '@xmoon76', 'dsh-pi-tui', 'dist', 'local-host.mjs')) return true
+  // pnpm's versioned virtual store path: `/node_modules/.pnpm/@xmoon76+dsh-pi-tui@<ver>_<hash>/node_modules/...`
+  if (entryValue.includes('/node_modules/.pnpm/@xmoon76+dsh-pi-tui@')) return true
+  // Any other layout must still prove the nearest manifest is this product.
+  let manifest: unknown
+  try {
+    manifest = JSON.parse(readFileSync(join(dirname(dirname(entryValue)), 'package.json'), 'utf8'))
+  } catch {
+    return false
+  }
+  return manifest !== null && typeof manifest === 'object' && (manifest as { readonly name?: unknown }).name === '@xmoon76/dsh-pi-tui'
+}
+
+/**
  * Locate the product's EXACT generated `ProgramArguments` block: precisely two
  * `<string>` children whose first value is the renderer's node executable form
- * and whose second value is an installed product `dist/local-host.mjs` path of
- * THIS profile. The lexical span must equal the renderer's exact bytes; any
- * reordering, binary plist, wrapper, extra argument or another profile's path
- * is not our generated block and returns `undefined`.
+ * and whose second value is an accepted product Host entry path. The lexical
+ * span must equal the renderer's exact bytes; any reordering, binary plist,
+ * wrapper, extra argument or another program is not our generated block and
+ * returns `undefined`.
  */
 function locateGeneratedProgramArguments(content: string, facts: LaunchdUnitFacts): { readonly oldEntry: string; readonly start: number; readonly end: number } | undefined {
   const decoded = decodeLaunchdPlist(content)
@@ -1266,18 +1291,7 @@ function locateGeneratedProgramArguments(content: string, facts: LaunchdUnitFact
   // renderer used. Compare against the decoded semantic values, not bytes, so
   // legal XML entity encoding in the old file still matches.
   if (nodeValue !== facts.nodePath) return undefined
-  // The old generated entry is an installed product Host entry of this same
-  // profile layout: .../<packageRoot>/dist/local-host.mjs whose nearest package
-  // manifest is this product (not a wrapper, not another program).
-  if (!entryValue.endsWith('/dist/local-host.mjs')) return undefined
-  const nearestManifest = join(dirname(dirname(entryValue)), 'package.json')
-  let manifest: unknown
-  try {
-    manifest = JSON.parse(readFileSync(nearestManifest, 'utf8'))
-  } catch {
-    return undefined
-  }
-  if (manifest === null || typeof manifest !== 'object' || (manifest as { readonly name?: unknown }).name !== '@xmoon76/dsh-pi-tui') return undefined
+  if (!isProductHostEntryPath(entryValue, facts)) return undefined
   // The lexical span must be the renderer's EXACT structure so the patch below
   // replaces only bytes this product wrote.
   const entryStart = content.indexOf(GENERATED_PROGRAM_ARGUMENTS_SPAN.head)
@@ -1343,9 +1357,11 @@ export function prepareOwnedLaunchdForCurrentInstall(
   // Prove the profile anchors (Label + three official env values). A plist of
   // another profile/scope is an identity refusal, not a migration decision.
   assertLaunchdProfileAnchors(facts, unit.content)
-  const namedEntry = resolveNamedLaunchdEntry(facts)
   const generated = locateGeneratedProgramArguments(unit.content, facts)
   if (generated === undefined) return { plan: { kind: 'no-op', reason: 'user-managed' } }
+  // Only a PROVEN generated block needs the stable target; a user-customized
+  // argv is never blocked by a profile layout that has no stable named entry.
+  const namedEntry = resolveNamedLaunchdEntry(facts)
   if (generated.oldEntry === namedEntry) return { plan: { kind: 'no-op', reason: 'current' } }
   const plan: LaunchdMigrationPlan = { kind: 'migrate', namedEntry }
   if (mode === 'inspect') return { plan }

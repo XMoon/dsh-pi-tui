@@ -755,7 +755,7 @@ test('migration patches only the proven generated ProgramArguments and build met
   mkdirSync(join(fx.accountHome, 'Library', 'LaunchAgents'), { recursive: true, mode: 0o700 })
   const path = plistPathOf(fx)
   const oldBuild = 'e'.repeat(64)
-  const oldEntry = join(fx.packageRoot, 'dist', 'local-host.mjs')
+  const oldEntry = join(fx.root, 'store', 'node_modules', '.pnpm', '@xmoon76+dsh-pi-tui@0.5.7_oldbuild', 'node_modules', '@xmoon76', 'dsh-pi-tui', 'dist', 'local-host.mjs')
   let oldPlist = renderLaunchdPlist({ ...fx.facts, hostEntryPath: oldEntry, buildId: oldBuild })
   // Legal user-owned additions OUTSIDE the generated spans.
   oldPlist = oldPlist
@@ -783,11 +783,24 @@ test('migration patches only the proven generated ProgramArguments and build met
   assert.equal(readFileSync(path, 'utf8'), next)
 })
 
+test('migration recognizes a pruned pnpm versioned store path as the old generated entry', { skip: NATIVE_PLIST_DECODER_SKIP }, t => {
+  const fx = fixture(t)
+  mkdirSync(join(fx.accountHome, 'Library', 'LaunchAgents'), { recursive: true, mode: 0o700 })
+  const path = plistPathOf(fx)
+  // The old physical package was already pruned by the official upgrade: the
+  // path no longer exists, but its product-store shape identifies our block.
+  const prunedEntry = join(fx.root, 'store', 'node_modules', '.pnpm', '@xmoon76+dsh-pi-tui@0.5.7_abc123', 'node_modules', '@xmoon76', 'dsh-pi-tui', 'dist', 'local-host.mjs')
+  writeFileSync(path, renderLaunchdPlist({ ...fx.facts, hostEntryPath: prunedEntry, buildId: 'e'.repeat(64) }), { mode: 0o600 })
+  const deps = depsOf(fx)
+  const inspected = prepareOwnedLaunchdForCurrentInstall(fx.facts, ownedUnitOf(fx, deps), deps, 'inspect')
+  assert.equal(inspected.plan.kind, 'migrate')
+})
+
 test('migration preserves a user-customized argv byte-for-byte and reports user-managed', { skip: NATIVE_PLIST_DECODER_SKIP }, async t => {
   const fx = fixture(t)
   mkdirSync(join(fx.accountHome, 'Library', 'LaunchAgents'), { recursive: true, mode: 0o700 })
   const path = plistPathOf(fx)
-  const oldEntry = join(fx.packageRoot, 'dist', 'local-host.mjs')
+  const oldEntry = join(fx.root, 'store', 'node_modules', '.pnpm', '@xmoon76+dsh-pi-tui@0.5.7_oldbuild', 'node_modules', '@xmoon76', 'dsh-pi-tui', 'dist', 'local-host.mjs')
   const oldPlist = renderLaunchdPlist({ ...fx.facts, hostEntryPath: oldEntry, buildId: 'e'.repeat(64) })
     .replace('<key>ProgramArguments</key>\n  <array>\n', '<key>ProgramArguments</key>\n  <array>\n    <string>--user-wrapper-flag</string>\n')
   writeFileSync(path, oldPlist, { mode: 0o600 })
@@ -802,7 +815,7 @@ test('migration never patches a restructured generated block or a changed file',
   const fx = fixture(t)
   mkdirSync(join(fx.accountHome, 'Library', 'LaunchAgents'), { recursive: true, mode: 0o700 })
   const path = plistPathOf(fx)
-  const oldEntry = join(fx.packageRoot, 'dist', 'local-host.mjs')
+  const oldEntry = join(fx.root, 'store', 'node_modules', '.pnpm', '@xmoon76+dsh-pi-tui@0.5.7_oldbuild', 'node_modules', '@xmoon76', 'dsh-pi-tui', 'dist', 'local-host.mjs')
   const canonical = renderLaunchdPlist({ ...fx.facts, hostEntryPath: oldEntry, buildId: 'e'.repeat(64) })
   // A comment inside the generated block breaks its exact lexical structure.
   const restructured = canonical.replace('  <array>\n', '  <array>\n    <!-- user note -->\n')
