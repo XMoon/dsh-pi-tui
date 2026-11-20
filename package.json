@@ -76,6 +76,10 @@
       "types": "./dist/preferences.d.mts",
       "default": "./dist/preferences.mjs"
     },
+    "./extension-config": {
+      "types": "./dist/extension-config.d.mts",
+      "default": "./dist/extension-config.mjs"
+    },
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./package.json": "./package.json"
   },
