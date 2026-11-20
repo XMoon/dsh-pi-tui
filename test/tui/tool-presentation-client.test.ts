@@ -14,6 +14,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import { createClientToolPresenter } from '../../src/tui/transcript/client-tool-presenter.ts'
+import { toolTargetKind } from '../../src/tui/transcript/tool-target-semantics.ts'
 
 const presenter = createClientToolPresenter()
 
@@ -221,6 +222,12 @@ test('result: a write diff reaches the result view only with a result path', () 
   // W05-E: the RESULT path wins over a different `args.file_path` (pathFromMeta).
   const canonical = writeResult({ file_path: 'src/b.ts', content: 'x' }, { path: '/repo/canonical.ts', diffs: [] })
   assert.deepEqual(canonical?.card === 'diff' ? canonical.diffs : undefined, [{ path: '/repo/canonical.ts', oldText: null, newText: 'x' }], 'W05-E: the result path wins')
+  // W05-E TSP sink: feed the REAL presenter Result View through the read-only
+  // `toolTargetKind` authority. The result diff path '/repo/canonical.ts' does
+  // NOT match the displayed target 'src/b.ts', so the target kind stays
+  // 'text' (the Show-vs-proof boundary: a result path only proves `path` on an
+  // exact/relativized match with the displayed target).
+  assert.equal(toolTargetKind('src/b.ts', { callView: undefined, resultView: canonical }, '/repo'), 'text', 'W05-E: a non-matching result path stays text')
 
   // The write diff is built from the args content, so both `file_path` and
   // `content` must be present (the call view and branch B both need them).

@@ -7,11 +7,16 @@
  *
  * Coverage (plan §5.3 — adapt the EXISTING pure helpers, never duplicate
  * formatting):
- * - edit/write/apply_patch-style diff cards — the `DiffCallView` is derived
- *   from the call arguments (an edit's old/new strings; a create's oldText
- *   is null), exactly the contract the Host-side presenter declares;
+ * - edit/write/apply_patch-style diff CALL cards — the `DiffCallView` is
+ *   derived from the call arguments (an edit's old/new strings; a create's
+ *   oldText is null), exactly the contract the Host-side presenter declares;
  * - bash/pwsh/terminal execute cards — `TerminalCallView` from the command
  *   and optional description/cwd arguments;
+ * - name-scoped RESULT cards (R11 Web parity, `result()` below): a generic
+ *   applied diff for ANY tool with a valid non-empty `meta.diffs`, a
+ *   write-with-result-path diff for `write` when the result declares a
+ *   non-empty `meta.path`, and a read card for `read` with a valid read call +
+ *   window + file envelope;
  * - everything else stays with the existing Client-side generic fallbacks
  *   (toolCardHeader/compactToolPresentation/read-envelope parsers), which
  *   the render layer already consults when the presenter returns
@@ -184,7 +189,11 @@ function diffsOf(record: Record<string, unknown>): FileDiff[] | undefined {
  * way dsh-web's keyed `renderSlot('tool.call.toolview', …, { entryKey: toolName,
  * fallback: GenericToolCard })` does; it never proves which Host Tool Definition
  * actually ran (a plugin may register a tool under a built-in name). The
- * recognized shapes, in the fixed precedence dsh-web applies:
+ * recognized shapes, in this bridge's fixed precedence (plan Step 1B) — that
+ * ordering is the PLAN's, not a claim that dsh-web orders the same way: a
+ * `read` row that also carries a valid non-empty `meta.diffs` wins the
+ * applied-diff branch here, while dsh-web's keyed `read` slot would show its
+ * Read card (the accepted W11 name-bound difference):
  *
  * - a generic APPLIED DIFF: ANY tool name whose result metadata carries a valid
  *   NON-EMPTY `diffs` list renders those recorded hunks — dsh-web's
