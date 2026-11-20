@@ -117,6 +117,54 @@ test('a Direct bootstrap with a missing Settings surface and a surviving legacy 
   }
 })
 
+test('a completed canonical marker lets a settings-less Direct bootstrap start with preserved legacy rows', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('direct-prefs-current-')
+  const patchPath = join(home, 'cordis.patch.yml')
+  writeFileSync(patchPath, [
+    '- id: pi-tui-preferences',
+    "  name: '@xmoon76/dsh-pi-tui/preferences'",
+    '  config:',
+    '    theme: dark',
+    '    legacySettingsMigrationVersion: 2',
+    '- id: tui-app',
+    "  name: '@xmoon76/dsh-pi-tui'",
+    '  config:',
+    '    theme: dark',
+    '',
+  ].join('\n'))
+  const ctx = new Context()
+  ctx.provide('profileContext', { home, patchPath })
+  const harness = makeHarness(home)
+  let exited = false
+  try {
+    await mountRunner(ctx, home, harness, {}, {}, () => { exited = true })
+    assert.equal(exited, false,
+      'marker 2 proves the migration completed; preserved legacy rows must not block startup')
+  } finally {
+    await disposeContext(ctx)
+  }
+})
+
+test('a settings-less Direct bootstrap refuses an un-migrated legacy preset default', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('direct-prefs-preset-')
+  const patchPath = join(home, 'cordis.patch.yml')
+  writeFileSync(patchPath, '[]\n')
+  writeFileSync(join(home, 'settings.yaml'), ['agent-presets:', '  default: minimal', ''].join('\n'))
+  const ctx = new Context()
+  ctx.provide('profileContext', { home, patchPath })
+  const harness = makeHarness(home)
+  let exited = false
+  try {
+    await mountRunner(ctx, home, harness, {}, {}, () => { exited = true })
+    assert.equal(exited, true,
+      'the legacy preset default cannot be committed without a write surface; startup must not admit a wrong default')
+  } finally {
+    await disposeContext(ctx)
+  }
+})
+
 test('the real runner hydrates resume, deferred create, and switch exactly once each', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-runner-bootstrap-')

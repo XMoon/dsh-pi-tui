@@ -216,12 +216,19 @@ interface MigrationPlan {
 }
 
 /**
- * Whether the profile still holds a TUI preference that only this migration can
- * carry into the canonical row. Used when the migration surface is unavailable:
- * a no-op composition may continue on canonical defaults, but any surviving
- * legacy value must fail the startup barrier instead of being silently lost.
+ * Whether a migration is still OUTSTANDING when no write surface is available.
+ * This is the admission fact, not mere legacy-row presence:
+ * - a canonical marker >= 2 proves the one-shot migration completed, so the
+ *   intentionally preserved legacy rows are diagnosis only;
+ * - otherwise only preference fields the canonical USER row does NOT already
+ *   own count (a retired `sessionId` or an old marker is not a preference);
+ * - the legacy `agent-presets.default` destination counts unless the registry
+ *   USER row already owns `selectedDefault` (the migration never overwrites an
+ *   owned registry value);
+ * - an unreadable/malformed legacy document cannot prove completion, so it
+ *   fails closed instead of claiming a safe no-op.
  */
-function legacyPreferencesPresent(input: ProfilePreferencesMigrationInput): boolean {
+function migrationOutstanding(input: ProfilePreferencesMigrationInput): boolean {
   let profileText = ''
   try {
     profileText = readFileSync(input.patchPath, 'utf8')
@@ -229,23 +236,35 @@ function legacyPreferencesPresent(input: ProfilePreferencesMigrationInput): bool
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
   }
   const sources = rawUserConfigs(profileText)
-  for (const id of [LEGACY_DIRECT_NAMESPACE, LEGACY_SPLIT_NAMESPACE]) {
-    const section = sources.get(id)
-    if (section !== undefined && Object.keys(section).length > 0) return true
-  }
+  const canonicalRaw = sources.get(TUI_PREFERENCES_NAMESPACE) ?? {}
+  if (markerOf(canonicalRaw) >= TUI_PREFERENCES_MIGRATION_VERSION) return false
+  const directRaw = sources.get(LEGACY_DIRECT_NAMESPACE) ?? {}
+  const splitRaw = sources.get(LEGACY_SPLIT_NAMESPACE) ?? {}
   const legacyText = readLegacyDocumentSync(input.home)
-  if (legacyText === undefined) return false
-  let document: unknown
-  try {
-    document = parseYaml(legacyText)
-  } catch (error) {
-    throw new TuiPreferencesMigrationError(
-      'TUI_PREFERENCES_MIGRATION_SOURCE',
-      `legacy settings document is malformed: ${error instanceof Error ? error.message : String(error)}`,
-    )
+  let legacyValues: Record<string, unknown> = {}
+  let presetDefault: string | undefined
+  if (legacyText !== undefined) {
+    let document: unknown
+    try {
+      document = parseYaml(legacyText)
+    } catch (error) {
+      throw new TuiPreferencesMigrationError(
+        'TUI_PREFERENCES_MIGRATION_SOURCE',
+        `legacy settings document is malformed: ${error instanceof Error ? error.message : String(error)}`,
+      )
+    }
+    legacyValues = legacyPreferenceValues(legacySection(document, 'dsh-pi-tui'), input.diag)
+    presetDefault = legacyPresetDefault(document)
   }
-  const section = legacySection(document, 'dsh-pi-tui')
-  return section !== undefined && Object.keys(section).length > 0
+  for (const field of PREFERENCE_FIELD_NAMES) {
+    if (Object.hasOwn(canonicalRaw, field)) continue
+    if (Object.hasOwn(directRaw, field) || Object.hasOwn(splitRaw, field) || Object.hasOwn(legacyValues, field)) return true
+  }
+  if (presetDefault !== undefined) {
+    const registryRaw = sources.get('agent-preset-registry') ?? {}
+    if (!Object.hasOwn(registryRaw, 'selectedDefault')) return true
+  }
+  return false
 }
 
 /**
@@ -262,13 +281,13 @@ export async function migrateProfileTuiPreferences(
   const { forms, configEditor, diag } = input
   if (forms === undefined || configEditor === undefined) {
     const reason = forms === undefined ? 'settings service unavailable' : 'config editor unavailable'
-    if (legacyPreferencesPresent(input)) {
+    if (migrationOutstanding(input)) {
       throw new TuiPreferencesMigrationError(
         'TUI_PREFERENCES_MIGRATION_UNAVAILABLE',
         `cannot migrate legacy TUI preferences: ${reason}; refusing to start with defaults`,
       )
     }
-    diag.warn('canonical TUI preference migration unavailable; no legacy TUI values survive, canonical defaults remain usable', { reason })
+    diag.warn('canonical TUI preference migration unavailable; no outstanding legacy migration, canonical values remain usable', { reason })
     return { status: 'unavailable', reason }
   }
   // The canonical row must be a Loader-managed profile entry for the official
@@ -280,13 +299,13 @@ export async function migrateProfileTuiPreferences(
   const entry = configEditor.entries().find(candidate => candidate.options.id === TUI_PREFERENCES_NAMESPACE)
   if (entry === undefined) {
     const reason = `no "${TUI_PREFERENCES_NAMESPACE}" Loader entry in this composition`
-    if (legacyPreferencesPresent(input)) {
+    if (migrationOutstanding(input)) {
       throw new TuiPreferencesMigrationError(
         'TUI_PREFERENCES_MIGRATION_UNAVAILABLE',
         `cannot migrate legacy TUI preferences: ${reason}; refusing to start with defaults`,
       )
     }
-    diag.warn('canonical TUI preference migration unavailable; no legacy TUI values survive, canonical defaults remain usable', { reason })
+    diag.warn('canonical TUI preference migration unavailable; no outstanding legacy migration, canonical values remain usable', { reason })
     return { status: 'unavailable', reason: 'canonical preferences row is not Loader-managed' }
   }
   if (entry.options.name !== TUI_PREFERENCES_ROW_NAME) {

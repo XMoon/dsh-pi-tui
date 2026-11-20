@@ -44,6 +44,7 @@ function rawPatch(state: HarnessState, extraRows = ''): string {
   ]
   if (state.direct !== undefined) rows.push({ id: DIRECT, name: '@xmoon76/dsh-pi-tui', config: state.direct })
   if (state.split !== undefined) rows.push({ id: SPLIT, name: '@xmoon76/dsh-pi-tui/host-runtime', config: state.split })
+  if (Object.keys(state.registry).length > 0) rows.push({ id: 'agent-preset-registry', name: '@deepseek-ai/dsh-agent-preset-registry', config: state.registry })
   return `${yamlStringify(rows)}${extraRows}`
 }
 
@@ -315,6 +316,40 @@ test('a missing Settings surface fails closed while legacy USER values survive',
   )
   assert.equal(h.document(), before, 'the raw legacy source is preserved')
   assert.equal(h.writes.length, 0, 'no canonical write happened')
+})
+
+test('a completed canonical marker makes preserved legacy rows diagnosis-only, not a startup failure', async () => {
+  const h = harness({ canonical: { theme: 'dark', legacySettingsMigrationVersion: 2 }, direct: { theme: 'dark' } })
+  const report = await migrateProfileTuiPreferences({ ...h.input(), forms: undefined })
+  assert.deepEqual(report, { status: 'unavailable', reason: 'settings service unavailable' })
+  assert.equal(h.writes.length, 0)
+})
+
+test('a retired row holding only sessionId / an old marker is not an outstanding preference migration', async () => {
+  const h = harness({ direct: { sessionId: 's-1', legacySettingsMigrationVersion: 1 } })
+  const report = await migrateProfileTuiPreferences({ ...h.input(), forms: undefined })
+  assert.deepEqual(report, { status: 'unavailable', reason: 'settings service unavailable' })
+  assert.equal(h.writes.length, 0)
+})
+
+test('a legacy preset default alone is an outstanding migration when the registry USER does not own it', async () => {
+  const h = harness()
+  writeFileSync(join(h.home, 'settings.yaml'), ['agent-presets:', '  default: minimal', ''].join('\n'))
+  await assert.rejects(
+    () => migrateProfileTuiPreferences({ ...h.input(), forms: undefined }),
+    (error: unknown) => error instanceof TuiPreferencesMigrationError
+      && error.code === 'TUI_PREFERENCES_MIGRATION_UNAVAILABLE',
+    'the preset destination must not be silently skipped without a write surface',
+  )
+  assert.equal(h.writes.length, 0)
+})
+
+test('a legacy preset default already owned by the registry USER is not outstanding', async () => {
+  const h = harness({ registry: { selectedDefault: 'standard' } })
+  writeFileSync(join(h.home, 'settings.yaml'), ['agent-presets:', '  default: minimal', ''].join('\n'))
+  const report = await migrateProfileTuiPreferences({ ...h.input(), forms: undefined })
+  assert.deepEqual(report, { status: 'unavailable', reason: 'settings service unavailable' })
+  assert.equal(h.writes.length, 0)
 })
 
 test('a missing Settings surface with no surviving legacy value is a safe unavailable no-op', async () => {
