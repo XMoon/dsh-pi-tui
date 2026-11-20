@@ -161,9 +161,11 @@ const collapsibleHeads = (snap) => snap.nodes
   .filter(node => String(node.class ?? '').includes('sf-section-head')
     || String(node.class ?? '').includes('sf-tool-head'))
 
-/** The node that carries one exact text, with its geometry-oracle verdict. */
+/** The node that carries one exact text, with its geometry-oracle verdict.
+ *  The comparison is on TRIMMED text: the client keeps a row segment's leading
+ *  separator space (` · <summary>`), while the expected form is trimmed. */
 function proveText(snap, text) {
-  const node = snap.nodes.find(candidate => String(candidate.text ?? '') === text)
+  const node = snap.nodes.find(candidate => String(candidate.text ?? '').trim() === String(text).trim())
   if (node === undefined) return { found: false }
   return {
     found: true,
@@ -173,6 +175,20 @@ function proveText(snap, text) {
     span: { x: visibleSpan(snap.chains, node, 'x'), y: visibleSpan(snap.chains, node, 'y') },
     box: visibleBox(snap.chains, node),
   }
+}
+
+/** Every node carrying one exact text (trimmed), each with its verdict. */
+function proveAllText(snap, text) {
+  return snap.nodes
+    .filter(candidate => String(candidate.text ?? '').trim() === String(text).trim())
+    .map(node => ({
+      found: true,
+      node,
+      containedXY: containedXY(snap.chains, node),
+      containedX: containedX(snap.chains, node),
+      span: { x: visibleSpan(snap.chains, node, 'x'), y: visibleSpan(snap.chains, node, 'y') },
+      box: visibleBox(snap.chains, node),
+    }))
 }
 
 async function waitFor(h, predicate, { limit = 250, intervalMs = 60 } = {}) {
@@ -326,21 +342,60 @@ export default async function (h) {
     const probe = preset === 'full' ? targetProbe : proveText(snap, actionHeadText(expected))
     const summaryProbe = proveText(snap, paintedSummary(expected))
     const visible = { actionHead: probe, toolTarget: targetProbe, preparingSummary: summaryProbe }
-    const proven = probe.found === true && probe.containedXY === true
+    // ── R13-RV-01: EVERY required painted path sink must be VISUALLY PROVEN
+    // (present in the client tree AND fully contained through every clipping
+    // ancestor) as a DECISIVE check. A clipped or missing required sink FAILS
+    // the run; a measurement can never carry that weight, so a CLIPPED /
+    // NOT_VISUALLY_PROVEN item can no longer coexist with a run-level PASS. ──
+    const provenance = (verdict) => verdict.found === true
+      ? { containedXY: verdict.containedXY, box: verdict.box }
+      : { found: false }
+    const requireVisible = (label, verdict) => h.check(
+      `[${state}] ${label} is visually proven (geometry oracle)`,
+      verdict.found === true && verdict.containedXY === true,
+      JSON.stringify(provenance(verdict)))
+    // The path sinks of this state: the Full Tool target (EVERY painted card
+    // instance), the Compact/Focus collapsed Action head, and the Preparing
+    // summary. A Tool target is intentionally ABSENT while a Compact/Focus
+    // Work is collapsed — one that IS painted must be proven like any sink.
+    const targetInstances = proveAllText(snap, expected)
+    const summaryInstances = proveAllText(snap, paintedSummary(expected))
+    if (preset === 'full') {
+      h.check(`[${state}] at least one Tool target is painted`,
+        targetInstances.length > 0, `instances=${targetInstances.length}`)
+    }
+    for (const [index, instance] of targetInstances.entries()) {
+      requireVisible(`the painted Tool target (instance ${index + 1})`, instance)
+    }
+    if (preset !== 'full') {
+      requireVisible('the Action head', probe)
+    }
+    h.check(`[${state}] at least one Preparing summary is painted`,
+      summaryInstances.length > 0, `instances=${summaryInstances.length}`)
+    for (const [index, instance] of summaryInstances.entries()) {
+      requireVisible(`the Preparing summary (instance ${index + 1})`, instance)
+    }
     const clipped = (probe.found === true && probe.containedXY !== true)
-      || (targetProbe.found === true && targetProbe.containedXY !== true)
-      || (summaryProbe.found === true && summaryProbe.containedXY !== true)
+      || targetInstances.some(instance => instance.containedXY !== true)
+      || summaryInstances.some(instance => instance.containedXY !== true)
+      || (preset === 'full' && targetInstances.length === 0)
+      || summaryInstances.length === 0
     if (clipped) {
       const item = {
         state, viewport: record.viewport,
         actionHead: probe.found ? { containedXY: probe.containedXY, box: probe.box } : 'absent',
-        toolTarget: targetProbe.found ? { containedXY: targetProbe.containedXY, box: targetProbe.box } : 'absent',
-        preparingSummary: summaryProbe.found ? { containedXY: summaryProbe.containedXY, box: summaryProbe.box } : 'absent',
+        toolTarget: targetInstances.map(instance => ({ containedXY: instance.containedXY, box: instance.box })),
+        preparingSummary: summaryInstances.map(instance => ({ containedXY: instance.containedXY, box: instance.box })),
         verdict: 'CLIPPED / NOT_VISUALLY_PROVEN',
       }
       ledger.clipped.push(item)
       h.measure(`CLIPPED / NOT_VISUALLY_PROVEN ${state}@${JSON.stringify(record.viewport)}`, JSON.stringify(item))
     }
+    // The run-level verdict may never coexist with a CLIPPED record of a
+    // required sink (the ledger entry is the audit trail, this is the gate).
+    h.check(`[${state}] no required path sink is CLIPPED / NOT_VISUALLY_PROVEN`,
+      clipped === false, JSON.stringify(ledger.clipped))
+    const proven = clipped === false
     return { snap, record, visible, proven, clipped }
   }
 
@@ -477,6 +532,11 @@ export default async function (h) {
   h.check('[C] the absolute path is fully visible through every clipping ancestor at 1280x800 light',
     c.proven, JSON.stringify(c.visible.actionHead.box))
   h.capture('03-C-1280x800-light', 'C: workspace /r13/workspace-C — the B path stays absolute')
+
+  // R13-RV-02: a POST-SWITCH native disclosure observation (plan §12.5): the
+  // expanded content of the state AFTER a status-only switch must agree with
+  // the same state's collapsed head, not only at B.
+  await disclosureAt('C', ABS_B, WORKSPACE_C)
 
   const b2 = await runCase(2, 'cwd=B', 'B2', 'src/a.ts', WORKSPACE_B, { forbiddenTexts: [ABS_B] })
   h.check('[B2] the User node body text is byte-stable with the first B state',
