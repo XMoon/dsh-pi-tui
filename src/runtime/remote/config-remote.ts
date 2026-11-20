@@ -487,7 +487,6 @@ class RemoteConfigMirror {
     this.scheduleRefresh()
   }
 
-
   /**
    * The invalidation-triggered rerun. The promise is coalesced with any
    * explicit `describe()` (one in-flight read serves both), and its failure
