@@ -49,6 +49,12 @@ import {
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
 const DSH_VERSION = '0.2.2-rc.3'
 
+/** The systemd user-manager install/start/migration path is Linux-only; macOS
+ *  exercises the launchd adapter through its own tests. */
+const LINUX_MANAGER_ONLY = Object.freeze({
+  skip: process.platform !== 'linux' ? 'the systemd user-manager path requires Linux' : false,
+})
+
 function exited(code: number, stdout = '', stderr = ''): SystemctlResult {
   return { kind: 'exited', code, stdout, stderr }
 }
@@ -444,7 +450,7 @@ function hostOptions(fx: ManagedFixture, overrides: { hostEntryPath?: string; ds
   }
 }
 
-test('install accepts a reachable manager that omits the still-empty target directory from UnitPath', async t => {
+test('install accepts a reachable manager that omits the still-empty target directory from UnitPath', LINUX_MANAGER_ONLY, async t => {
   const fx = managedFixture(t)
   const root = testLifecycle(t).tempDir('m62b-install-empty-unitpath-')
   const unitDir = join(root, '.config', 'systemd', 'user')
@@ -460,7 +466,7 @@ test('install accepts a reachable manager that omits the still-empty target dire
   assert.equal(systemctl.calls.filter(args => args.includes('daemon-reload')).length, 1)
 })
 
-test('install refuses an unusable user manager instead of writing or falling back', async t => {
+test('install refuses an unusable user manager instead of writing or falling back', LINUX_MANAGER_ONLY, async t => {
   const fx = managedFixture(t)
   const unitDir = testLifecycle(t).tempDir('m62b-install-nomanager-')
   const systemctl = fakeManager({
@@ -474,7 +480,7 @@ test('install refuses an unusable user manager instead of writing or falling bac
   assert.deepEqual(readdirSync(unitDir), [])
 })
 
-test('install queries the real manager BEFORE creating a missing user unit directory', async t => {
+test('install queries the real manager BEFORE creating a missing user unit directory', LINUX_MANAGER_ONLY, async t => {
   const fx = managedFixture(t)
   const root = testLifecycle(t).tempDir('m62b-install-order-')
   const unitDir = join(root, 'nested', 'user')
@@ -509,7 +515,7 @@ test('install queries the real manager BEFORE creating a missing user unit direc
   assert.equal(existsSync(unitDir), true)
 })
 
-test('install creates one unit with the stable Profile entry, reloads once and never starts or enables it', async t => {
+test('install creates one unit with the stable Profile entry, reloads once and never starts or enables it', LINUX_MANAGER_ONLY, async t => {
   const fx = managedFixture(t)
   const unitDir = testLifecycle(t).tempDir('m62b-install-fresh-')
   const unitName = buildUnitName('pi-tui', fx.scope.scopeId)
@@ -550,7 +556,7 @@ test('the stable Profile entry must resolve to the current installed package ent
   )
 })
 
-test('install reloads a freshly created unit even when the manager still reports a cached loaded definition', async t => {
+test('install reloads a freshly created unit even when the manager still reports a cached loaded definition', LINUX_MANAGER_ONLY, async t => {
   const fx = managedFixture(t)
   const unitDir = testLifecycle(t).tempDir('m62b-install-stale-cache-')
   const finalPath = join(unitDir, buildUnitName('pi-tui', fx.scope.scopeId))
@@ -563,7 +569,7 @@ test('install reloads a freshly created unit even when the manager still reports
   assert.equal(systemctl.calls.filter(args => args.includes('daemon-reload')).length, 1)
 })
 
-test('repeat install is fully idempotent once the manager has loaded the unit', async t => {
+test('repeat install is fully idempotent once the manager has loaded the unit', LINUX_MANAGER_ONLY, async t => {
   const fx = managedFixture(t)
   const unitDir = testLifecycle(t).tempDir('m62b-install-repeat-')
   const finalPath = join(unitDir, buildUnitName('pi-tui', fx.scope.scopeId))
@@ -576,7 +582,7 @@ test('repeat install is fully idempotent once the manager has loaded the unit', 
   assert.equal(systemctl.calls.filter(args => args.includes('daemon-reload')).length, 1)
 })
 
-test('a freshly created unit reloads before verifying a cached different FragmentPath', async t => {
+test('a freshly created unit reloads before verifying a cached different FragmentPath', LINUX_MANAGER_ONLY, async t => {
   const fx = managedFixture(t)
   const unitDir = testLifecycle(t).tempDir('m62b-install-old-fragment-')
   const unitName = buildUnitName('pi-tui', fx.scope.scopeId)
@@ -606,7 +612,7 @@ test('a freshly created unit reloads before verifying a cached different Fragmen
   assert.equal(calls.filter(args => args.includes('daemon-reload')).length, 1)
 })
 
-test('install refuses to shadow a manager-loaded foreign unit of the same name before any write', async t => {
+test('install refuses to shadow a manager-loaded foreign unit of the same name before any write', LINUX_MANAGER_ONLY, async t => {
   const fx = managedFixture(t)
   const unitDir = testLifecycle(t).tempDir('m62b-install-shadow-')
   const unitName = buildUnitName('pi-tui', fx.scope.scopeId)
@@ -637,7 +643,7 @@ test('install refuses to shadow a manager-loaded foreign unit of the same name b
   assert.equal(readFileSync(foreignSource, 'utf8').startsWith('[Unit]'), true, 'the foreign loaded definition must be untouched')
 })
 
-test('a running foreign unit whose source file is gone is not shadowed', async t => {
+test('a running foreign unit whose source file is gone is not shadowed', LINUX_MANAGER_ONLY, async t => {
   const fx = managedFixture(t)
   const unitDir = testLifecycle(t).tempDir('m62b-install-active-gone-')
   const unitName = buildUnitName('pi-tui', fx.scope.scopeId)
@@ -666,7 +672,7 @@ test('a running foreign unit whose source file is gone is not shadowed', async t
   assert.equal(existsSync(finalPath), false, 'a running foreign unit must not be shadowed')
 })
 
-test('a not-found unit still reported active is not treated as unused', async t => {
+test('a not-found unit still reported active is not treated as unused', LINUX_MANAGER_ONLY, async t => {
   const fx = managedFixture(t)
   const unitDir = testLifecycle(t).tempDir('m62b-install-notfound-active-')
   const unitName = buildUnitName('pi-tui', fx.scope.scopeId)
@@ -695,7 +701,7 @@ test('a not-found unit still reported active is not treated as unused', async t 
   assert.equal(existsSync(finalPath), false, 'an active not-found name must not be shadowed')
 })
 
-test('install still recovers when the manager only caches a removed same-name unit', async t => {
+test('install still recovers when the manager only caches a removed same-name unit', LINUX_MANAGER_ONLY, async t => {
   const fx = managedFixture(t)
   const unitDir = testLifecycle(t).tempDir('m62b-install-stale-only-')
   const unitName = buildUnitName('pi-tui', fx.scope.scopeId)
@@ -725,7 +731,7 @@ test('install still recovers when the manager only caches a removed same-name un
   assert.equal(existsSync(finalPath), true)
 })
 
-test('a failed reload of a fresh unit is rolled back so a retry reloads again', async t => {
+test('a failed reload of a fresh unit is rolled back so a retry reloads again', LINUX_MANAGER_ONLY, async t => {
   const fx = managedFixture(t)
   const unitDir = testLifecycle(t).tempDir('m62b-install-retry-')
   const unitName = buildUnitName('pi-tui', fx.scope.scopeId)
@@ -745,7 +751,7 @@ test('a failed reload of a fresh unit is rolled back so a retry reloads again', 
   assert.equal(stale.calls.filter(args => args.includes('daemon-reload')).length, 1)
 })
 
-test('install preserves an existing same-identity customized unit and never rewrites it', async t => {
+test('install preserves an existing same-identity customized unit and never rewrites it', LINUX_MANAGER_ONLY, async t => {
   const fx = managedFixture(t)
   const unitDir = testLifecycle(t).tempDir('m62b-install-existing-')
   const path = join(unitDir, buildUnitName('pi-tui', fx.scope.scopeId))
@@ -768,7 +774,7 @@ test('install preserves an existing same-identity customized unit and never rewr
   assert.equal(readFileSync(path, 'utf8'), customized, 'user runtime directives must stay byte-for-byte intact')
 })
 
-test('install explicitly reloads an existing but not-loaded unit and verifies FragmentPath', async t => {
+test('install explicitly reloads an existing but not-loaded unit and verifies FragmentPath', LINUX_MANAGER_ONLY, async t => {
   const fx = managedFixture(t)
   const unitDir = testLifecycle(t).tempDir('m62b-install-notloaded-')
   const unit = writeUnit(fx, unitDir)
@@ -779,7 +785,7 @@ test('install explicitly reloads an existing but not-loaded unit and verifies Fr
   assert.equal(systemctl.calls.filter(args => args.includes('daemon-reload')).length, 1)
 })
 
-test('install refuses a foreign unit and a wrong DSH anchor, and reuses a same-Profile other-build unit', async t => {
+test('install refuses a foreign unit and a wrong DSH anchor, and reuses a same-Profile other-build unit', LINUX_MANAGER_ONLY, async t => {
   const fx = managedFixture(t)
   const foreignDir = testLifecycle(t).tempDir('m62b-install-foreign-')
   const foreign = writeUnit(fx, foreignDir, renderUnitContent({
@@ -823,7 +829,7 @@ test('install refuses a foreign unit and a wrong DSH anchor, and reuses a same-P
   assert.deepEqual(readdirSync(wrongDir), [])
 })
 
-test('a reachable manager that never loads the fresh unit rolls the file back and leaves the basic daemon free', async t => {
+test('a reachable manager that never loads the fresh unit rolls the file back and leaves the basic daemon free', LINUX_MANAGER_ONLY, async t => {
   const fx = managedFixture(t)
   const unitDir = testLifecycle(t).tempDir('m62b-install-neverloaded-')
   const unitName = buildUnitName('pi-tui', fx.scope.scopeId)
@@ -848,7 +854,7 @@ test('a reachable manager that never loads the fresh unit rolls the file back an
   assert.deepEqual(startCalls, [], 'the recovered basic start must not query the manager at all')
 })
 
-test('a post-reload FragmentPath mismatch rolls the fresh file back after a real reload', async t => {
+test('a post-reload FragmentPath mismatch rolls the fresh file back after a real reload', LINUX_MANAGER_ONLY, async t => {
   const fx = managedFixture(t)
   const unitDir = testLifecycle(t).tempDir('m62b-install-wrong-fragment-')
   const unitName = buildUnitName('pi-tui', fx.scope.scopeId)
@@ -882,7 +888,7 @@ test('a post-reload FragmentPath mismatch rolls the fresh file back after a real
   assert.equal(readFileSync(elsewhere, 'utf8'), '[Unit]\n', 'the manager-loaded definition is never modified')
 })
 
-test('an unresolvable loaded source other than a missing file stays refused', async t => {
+test('an unresolvable loaded source other than a missing file stays refused', LINUX_MANAGER_ONLY, async t => {
   const fx = managedFixture(t)
   const unitDir = testLifecycle(t).tempDir('m62b-install-eloop-')
   const unitName = buildUnitName('pi-tui', fx.scope.scopeId)
@@ -920,7 +926,7 @@ test('an unresolvable loaded source other than a missing file stays refused', as
   assert.equal(existsSync(finalPath), false, 'no unit file may be written')
 })
 
-test('a post-reload query failure rolls the fresh file back instead of leaving it', async t => {
+test('a post-reload query failure rolls the fresh file back instead of leaving it', LINUX_MANAGER_ONLY, async t => {
   const fx = managedFixture(t)
   const unitDir = testLifecycle(t).tempDir('m62b-install-queryfail-')
   const unitName = buildUnitName('pi-tui', fx.scope.scopeId)
@@ -943,7 +949,7 @@ test('a post-reload query failure rolls the fresh file back instead of leaving i
   assert.equal(existsSync(finalPath), false, 'an unverifiable fresh unit must be rolled back')
 })
 
-test('install reports a failed daemon-reload instead of claiming the unit is loaded', async t => {
+test('install reports a failed daemon-reload instead of claiming the unit is loaded', LINUX_MANAGER_ONLY, async t => {
   const fx = managedFixture(t)
   const unitDir = testLifecycle(t).tempDir('m62b-install-reloadfail-')
   const finalPath = join(unitDir, buildUnitName('pi-tui', fx.scope.scopeId))
@@ -955,7 +961,7 @@ test('install reports a failed daemon-reload instead of claiming the unit is loa
   assert.equal(existsSync(finalPath), false, 'the failed fresh install must remove its unverified unit file')
 })
 
-test('a public start with no installed unit spawns detached without any systemctl call', async t => {
+test('a public start with no installed unit spawns detached without any systemctl call', LINUX_MANAGER_ONLY, async t => {
   const fx = managedFixture(t)
   const emptyUnitDir = testLifecycle(t).tempDir('m62b-no-unit-')
   const systemctl = fakeManager({ finalPath: join(emptyUnitDir, 'unused.service'), unitPath: emptyUnitDir, unitPathResult: exited(1, '', 'no manager') })
@@ -970,7 +976,7 @@ test('a public start with no installed unit spawns detached without any systemct
   assert.deepEqual(readdirSync(emptyUnitDir), [], 'a public start must never create a unit')
 })
 
-test('a public start with an installed unit starts it once through systemd and never rewrites it', async t => {
+test('a public start with an installed unit starts it once through systemd and never rewrites it', LINUX_MANAGER_ONLY, async t => {
   const fx = managedFixture(t)
   const unitDir = testLifecycle(t).tempDir('m62b-start-unit-')
   const unit = writeUnit(fx, unitDir)
@@ -983,7 +989,7 @@ test('a public start with an installed unit starts it once through systemd and n
   assert.equal(flattened.some(call => call.includes('daemon-reload')), false, 'a loaded unit is not reloaded by start')
 })
 
-test('a public start with a different FragmentPath refuses to start and never falls back', async t => {
+test('a public start with a different FragmentPath refuses to start and never falls back', LINUX_MANAGER_ONLY, async t => {
   const fx = managedFixture(t)
   const unitDir = testLifecycle(t).tempDir('m62b-start-fragment-')
   const unit = writeUnit(fx, unitDir)
@@ -995,7 +1001,7 @@ test('a public start with a different FragmentPath refuses to start and never fa
   assert.equal(systemctl.calls.some(args => args.includes('start')), false, 'a conflicting unit is never started')
 })
 
-test('a public start with a broken manager or an unloaded unit never falls back to a process', async t => {
+test('a public start with a broken manager or an unloaded unit never falls back to a process', LINUX_MANAGER_ONLY, async t => {
   const fx = managedFixture(t)
   const brokenDir = testLifecycle(t).tempDir('m62b-start-broken-')
   const brokenUnit = writeUnit(fx, brokenDir)
@@ -1020,7 +1026,7 @@ test('a public start with a broken manager or an unloaded unit never falls back 
   assert.equal(existsSync(fx.markerPath), false)
 })
 
-test('a public start starts an owner-verified other-build unit once and never rewrites it', async t => {
+test('a public start starts an owner-verified other-build unit once and never rewrites it', LINUX_MANAGER_ONLY, async t => {
   const fx = managedFixture(t)
   const unitDir = testLifecycle(t).tempDir('m62b-start-oldbuild-')
   const unit = writeUnit(fx, unitDir, renderUnitContent({
@@ -1077,7 +1083,7 @@ function migrationManager(path: string, calls: string[][], loaded = true) {
   }
 }
 
-test('a recognized generated legacy unit is migrated field-only, revalidated and becomes a no-op', async t => {
+test('a recognized generated legacy unit is migrated field-only, revalidated and becomes a no-op', LINUX_MANAGER_ONLY, async t => {
   const fx = managedFixture(t)
   const unitDir = testLifecycle(t).tempDir('m62b-migrate-')
   const path = join(unitDir, buildUnitName('pi-tui', fx.scope.scopeId))
@@ -1128,7 +1134,7 @@ test('a recognized generated legacy unit is migrated field-only, revalidated and
   assert.equal(calls.filter(args => args.includes('daemon-reload')).length, reloads, 'a no-op must not reload the manager')
 })
 
-test('user-custom commands, symlinked units and unwritable units are never rewritten', async t => {
+test('user-custom commands, symlinked units and unwritable units are never rewritten', LINUX_MANAGER_ONLY, async t => {
   const fx = managedFixture(t)
   const base = { scope: fx.scope, profile: 'pi-tui', hostEntryPath: fx.entry }
   const storeRoot = testLifecycle(t).tempDir('m62b-old-store-')
@@ -1184,7 +1190,7 @@ test('user-custom commands, symlinked units and unwritable units are never rewri
   assert.equal(readOnlyCalls.some(args => args.includes('daemon-reload')), false)
 })
 
-test('the apply path re-proves the stopped state and file identity before committing a rewrite', async t => {
+test('the apply path re-proves the stopped state and file identity before committing a rewrite', LINUX_MANAGER_ONLY, async t => {
   const fx = managedFixture(t)
   const base = { scope: fx.scope, profile: 'pi-tui', hostEntryPath: fx.entry }
 
@@ -1261,7 +1267,7 @@ test('the apply path re-proves the stopped state and file identity before commit
   assert.equal(changedCalls.some(args => args.includes('daemon-reload')), false)
 })
 
-test('a committed migration reports an unconfirmed result when the reload or manager source fails', async t => {
+test('a committed migration reports an unconfirmed result when the reload or manager source fails', LINUX_MANAGER_ONLY, async t => {
   const fx = managedFixture(t)
   const base = { scope: fx.scope, profile: 'pi-tui', hostEntryPath: fx.entry }
 
