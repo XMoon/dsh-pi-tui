@@ -276,16 +276,31 @@ export function createExitIntentCoordinator(deps: ExitIntentCoordinatorDeps): Ex
     // controller). The exit options are preserved (Owner decision), but the
     // user must SEE the shell reminder before acting: an un-warned confirmation
     // refreshes the SAME phase with the reminder instead of committing. The
-    // refresh never leaves the current phase: an Unconfirmed seat keeps its
-    // refusal facts and its safe option set, and is never rebuilt into a Busy
-    // choice that re-offers a second Stop.
+    // refresh never mints a NEW captured identity (a Connection/binding
+    // rollover must retire the choice, not rebind the old intent to the new
+    // transport generation), and it never leaves the current phase: an
+    // Unconfirmed seat keeps its refusal facts and its safe option set, and is
+    // never rebuilt into a Busy choice that re-offers a second Stop.
     if (facts.shellRunning && model.shellRunning !== true) {
+      if (backend !== identity.backend) {
+        safeDiag('info', 'exit choice retired: backend changed', { captured: identity.backend, live: backend })
+        closeChoice()
+        return
+      }
+      if (!deps.facts.isScopeCurrent(identity.scope, identity.transportToken)) {
+        safeDiag('info', 'exit choice retired: the captured session scope is no longer current')
+        closeChoice()
+        return
+      }
       if (model.phase === 'unconfirmed') {
         open = exitChoiceUnconfirmed(model.status, select, dismiss, true)
         presenter()?.update(open)
         return
       }
-      openChoice(identity.kind, facts, backend)
+      // The asking phase refreshes ONLY the model in place: the captured
+      // identity (scope + exact transport token) stays the one the user chose.
+      open = exitChoiceAsking(identity.kind, select, dismiss, true)
+      presenter()?.update(open)
       return
     }
     // The choice captured an exact identity. A backend flip retires it with no
@@ -393,6 +408,13 @@ export function createExitIntentCoordinator(deps: ExitIntentCoordinatorDeps): Ex
     if (live === undefined) throw new Error('a daemon Stop requires a captured live Session')
     open = exitChoiceStopping(select, dismiss)
     presenter()?.update(open)
+    // The Stopping presentation is SYNCHRONOUS: a higher-priority Host modal
+    // may withdraw the choice from inside that very update (dismiss/dispose),
+    // which aborts this controller. The Stop may only leave with the choice
+    // that dispatched it still open, this wait still current and un-aborted,
+    // and the captured identity unchanged — otherwise zero Cancel, zero commit.
+    if (disposed || open === undefined || stopWait !== controller || controller.signal.aborted) return
+    if (!identityCurrent(identity)) return
     const outcome = await deps.stopCurrentWork(live, controller.signal)
     // The choice (or the whole coordinator) was withdrawn while waiting: its
     // abort/settlement owns the state now, and no exit may be committed.

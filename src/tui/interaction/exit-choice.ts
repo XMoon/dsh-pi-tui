@@ -19,14 +19,24 @@
 import { matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi } from '@xmoon76/pi-tui'
 import type { Component, Focusable, TuiMouseEvent, TuiMouseEventResult } from '@xmoon76/pi-tui'
 import type { ExitChoiceModel, ExitChoiceOption, ExitChoiceOptionView } from '../../app/surface/exit-choice.ts'
-import { color } from '../theme/runtime.ts'
+import { color, selectListTheme as theme } from '../theme/runtime.ts'
 
 /** Below this inner width the compact option labels are used. */
 const NARROW_WIDTH = 40
-/** The visible focus marker of the focused option row. */
-const FOCUS_MARK = '❯'
+/**
+ * The focused option's navigation cursor — the Owner-frozen D3 device: the
+ * ASCII `>` two-cell cursor gutter owns `primary`; the selected label itself is
+ * bold `textStrong` (see `docs/architecture/design-language.md` D3/§5). `❯`
+ * stays reserved for its transcript/legacy roles and is never a list cursor.
+ */
+const FOCUS_MARK = '>'
 /** The fallback content height before the mounting frame reports a budget. */
 const DEFAULT_MAX_ROWS = 20
+
+/** Pad a non-focused option row to the frame width so the box stays solid. */
+function paddedRow(text: string, inner: number): string {
+  return text + ' '.repeat(Math.max(0, inner - visibleWidth(text)))
+}
 
 /** One painted option's clickable segment. */
 interface OptionHit {
@@ -90,12 +100,14 @@ export class ExitChoicePanel implements Component, Focusable {
   setModel(model: ExitChoiceModel): void {
     if (this.disposed) return
     this.model = model
+    // A phase/model transition is an intervening gesture: a pointer press
+    // captured by the previous frame can never complete on the new one.
+    this.pressed = undefined
     // Reset focus when the new phase no longer offers the current option;
     // otherwise keep the user's focus across an update of the same list.
     if (this.focus === undefined || !model.options.some(option => option.id === this.focus)) {
       this.focus = model.focus ?? model.options[0]?.id
     }
-    this.pressed = undefined
   }
 
   /** Content-row budget from the owning responsive frame. */
@@ -119,12 +131,18 @@ export class ExitChoicePanel implements Component, Focusable {
     // dispatch a second cancel or turn the wait into an exit.
     if (this.model.phase === 'stopping') return
     if (matchesKey(data, 'escape') || matchesKey(data, 'ctrl+c')) {
+      // Any intervening gesture cancels a pending pointer press: the release
+      // can only ever complete the gesture the user CURRENTLY sees.
+      this.pressed = undefined
       this.model.select('stay')
       return
     }
     const operable = this.lastOperable
     if (operable.length === 0) return
     if (matchesKey(data, 'up') || matchesKey(data, 'down') || matchesKey(data, 'tab') || matchesKey(data, 'shift+tab')) {
+      // A keyboard focus move is an intervening gesture: a pointer press
+      // started on another option can never be released into an action.
+      this.pressed = undefined
       const forward = !matchesKey(data, 'up') && !matchesKey(data, 'shift+tab')
       const index = operable.findIndex(option => option.id === this.focusedOption())
       const from = index < 0 ? 0 : index
@@ -134,6 +152,7 @@ export class ExitChoicePanel implements Component, Focusable {
       return
     }
     if (matchesKey(data, 'enter') || matchesKey(data, 'space')) {
+      this.pressed = undefined
       const focused = this.focusedOption()
       if (focused !== undefined) this.model.select(focused)
     }
@@ -215,7 +234,11 @@ export class ExitChoicePanel implements Component, Focusable {
         const text = `${focused ? FOCUS_MARK : ' '} ${label}`
         const complete = visibleWidth(text) <= inner
         const painted = complete ? text : truncateToWidth(text, inner, '…')
-        lines.push(focused ? color.primary(painted) : color.text(painted))
+        // D3: the two-cell gutter owns primary; the focused LABEL is bold
+        // textStrong — never a primary-painted whole row.
+        lines.push(focused
+          ? `${theme.selectedPrefix(`${FOCUS_MARK} `)}${theme.selectedText(label)}`
+          : color.text(paddedRow(painted, inner)))
         // Register a target only for a WHOLE label: a clipped option must never
         // be clickable or keyboard-actable as if it were fully readable.
         if (complete) hits.push({ option: option.id, y: lines.length - 1, start: 0, end: visibleWidth(text) })

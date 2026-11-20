@@ -1383,6 +1383,59 @@ test('exit intent: a shell that starts after the Stop refreshes Unconfirmed, nev
   assert.equal(h.stopCalls.length, 1)
 })
 
+test('exit intent: a shell-reminder refresh never rebinds the captured transport identity', () => {
+  // F1: the refresh must validate the ORIGINAL identity first and update the
+  // model in place; a Connection/binding rollover (scope unchanged) retires
+  // the choice instead of letting the old intent act on the new generation.
+  const h = exitIntentHarness({ backend: 'daemon', activity: 'working' })
+  h.coordinator.request('slash')
+  const opened = h.current()
+  assert.equal(opened?.shellRunning, false)
+  h.state.shell = true
+  h.state.scopeCurrent = false // the transport token rolled over; the scope id is unchanged
+  h.current()!.select('keep-and-disconnect')
+  assert.deepEqual(h.commits, [], 'a rolled identity retires the choice, it never refreshes or commits')
+  assert.equal(h.current(), undefined)
+  assert.deepEqual(h.stopCalls, [])
+  // A same-generation refresh keeps the SAME captured identity and options.
+  const same = exitIntentHarness({ backend: 'daemon', activity: 'working' })
+  same.coordinator.request('slash')
+  same.state.shell = true
+  same.current()!.select('keep-and-disconnect')
+  const refreshed = same.current()
+  assert.deepEqual(refreshed?.options.map(option => option.id), ['keep-and-disconnect', 'stop-and-disconnect', 'stay'])
+  refreshed!.select('keep-and-disconnect')
+  assert.deepEqual(same.commits, [{ workStopped: false }], 'the warned Keep commits once')
+})
+
+test('exit intent: a modal that withdraws the Stopping presentation cancels the Stop dispatch', async () => {
+  // F2: the Stopping model update is SYNCHRONOUS; a Host modal can dismiss the
+  // choice from inside that very update. The Stop must then never dispatch.
+  let seen: AbortSignal | undefined
+  const h = exitIntentHarness({
+    backend: 'daemon',
+    activity: 'working',
+    stop: signal => new Promise(resolve => {
+      seen = signal
+      signal.addEventListener('abort', () => resolve({ kind: 'unconfirmed', detail: 'aborted' }), { once: true })
+    }),
+  })
+  h.state.presenterFault = phase => {
+    if (phase === 'update') {
+      // The modal preemption runs INSIDE the synchronous Stopping update.
+      h.state.presenterFault = undefined
+      h.current()!.dismiss()
+    }
+  }
+  h.coordinator.request('slash')
+  h.current()!.select('stop-and-disconnect')
+  await new Promise<void>(resolve => setImmediate(resolve))
+  await new Promise<void>(resolve => setImmediate(resolve))
+  assert.equal(seen, undefined, 'the official cancel was never dispatched after the modal withdrew the seat')
+  assert.deepEqual(h.stopCalls, [])
+  assert.deepEqual(h.commits, [])
+})
+
 test('exit intent: a committed session switch retires the open choice with zero action', () => {
   const h = exitIntentHarness({ backend: 'daemon', activity: 'working' })
   h.coordinator.request('slash')

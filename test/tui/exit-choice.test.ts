@@ -70,7 +70,7 @@ test('asking: all three actions are painted together with the safe default focus
   const stay = lines.findIndex(line => line.includes('Stay in the TUI'))
   assert.ok(keep >= 0 && stop >= 0 && stay >= 0, `all options are visible:\n${text}`)
   assert.ok(keep < stop && stop < stay, 'the fixed keyboard order is preserved')
-  assert.match(lines[keep]!, /^❯ /, 'Keep owns the initial focus')
+  assert.match(lines[keep]!, /^> /, 'Keep owns the initial focus')
   assert.match(lines[stop]!, /^ {2}Stop/, 'unfocused options keep their full label')
   assert.match(text, /↑↓ Select · Enter Confirm · Esc Stay/)
   for (const line of lines) assert.ok(visibleWidth(line) <= 60, `row fits the frame: ${line}`)
@@ -93,7 +93,7 @@ test('keyboard: ↑↓ move the painted focus and Enter selects it', () => {
   let lines = seat.component.render(60).map(stripAnsi)
   seat.component.handleInput('\x1b[B') // down
   lines = seat.component.render(60).map(stripAnsi)
-  const focused = lines.find(line => line.startsWith('❯ '))
+  const focused = lines.find(line => line.startsWith('> '))
   assert.ok(focused?.includes('Stop current work and disconnect'), `focus moved to Stop:\n${lines.join('\n')}`)
   seat.component.handleInput('\r')
   assert.deepEqual(seat.selections, ['stop-and-disconnect'], 'Enter selects the EXACT painted focus')
@@ -127,9 +127,26 @@ test('unconfirmed: only Disconnect/Stay remain and the refusal detail is painted
   assert.match(text, /The daemon refused the stop\./)
   assert.ok(!text.includes('Stop current work'), 'no unprovable Stop action is offered')
   const disconnect = lines.findIndex(line => line.includes('Disconnect without stopping'))
-  assert.match(lines[disconnect]!, /^❯ /, 'Disconnect owns the focus')
+  assert.match(lines[disconnect]!, /^> /, 'Disconnect owns the focus')
   seat.component.handleInput('\r')
   assert.deepEqual(seat.selections, ['disconnect-without-stop'])
+})
+
+test('a keyboard focus move cancels a pending pointer press', () => {
+  // F3: a press on Stop followed by Up/Down must never let the Stop release
+  // activate: the intervening gesture invalidates the press identity.
+  const seat = mountRecorder(select => exitChoiceAsking('daemon-busy', select, () => {}))
+  const lines = seat.component.render(60).map(stripAnsi)
+  const stopRow = lines.findIndex(line => line.includes('Stop current work and disconnect'))
+  assert.ok(stopRow >= 0)
+  seat.component.handleMouse(mouseEvent('press', 2, stopRow, 60, lines.length))
+  seat.component.handleInput('\x1b[B') // keyboard focus move — intervening gesture
+  seat.component.handleMouse(mouseEvent('click', 2, stopRow, 60, lines.length))
+  assert.deepEqual(seat.selections, [], 'the Stop release after a keyboard move activates nothing')
+  // The pointer path still works when no key intervenes.
+  seat.component.handleMouse(mouseEvent('press', 2, stopRow, 60, lines.length))
+  seat.component.handleMouse(mouseEvent('click', 2, stopRow, 60, lines.length))
+  assert.deepEqual(seat.selections, ['stop-and-disconnect'])
 })
 
 test('mouse: press+click on the SAME complete option activates it once', () => {
@@ -229,7 +246,7 @@ test('a phase update drops a focus the new options no longer offer', () => {
   // must not survive onto an option that no longer exists.
   seat.component.setModel(exitChoiceUnconfirmed(undefined, option => { seat.selections.push(option) }, () => {}))
   const lines = seat.component.render(60).map(stripAnsi)
-  const focused = lines.find(line => line.startsWith('❯ '))
+  const focused = lines.find(line => line.startsWith('> '))
   assert.ok(focused?.includes('Disconnect without stopping'), 'the new phase owns its safe default')
 })
 
