@@ -1801,6 +1801,39 @@ test('darwin restart applies the bounded migration only after the old kernel ide
   assert.match(migrated, new RegExp(`<string>${fx.scope.buildId}</string>`, 'u'))
 })
 
+test('darwin restart reports an other-build running Host without claiming adoption', { skip: process.platform !== 'darwin' ? 'the Darwin admin seat requires macOS' : false }, async t => {
+  const fx = fixture(t)
+  writeOwnedLaunchd(fx)
+  const oldRecord = darwinRecordOf(fx.scope)
+  const otherBuildRecord = darwinRecordOf(fx.scope, {
+    instanceId: '55555555-5555-4555-8555-555555555555',
+    hostPid: 7575,
+    buildId: 'e'.repeat(64),
+  })
+  let alive = true
+  let current: LocalInstanceRecord | undefined = oldRecord
+  const launchctl = fakeLaunchd(fx, { loaded: true, state: 'running', pid: oldRecord.hostPid, onBootout: () => { alive = false } })
+  const result = await runDaemonControl({ verb: 'restart' }, fx.profile, darwinDepsOf(fx, {
+    launchctl: launchctl.run,
+    readRecord: () => current,
+    inspectProcess: record => (record.instanceId === oldRecord.instanceId ? (alive ? 'alive' : 'dead') : 'alive'),
+    authenticate: async record => ({ record, cookie: 'c', identity: record }),
+    readKernel: pid => {
+      if (pid === oldRecord.hostPid) return alive ? { kind: 'alive', identity: oldRecord.hostKernelIdentity } : { kind: 'gone' }
+      return { kind: 'alive', identity: otherBuildRecord.hostKernelIdentity }
+    },
+    ensureHost: async () => {
+      current = otherBuildRecord
+      return { record: otherBuildRecord, cookie: 'c', identity: otherBuildRecord }
+    },
+    sleep: async () => {},
+    now: () => 0,
+  }))
+  assertCode(result, 0)
+  assert.match(result.stdout, /^compatibility=other-build$/mu)
+  assert.match(result.stderr, /Host restarted, but the running build differs from the installed profile; inspect the custom LaunchAgent ProgramArguments/u)
+})
+
 test('darwin restart refuses before stop when the old job identity is unmatched, leaving the plist untouched', { skip: process.platform !== 'darwin' ? 'the Darwin admin seat requires macOS' : false }, async t => {
   const fx = fixture(t)
   const facts = launchdFactsOf(fx)
