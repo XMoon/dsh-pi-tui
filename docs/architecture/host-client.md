@@ -886,6 +886,61 @@ the three fixed non-user values without volatile Settings forms (Web runtime
 silence, Office Kit Host output directory, Office Skill user Python); the
 private `piTuiWebAccess` service remains the only runtime owner of the toggle.
 
+### Per-Turn TUI prompt policy and session-view presence
+
+Four TUI-owned system-prompt sections — `tui:progress-updates` (80),
+`tui:response-style` (81), `tui:git-attribution` (82) and `tui:focus-mode` (90)
+— are installed per ordinary root Agent by ONE shared policy
+(`app/agent/prompt-sections.ts`), on the Direct branch at composition and on a
+Split Host through the `agent/created` observation of the official registry.
+Their text derives from the canonical `pi-tui-preferences` live references and
+the per-Turn policy; a `complete` persona keeps the official suppression
+result (the complete section is the sole prompt), and a subagent-origin
+Session never gets these sections.
+
+The per-Turn policy is a SAME-SESSION fact, frozen exactly once per Turn: the
+official `turn/start` publication synchronously samples the Session's current
+verified TUI viewers `{ eligible, focus }` and the four section texts read that
+frozen snapshot until `turn/end` clears it. The three preference axes
+(progress cadence, response style, git attribution) stay live reads at every
+assembly. An ineligible Turn renders none of the four texts; section presence
+is never a claim of rendered text.
+
+Who counts as a current verified TUI viewer differs by backend and is never a
+Profile fact:
+
+- Direct: the local surface is the only viewer — eligible when the committed
+  main view is exactly this Agent's Session, Focus when the local display
+  preset is Focus.
+- Split: the Host folds the **authenticated per-Peer presence** projection
+  (`piTuiPromptPresence`, one private `syncView` method): each Client asserts
+  its own currently viewed Session id (or `null`) plus its Client-local display
+  preset under a monotonic revision, and the Host commits exactly one record
+  per `RemoteInvocation.peer.id`, returning the ACK only after the commit.
+  A non-Owner caller is denied at the Gateway dispatch; an untrusted or
+  subagent Session id is a definite `session-not-live` refusal; a stale
+  revision never touches the committed record; a disposed Peer's record is
+  retired with its `peer.signal` lifetime. The per-Turn fold compares the
+  record's Session/Agent objects by identity against the CURRENT Host
+  registries (a same-id replacement invalidates the voter) and ORs presets —
+  any current Focus viewer makes the Turn Focus.
+
+A Split Client re-projects its view after every navigation commit and every
+display mutation, and its prompt admission (ordinary, steer and queued) awaits
+the current revision's Host ACK before the Client starts its own new Turn; a
+refused or unconfirmed presence refuses that submission truthfully and never
+replays it. Another Client is never delayed by an unACKed change — the Turn
+samples the most recent ACKed roster at its start. The durable `displayPreset`
+profile value is a startup preference only; it is never a Focus voter, and a
+Web/ACP-only Session stays on the official prompt.
+
+Regression anchors: `test/app/agent-prompt-sections.test.ts` (frozen Turn on
+real Session boundaries),
+`test/app/pi-tui-prompt-presence-wire.test.ts` (ACK-after-commit, peer
+identity, stale revision, untrusted Session, peer retirement),
+`test/integration/host-agent-prompt-parity.test.ts` (Direct/Host model-facing
+parity and the negative cases).
+
 ### Host liveness observation
 
 The Host-only entry installs exactly one internal, read-only

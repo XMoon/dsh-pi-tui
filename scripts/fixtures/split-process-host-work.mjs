@@ -316,6 +316,11 @@ function recordPromptFacts(options) {
     presentInstruction: systemText.includes('Use present to publish complete deliverables'),
     presentTool: toolNames.includes('present'),
     toolNames,
+    // M6 PR-C C4: the model-facing TUI prompt-section facts (the parity sink).
+    focusSection: systemText.includes('# Focus mode'),
+    progressSection: systemText.includes('# Progress updates:'),
+    responseSection: systemText.includes('# Response style:'),
+    gitSection: systemText.includes('# Git attribution'),
   }) + '\n', { mode: 0o600 })
 }
 

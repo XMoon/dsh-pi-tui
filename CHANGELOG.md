@@ -9,6 +9,8 @@
 
 ### 新增
 
+- **模型提示词统一携带 TUI 行为指导，Split 与 Direct 完全一致。** 每个普通 Session 的 Turn 现在会按"Turn 开始时正在查看该 Session 的 TUI 客户端"注入四段行为指导：进度更新节奏、回复风格、Git 署名与 Focus Mode；没有任何 TUI 查看者的 Turn 以及子会话（subagent）不注入这些段落，官方默认提示词不受影响。Focus 判定以 Turn 开始瞬间的在线查看者为准（任一在线查看者处于 Focus 即该 Turn 启用 Focus，并压制进度更新段落）；进行中的 Turn 不受中途 `/display` 切换或离开 Session 的影响，下一 Turn 重新判定，而进度/回复风格/Git 署名三个偏好的修改在下一步生效。Split 多客户端下各 Client 的显示模式互相独立：Focus 来自在线查看者的真实当前视图，而不是共享 Profile 的 `displayPreset`（该值只是启动偏好）；查看者退出后其投票立即失效。Git 署名的 `Assisted-By` 行会按实际 provider/model 插值。Client 在发起自己的新 Turn 前会先等待 Host 确认其当前视图；无法确认时本次发送被如实拒绝并保留可编辑草稿，绝不自动重试。仅 Web/ACP 的 Session 继续保持官方提示词。
+
 - **新增 `/acp` 快捷开关，可直接在 Split TUI 中查看并切换当前 Host 的本地 ACP Listener。** 输入 `/acp` 打开一个短菜单：无需已有 Session，也不会创建 Session/Agent、提交模型输入、打开浏览器或改变默认后端。菜单显示 Host 的实时状态，仅在 `disabled`/`enabled` 时提供一次显式的 Enable/Disable，随后按 Host 的权威回读重绘；`changing`、`unavailable` 或连接不可读时不提供写入，旧菜单无法写入新 Host。Direct 后端明确拒绝（仅 Split Client 可用）；持久 `Start ACP automatically` 仍只属于 `/settings → General`，只在下次 Host 启动生效，Headless 场景继续用 `daemon status` 查看 `acp` 与 `acp-socket`。
 
 - **SVG 支持静态描边样式与 `currentColor`。** SVG admission 白名单新增四个有确定渲染意义的静态属性:`stroke-dasharray`(1–32 个无单位非负数或 `none`)、`stroke-dashoffset`(单个有符号无单位数)、`stroke-miterlimit`(1–1000)与 `color`(固定色值);`fill`/`stroke`/`stop-color` 的**整值** `currentColor` 现在按文档内静态继承的 `color` 求值。相对单位、`<style>`/`<filter>`、外部引用、DOCTYPE、混合 token(如 `url(#g) currentColor`)与既有像素/字节预算全部维持原拒绝,原始 SVG 字节不重写。

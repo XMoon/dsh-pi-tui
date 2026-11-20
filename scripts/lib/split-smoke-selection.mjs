@@ -43,6 +43,7 @@ import { runSessionlessHostFileF5B } from '../smoke/split-process/sessionless-ho
 import { runSessionlessDefaultModel } from '../smoke/split-process/sessionless-default-model.mjs'
 import { runRemoteGitBranchLocality } from '../smoke/split-process/remote-git-branch-locality.mjs'
 import { runSharedSessionInteractions } from '../smoke/split-process/shared-session-interactions.mjs'
+import { runPromptSessionFocusTurnParity } from '../smoke/split-process/prompt-session-focus-turn-parity.mjs'
 import { runHostRuntimeDisabled } from '../smoke/split-process/host-runtime-disabled.mjs'
 import { runHostUserShellF1 } from '../smoke/split-process/host-user-shell-f1.mjs'
 import { runSessionlessShellCompletionG14 } from '../smoke/split-process/sessionless-shell-completion-g14.mjs'
@@ -206,6 +207,13 @@ const CASE_REGISTRY = Object.freeze([
     title: 'two real Clients retain one Session and settle one Host Question or Approval exactly once',
     platforms: LINUX_DARWIN,
     run: runSharedSessionInteractions,
+  }),
+  Object.freeze({
+    suite: 'prompt',
+    id: 'prompt.session-focus-turn-parity',
+    title: 'per-Turn TUI prompt policy follows the live session-view roster: any Focus viewer wins, a frozen Turn survives its viewer exiting mid-turn, and a fresh Peer decides its own Turn',
+    platforms: LINUX_DARWIN,
+    run: runPromptSessionFocusTurnParity,
   }),
   Object.freeze({
     suite: 'navigation',
