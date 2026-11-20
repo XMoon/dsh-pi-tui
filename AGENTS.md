@@ -238,14 +238,14 @@ extension-facing contract.
   See `docs/architecture/surface-catalog.md`.
 - **Question flow stays in the editor seat.** Keep one unified, budgeted
   scrollport and preserve its seat/modal ownership. See
-  `test/question-flow.test.ts` and `test/rendering.test.ts`.
+  `test/tui/question-flow.test.ts` and `test/domain/rendering.test.ts`.
 - **Managed overlays follow the overlay/focus contract.** Logical intent is
   committed before any fork call that can synchronously run a plugin callback,
   and a callback's newer operation always wins; the host derives the focused
   seat from the live physical focus. See `docs/architecture/overlay-focus.md`.
 - **Context presentation does not rewrite model input.** Keep model-facing bytes
   untouched; render parsed skill/system envelopes, never raw XML. See
-  `test/rendering.test.ts`.
+  `test/domain/rendering.test.ts`.
 - **Prove lifecycle invariants with a probe, not with intuition.** For
   generation/lease, proxy-receiver, attachment and teardown-idempotence changes,
   confirm the real numbers and identities (a targeted probe or test) instead of
@@ -254,213 +254,53 @@ extension-facing contract.
 
 ## Development
 
-Common checks:
+Use `docs/guides/development.md` for worktrees, locked mise setup, npm and
+Source DSH modes, branch promotion, build ordering, packaged validation and
+distribution diagnosis. Use `docs/guides/testing.md` to choose test owners,
+independent failure-detection evidence and the narrowest relevant lane.
+Do not copy their evolving commands, test rosters or CI job inventory here.
 
-```sh
-mise run build
-mise run typecheck
-mise run test
-```
-
-`mise` is the project tool entry for Node, pnpm and the pinned DSH CLI. The
-mise tasks are thin proxies; keep using the existing pnpm/script lanes for
-everything else (`mise exec -- pnpm <script>`). Use the smallest relevant
-validation for the current change. Prefer targeted tests first; do not run
-expensive compatibility suites mechanically.
-
-Before adding, changing, retaining as mandatory or retiring a test, establish
-its independent failure-detection value. A code change or review finding does
-not automatically require a new test; reduce or retire redundant and
-implementation-bound tests rather than strengthening them. Read
-`docs/guides/testing.md` first: it owns test worthiness, the test-tree ownership
-map, lane commands and objective discovery guards.
-
-A stage-final validation must not run the same suite twice. `pnpm verify:release`
-is the repository's full pipeline: `typecheck:fork` + `typecheck:bench`,
-`test:fork`, `test:tmux`, `test:tooling`, the shared `check:gates` preflight
-(architecture / boundary / keybinding / naming / session-event /
-installation-doc / pi-divergence / pi-vendor gates; the pi component
-compatibility test is skipped there because `pack:release`'s product suite
-runs the same test file), `pnpm audit`, and finally `pnpm pack:release`.
-`pack:release`
-is the explicit local orchestrator: `clean` + `clean:fork` + `build` +
-`typecheck:bundle` + `test:product` + `pack:artifact` + `smoke:release`
-(the eight packed-artifact smokes: tarball, extension fixture, advanced,
-phase4, unstable, vim, examples, composeAgent). So in one pass never also run
-`typecheck:bundle`, `test:product`, `scripts/tarball-smoke.mjs` or
-`scripts/compose-agent-compat-smoke.mjs` by hand, and never invoke
-`pnpm pack:artifact`/`pack:release` while a build or an artifact-dependent gate
-is running. `pnpm test` already contains `test:fork` + `test:product` +
-`test:tooling` + `test:tmux`; prefer it over the individual pieces. What a
-stage-final pass still needs ON TOP of `verify:release`: the migration contract
-smokes (`smoke:remote-*`), `smoke:boundary`, `smoke:startup-strictness`, the
-published-DSH compatibility checks (`compat:dsh:npm`, `compat:dsh:client-family`
-— `verify:release` does NOT contain them), `git diff --check` (unstaged and
-staged), plus whatever stage-specific validation the authority plan for the
-current stage requires (e.g. the Pre-M3 plan's §35.5/§35.6 matrix).
-
-**Never re-run a lane that is already green on the same state.** Before a
-stage-final pass, take stock of what has already run against the CURRENT tree
-and run only the remainder — re-running a green lane after an edit that does
-not touch its inputs buys no evidence and costs the whole suite. A delta
-invalidates a lane only when it touches that lane's inputs: `packages/pi-tui/**`
-for the fork lanes, `src/**` + `test/**` + `scripts/**` for the bundle suites,
-`docs/**` and the doc-gate inputs for `test:tmux`/the documentation gates.
-A docs-only or comment-only delta does not invalidate a suite already green on
-the same code. State which lanes were already green (and against which state)
-and which were run for the delta, so the evidence stays auditable. CI runs the
-full pipeline on the PR; the local stage-final pass exists to catch failures
-before pushing, not to reproduce CI.
-
-**Start a long lane only on a frozen tree.** Begin a stage-final pass — or any
-lane that takes minutes — only once every known finding is fixed, no review
-round or acceptance item is in flight, and you cannot name a reason another edit
-is expected; until then run only the delta-targeted tests. An edit made while a
-lane runs voids that run: kill it explicitly, record why, and re-run once after
-the tree is frozen instead of letting it finish and then running the same state
-twice.
-
-`ci.yml` coverage is what makes a green PR check evidence instead of work to
-reproduce: `Source checks` runs `build:fork`, `typecheck:fork`,
-`typecheck:bench`, `test:fork`, the `smoke:remote-*` parity/closure lanes (five
-of them only when the resolved DSH mode is `source`), `test:tmux`,
-`test:tooling`, `generate:pi-divergences` with a `git diff --exit-code` on
-`DIVERGENCES.md`, and the shared `pnpm check:gates` preflight. The gate registry
-in `scripts/run-quality-gates.mjs` is the single list: `mise run check`, CI and
-`verify:release` all use that entry, and `ci-only` gates keep independent CI
-steps. Keep the rule in CI: add a new gate to the registry, run
-local-preflight gates only through `pnpm check:gates`, and keep the exact
-packed-candidate source-leak command as the only direct gate step.
-`Build and pack` runs the root `build`, `typecheck:bundle` and `test:product`
-in separate jobs, then a lifecycle-free `pack:artifact` candidate qualified by
-the eight packed-artifact smokes through `smoke:release`; the qualification job
-also runs `smoke:startup-strictness`. The `mise-toolchain` job installs the
-locked project toolchain, proves the DSH CLI version and setup in npm mode, and
-proves the Source toolchain contract without running npm setup in source mode. The remaining jobs
-run `smoke:boundary`, `smoke:official-presets`, `compat:dsh:client-family`, the
-tarball smokes and `pnpm audit`. `split-process` runs on npm release-tag pushes and is required for publication. The `workflow_dispatch` input `run_split_process` can also run the packed Split
-smoke on any npm-mode `refs/heads/...` branch; when enabled, the CI verdict requires it to succeed.
-Without that explicit input, PR, branch and Source Mode runs keep the job
-`skipped`. Host/Client split-process development work may also run
-`pnpm smoke:split-process` manually against the actual candidate tarball under
-its task plan. The Split lane prints `START/DONE/ERROR` scopes (case and
-recovery subscene) with UTC time and duration, and its default failure output
-includes the real error stack; `SPLIT_PROCESS_SMOKE_KEEP=1` only preserves the
-temporary scene. The lanes CI does NOT run — therefore the only ones a stage-final pass
-must run locally — are
-`compat:dsh:npm`, `gate:dsh-preset-parity`,
-`smoke:remote-fork-rewind-parity` and `smoke:remote-session-lifecycle-parity`; a mode-gated
-CI step that was skipped counts as not covered.
-
-**Keep one run ledger per session** (lane → last green state → its inputs) and
-consult it before every run: having to run a lane again is a fact to state, not
-a habit to fall back on.
-
-Validation mechanics for this toolchain:
-
-* `packages/pi-tui/dist` is a build INPUT to the root bundle and to the tests:
-  run `pnpm build` before testing anything that depends on the fork, and never
-  run a build and an artifact-dependent test or gate at the same time.
-* Some bundle paths run under Node's strip-only TypeScript loader: new `src/**`
-  files must not use TypeScript parameter properties
-  (`constructor(private readonly x: T) {}`) — assign explicit fields instead.
-* `scripts/client-boundary-gate.mjs` counts a Host package import even when it is
-  TYPE-ONLY (`@deepseek-ai/dsh-agent` / `@deepseek-ai/dsh-session`). Prefer a
-  local structural type or the owning port's type; see
-  `docs/architecture/host-client.md`.
-* Extending a shared interface (e.g. `TuiCommandRunner`, `TuiSettingsDoc`) also
-  reaches its test fakes and literal builders: update them with the change and
-  let `pnpm typecheck:bundle` enumerate the remainder.
-* Changing WHAT the public entry re-exports (moving or re-exporting a
-  publicly-exported type/function) changes the emitted declaration graph: the
-  bundled `dist/*.d.mts` may only carry the top-level regions allowlisted in
-  `scripts/tarball-smoke.mjs`. Run `pnpm build`, then `pnpm pack:artifact`, then
-  `pnpm smoke:release -- ./xmoon76-dsh-pi-tui-<version>.tgz` before pushing —
-  the ordinary product suite does NOT cover this (it is a `smoke:release`/CI
-  check), and a stale `dist` or an old tgz makes it pass locally. For the full
-  local route use `pnpm pack:release` instead.
-* A publicly-exported helper therefore follows the canonical owner-layer placement
-  (`## Repository boundaries` → `### Source module placement`) and is exposed through
-  the public entry (`src/index.ts`) or an existing documented facade. Do not create a
-  new root `src/*.ts` module merely to satisfy declaration bundling. The root
-  ledger `scripts/source-root-baseline.json` is CLOSED at the seven stable
-  entries/facades with no legacy root left (the architecture gate also forbids
-  every retired root path); those entries are not a template for new modules. If the declaration/tarball boundary
-  cannot expose the canonical nested owner, STOP and report the packaging constraint
-  instead of growing the root baseline.
-
-When entering a development worktree:
-
-```sh
-mise install --locked
-mise run setup
-```
-
-`mise install` provides the project Node, pnpm and the DSH CLI whose exact
-version comes from `package.json`; `mise run setup` performs the npm-mode frozen
-install and refuses `source` mode. `setup` is an install action, not a doctor or
-state writer: a fresh npm worktree may still report legacy `pnpm dev:doctor`
-`MISSING`; that is not a setup failure. If your global mise config declares other
-tools, scope the install with
-`MISE_ENABLE_TOOLS=node,pnpm,npm:@deepseek-ai/dsh mise install --locked` (the
-same allowlist CI uses).
-
-Source Mode is a long-lived workflow, not legacy. On a source worktree use the
-explicit source tasks; their mode is always `source` regardless of the tracked
-`test/compat/dsh-mode.json` default:
-
-```sh
-mise run source:doctor
-mise run source:bootstrap
-mise run source:doctor    # must report READY
-mise run build
-mise run source:profile
-mise run source:dsh
-```
-
-A worktree with an existing Source materialization must not run `mise run setup`
-or the npm `dev:profile`/`dev:dsh` entries, even when its tracked mode is npm;
-use the Source tasks. `source:profile` and `source:dsh` use this worktree's
-`./node_modules/.bin/dsh` and the isolated `temp/source-dsh-home`; never use a
-bare `dsh`, the mise npm CLI or the real `~/.dsh` for Source Mode. A plain `pnpm install` before bootstrap leaves the DSH workspace
-state incorrect (`workspace DSH incorrect` / `local state missing`); the
-bootstrap task performs the dependency install itself, then `source:doctor`
-must report `READY`. A plain `pnpm install` after bootstrap re-resolves
-`@deepseek-ai/*` to registry versions and breaks the source-mode workspace
-again; use `DSH_MODE=source mise exec -- pnpm dev:shell` (or `source ./.dsh-dev-env` with `DSH_MODE=source` set) for commands that need the source environment, and re-run `source:bootstrap` after any real install.
-Keep each worktree's `node_modules` and `dist` independent; never symlink them,
-and build in that worktree before using a profile.
-
-For an interactive npm-mode TUI session in this worktree:
-
-```sh
-mise run build
-mise run dev:profile
-mise run dev:dsh
-```
-
-The profile lives under the worktree's `temp/mise-dsh-home`. Never point
-`DSH_HOME` at the real `~/.dsh`, and never treat a direct `dsh` invocation as
-the isolated development profile.
-
-* `main` is the released npm-backed compatibility line; `next` is the
+- `mise` is the project entry for the pinned Node, pnpm and DSH toolchain.
+  Start from a prepared, isolated worktree. Do not reuse real profiles or
+  symlink `node_modules` / built outputs between worktrees.
+- Run targeted tests first. Before pushing, use `mise run check` on the
+  frozen tree. It is a pre-push signal, not a substitute for changed-feature
+  tests, runtime/wire/GUI proof or full release qualification.
+- The sole static-gate registry is `scripts/run-quality-gates.mjs`.
+  `pnpm check:gates` owns local-preflight execution; never maintain a
+  second gate list in prose or invoke its gates independently in routine CI.
+- `pnpm verify:release` is the full release pipeline and includes many
+  other lanes. Do not repeat successful suites against the same inputs.
+  Run mode-dependent, runtime, packed-candidate and Source compatibility
+  checks only when the applicable contract requires them. A skipped CI
+  lane is not a PASS.
+- Start expensive validation only after the tree is stable and no further
+  edits are anticipated. If its inputs change mid-run, that evidence is
+  invalidated. For a docs-only delta, run the applicable documentation/gate
+  checks; do not claim product runtime evidence without running it.
+- The vendored `packages/pi-tui/dist` is a build input: build the fork
+  before root bundling or relevant tests. Do not run a build concurrently
+  with an artifact-dependent test, pack or gate.
+- Changes to public exports / emitted declarations require the packaged
+  distribution checks, not merely unit tests. A nested owner module must
+  not be moved to the closed `src/` root just to satisfy declaration
+  bundling; investigate the packaging boundary instead.
+- Type-only Host package imports still count toward the Client boundary
+  gate. Node strip-only TypeScript paths do not support parameter
+  properties. Keep shared interface test fakes in sync with actual changes.
+- `main` is the released npm compatibility line; `next` is the
   forward-integration line and may use its tracked Source Mode.
-* Normal feature/fix work lands on `main`, then merges `main -> next`; do not
-  duplicate shared implementations. Use `next` directly only for explicit
-  next-only work requiring an unpublished DSH API or contract.
-* A promotion uses a real merge commit; never squash/reset long-lived history or
-  replace `next`'s newer DSH target/policy with `main`'s released one.
-* Do not modify the real-use `pi-tui` profile during development.
-* `compat:dsh:source` is a full distribution-boundary verification, not a
-  routine test after ordinary TUI changes. Run it only when the DSH source or
-  distribution boundary changes (source pin, target metadata, distribution
-  infrastructure, source/npm discrepancy, or an unpublished DSH commit), or
-  when explicitly requested; skip it for TUI-only changes when DSH is
-  unchanged.
-
-Read `docs/guides/development.md` before changing DSH mode, worktree/bootstrap
-behavior, or promoting `main`/`next`. Read `docs/guides/dsh-compatibility.md` for
-distribution compatibility.
+  Promote with an actual merge, not a reset or squash.
+- A worktree already materialized in Source Mode must not run `mise run setup`.
+  Check `mise run source:doctor` first. For a non-ready source environment,
+  use `mise run source:bootstrap` and require a subsequent READY doctor.
+  Do not repair Source Mode with a plain `pnpm install` or globally installed DSH.
+- `compat:dsh:source` is a full distribution-boundary verification, not a
+  routine test after ordinary TUI changes. Run it only when the Source
+  distribution/compatibility boundary changes or the Owner requests it.
+- Check `git diff --check`, review the full diff and distinguish local
+  checks from CI/physical verification. Never push or publish without the
+  applicable user approval from the execution discipline and release rules.
 
 ## Release
 

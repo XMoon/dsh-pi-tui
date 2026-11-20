@@ -54,10 +54,16 @@ MANDATORY or BLOCKING.
 | Path | Audience | What it owns |
 |---|---|---|
 | `architecture/overview.md` | contributors | Ownership map and canonical layers, dependency direction, composition zone, source-placement policy and root ledger, architecture-gate scope |
-| `architecture/host-client.md` | contributors | Host-owned vs Client-local locality, the semantic-port boundary, Direct/Remote equivalence, currentness/identity fences, Plugin Manager Host authority, workflow-terminal authority, coupling guard and qualification tiers |
+| `architecture/host-client.md` | contributors | Host/Client locality, semantic ports, backend selection, Split transport, Direct/Remote equivalence, currentness and Session/Host authority; canonical owner for Client detach |
+| `architecture/host-daemon.md` | contributors | Profile-scoped daemon supervision, Host process management and administrative command lifecycle |
+| `architecture/host-acp.md` | contributors | Host-owned local ACP v1 listener, bounded protocol admission and session-view contract |
 | `architecture/concurrency.md` | contributors | Session writer authority (`SessionHandle` / `SessionWriteLease`), process-local transition/operation barriers, stale/generation fences |
 | `architecture/failure-model.md` | contributors | `runDetached` / `runOwned` promise ownership, error observation and cancellation taxonomy |
-| `architecture/surface-behavior.md` | contributors | Durable non-transcript workspace behavior: quit/queue, Task Center/Browser, Job Workspace, Settings, Task Quick, Plugin Manager/Detail, input completion and attachment intake |
+| `architecture/surface-behavior.md` | contributors | Shared non-transcript interaction contracts: quit, queue, composer submission, task/job views, Web/ACP quick controls, model picker, schedule, task quick and common docks; entry links to separately owned surfaces |
+| `architecture/surface-session.md` | contributors | Session Workspace browsing, navigation, currentness, switching and guarded resume behavior |
+| `architecture/surface-settings.md` | contributors | Settings Workspace page navigation, edit/write settlement and configuration presentation |
+| `architecture/surface-plugins.md` | contributors | Plugin Manager/Detail surface interactions, inventory display and install/update workflows |
+| `architecture/surface-input.md` | contributors | Attachment intake, input completion, session `@` routing and shell-input surface behavior |
 | `architecture/surface-catalog.md` | contributors | Command/skill catalog ownership, standing scope, Host vs TUI authority and refresh semantics |
 | `architecture/overlay-focus.md` | contributors | Managed-overlay / editor-seat / focus contract, synchronous reentrancy, one-shot closure and physical-screen leases |
 | `architecture/transcript.md` | contributors | One DisplayPreset authority, semantic transcript classification, folding/reveal, Context/Work/Thinking disclosure |
@@ -99,6 +105,7 @@ MANDATORY or BLOCKING.
 | `guides/tern-gui-testing.md` | TSP contributors | The real Tern GUI-window lane: the native window, the OS chrome/font stack, the live-window Appearance switch, control-injected pointer/key input and the client `a11y` tree (not OS input or an OS reader) |
 | `guides/footer.md` | users | `/footer` builtin items, styles, custom text/commands, extension items and troubleshooting |
 | `guides/dsh-compatibility.md` | users/contributors | Semver/prerelease matching method, manifest/matrix/mode authority, Session V2/V3 data handling, Source Mode validation |
+| `guides/daemon.md` | users | Local Linux/macOS daemon mode, backend selection, safe Host control and optional supervision |
 | `guides/testing.md` | contributors | The test-tree ownership map, the new-test rules, the lane commands and the objective discovery guards |
 
 ## Source-of-truth boundaries
@@ -128,3 +135,22 @@ Record a decision and its rationale in the owning document at the same time as
 the behavior change. Write the rule and the *why*, not a walkthrough of the
 implementation. Keep a new fact in exactly one place: link, don't copy. English
 only, unless the user explicitly asks otherwise.
+
+For a documentation-only change or a new product behavior:
+
+1. Read the root `AGENTS.md`, this map and the owning architecture contract.
+   Verify the claim against current source/tests or the reusable procedure;
+   a PR plan or a historical screenshot does not establish current behavior.
+2. Choose the smallest owning document. Separate user-facing steps from the
+   developer contract; do not create a second copy of an authoritative rule.
+   A large file is split only at a real independently owned responsibility,
+   retaining the shared lifecycle/authority contract in its canonical owner.
+3. When moving a section, preserve its semantics and add an entry link from
+   the old top-level section. Update this canonical index and all references
+   to moved nested anchors; check any source/test comments that point at it.
+4. Run the repository documentation gate with `node scripts/docs-gate.mjs`
+   (also part of `pnpm check:gates`), and review links, source-path claims and
+   formatting. A green path/index check cannot prove the written semantics.
+5. Keep implementation plans, decisions requiring approval, run evidence and
+   historical comparison snapshots in the owning PR/Issue or external plan,
+   not in this long-lived documentation tree.

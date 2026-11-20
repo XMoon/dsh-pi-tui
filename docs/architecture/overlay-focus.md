@@ -170,14 +170,12 @@ mutate the answer, submit/steer editor input, change session/context identity,
 or trigger lifecycle/business/plugin actions. Todo presentation is allowed;
 Todo/business mutation is not.
 
-Transcript Search is intended inspection, not a product-level prohibition. It
-is deferred from this PR because the current `OverlayBroker` mounts a new
-managed overlay under an active Question/Approval suspension as hidden; making
-Search a temporary keyboard owner would require a new nested inspection-child
-ownership primitive. The follow-up is **Milestone A follow-up — nested
-transcript Search under Question/Approval**. Until that ownership proof exists,
-the existing modal routing consumes Search input rather than falling through to
-the generic Host ladder.
+Transcript Search is an inspection action, not a product-level prohibition,
+but the current `OverlayBroker` mounts a new managed overlay as hidden during
+an active Question/Approval suspension. There is no nested inspection-child
+keyboard owner for Search. Therefore the modal routing consumes Search input;
+it must not fall through to the generic Host ladder or falsely appear
+interactive under the blocked response seat.
 
 ### 6.0 The official plan-review Question branch
 
@@ -864,7 +862,7 @@ same screen are untouched.
 workspace with the same temporary physical-screen lease as the Job workspace, and
 the two leases are MUTUALLY EXCLUSIVE. The whole surface is a read projection
 whose writable-row set and value contracts are owned by
-[surface-behavior.md](./surface-behavior.md) `Settings Workspace`; this section
+[surface-settings.md](./surface-settings.md) `Settings Workspace`; this section
 owns only the lease, focus and write-lifecycle mechanics.
 
 - **One lease latch for every workspace.** `TuiApp.openSettingsWorkspace` mints a
@@ -915,7 +913,7 @@ owns only the lease, focus and write-lifecycle mechanics.
   same L2 transition. `Esc`/`Backspace` step back (and close at L0) — wide,
   medium and narrow behave identically, and a new open starts on the About
   home. The `Tab`/`Shift+Tab` region-key contract is owned by
-  [surface-behavior.md](./surface-behavior.md#settings-workspace); those keys
+  [surface-settings.md](./surface-settings.md#settings-workspace); those keys
   only re-focus an existing region and never activate a page, row or write.
   Leaving the workspace is therefore always one reachable key (the Action Bar
   is pinned to the physical last row at every height, down to a one-row
@@ -927,7 +925,7 @@ owns only the lease, focus and write-lifecycle mechanics.
   projection or the real page) and no configuration pane — except the Plugins
   page, whose 76..119 content focus gives the frame to `List | Details` (also
   subject to the six-real-body-row floor) and lets the rail step aside (see
-  [surface-behavior.md](./surface-behavior.md) § Plugin Manager). No second
+  [surface-plugins.md](./surface-plugins.md) § Plugin Manager). No second
   "visible window" state is stored, hidden panes are neither painted nor
   addressable, and row text is laid out against the pane width it is actually
   painted in.

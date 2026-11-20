@@ -24,20 +24,9 @@ wrong home:
 - **Settings reads are schema-shaped.** History is opaque runtime data; a
   preferences schema has no business validating it.
 
-### What other agents do
-
-| Agent | Location | Format | Keyed by |
-|---|---|---|---|
-| kimi-code | `<dataDir>/user-history/<md5(cwd)>.jsonl` | JSONL `{"content": …}` | per cwd |
-| Claude Code | `~/.claude/history.jsonl` | JSONL | global |
-| Codex CLI | `~/.codex/history.jsonl` | JSONL | per machine |
-| aider | `<git_root>/.aider.input.history` | plain lines | per project |
-| Gemini CLI | none — derives ↑ recall from session logs at runtime | — | per session |
-| shells | `~/.bash_history` etc. | plain lines | per user |
-
-Nobody stores input history in a settings/preferences file. The closest
-match for dsh-pi-tui's per-directory requirement is **kimi-code**: a
-dedicated data file keyed by the working directory. We adopt that shape.
+The dedicated per-directory JSONL file avoids high-frequency updates in the
+user-editable settings document. Its independent append writer is also what
+prevents a settings whole-file replacement from erasing another window's input.
 
 ## The chosen design
 
@@ -62,13 +51,11 @@ dedicated data file keyed by the working directory. We adopt that shape.
   - **Recall**: `HISTORY_RECALL_LIMIT` (100) entries seed the editor's
     ↑/↓ history. The canonical JSONL is NEVER truncated or rewritten on
     read — a concurrent append from another window must never land in an
-    orphaned inode. Auto-compaction is a planned maintenance milestone
-    (`HISTORY_FILE_MAX_ENTRIES`, 5000), not part of the read/append
-    contract.
+    orphaned inode. No read-side compaction may rewrite the append-only file or
+    replace the inode while concurrent writers can hold it.
 - Corrupt lines are skipped on load, never fatal.
 - `!` shell commands are stored verbatim (with the `!`), so ↑ recall
-  restores them as text and Enter re-runs the shell branch (kimi does the
-  same with its bash-mode flag).
+  restores them as text and Enter re-runs the shell branch.
 - The runner loads the file per session (and once at boot for the launch
   cwd, so a fresh window recalls immediately — see below) and appends on
   every submitted line.

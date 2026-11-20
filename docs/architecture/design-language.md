@@ -1076,7 +1076,7 @@ A **PiTui-painted** overlay is the same vocabulary in a rounded `Frame` instead 
 | Placeholder / loading / failure | role 16: `textDim`; a failed one names the failure and paints that word `error` (`Model catalog unavailable: …`); loading is a word (`Loading models…`), never animation. |
 | Bottom row | inside the frame; `Esc` is its **last** segment (D8) and the hint line uses ` · ` (D4). |
 | Sizing ladder | The step is declared by **content type**: short menu `64`; default interactive list `72`; long values, badges or a detail column `88`; **full** for a surface that must present a whole document or decision (a long-command approval, a full-screen list). Resolution, in this order: **(1)** `full` is not a numeric step — `effective = columns` (a surface that needs its own margin, e.g. the full-screen task browser, declares that margin as a per-surface exception); **(2)** otherwise `effective = min(declared, columns)`, then snap **down** to the largest ladder step `≤ effective`; **(3)** if `effective < 64` there is no ladder step to snap to — the overlay takes **exactly `columns`** and degrades through its own row budget / `ROW_PRIORITY` / degenerate-grant rules instead of through frame size (there is no minimum terminal width for an overlay). The step is never raised because the terminal is wide. Height is `min(rows − 2, cap)` with the cap owned by the step (`24` narrow/standard, `28` wide, the terminal for full). A per-surface exception is allowed only when that surface's own doc names it with its reason — the PiTui `/model` sizing exception is `88×28` (the list, the independent Reasoning Effort strip, the Agent Team row and the footer must share one frame without squeezing the model list); the Delivered files browser is a CENTERED percentage window, `width = C < 80 ? C : min(120, max(72, floor(C × 0.80)))` and `maxHeight = R < 20 ? max(1, R − 2) : min(38, max(1, floor(R × 0.75)))` with the center-anchor default (no margin), because it must stay usable at `44×20` and still refuse the old `≥110`-column near-fullscreen jump at `120×40`; its frame, row grant and host options read the SAME live helper (never a second percentage); a terminal resize rebinds the same logical lease at the new result so the panel state survives and the frame never paints a wider canvas over the transcript beside it. The browser is also the one surface that opts into overlay text selection (fork divergence X068, amendment `D17`): the selectable region is the painted frame's content area, so selecting text adds no inset, no gutter, no row and no glyph to the vocabulary — the same cells are painted, and a drag over them selects instead of hitting an inert modal cell (the pointer contract lives in [overlay-focus.md](./overlay-focus.md) §6.1). Every other overlay keeps the opaque default and paints no such affordance. The TSP-native `/model` instead lets each native sheet declare its own client size (catalogue `size:'md'`, Reader overlay `size:'lg'`), chosen from that surface's own measured pane geometry (see §12.3) |
-| Assembly | mandatory chrome (title, search row, hint) is granted first, then the item window, then optional separators/scroll/status — the existing `overlay-focus-contract.md` budget rules stay authoritative. |
+| Assembly | mandatory chrome (title, search row, hint) is granted first, then the item window, then optional separators/scroll/status — the existing `overlay-focus.md` budget rules stay authoritative. |
 
 ### 12.3 Native TSP surface adapter (product semantics, not PiTui geometry)
 
@@ -1097,52 +1097,47 @@ This is a **renderer-specific application of** D1–D14, not a new layout framew
 
 ## 13. Reference alignment and deliberate divergences
 
-The reference study (Pi `earendil-works/pi` / `badlogic/pi-mono`, oh-my-pi
-`can1357/oh-my-pi` @ main `818dd42b73`, kimi-code `MoonshotAI/kimi-code`) was
-read as *evidence of what a mainstream TUI does*, never as a specification to
-copy. Pi and kimi-code were fetched from GitHub (their local checkouts are not
-present on this machine), so those quotes carry file+symbol rather than
-line numbers.
+This section records the decisions that remain load-bearing for this
+repository. The dated comparison snapshots, upstream source line numbers and
+one-off reference-study results are not product contracts. Sections D1–D14
+above own the normative visual vocabulary; this rationale does not create a
+second palette or surface-specific exception list.
 
-### 13.1 Followed (consensus, and it also matches this repo)
+### 13.1 Followed (current shared rules)
 
-| Rule | Where the references agree | Where this repo already does it |
-|---|---|---|
-| A navigation cursor is a **glyph in a gutter**, not a colour | pi `select-list.ts` `"→ "`; oh-my-pi `select-list.ts:592` `cursor + ' '`; kimi `SELECT_POINTER = '❯'` | `src/tui/panels/settings-workspace-panel.ts:766,774,887` (`'> '`), `settingsListTheme.cursor` |
-| **Selection ≠ current** | pi `model-selector.ts` second `✓ ` gutter; kimi DESIGN §1 "当前项与选中项互相独立" | the candidate list's row-end mark (`:888`); this document keeps the device and replaces the arrow with the width-safe word |
-| ` · ` joins metadata/hint segments | oh-my-pi `theme/symbols.ts:456` `"sep.dot": " · "`; kimi DESIGN §4; pi `settings-list.ts` hint line | both workspace meta/fact rows, `task-panel.ts:1275-1287` |
-| **Key token Capitalized, verb lowercase** | pi `keyDisplayText`; oh-my-pi `key-hint-format.ts`; kimi DESIGN §4 | `Esc back`, `Enter details` (bare letters must change, §4.1) |
-| Hints and keys come from the **keymap**, never a raw literal | pi AGENTS.md; kimi `printable-key-guard.test.ts` (CI-enforced); oh-my-pi `formatKeyHint` | `componentKeymap.keyHint('tasks.stop')` in Job; Settings still compares `'r'`/`'c'` |
-| Every row is width-clamped through the shared helpers | pi/oh-my-pi/kimi docs | `fit()` / `truncateToWidth` / `visibleWidth`; `test/domain/icons.test.ts` |
-| A **small, counted** decoration budget | kimi DESIGN §3 "整个 dialog 全宽 `─` 仅 2 条（顶 + 底）", checklist-enforced; pi's de-facto 2 `DynamicBorder`s | `planSettingsChrome` grants 0 or 2 rules |
-| Text contrast floor ≥ 4.5:1 | pi `docs/themes.md`; kimi AGENTS.md (+3:1 chrome) | palette comments ("tuned for ≥ 4.5:1 contrast on black") |
-| `borderFocus` is approval-only | kimi `theme/colors.ts` "Focus / attention border — currently only the approval panel" | identical comment on our `ColorPalette.borderFocus` |
+- Cursor location and the currently configured value are separate facts:
+  navigation uses a visible gutter glyph and the current-value indicator is
+  preserved independently of selection.
+- Key hints use semantic keybinding display text, not guessed printable
+  literals. Metadata and hint segments use the shared ` · ` separator.
+- Row text is clamped at the available *cell* width; colour alone never
+  conveys availability, selection, meaning or focus.
+- Frame chrome consumes a bounded row budget. Status and controls remain
+  readable even when the terminal or native client compresses the viewport.
 
 ### 13.2 Deliberate divergences
 
-| Decision | What the references do | What this contract does, and why |
-|---|---|---|
-| Surface identity ink | kimi paints the dialog title `primary` + bold; oh-my-pi insets it in the top rule in `accent` | `textStrong` bold, no colour. This repo already uses `primary` for links *and* inline code *and* selection (`markdownTheme.code`, picker prefixes), so a blue title would make "blue" mean brand + clickable + current at once. Keeping the identity weight-only keeps `primary` = active/actionable |
-| Selected row's text | pi/oh-my-pi paint it with their accent token | bold `textStrong`; only the cursor glyph is `primary`. Same reason as above, and it matches this repo's existing picker device |
-| Hint overflow | kimi truncates the whole line; pi truncates + one documented whole-segment drop; oh-my-pi's native path wraps and its ANSI footer clips in a height-1 row | **whole-segment drop by priority, never mid-word** (already implemented in Job). At a pinned height 1, wrapping is impossible and line truncation is what produces today's `Esc back · ↑↓/Pg keys scroll · Enter change…` |
-| Status word case + marker | pi sentence case; oh-my-pi Title Case with `●`/`✓`/`✕`/`⊘` glyphs; kimi lowercase with a row-end `← current` | Title Case word plus one EAW-neutral `‣` anchor (D5 + D7). `●`/`○`/`◐`/`×` are rejected as width-unsafe, and the width-safe `✓`/`✕`/`⊘` are rejected because a per-status glyph vocabulary makes the shape the signal |
-| Cursor glyph shape | pi `→`, oh-my-pi `❯`/`>`, kimi `❯` (and kimi forbids inventing `>`/`→` for its own dialogs) | `>` for this repo (D3): `→` is EAW-ambiguous, `❯` already owns the transcript's user marker, `›` already owns two icon semantics |
-| "Never colour alone" | **no reference states this rule** (one paints a disabled row by colour only) | adopted anyway (§3.3.3) because our palette proves colour is unreliable here: `borderFocus` and `warning` are the same hex |
-| Rules on a status line | kimi forbids an inner rule; oh-my-pi freely adds `├──┤` dividers | at most one rule per boundary and never flanking a text line (D6) |
+| Choice | Durable reason |
+|---|---|
+| Titles use bold `textStrong`, not action ink | `primary` marks active/actionable elements; colouring titles would obscure that distinction |
+| Selected labels are bold while only the `>` gutter is `primary` | Selection is not the current configured value; the glyph avoids EAW-ambiguous arrows and transcript markers |
+| Hint overflow drops whole segments in priority order | One-height rows cannot safely wrap; breaking key/verb tokens creates misleading instructions |
+| Status words use Title Case and a width-neutral `‣` anchor | Multiple status glyph alphabets are inconsistent across terminal fonts and widths |
+| At most one separator per boundary | Extra rules consume rows needed by content, without adding semantic structure |
+| Disabled and failed states retain text labels | Colour contrast and palette roles alone are insufficient on real terminals |
 
 ### 13.3 What is realistically machine-checkable
 
-The study checked what each project actually gates. kimi is the strongest
-(named-chalk-colour scan, bare-printable-key scan, per-dialog exact-line
-assertions); oh-my-pi has no snapshot gate but pins exact row strings, column
-indices and theme glyph tokens; Pi gates formatting/lint only. **None of the
-three has a TUI screenshot gate, and none gates a decoration budget or a
-"colour alone" rule.**
-
-That is why §11.3 restricts this repo's automated checks to the glyph width
-gate, a handful of frame invariants in the two existing `VirtualTerminal`
-suites, and the degradation-ladder matrix — and leaves the rest to the review
-checklist.
+Automated checks protect cell-width safety, a small set of frame invariants and
+the responsive degradation matrix. They do **not** prove physical focus, mouse
+or touch completeness, font rendering, visual hierarchy or the usability of an
+actual terminal/client. Those require the relevant product review and
+qualification procedures (see
+[overlay-focus.md](./overlay-focus.md),
+[../guides/tmux-testing.md](../guides/tmux-testing.md), and
+[../guides/tern-gui-testing.md](../guides/tern-gui-testing.md)).
+Do not convert one-off screenshot measurements or upstream comparisons into a
+permanent machine gate.
 
 ### 13.4 Transcript right gutter and measurement
 
