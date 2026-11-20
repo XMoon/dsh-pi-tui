@@ -272,6 +272,15 @@ async function hostChild() {
           state: entry.fiber?.state,
         })),
         configEditorIds: ctx.get('configEditor').entries().map(entry => entry.options.id),
+        // The OFFICIAL resolved package identity (not a path guess): the same
+        // PluginPackages lookup production discovery consumes.
+        packages: Object.fromEntries(['a', 'b', 'dual', 'plain'].map(fixture => {
+          const name = `@r8-pr1-fixture/${fixture}`
+          const resolved = ctx.get('pluginPackages')?.packageOf(name, ctx.baseUrl)
+          return [fixture, resolved === undefined ? undefined : {
+            name: resolved.name, version: resolved.version, dir: resolved.dir, manifestName: resolved.manifest?.name,
+          }]
+        })),
         settings: descriptors
           .filter(row => row.ns.startsWith('pi-tui-extcfg-') || row.ns === 'pi-tui-preferences')
           .map(row => ({ ns: row.ns, revision: row.revision, schema: row.schema, value: row.value, base: row.base, user: row.user })),
@@ -535,11 +544,19 @@ function main() {
     for (const name of [...FIXTURES.map(fixture => `@r8-pr1-fixture/${fixture}`), '@xmoon76/dsh-pi-tui']) {
       check(`P1-01a:${name}`, bundles.includes(name), `official PM selects ${name}`, `bundles=${bundles.join(',')}`)
     }
-    const manifestOf = fixture => readJson(join(profileDir, 'node_modules', '@r8-pr1-fixture', fixture, 'package.json'))
-
     const first = runHost({ env, runRoot, stampDir, sentinel, label: 'first' })
     const boot = first.snapshots[0]
     evidence.firstBoot = boot
+    const manifestOf = fixture => {
+      const resolved = boot.packages?.[fixture]
+      if (resolved?.dir === undefined) throw new Error(`official PluginPackages did not resolve @r8-pr1-fixture/${fixture}`)
+      return { name: resolved.name, manifest: readJson(join(resolved.dir, 'package.json')) }
+    }
+    for (const fixture of FIXTURES) {
+      const resolved = boot.packages?.[fixture]
+      check(`P1-02f:${fixture}`, resolved?.name === `@r8-pr1-fixture/${fixture}` && resolved?.manifestName === resolved.name,
+        `official PluginPackages resolves @r8-pr1-fixture/${fixture}`, JSON.stringify(resolved))
+    }
     const aRow = rowId('a')
     const bRow = rowId('b')
     const dualRow = rowId('dual')
@@ -560,20 +577,20 @@ function main() {
     // P1-02 discovery uses the REAL installed manifests and the REAL mounted
     // rows through the real pure function, never a copy of the hash rule.
     const discoveryA = discoverClientExtension({
-      package: { name: '@r8-pr1-fixture/a', manifest: manifestOf('a') },
+      package: manifestOf('a'),
       selectedBundle: bundles.includes('@r8-pr1-fixture/a'),
       effectiveRows: boot.rows.map(row => ({ id: row.id, name: row.name })),
     })
     check('P1-02d', discoveryA.kind === 'candidate' && discoveryA.configRowId === aRow,
       'pure discovery returns the candidate for the real row', JSON.stringify(discoveryA))
     const wrongRow = discoverClientExtension({
-      package: { name: '@r8-pr1-fixture/a', manifest: manifestOf('a') },
+      package: manifestOf('a'),
       selectedBundle: true,
       effectiveRows: boot.rows.filter(row => row.id !== aRow).map(row => ({ id: row.id, name: row.name })),
     })
     check('P1-02e', wrongRow.kind === 'invalid-opt-in', 'a mis-mounted row loses Client qualification only', JSON.stringify(wrongRow))
     const plainDiscovery = discoverClientExtension({
-      package: { name: '@r8-pr1-fixture/plain', manifest: manifestOf('plain') },
+      package: manifestOf('plain'),
       selectedBundle: true,
       effectiveRows: boot.rows.map(row => ({ id: row.id, name: row.name })),
     })
@@ -726,7 +743,7 @@ function main() {
     check('P1-07c', !boot.rows.some(row => row.name === '@r8-pr1-fixture/dual/tui'),
       'PiTui added no Host row for the package ./tui entry', JSON.stringify(boot.rows.filter(row => row.name.includes('dual'))))
     const dualDiscovery = discoverClientExtension({
-      package: { name: '@r8-pr1-fixture/dual', manifest: manifestOf('dual') },
+      package: manifestOf('dual'),
       selectedBundle: true,
       effectiveRows: boot.rows.map(row => ({ id: row.id, name: row.name })),
     })
