@@ -39,7 +39,11 @@ import { join } from 'node:path'
 import { SplitSmokeAssertionError } from '../../lib/split-smoke-diagnostics.mjs'
 import { waitForC1WorkEvent } from '../../lib/split-smoke-fixtures.mjs'
 import { alive, waitForSurfaceStatus } from '../../lib/split-smoke-processes.mjs'
-import { waitForHostSessionEvent, waitForHostSessionEventAfter } from '../../lib/split-smoke-sessions.mjs'
+import {
+  hostSessionEvents,
+  waitForHostSessionEvent,
+  waitForHostSessionEventAfter,
+} from '../../lib/split-smoke-sessions.mjs'
 import { createC1Scene } from './c1-scene.mjs'
 
 function assert(condition, message) {
@@ -158,11 +162,12 @@ export async function runPromptSessionFocusTurnParity(context) {
     clientB.send('pp-b-after-a-exit-step\r')
     await clientB.waitForScreen('pp-b-after-a-exit-step', 'PP B queued the post-exit step', 120_000)
     clientB.send('\x13')
+    const secondTurnBoundary = (hostSessionEvents(dshHome, sessionX) ?? []).length
     writeFileSync(releaseBarrier, '', { mode: 0o600 })
     const frozenRows = await waitForRows(4, 'PP frozen post-exit step request')
     assertRow(frozenRows[3], { focusSection: true, progressSection: false },
       'PP the open Turn kept Focus after the Focus viewer exited mid-Turn')
-    await waitForHostSessionEventAfter(dshHome, sessionX, 0,
+    await waitForHostSessionEventAfter(dshHome, sessionX, secondTurnBoundary,
       event => event.type === 'turn/end', 'PP second turn/end', 120_000)
 
     // B's NEXT Turn (the T+1 after turn/end) is ordinary: B is a Full-only
@@ -205,11 +210,12 @@ export async function runPromptSessionFocusTurnParity(context) {
       'PP Client C must be a fresh live business PID')
     clientC.send('/display focus\r')
     await clientC.waitForScreen('Display: focus.', 'PP C applied the Focus display preset', 60_000)
+    const cTurnBoundary = (hostSessionEvents(dshHome, sessionX) ?? []).length
     clientC.send('pp-c-x-turn\r')
     const cRows = await waitForRows(7, 'PP fresh Peer Turn request')
     assertRow(cRows[6], { focusSection: true, progressSection: false },
       'PP fresh Peer Focus view decided its own Turn')
-    await waitForHostSessionEventAfter(dshHome, sessionX, 0,
+    await waitForHostSessionEventAfter(dshHome, sessionX, cTurnBoundary,
       event => event.type === 'turn/end', 'PP fresh Peer turn/end', 120_000)
     await assertHostIdentityKept(host, hostBefore, 'PP Host after the full scene')
 
