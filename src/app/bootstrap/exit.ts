@@ -82,24 +82,22 @@ export function formatDaemonDetachHint(facts: {
 }
 
 /**
- * Whether a daemon resume hint must pin the backend. The Client launch
- * envelope records the ONE frozen backend decision (`value` + `source`); only
- * a Profile-persisted daemon backend can be resumed by the plain command. An
- * environment override (or an unrecorded decision) must be carried explicitly,
- * because `DSH_PI_TUI_BACKEND` is deliberately cleared in the Client and is
- * never written back to the Profile.
- * @param raw - the `SPLIT_PROCESS_CLIENT_LAUNCH_BACKEND` JSON, if recorded.
+ * Whether a daemon resume hint must pin `DSH_PI_TUI_BACKEND=daemon`.
+ *
+ * The question is what the NEXT launch will actually pick, NOT why THIS Client
+ * started. A verified `daemon → direct` save (this PR's core path) changes the
+ * persisted Profile while the old daemon Host keeps running, so the frozen
+ * launch envelope can no longer answer it: a plain `dsh --profile …` would
+ * cold-launch Direct and never reconnect to the Host that Leave kept alive.
+ * Only a CURRENT authoritative `daemon` may be resumed by the plain command;
+ * `direct` or an unreadable/unknown backend must carry the explicit override.
+ * @param currentBackend - the authoritative persisted Backend at exit time.
  * @returns true when the resume command needs `DSH_PI_TUI_BACKEND=daemon`.
  */
-export function daemonResumeBackendOverride(raw: string | undefined): boolean {
-  if (raw === undefined || raw === '') return true
-  try {
-    const parsed = JSON.parse(raw) as { readonly value?: unknown; readonly source?: unknown }
-    return !(parsed.value === 'daemon' && parsed.source === 'profile')
-  } catch {
-    // An unparseable record cannot prove the Profile is daemon: fail safe.
-    return true
-  }
+export function daemonResumeBackendOverride(currentBackend: 'direct' | 'daemon' | undefined): boolean {
+  // Unknown/unready is never proof that the Profile still selects daemon: a
+  // plain command could silently cold-launch Direct, so fail safe and pin.
+  return currentBackend !== 'daemon'
 }
 
 /** POSIX-safe single-argument quoting for a copy-paste shell hint. */
@@ -154,6 +152,14 @@ export interface ExitControllerDeps {
    * same memoized owner. Never called for Leave/Stay/ordinary exits.
    */
   releaseTransport?(): Promise<void>
+  /**
+   * M6 UX PR2 (RFL-017): the ONE authoritative whole-Host stop outcome that
+   * drove this exit, including the local refusals that never reached the
+   * control plane (unproven terminal restore, no admin capability). The hint
+   * consumes THIS result, so a refused Stop can never read as an ordinary
+   * Leave. Called at most once and only when a Stop verdict was committed.
+   */
+  hostStopOutcome?(outcome: { readonly confirmed: boolean; readonly detail?: string }): void
   /**
    * M6 UX PR2 (N1): whether the ONE teardown PROVED the terminal restored.
    * The confirmed whole-Host Stop is a destructive admin action, so it runs
@@ -292,6 +298,16 @@ export function createExitController(deps: ExitControllerDeps): {
             safeDiag(deps.diag, 'error', 'daemon host stop failed', { error: safeErrorMessage(adminError) })
             hostStop = { code: 4, detail: 'the management call failed before the control plane reported a result' }
           }
+        }
+      }
+      // RFL-017: publish the ONE Host Stop outcome (0, refusal, or local
+      // refusal) before the hint reads it. A throwing sink must never skip the
+      // hint/exit steps.
+      if (hostStop !== undefined) {
+        try {
+          deps.hostStopOutcome?.({ confirmed: hostStop.code === 0, ...(hostStop.detail === undefined ? {} : { detail: hostStop.detail }) })
+        } catch {
+          // No lower sink.
         }
       }
       // pi parity: after the terminal restores, print how to re-enter the

@@ -784,6 +784,8 @@ function exitHarness(options: {
   adminStop?: () => Promise<{ code: number; stdout: string; stderr: string }>
   /** N1: the teardown's TTY-release verdict the exit root observes. */
   rendererReleased?: 'released' | 'failed' | undefined
+  /** RFL-017: the ONE authoritative outcome the hint consumes. */
+  hostStopOutcome?: (outcome: { confirmed: boolean; detail?: string }) => void
   /** Whether the surface teardown itself rejects (the renderer release failed). */
   cleanupRejects?: boolean
 } = {}) {
@@ -829,6 +831,7 @@ function exitHarness(options: {
         return await options.adminStop!()
       },
     }),
+    ...(options.hostStopOutcome === undefined ? {} : { hostStopOutcome: options.hostStopOutcome }),
   })
   return { requestExit, calls, exitDone, lines }
 }
@@ -1377,11 +1380,11 @@ test('daemon detach hint: a temporary backend override is preserved and argument
   assert.ok(!persisted.includes('DSH_PI_TUI_BACKEND'), 'a Profile-persisted daemon needs no override')
   const quoted = formatDaemonDetachHint({ profile: "team's profile", sessionId: 'session 42', workStopped: false, backendOverride: true })
   assert.match(quoted, /--profile 'team'\\''s profile' --session 'session 42'/u)
-  assert.equal(daemonResumeBackendOverride(undefined), true)
-  assert.equal(daemonResumeBackendOverride(''), true)
-  assert.equal(daemonResumeBackendOverride('{"value":"daemon","source":"env"}'), true)
-  assert.equal(daemonResumeBackendOverride('{"value":"daemon","source":"profile"}'), false)
-  assert.equal(daemonResumeBackendOverride('not-json'), true)
+  // RFL-016: the pin answers what the NEXT launch picks, from the CURRENT
+  // authoritative backend — never the frozen launch envelope.
+  assert.equal(daemonResumeBackendOverride('daemon'), false, 'a still-daemon Profile resumes with the plain command')
+  assert.equal(daemonResumeBackendOverride('direct'), true, 'a verified daemon→direct save must still pin daemon to reach the old Host')
+  assert.equal(daemonResumeBackendOverride(undefined), true, 'an unknown backend is never proof of daemon: pin')
 })
 
 test('classifyExitIntent: the frozen decision matrix, unknown never idle', () => {
@@ -2171,4 +2174,60 @@ test('the lifecycle reports the TTY-release half separately from the batch', asy
     await new Promise(resolve => setImmediate(resolve))
     assert.equal(lifecycle.surfaceReleased(), 'failed', 'a rejected release is NOT a granted terminal')
   }
+})
+
+test('a refused Host stop publishes the SAME unconfirmed outcome the hint prints (RFL-017)', async () => {
+  const outcomes: Array<{ confirmed: boolean; detail?: string }> = []
+  const { requestExit, exitDone } = exitHarness({
+    rendererReleased: 'failed',
+    cleanupRejects: true,
+    adminStop: async () => ({ code: 0, stdout: '', stderr: '' }),
+    hostStopOutcome: outcome => { outcomes.push(outcome) },
+  })
+  requestExit({ hostStopRequested: true })
+  assert.equal(await exitDone, 4)
+  assert.equal(outcomes.length, 1, 'exactly ONE authoritative outcome reaches the hint fact')
+  assert.equal(outcomes[0]!.confirmed, false)
+  assert.match(outcomes[0]!.detail ?? '', /terminal was not restored/u)
+  const hint = formatDaemonDetachHint({ profile: 'p', sessionId: 's', workStopped: false, hostStop: outcomes[0] })
+  assert.match(hint, /Daemon Host stop was not confirmed: the terminal was not restored, so the Profile Host was left running/u,
+    'the user-visible hint says the stop was NOT confirmed and why')
+})
+
+test('a confirmed Host stop publishes the confirmed outcome the hint prints (RFL-017)', async () => {
+  const outcomes: Array<{ confirmed: boolean; detail?: string }> = []
+  const { requestExit, exitDone } = exitHarness({
+    rendererReleased: 'released',
+    adminStop: async () => ({ code: 0, stdout: '', stderr: '' }),
+    hostStopOutcome: outcome => { outcomes.push(outcome) },
+  })
+  requestExit({ hostStopRequested: true })
+  assert.equal(await exitDone, 0)
+  assert.deepEqual(outcomes, [{ confirmed: true }])
+  const hint = formatDaemonDetachHint({ profile: 'p', sessionId: 's', workStopped: false, hostStop: outcomes[0] })
+  assert.match(hint, /Daemon Host stopped for this Profile\./u)
+})
+
+test('a verified daemon→direct Leave pins the daemon backend in the resume command (RFL-016)', () => {
+  // 1. The Client launched from a Profile-persisted `daemon` backend: the plain
+  //    command is a valid resume for the old Host.
+  const before = formatDaemonDetachHint({
+    profile: 'pi-tui-dev',
+    sessionId: 'session-42',
+    workStopped: false,
+    backendOverride: daemonResumeBackendOverride('daemon'),
+  })
+  assert.ok(!before.includes('DSH_PI_TUI_BACKEND'), 'a still-daemon Profile needs no override')
+
+  // 2. The user's verified daemon→direct save has changed the Profile, and Leave
+  //    keeps the OLD daemon Host alive. A plain `dsh --profile …` would now
+  //    cold-launch Direct and never reconnect: the hint must pin daemon.
+  const after = formatDaemonDetachHint({
+    profile: 'pi-tui-dev',
+    sessionId: 'session-42',
+    workStopped: false,
+    backendOverride: daemonResumeBackendOverride('direct'),
+  })
+  assert.match(after, /DSH_PI_TUI_BACKEND=daemon dsh --profile pi-tui-dev --session session-42/u)
+  assert.match(after, /The daemon Host was not stopped by this action\./u)
 })

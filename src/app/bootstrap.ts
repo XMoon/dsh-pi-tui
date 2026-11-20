@@ -3448,7 +3448,11 @@ export function applyRunnerWithRuntime(
             profile,
             sessionId,
             workStopped: exitWorkStopped,
-            backendOverride: daemonResumeBackendOverride(process.env.SPLIT_PROCESS_CLIENT_LAUNCH_BACKEND),
+            // RFL-016: what the NEXT launch picks now — a verified
+            // daemon→direct save can have moved the Profile while the old Host
+            // keeps running, so the launch envelope is the wrong fact.
+            backendOverride: daemonResumeBackendOverride(backend.config.backendStartupPreference.read()?.backend),
+
             ...(exitHostStop === undefined ? {} : { hostStop: exitHostStop }),
           })
         }
@@ -3465,18 +3469,10 @@ export function applyRunnerWithRuntime(
       ...(profileDaemonAdmin === undefined
         ? {}
         : {
-            adminStop: async () => {
-              try {
-                const result = await profileDaemonAdmin!.run('stop')
-                exitHostStop = result.code === 0
-                  ? { confirmed: true }
-                  : { confirmed: false, detail: adminStopRefusalDetail(result) }
-                return result
-              } catch (error) {
-                exitHostStop = { confirmed: false, detail: 'the management call failed before the control plane reported a result' }
-                throw error
-              }
-            },
+            adminStop: async () => await profileDaemonAdmin!.run('stop'),
+            // RFL-017: the exit root publishes the ONE authoritative outcome
+            // (manager result AND every local refusal) to the same hint fact.
+            hostStopOutcome: (outcome) => { exitHostStop = outcome },
           }),
     })
     /**
