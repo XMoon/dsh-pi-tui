@@ -1945,11 +1945,21 @@ test('Host path completion inserts literal Shell words before real command execu
     await vt.waitForRender()
     vt.sendInput('!')
     vt.sendInput(`${item.command} ${item.quote}${item.prefix}`)
+    const typed = app.seatTextForTest()
     vt.sendInput('\t')
-    await vt.waitForRender()
+    // The Host completion is a real asynchronous finder request: wait for its
+    // own settled outcome (a dropdown or an applied value), never for one
+    // render tick. A 20 ms frame can beat the finder on a loaded machine.
+    await pollUntil(
+      () => app.seatTextForTest() !== typed || app.isShowingAutocompleteForTest(),
+      `Host path completion to settle for ${item.prefix}`,
+    )
     if (app.isShowingAutocompleteForTest()) {
       vt.sendInput('\t')
-      await vt.waitForRender()
+      await pollUntil(
+        () => app.seatTextForTest() !== typed,
+        `Host path completion to apply for ${item.prefix}`,
+      )
     }
     const body = app.seatTextForTest()
     const expectedPath = item.expectedPath

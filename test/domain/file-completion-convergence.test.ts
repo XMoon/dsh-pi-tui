@@ -750,6 +750,13 @@ test('review finding (round 5): fd matches case-insensitively (aligned with the 
   // signs the lowercase basename as a prefix match (80).
   assert.equal(scorePathCandidate({ path: 'foo.txt', kind: 'file' }, 'FOO'.toLowerCase()), 80,
     'the shared ranking must be case-insensitive')
+  // This real-fd half needs TWO distinct directory entries whose only difference
+  // is case. A case-insensitive fixture filesystem (the default APFS install)
+  // aliases them into one inode, so the premise itself cannot be built there.
+  if (statSync(join(root, 'Foo.txt')).ino === statSync(join(root, 'foo.txt')).ino) {
+    t.skip('the fixture filesystem is case-insensitive: distinct case variants cannot coexist')
+    return
+  }
   // REAL fd-backed path: the default DirectHostFilePort probes PATH (fd
   // then fdfind — this machine has /usr/bin/fdfind), so the -i flag is
   // what produces both matches. A fallback-only null would pass even

@@ -737,7 +737,7 @@ test('an APPLIED real-Host version exemption reaches the card Detail without an 
   'the applied real-Host exemption is visible on the card')
 })
 
-test('a real Host platform refusal stays out of the default list and never installs', async (t) => {
+test('a real Host platform refusal stays out of the default list and never installs', { skip: process.platform === 'darwin' ? 'the shipped CUA bundle is supported on macOS; this case proves the Linux Host platform refusal' : false }, async (t) => {
   const life = testLifecycle(t)
   const workRoot = life.tempDir('cua-default-')
   const seeded = seedProfile(workRoot)
@@ -796,7 +796,7 @@ test('a real Host platform refusal stays out of the default list and never insta
   assert.equal(codex.installBlockedReason, undefined)
 })
 
-test('a selected bundle the Host refuses is disabled through the Host and leaves the default list', async (t) => {
+test('a selected bundle is disabled through the Host and its default-listing state follows Host support', async (t) => {
   const life = testLifecycle(t)
   const workRoot = life.tempDir('cua-selected-')
   const seeded = seedProfile(workRoot, [CUA_BUNDLE])
@@ -840,7 +840,19 @@ test('a selected bundle the Host refuses is disabled through the Host and leaves
   await page.harness.waitForFrame()
   page.harness.vt.sendInput('\x1b')
   await page.harness.waitForFrame()
-  await page.waitFor(() => !page.frame().includes(painted), 'the default list hides the unselected bundle')
+  if (refused) {
+    await page.waitFor(() => !page.frame().includes(painted), 'the default list hides the unselected bundle')
+  } else {
+    // A supported CUA bundle is a shipped Optional member, so unselecting it
+    // returns it to the Host default listing instead of hiding it. The list row
+    // paints the package name while the Detail paints the title, so the model's
+    // Host default-listing fact is the stable assertion here.
+    await page.waitFor(() => {
+      const card = cardOf()
+      return card !== undefined && card.listedByDefault !== false
+    }, 'the supported unselected bundle stays in the default listing')
+    assert.equal(cardOf()!.enabled, false, 'the supported bundle stays disabled after the Host disable')
+  }
 
   // The card is NOT deleted from the Host catalog / model: an explicit search
   // reads it again with its Host facts intact, and no hidden card becomes the
@@ -857,19 +869,20 @@ test('a profile-owned bundle the Host refuses keeps Disable and the Host-permitt
   const workRoot = life.tempDir('cua-profile-owned-')
   // CUA is a SHIPPED Optional bundle in rc.2, so a profile-owned platform
   // refusal is proven with an independent profile package instead.
-  const PROFILE_REFUSED_BUNDLE = '@fixture/darwin-only-profile-bundle'
+  const PROFILE_REFUSED_BUNDLE = '@fixture/aix-only-profile-bundle'
   const seeded = seedProfile(workRoot, [PROFILE_REFUSED_BUNDLE])
   const profileDir = seeded.profileContext.dir as string
   // Narrow deterministic INPUT control (not darwin hardware evidence): this
-  // profile's OWN dependency declares the platform, so the REAL Host reports
-  // availability:'profile', installed:true, selected:true, removable:true and
-  // the unsupported-platform error on every platform.
+  // profile's OWN dependency declares an AIX-only platform, so the REAL Host
+  // reports availability:'profile', installed:true, selected:true,
+  // removable:true and the unsupported-platform error on every test Host
+  // (Linux, macOS and Windows).
   const packageDir = join(profileDir, 'node_modules', PROFILE_REFUSED_BUNDLE)
   mkdirSync(packageDir, { recursive: true })
   writeFileSync(join(packageDir, 'package.json'), JSON.stringify({
     name: PROFILE_REFUSED_BUNDLE,
     version: '1.0.0',
-    dsh: { bundle: { patch: [], platforms: ['darwin'] } },
+    dsh: { bundle: { patch: [], platforms: ['aix'] } },
   }, null, 2))
   writeFileSync(join(profileDir, 'package.json'), JSON.stringify({
     name: 'catalog-fixture-profile',

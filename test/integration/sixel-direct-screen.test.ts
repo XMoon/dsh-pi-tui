@@ -2141,25 +2141,39 @@ test('a real top-cropped transcript image maps the visible rows and opens the di
   const hidden = scrolled.scrollTop - tokenRow
   assert.ok(hidden >= 3 && hidden < 12, `the viewport top is inside the image (hidden ${hidden}): ${JSON.stringify(scrolled)}`)
 
-  // The crop encode is still pending: no committed body exists yet, and a press
-  // on the viewport's first row must stay inert. The visible auto scrollbar is
-  // no longer a paint prerequisite (X074 fix).
+  // The pending-window assertions need the encoder to still be in flight. A fast
+  // native encoder (notably macOS arm64) can commit its full/crop raster before
+  // this point; the committed-frame assertions below still prove the product
+  // contract, so only the unobservable pending window is skipped there.
   const pending = readImage()
-  assert.equal(pending.attachment.bodyEnd, pending.attachment.bodyStart, 'no crop body is committed while it is pending')
-  assert.equal(pending.attachment.bodyStart, pending.attachment.infoRow + 1,
-    'the row map still starts at the un-cropped body')
-  const topRow = projection.fullscreenPaintSnapshot.headerHeight + 1
-  terminal.sendInput(`\x1b[<0;1;${topRow}M`)
-  terminal.sendInput(`\x1b[<0;1;${topRow}m`)
-  assert.equal(workspaceOpen(), false, 'a pending crop row opens no Viewer')
+  if (pending.attachment.bodyEnd === pending.attachment.bodyStart) {
+    // The crop encode is still pending: no committed body exists yet, and a press
+    // on the viewport's first row must stay inert. The visible auto scrollbar is
+    // no longer a paint prerequisite (X074 fix).
+    assert.equal(pending.attachment.bodyStart, pending.attachment.infoRow + 1,
+      'the row map still starts at the un-cropped body')
+    const topRow = projection.fullscreenPaintSnapshot.headerHeight + 1
+    terminal.sendInput(`\x1b[<0;1;${topRow}M`)
+    terminal.sendInput(`\x1b[<0;1;${topRow}m`)
+    assert.equal(workspaceOpen(), false, 'a pending crop row opens no Viewer')
 
-  // Wait for the REAL pending observation (a framePainted with grant+pendingCrop
-  // and no painted body). Scrollbar visibility is irrelevant: the committed crop
-  // may land while the transient bar is still visible.
-  await until(() => pendingObserver.clicked(), 'the granted crop encode to be pending', 30_000)
-  await tick(30)
-  assert.equal(workspaceOpen(), false, 'a granted but uncommitted crop click opens no Viewer')
-  await settlePointerWindow()
+    // Wait for the REAL pending observation (a framePainted with grant+pendingCrop
+    // and no painted body). Scrollbar visibility is irrelevant: the committed crop
+    // may land while the transient bar is still visible.
+    await until(() => pendingObserver.clicked(), 'the granted crop encode to be pending', 30_000)
+    await tick(30)
+    assert.equal(workspaceOpen(), false, 'a granted but uncommitted crop click opens no Viewer')
+    await settlePointerWindow()
+  } else {
+    // The raster committed before the pending window was observable. Wait for
+    // the real crop body, then continue through every committed-frame assertion.
+    await until(() => {
+      const current = readImage()
+      return current.crop >= 3 && current.attachment.bodyEnd > current.attachment.bodyStart
+    }, 'the top crop to commit', 30_000)
+    assert.equal(workspaceOpen(), false, 'a fast pending crop click never opens a Viewer')
+    await settlePointerWindow()
+  }
 
   const painted = readImage()
   const paintedRows = painted.attachment.bodyEnd - painted.attachment.bodyStart

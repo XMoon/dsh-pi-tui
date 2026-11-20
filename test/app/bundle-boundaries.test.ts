@@ -461,20 +461,24 @@ test('the release Experimental members paint their real TUI surface and platform
     return frame.includes('Experimental') && !frame.includes('Loading plugins…')
   }, 'the first painted Plugin Manager catalog')
 
-  // The Host hides the CUA entry by default; the initial painted list advertises
-  // explicit search, and paging the list never paints the hidden card.
-  const firstPage = plain(vt.getViewport())
-  assert.match(firstPage, /searches hidden official/u, 'the initial list advertises explicit search')
-  let defaultList = firstPage
-  for (let page = 0; page < 12; page += 1) {
-    const before = plain(vt.getViewport())
-    vt.sendInput('\x1b[6~')
-    await renderFrame()
-    const after = plain(vt.getViewport())
-    if (after === before) break
-    defaultList += `\n${after}`
+  // An UNSUPPORTED Host hides the CUA entry by default; the initial painted list
+  // advertises explicit search and paging never paints the hidden card. A
+  // supported (macOS) Host lists its shipped CUA bundle and therefore has no
+  // hidden-official hint to advertise.
+  if (process.platform !== 'darwin') {
+    const firstPage = plain(vt.getViewport())
+    assert.match(firstPage, /searches hidden official/u, 'the initial list advertises explicit search')
+    let defaultList = firstPage
+    for (let page = 0; page < 12; page += 1) {
+      const before = plain(vt.getViewport())
+      vt.sendInput('\x1b[6~')
+      await renderFrame()
+      const after = plain(vt.getViewport())
+      if (after === before) break
+      defaultList += `\n${after}`
+    }
+    assert.doesNotMatch(defaultList, /dsh-cua-bundle/u, 'the Host-hidden CUA entry is absent from the default list')
   }
-  assert.doesNotMatch(defaultList, /dsh-cua-bundle/u, 'the Host-hidden CUA entry is absent from the default list')
 
   for (const name of RELEASE_FRAME_NAMES) {
     // Exact-name search from the page's own search seat.

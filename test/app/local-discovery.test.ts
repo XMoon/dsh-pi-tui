@@ -72,6 +72,11 @@ import { observeAuthenticatedLocalAcpStatus } from '../../src/app/remote-process
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
 
+/** Facts whose owner is the Linux /proc + abstract-socket implementation. */
+const LINUX_ONLY = Object.freeze({
+  skip: process.platform !== 'linux' ? 'the Linux local-scope implementation requires Linux' : false,
+})
+
 interface Fixture {
   readonly root: string
   readonly home: string
@@ -330,7 +335,7 @@ test('existing registry/launch modes are not part of the read policy while new w
   }
 })
 
-test('a final registry symlink is rejected while a symlinked run chain is accepted', t => {
+test('a final registry symlink is rejected while each platform enforces its run-chain policy', t => {
   const value = fixture(t)
   try {
     const scope = scopeFor(value)
@@ -352,11 +357,21 @@ test('a final registry symlink is rejected while a symlinked run chain is accept
       const outside = join(symlinked.root, 'outside-run')
       mkdirSync(outside, { recursive: true, mode: 0o700 })
       symlinkSync(outside, join(symlinked.home, 'run'))
-      // A legal symlink in the user's existing layout is followed; the private
-      // scope directory is created through it.
-      const linkedScope = scopeFor(symlinked)
-      assert.equal(existsSync(join(outside, 'dsh-pi-tui', linkedScope.scopeId)), true)
-      assert.equal(lstatSync(linkedScope.dir).mode & 0o777, 0o700)
+      if (process.platform === 'linux') {
+        // The Linux user layout follows a legal run-root symlink and creates
+        // the private scope directory through it.
+        const linkedScope = scopeFor(symlinked)
+        assert.equal(existsSync(join(outside, 'dsh-pi-tui', linkedScope.scopeId)), true)
+        assert.equal(lstatSync(linkedScope.dir).mode & 0o777, 0o700)
+      } else {
+        // Darwin requires the owned real-directory chain; a symlinked run root
+        // is refused and nothing is created through it.
+        assert.throws(
+          () => scopeFor(symlinked),
+          (error: unknown) => error instanceof LocalScopeError && error.code === 'SCOPE_DIRECTORY_UNSAFE',
+        )
+        assert.equal(existsSync(join(outside, 'dsh-pi-tui')), false)
+      }
     } finally {
       cleanup(symlinked.root)
     }
@@ -570,7 +585,7 @@ test('registry token injection, wrong origin and a launch naming another instanc
   }
 })
 
-test('an existing 0755/0775 run chain is accepted without chmodding and new components are 0700', t => {
+test('an existing 0755/0775 run chain is accepted without chmodding and new components are 0700', LINUX_ONLY, t => {
   const value = fixture(t)
   try {
     const runRoot = join(value.home, 'run')
@@ -600,7 +615,7 @@ test('an existing 0755/0775 run chain is accepted without chmodding and new comp
   }
 })
 
-test('an official DSH home outside the current uid is accepted for read-only inspection', t => {
+test('an official DSH home outside the current uid is accepted for read-only inspection', LINUX_ONLY, t => {
   const rootInfo = lstatSync('/tmp')
   if (rootInfo.uid === process.getuid?.()) {
     t.skip('no root-owned system directory is available')
@@ -1030,7 +1045,7 @@ test('a self-consistent Host build is admitted while a registry/identity build d
 test('the authenticated ACP status observation accepts only this Host instance and fails closed', async t => {
   const value = fixture(t)
   const scope = scopeFor(value)
-  const record = linuxRecordFor(scope)
+  const record = recordFor(scope)
   let instanceId = record.instanceId
   let status: unknown = { state: 'enabled' }
   let reject = false
@@ -1077,7 +1092,7 @@ test('the authenticated ACP status observation accepts only this Host instance a
 test('a status body that fails after the headers is an unprovable undefined, never a rejection', async t => {
   const value = fixture(t)
   const scope = scopeFor(value)
-  const record = linuxRecordFor(scope)
+  const record = recordFor(scope)
   const server = createHttpServer((_request, response) => {
     // Valid 200 + the exact media/cache headers, then a truncated body and a
     // destroyed socket: the read fails mid-stream AFTER the headers.

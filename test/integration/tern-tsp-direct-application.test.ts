@@ -131,7 +131,7 @@ test('a TSP Enter drives a REAL Agent turn and the streamed reply reaches the pa
  * CONTENT (a scripted `xclip` that answers the two questions the real probe
  * asks). DELIBERATELY ABSENT: a physical OS clipboard and a physical Tern GUI.
  */
-test('a real Ctrl+V with an image clipboard lands a composer token and submits a durable image block', async (t) => {
+test('a real Ctrl+V with an image clipboard lands a composer token and submits a durable image block', { skip: process.platform !== 'linux' ? 'the Direct Ctrl+V fixture substitutes an X11 xclip helper; the macOS AppleScript probe is covered by the clipboard unit tests' : false }, async (t) => {
   const { chmodSync, mkdirSync, writeFileSync } = await import('node:fs')
   const { join } = await import('node:path')
   const { testLifecycle } = await import('../support/temp-lifecycle.ts')
@@ -236,7 +236,7 @@ test('a real Ctrl+V with an image clipboard lands a composer token and submits a
  * image, no image notice and no submission. The helper answers the probe with
  * a text payload only, exactly as `wl-paste`/`xclip` do for a text clipboard.
  */
-test('a real Ctrl+V with a TEXT clipboard inserts at the caret and stages no image', async (t) => {
+test('a real Ctrl+V with a TEXT clipboard inserts at the caret and stages no image', { skip: process.platform !== 'linux' ? 'the Direct Ctrl+V fixture substitutes an X11 xclip helper; the macOS AppleScript probe is covered by the clipboard unit tests' : false }, async (t) => {
   const { chmodSync, mkdirSync, writeFileSync } = await import('node:fs')
   const { join } = await import('node:path')
   const { testLifecycle } = await import('../support/temp-lifecycle.ts')
