@@ -7,11 +7,16 @@
  *
  * Coverage (plan §5.3 — adapt the EXISTING pure helpers, never duplicate
  * formatting):
- * - edit/write/apply_patch-style diff cards — the `DiffCallView` is derived
- *   from the call arguments (an edit's old/new strings; a create's oldText
- *   is null), exactly the contract the Host-side presenter declares;
+ * - edit/write/apply_patch-style diff CALL cards — the `DiffCallView` is
+ *   derived from the call arguments (an edit's old/new strings; a create's
+ *   oldText is null), exactly the contract the Host-side presenter declares;
  * - bash/pwsh/terminal execute cards — `TerminalCallView` from the command
  *   and optional description/cwd arguments;
+ * - name-scoped RESULT cards (R11 Web parity, `result()` below): a generic
+ *   applied diff for ANY tool with a valid non-empty `meta.diffs`, a
+ *   write-with-result-path diff for `write` when the result declares a
+ *   non-empty `meta.path`, and a read card for `read` with a valid read call +
+ *   window + file envelope;
  * - everything else stays with the existing Client-side generic fallbacks
  *   (toolCardHeader/compactToolPresentation/read-envelope parsers), which
  *   the render layer already consults when the presenter returns
@@ -50,7 +55,16 @@ const stringOf = (value: unknown): string | undefined =>
 function editDiffView(name: string, args: Record<string, unknown>): DiffCallView | undefined {
   const path = stringOf(args.path) ?? stringOf(args.file_path) ?? stringOf(args.fileName)
   if (path === undefined) return undefined
-  const newText = stringOf(args.new_string) ?? stringOf(args.content) ?? stringOf(args.newText)
+  // A legal EMPTY new text (a write of `''`, or an edit that deletes by
+  // replacing with `''`) is a real value, not an absent one: accept `''` here
+  // (unlike `stringOf`, which rejects it) so an empty-file write or a delete
+  // edit still forms its diff. The `new_string ?? content ?? newText` priority
+  // is unchanged; only the empty-string acceptance differs. The path and old
+  // text keep the `stringOf` rules (an empty path/old is still absent).
+  const newText = typeof args.new_string === 'string' ? args.new_string
+    : typeof args.content === 'string' ? args.content
+    : typeof args.newText === 'string' ? args.newText
+    : undefined
   if (newText === undefined) return undefined
   // An edit carries the prior text; a write/create has none (null), exactly
   // the Host contract's distinction.
@@ -168,80 +182,49 @@ function diffsOf(record: Record<string, unknown>): FileDiff[] | undefined {
 }
 
 /**
- * The diff an EMPTY-diff write metadata record implies, or undefined.
+ * The settled-result view derived from the call NAME plus the tool-authored
+ * result metadata, mirroring the dsh-web Client tool cards (R11 Web parity).
+ * This is NAME-SCOPED Web-like card recognition + a generic applied diff — it
+ * is NOT tool-author identity authentication. A wire name selects the card the
+ * way dsh-web's keyed `renderSlot('tool.call.toolview', …, { entryKey: toolName,
+ * fallback: GenericToolCard })` does; it never proves which Host Tool Definition
+ * actually ran (a plugin may register a tool under a built-in name). The
+ * recognized shapes, in this bridge's fixed precedence (plan Step 1B) — that
+ * ordering is the PLAN's, not a claim that dsh-web orders the same way: a
+ * `read` row that also carries a valid non-empty `meta.diffs` wins the
+ * applied-diff branch here, while dsh-web's keyed `read` slot would show its
+ * Read card (the accepted W11 name-bound difference):
  *
- * An empty `diffs` list has two legitimate origins in the write projection: a
- * create (no before-image) and an overwrite that wrote the identical content
- * (the patch has no hunks). Unlike the other branches, this one does not
- * REPORT what the metadata says — it FABRICATES a `newText` from the call
- * arguments — so it demands the tool's write contract rather than a mere field
- * collision: `operation` must be one of the two values that projection
- * defines, `diffs` must be the empty list, and the call must carry the string
- * `content` the diff is built from.
+ * - a generic APPLIED DIFF: ANY tool name whose result metadata carries a valid
+ *   NON-EMPTY `diffs` list renders those recorded hunks — dsh-web's
+ *   `GenericToolCard` calls `diffCardModel` the same way. There is NO
+ *   text-content gate: an applied diff is REPORTED by the metadata, so empty or
+ *   non-text result content still shows the recorded hunks (the earlier single
+ *   non-empty text requirement was a divergence from Web, now removed).
+ * - a WRITE-with-result-path diff (branch B): ONLY `name === 'write'`, when its
+ *   SUCCESS result declares a non-empty `meta.path` and carries no valid
+ *   non-empty `diffs`, rebuilds the diff from the call `content` with its PATH
+ *   taken from the RESULT metadata — the official `write.presentResult`
+ *   fallback. Because the path is a tool-authored result fact, it may prove
+ *   `targetKind:path`. A write with NO result path yields NO Result View (the
+ *   args-derived diff is shown by the `call()` fallback), so an unproven
+ *   `args.file_path` never becomes a synthetic result path. Keyed on the write
+ *   contract by NAME (non-empty `file_path`, string `content`, `''` allowed),
+ *   never on a metadata `operation` marker; `edit` gets no such fabrication.
+ * - a READ card: ONLY `name === 'read'` with a valid read CALL (a non-empty
+ *   `file_path`, optional `offset`/`limit` as positive integers — dsh-web's
+ *   `validReadCall`), a valid read window metadata, and exactly one
+ *   `<type>file</type>` envelope (dsh-web's `read-card-model`).
  *
- * BOUNDARY, deliberately recorded here: that shape is specific enough to be
- * worth honouring, but it is NOT a globally unique tool identity. `meta` is
- * arbitrary tool-private JSON with no namespace, so a third-party tool can
- * legitimately emit the very same fields and be rendered as a file diff. The
- * Owner has accepted that bound for this PR and for the not-yet-public Remote
- * branch, because the worst outcome is a read-only presentation, and because a
- * real discriminator would need a Host/Wire-level type this change must not
- * add. Re-open that decision when the Remote branch opens publicly or a real
- * third-party collision appears — and then review the whole Remote result-
- * presenter provenance mechanism, not just this one field.
- *
- * The path follows the Host presenter exactly: the metadata's own path when it
- * has one, otherwise the call's `file_path`. That second arm is reachable only
- * for OLD or malformed replay metadata — a current write always projects a
- * canonical path — and the Host rebuilds a diff for it, so declining it here
- * would make a replayed session diverge from Direct.
- */
-function emptyWriteDiff(
-  record: Record<string, unknown>,
-  args: Record<string, unknown> | undefined,
-): FileDiff[] | undefined {
-  const operation = record['operation']
-  if (operation !== 'create' && operation !== 'update') return undefined
-  const diffs = record['diffs']
-  if (!Array.isArray(diffs) || diffs.length !== 0) return undefined
-  const content = args?.['content']
-  if (typeof content !== 'string') return undefined
-  const metaPath = record['path']
-  const argPath = args?.['file_path']
-  const path = typeof metaPath === 'string' && metaPath !== ''
-    ? metaPath
-    : typeof argPath === 'string' ? argPath : undefined
-  if (path === undefined || path === '') return undefined
-  return [{ path, oldText: null, newText: content }]
-}
-
-/**
- * The settled-result view derived from the TOOL-AUTHORED result metadata,
- * mirroring the two Host `presentResult` implementations the Client cannot
- * call:
- *
- * - the DIFF shape mirrors the mutation tools. `dsh-tool-fs` records
- *   `{ operation, path, diffs }` for a write and `{ path, diffs }` for an
- *   edit, and emits `diffs: []` in TWO cases: the write CREATED the file
- *   (`before === null`), or it overwrote it with identical content (no hunks).
- *   Its write presenter then falls back to a diff built from the call
- *   arguments, while its edit presenter declines. The fallback is keyed on the
- *   tool-authored `operation` field — NOT on the tool name, which a plugin can
- *   shadow.
- * - the READ shape mirrors the read tool: the metadata must survive the same
- *   window validation, and the result content must be exactly one
- *   `<type>file</type>` envelope. The envelope body comes back as `content`,
- *   the degradation path the SDK documents for a UI without a rich read card.
- *
- * For every RECOGNIZED first-party shape this mirrors the Host presenter
- * exactly, so the two branches agree on those. It is NOT a universal parity
- * claim: this reader is name-agnostic and decodes by SHAPE, while the Host
- * calls the definition that actually ran. A structurally read-shaped payload
- * on some other tool's result is therefore decoded as a read card here even
- * though that tool's own presenter would decline it — the accepted structural
- * boundary recorded on `emptyWriteDiff`, not a first-party defect.
+ * A FAILED call yields no view (the tool's own `presentResult` returns none).
+ * Anything unrecognized is `undefined`, keeping the existing generic result
+ * renderers authoritative and preserving the raw result/error. This reader
+ * decodes by NAME + shape and never consults a Host registry. A third-party
+ * tool that shadows the `read`/`write` name can still match these rows — the
+ * accepted name-based bound, not a source-identity claim.
  */
 function metaPathView(
+  name: string,
   meta: unknown,
   content: readonly ContentBlock[],
   isError: boolean,
@@ -249,50 +232,83 @@ function metaPathView(
 ): ToolResultView | undefined {
   // The tool's own Host `presentResult` returns no view for a FAILED call.
   if (isError) return undefined
-  if (typeof meta !== 'object' || meta === null || Array.isArray(meta)) return undefined
-  const record = meta as Record<string, unknown>
+  const record = typeof meta === 'object' && meta !== null && !Array.isArray(meta)
+    ? meta as Record<string, unknown>
+    : undefined
 
-  // The result content must be the ONE text block the view describes.
-  const only = content.length === 1 ? content[0] : undefined
-  if (only === undefined || only.type !== 'text') return undefined
-  const text = only.text
+  // A generic applied diff (ANY tool name): a valid NON-EMPTY `diffs` list in
+  // the result metadata, exactly as the tool's own `diffsFromMeta` narrows it.
+  // The hunks are reported by the metadata, so no text-content gate applies
+  // (Web `diffCardModel` parity).
+  const diffs = record === undefined ? undefined : diffsOf(record)
+  if (diffs !== undefined) return { card: 'diff', diffs }
 
-  const diffs = diffsOf(record)
-  if (diffs !== undefined) {
-    // The diff view describes the files the call CHANGED; the result content
-    // must be the one block those changes are reported in.
-    if (text.trim() === '') return undefined
-    return { card: 'diff', diffs }
+  // Branch B — "write with result path": a SUCCESS `write` whose RESULT
+  // declares a non-empty `meta.path` rebuilds its diff from the call `content`
+  // but takes its PATH from the RESULT metadata (a tool-authored fact, so it
+  // may prove `targetKind:path` via the exact/relativized match). This is the
+  // official `write.presentResult` fallback, keyed on the write contract by
+  // NAME (a non-empty `file_path` and a string `content` argument, `''`
+  // allowed), never on a metadata `operation`/`diffs` marker a foreign tool
+  // could emit. A write with NO result path yields NO Result View here — the
+  // args-derived diff is shown by the `call()`/renderToolBody fallback instead,
+  // so an unproven `args.file_path` never becomes a synthetic result path. The
+  // result path wins over a different `args.file_path` (`pathFromMeta(meta)`).
+  if (name === 'write') {
+    const filePath = args?.['file_path']
+    const written = args?.['content']
+    const metaPath = record?.['path']
+    if (typeof filePath === 'string' && filePath.trim() !== ''
+        && typeof written === 'string'
+        && typeof metaPath === 'string' && metaPath !== '') {
+      return { card: 'diff', diffs: [{ path: metaPath, oldText: null, newText: written }] }
+    }
   }
-  // An empty diff list (a create, or an overwrite that changed nothing). The
-  // tool's own write presenter rebuilds that diff from its arguments.
-  const rebuilt = emptyWriteDiff(record, args)
-  if (rebuilt !== undefined) return { card: 'diff', diffs: rebuilt }
 
-  const readMeta = readMetaOf(record)
-  if (readMeta === undefined) return undefined
-  const envelope = /^<path>[^\n]*<\/path>\n<type>file<\/type>\n<content>\n([\s\S]*)\n<\/content>$/u.exec(text)
-  if (envelope === null) return undefined
-  return {
-    card: 'read',
-    path: readMeta.path,
-    offset: readMeta.offset,
-    lines: readMeta.lines,
-    totalLines: readMeta.totalLines,
-    ...readMeta.lang === undefined ? {} : { lang: readMeta.lang },
-    content: [{ type: 'text', text: envelope[1] ?? '' }],
+  // The read card (ONLY `read`): a valid read CALL first (dsh-web
+  // `validReadCall`), then the read window metadata, then exactly one file
+  // envelope. A merged read group's literal `'2 files'` args never parse to an
+  // object, so it is refused upstream; a `read` with a missing/blank
+  // `file_path` or a non-positive `offset`/`limit` is refused here.
+  if (name === 'read') {
+    const filePath = args?.['file_path']
+    if (typeof filePath !== 'string' || filePath.trim() === '') return undefined
+    const offset = args?.['offset']
+    if (offset !== undefined && (typeof offset !== 'number' || !Number.isInteger(offset) || offset < 1)) return undefined
+    const limit = args?.['limit']
+    if (limit !== undefined && (typeof limit !== 'number' || !Number.isInteger(limit) || limit < 1)) return undefined
+    const readMeta = record === undefined ? undefined : readMetaOf(record)
+    if (readMeta === undefined) return undefined
+    // The result content must be the ONE text block the read tool writes.
+    const only = content.length === 1 ? content[0] : undefined
+    if (only === undefined || only.type !== 'text') return undefined
+    const envelope = /^<path>[^\n]*<\/path>\n<type>file<\/type>\n<content>\n([\s\S]*)\n<\/content>$/u.exec(only.text)
+    if (envelope === null) return undefined
+    return {
+      card: 'read',
+      path: readMeta.path,
+      offset: readMeta.offset,
+      lines: readMeta.lines,
+      totalLines: readMeta.totalLines,
+      ...readMeta.lang === undefined ? {} : { lang: readMeta.lang },
+      content: [{ type: 'text', text: envelope[1] ?? '' }],
+    }
   }
+
+  return undefined
 }
 
 /**
  * Build the Client-derived presenter (Remote branch). The `result` half reads
- * ONLY the tool-authored result metadata, so a Remote read row can reach the
- * same path semantics as a Direct one without a Host field and without
- * inferring by tool name. Every other settled-result rendering the TUI needs
- * already has a Client-side derivation (read envelopes, result text lines,
- * the compact summaries), so a Host result view is never required — an
- * absent, foreign or inconsistent metadata yields `undefined` and keeps
- * those paths authoritative.
+ * the wire NAME plus the tool-authored result metadata — a bounded, name-scoped
+ * projection that lets a Remote `read`/`write` row reach the same card a Direct
+ * one shows, without a Host field and without a Host registry lookup. This is
+ * Web-like card RECOGNITION (dsh-web keys its Client slots by wire name too),
+ * not tool-author authentication: a plugin that shadows `read`/`write` can
+ * still match. Every other settled-result rendering the TUI needs already has
+ * a Client-side derivation (read envelopes, result text lines, the compact
+ * summaries), so a Host result view is never required — an absent, foreign or
+ * inconsistent metadata yields `undefined` and keeps those paths authoritative.
  */
 export function createClientToolPresenter(): ToolPresenter {
   return {
@@ -312,16 +328,17 @@ export function createClientToolPresenter(): ToolPresenter {
       if (name === 'exit_plan_mode') return planReviewView(args)
       return undefined
     },
-    result(_name: string, argsRaw: string, result: { readonly content: readonly ContentBlock[]; readonly isError: boolean; readonly meta?: unknown }): ToolResultView | undefined {
+    result(name: string, argsRaw: string, result: { readonly content: readonly ContentBlock[]; readonly isError: boolean; readonly meta?: unknown }): ToolResultView | undefined {
       // The Direct bridge parses the args JSON BEFORE consulting the tool, so
       // a row whose args are not a JSON object (a merged read group's literal
       // `'2 files'`) never reaches a Host `presentResult` at all. The Client
       // derivation must apply the SAME gate, or the two branches would produce
       // different views for the same row. The parsed args are also what a
-      // write's create-fallback diff is rebuilt from.
+      // write's fallback diff is rebuilt from and what a read's `validReadCall`
+      // checks.
       const args = parseArgs(argsRaw)
       if (args === undefined) return undefined
-      return metaPathView(result.meta, result.content, result.isError, args)
+      return metaPathView(name, result.meta, result.content, result.isError, args)
     },
   }
 }
