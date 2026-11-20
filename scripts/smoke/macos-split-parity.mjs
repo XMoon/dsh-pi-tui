@@ -2518,6 +2518,16 @@ async function runD4LaunchdScene({ installation, workRoot, report, start, projec
     .replace(/<key>StandardErrorPath<\/key>\n  <string>[^<]*<\/string>/u, `<key>StandardErrorPath</key>\n  <string>${customStderr}</string>`)
     .replace('</dict>\n</plist>', '</dict>\n<!-- D4L user runtime comment -->\n</plist>')
   assert(customPlist !== plistText, 'L02-CUSTOM: could not build the user-customized plist fixture')
+  // F1 freshness proof: launchd first holds the DEFAULT definition (loaded,
+  // not running). The user then edits the on-disk plist; `daemon start` must
+  // load the CURRENT user definition instead of kickstarting the cached one.
+  writeFileSync(plistPath, plistText, { mode: 0o600 })
+  recordPlistIdentity(label, plistPath)
+  const cachedBootstrap = runLaunchctlCommand(['bootstrap', `gui/${String(uid)}`, plistPath])
+  assert(cachedBootstrap.status === 0, 'L02-CUSTOM: bootstrapping the default plist failed')
+  const cachedPrint = launchctlJobPrint(label)
+  assert(cachedPrint.status === 0 && !cachedPrint.stdout.includes('D4L_CUSTOM_FLAG => on'),
+    'L02-CUSTOM: the cached default job must not already carry the user edit')
   writeFileSync(plistPath, customPlist, { mode: 0o600 })
   recordPlistIdentity(label, plistPath)
   const customStart = daemonOk(['start'], 'L02-CUSTOM start')
@@ -2539,7 +2549,7 @@ async function runD4LaunchdScene({ installation, workRoot, report, start, projec
   writeFileSync(plistPath, plistText, { mode: 0o600 })
   recordPlistIdentity(label, plistPath)
   report.rows.push({ id: 'L02-CUSTOM', status: 'PASS', extraEnv: 'D4L_CUSTOM_FLAG', runAtLoad: true,
-    manager: customStart.fields.manager, hostPid: customHost.record.hostPid })
+    manager: customStart.fields.manager, hostPid: customHost.record.hostPid, reloadedEditedIdle: true })
 
   // ── L04 negative: loaded but NOT started is never Ready/launchd ─────────
   const ownBootstrap = runLaunchctlCommand(['bootstrap', `gui/${String(uid)}`, plistPath])

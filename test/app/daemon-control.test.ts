@@ -16,6 +16,7 @@ import test, { type TestContext } from 'node:test'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
 import {
   bindDarwinKernelSeat,
+  computeBuildId,
   darwinHostProfileSeatDir,
   inspectInstalledProfileScope,
   LOCAL_PROTOCOL,
@@ -271,6 +272,15 @@ function darwinDepsOf(fx: Fixture, overrides: Partial<DaemonControlDeps> = {}): 
 }
 
 const UID = process.getuid?.() ?? 1000
+
+/** A still-readable historical product package whose computed build identity proves provenance. */
+function writeOldDarwinPackage(fx: Fixture): { readonly root: string; readonly buildId: string } {
+  const root = join(fx.profile.dir, 'old-store', 'node_modules', '@xmoon76', 'dsh-pi-tui')
+  mkdirSync(join(root, 'dist'), { recursive: true, mode: 0o700 })
+  writeFileSync(join(root, 'package.json'), `${JSON.stringify({ name: '@xmoon76/dsh-pi-tui', version: '0.5.6' })}\n`)
+  writeFileSync(join(root, 'dist', 'local-host.mjs'), 'process.exit(1)\n')
+  return { root, buildId: computeBuildId(root, DSH_VERSION) }
+}
 
 /** The same validated launchd facts the Darwin management path derives. */
 function launchdFactsOf(fx: Fixture): LaunchdUnitFacts {
@@ -1736,8 +1746,9 @@ test('darwin cold start migrates a loaded-but-idle old generated plist, then sta
   const fx = fixture(t)
   const facts = launchdFactsOf(fx)
   mkdirSync(join(fx.accountHome, 'Library', 'LaunchAgents'), { recursive: true, mode: 0o700 })
-  const oldBuild = 'e'.repeat(64)
-  const oldEntry = join(fx.profile.dir, 'node_modules', '.pnpm', '@xmoon76+dsh-pi-tui@0.5.7_oldbuild', 'node_modules', '@xmoon76', 'dsh-pi-tui', 'dist', 'local-host.mjs')
+  const old = writeOldDarwinPackage(fx)
+  const oldBuild = old.buildId
+  const oldEntry = join(old.root, 'dist', 'local-host.mjs')
   const oldPlist = renderLaunchdPlist({ ...facts, hostEntryPath: oldEntry, buildId: oldBuild })
   writeFileSync(launchdPlistPathOf(fx), oldPlist, { mode: 0o600 })
   const launchctl = fakeLaunchd(fx, { loaded: true, state: 'not running', pid: undefined })
@@ -1770,9 +1781,9 @@ test('darwin restart applies the bounded migration only after the old kernel ide
   const fx = fixture(t)
   const facts = launchdFactsOf(fx)
   mkdirSync(join(fx.accountHome, 'Library', 'LaunchAgents'), { recursive: true, mode: 0o700 })
-  const oldBuild = 'e'.repeat(64)
-  const oldEntry = join(fx.profile.dir, 'node_modules', '.pnpm', '@xmoon76+dsh-pi-tui@0.5.7_oldbuild', 'node_modules', '@xmoon76', 'dsh-pi-tui', 'dist', 'local-host.mjs')
-  writeFileSync(launchdPlistPathOf(fx), renderLaunchdPlist({ ...facts, hostEntryPath: oldEntry, buildId: oldBuild }), { mode: 0o600 })
+  const old = writeOldDarwinPackage(fx)
+  const oldEntry = join(old.root, 'dist', 'local-host.mjs')
+  writeFileSync(launchdPlistPathOf(fx), renderLaunchdPlist({ ...facts, hostEntryPath: oldEntry, buildId: old.buildId }), { mode: 0o600 })
   const oldRecord = darwinRecordOf(fx.scope)
   const newRecord = darwinRecordOf(fx.scope, { instanceId: '44444444-4444-4444-8444-444444444444', hostPid: 6464 })
   let alive = true

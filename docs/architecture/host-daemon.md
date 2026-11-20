@@ -146,15 +146,23 @@ supported Daemon platform in this contract.
   `bootstrap`, then executes the user's launchd configuration as written: a
   custom program that never becomes a real authenticated Host fails truthfully
   with no detached fallback, and no user runtime directive is defaulted or
-  rewritten. An explicit cold `daemon start` or `restart` may apply ONE bounded
+  rewritten. A verified loaded-but-IDLE job (no PID) is unloaded and
+  re-bootstrapped from the CURRENT on-disk plist before it is started, so an
+  off-disk user edit is the definition launchd executes; a `spawn scheduled` or
+  otherwise unconfirmed transition is refused and a running PID is never
+  touched. An explicit cold `daemon start` or `restart` may apply ONE bounded
   migration to a plist whose decoded `ProgramArguments` is exactly this
   product's historical two-string generated block (node executable plus an
-  installed product `dist/local-host.mjs` of this Profile): only that decoded
-  second entry becomes the current stable named entry and, when the entry
-  actually migrates, the adjacent generated `X-DshPiTuiInstallBuild` value is
-  updated; every other byte, comment, extra key and user-customized argv is
-  preserved. A user-customized argv, a restructured XML, a binary plist or an
-  unrecognized shape is never rewritten. `daemon install` itself never
+  installed product `dist/local-host.mjs` of this Profile). Provenance is
+  proven only when the plist's recorded `X-DshPiTuiInstallBuild` equals the
+  still-readable old package's computed build identity for THIS Profile; a
+  pruned old package or a pin to another Profile/build cannot prove provenance
+  and stays `user-managed`. When proven, only that decoded second entry becomes
+  the current stable named entry and, when the entry actually migrates, the
+  adjacent generated `X-DshPiTuiInstallBuild` value is updated; every other
+  byte, comment, extra key and user-customized argv is preserved. A
+  user-customized argv, a restructured XML, a binary plist or an unrecognized
+  shape is never rewritten. `daemon install` itself never
   migrates or rewrites a plist. `daemon uninstall` removes only that verified
   plist and, when the job is loaded from it, `bootout`s only that verified job
   whose process identity is proven by the authenticated Host record; a

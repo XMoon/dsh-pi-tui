@@ -42,6 +42,7 @@ import {
 } from '../../src/app/remote-process/local-host-launchd.ts'
 import { collectUnitFacts, profileIdentityDigest, startManagedHostCandidate } from '../../src/app/remote-process/local-host-manager.ts'
 import {
+  computeBuildId,
   inspectInstalledProfileScope,
   LocalScopeError,
   scopeFromInstalledProfile,
@@ -109,6 +110,15 @@ function fixture(t: TestContext): Fixture {
 /** The stable named entry the official profile layout exposes. */
 function namedEntryOf(fx: Fixture): string {
   return join(fx.profileDir, 'node_modules', '@xmoon76', 'dsh-pi-tui', 'dist', 'local-host.mjs')
+}
+
+/** A still-readable historical product package whose computed build identity proves provenance. */
+function writeOldProductPackage(fx: Fixture): { readonly root: string; readonly buildId: string } {
+  const root = join(fx.root, 'old-store', 'node_modules', '@xmoon76', 'dsh-pi-tui')
+  mkdirSync(join(root, 'dist'), { recursive: true, mode: 0o700 })
+  writeFileSync(join(root, 'package.json'), `${JSON.stringify({ name: '@xmoon76/dsh-pi-tui', version: '0.5.6' })}\n`)
+  writeFileSync(join(root, 'dist', 'local-host.mjs'), 'process.exit(1)\n')
+  return { root, buildId: computeBuildId(root, DSH_VERSION) }
 }
 
 function depsOf(fx: Fixture, overrides: Partial<LaunchdAdapterDeps> = {}): LaunchdAdapterDeps {
@@ -600,6 +610,54 @@ test('start reuses a running job without bootstrap or kickstart', { skip: NATIVE
   assert.deepEqual(launchctl.calls, [['print', `gui/${String(UID)}/${unit.label}`]])
 })
 
+test('start reloads a loaded idle job from the edited on-disk plist before kickstart', { skip: NATIVE_PLIST_DECODER_SKIP }, async t => {
+  const fx = fixture(t)
+  const launchctl = fakeLaunchctl(fx, { loaded: false })
+  const deps = depsOf(fx, { launchctl: launchctl.run })
+  const installed = await installLaunchdUnit(fx.facts, deps)
+  // Simulate the reachable state: the job was bootstrapped before, is idle,
+  // and the user edited the plist while launchd still holds the old definition.
+  launchctl.job.loaded = true
+  launchctl.job.state = 'not running'
+  delete launchctl.job.pid
+  const edited = readFileSync(installed.filePath, 'utf8')
+    .replace(fx.facts.hostEntryPath, '/usr/local/bin/my-wrapper')
+    .replace('    <key>SPLIT_PROCESS_PROFILE</key>', '    <key>EDITED_FLAG</key>\n    <string>on</string>\n    <key>SPLIT_PROCESS_PROFILE</key>')
+  writeFileSync(installed.filePath, edited, { mode: 0o600 })
+  const unit = ownedUnitOf(fx, deps)
+  launchctl.calls.length = 0
+  await startLaunchdService(fx.facts, unit, deps)
+  assert.deepEqual(launchctl.calls, [
+    ['print', `gui/${String(UID)}/${unit.label}`],
+    ['print', `gui/${String(UID)}/${unit.label}`],
+    ['bootout', `gui/${String(UID)}/${unit.label}`],
+    ['print', `gui/${String(UID)}/${unit.label}`],
+    ['print', `gui/${String(UID)}/${unit.label}`],
+    ['bootstrap', `gui/${String(UID)}`, installed.filePath],
+    ['print', `gui/${String(UID)}/${unit.label}`],
+    ['kickstart', `gui/${String(UID)}/${unit.label}`],
+  ], 'an idle loaded job is reloaded from the current edited plist before kickstart')
+  assert.equal(readFileSync(installed.filePath, 'utf8'), edited, 'reloading never rewrites the user plist')
+})
+
+test('start refuses an unconfirmed PID-less loaded job without booting it out', { skip: NATIVE_PLIST_DECODER_SKIP }, async t => {
+  const fx = fixture(t)
+  const launchctl = fakeLaunchctl(fx, { loaded: false })
+  const deps = depsOf(fx, { launchctl: launchctl.run })
+  await installLaunchdUnit(fx.facts, deps)
+  launchctl.job.loaded = true
+  launchctl.job.state = 'spawn scheduled'
+  delete launchctl.job.pid
+  const unit = ownedUnitOf(fx, deps)
+  launchctl.calls.length = 0
+  await assert.rejects(
+    startLaunchdService(fx.facts, unit, deps),
+    (error: unknown) => error instanceof LocalScopeError && error.code === 'HOST_MANAGER_START_FAILED',
+  )
+  assert.equal(launchctl.calls.some(args => args[0] === 'bootout' || args[0] === 'bootstrap' || args[0] === 'kickstart'), false,
+    'a transition that is not provably idle is never touched')
+})
+
 test('start refuses a loaded job from a foreign source plist even with matching anchors', { skip: NATIVE_PLIST_DECODER_SKIP }, async t => {
   const fx = fixture(t)
   const launchctl = fakeLaunchctl(fx, { loaded: false })
@@ -754,8 +812,9 @@ test('migration patches only the proven generated ProgramArguments and build met
   const fx = fixture(t)
   mkdirSync(join(fx.accountHome, 'Library', 'LaunchAgents'), { recursive: true, mode: 0o700 })
   const path = plistPathOf(fx)
-  const oldBuild = 'e'.repeat(64)
-  const oldEntry = join(fx.root, 'store', 'node_modules', '.pnpm', '@xmoon76+dsh-pi-tui@0.5.7_oldbuild', 'node_modules', '@xmoon76', 'dsh-pi-tui', 'dist', 'local-host.mjs')
+  const old = writeOldProductPackage(fx)
+  const oldBuild = old.buildId
+  const oldEntry = join(old.root, 'dist', 'local-host.mjs')
   let oldPlist = renderLaunchdPlist({ ...fx.facts, hostEntryPath: oldEntry, buildId: oldBuild })
   // Legal user-owned additions OUTSIDE the generated spans.
   oldPlist = oldPlist
@@ -783,17 +842,46 @@ test('migration patches only the proven generated ProgramArguments and build met
   assert.equal(readFileSync(path, 'utf8'), next)
 })
 
-test('migration recognizes a pruned pnpm versioned store path as the old generated entry', { skip: NATIVE_PLIST_DECODER_SKIP }, t => {
+test('migration preserves a pruned old package path as user-managed (no provenance authority)', { skip: NATIVE_PLIST_DECODER_SKIP }, t => {
   const fx = fixture(t)
   mkdirSync(join(fx.accountHome, 'Library', 'LaunchAgents'), { recursive: true, mode: 0o700 })
   const path = plistPathOf(fx)
-  // The old physical package was already pruned by the official upgrade: the
-  // path no longer exists, but its product-store shape identifies our block.
+  // The old physical package was pruned by the official upgrade: the record
+  // cannot prove this argv was product-generated for THIS Profile, so it must
+  // stay byte-for-byte user-managed rather than be invented into a migration.
   const prunedEntry = join(fx.root, 'store', 'node_modules', '.pnpm', '@xmoon76+dsh-pi-tui@0.5.7_abc123', 'node_modules', '@xmoon76', 'dsh-pi-tui', 'dist', 'local-host.mjs')
   writeFileSync(path, renderLaunchdPlist({ ...fx.facts, hostEntryPath: prunedEntry, buildId: 'e'.repeat(64) }), { mode: 0o600 })
   const deps = depsOf(fx)
   const inspected = prepareOwnedLaunchdForCurrentInstall(fx.facts, ownedUnitOf(fx, deps), deps, 'inspect')
-  assert.equal(inspected.plan.kind, 'migrate')
+  assert.deepEqual(inspected, { plan: { kind: 'no-op', reason: 'user-managed' } })
+})
+
+test('migration preserves an exact-shaped argv pinned to another Profile', { skip: NATIVE_PLIST_DECODER_SKIP }, t => {
+  const fx = fixture(t)
+  mkdirSync(join(fx.accountHome, 'Library', 'LaunchAgents'), { recursive: true, mode: 0o700 })
+  const path = plistPathOf(fx)
+  const old = writeOldProductPackage(fx)
+  const otherProfileDir = join(fx.root, 'profiles', 'other', 'node_modules', '@xmoon76', 'dsh-pi-tui')
+  mkdirSync(join(fx.root, 'profiles', 'other', 'node_modules', '@xmoon76'), { recursive: true, mode: 0o700 })
+  symlinkSync(old.root, otherProfileDir)
+  const pinnedEntry = join(otherProfileDir, 'dist', 'local-host.mjs')
+  writeFileSync(path, renderLaunchdPlist({ ...fx.facts, hostEntryPath: pinnedEntry, buildId: old.buildId }), { mode: 0o600 })
+  const deps = depsOf(fx)
+  const unit = ownedUnitOf(fx, deps)
+  assert.deepEqual(prepareOwnedLaunchdForCurrentInstall(fx.facts, unit, deps, 'inspect'), { plan: { kind: 'no-op', reason: 'user-managed' } })
+  assert.equal(readFileSync(path, 'utf8').includes(pinnedEntry), true, 'a user pin to another Profile is preserved')
+})
+
+test('migration preserves an exact-shaped argv whose recorded build identity does not match', { skip: NATIVE_PLIST_DECODER_SKIP }, t => {
+  const fx = fixture(t)
+  mkdirSync(join(fx.accountHome, 'Library', 'LaunchAgents'), { recursive: true, mode: 0o700 })
+  const path = plistPathOf(fx)
+  const old = writeOldProductPackage(fx)
+  const oldEntry = join(old.root, 'dist', 'local-host.mjs')
+  writeFileSync(path, renderLaunchdPlist({ ...fx.facts, hostEntryPath: oldEntry, buildId: 'f'.repeat(64) }), { mode: 0o600 })
+  const deps = depsOf(fx)
+  const unit = ownedUnitOf(fx, deps)
+  assert.deepEqual(prepareOwnedLaunchdForCurrentInstall(fx.facts, unit, deps, 'inspect'), { plan: { kind: 'no-op', reason: 'user-managed' } })
 })
 
 test('migration preserves a user-customized argv byte-for-byte and reports user-managed', { skip: NATIVE_PLIST_DECODER_SKIP }, async t => {
@@ -815,8 +903,9 @@ test('migration never patches a restructured generated block or a changed file',
   const fx = fixture(t)
   mkdirSync(join(fx.accountHome, 'Library', 'LaunchAgents'), { recursive: true, mode: 0o700 })
   const path = plistPathOf(fx)
-  const oldEntry = join(fx.root, 'store', 'node_modules', '.pnpm', '@xmoon76+dsh-pi-tui@0.5.7_oldbuild', 'node_modules', '@xmoon76', 'dsh-pi-tui', 'dist', 'local-host.mjs')
-  const canonical = renderLaunchdPlist({ ...fx.facts, hostEntryPath: oldEntry, buildId: 'e'.repeat(64) })
+  const old = writeOldProductPackage(fx)
+  const oldEntry = join(old.root, 'dist', 'local-host.mjs')
+  const canonical = renderLaunchdPlist({ ...fx.facts, hostEntryPath: oldEntry, buildId: old.buildId })
   // A comment inside the generated block breaks its exact lexical structure.
   const restructured = canonical.replace('  <array>\n', '  <array>\n    <!-- user note -->\n')
   writeFileSync(path, restructured, { mode: 0o600 })
@@ -1149,6 +1238,50 @@ test('a public managed start uses the installed LaunchAgent instead of the detac
     ['kickstart', `gui/${String(UID)}/${buildLaunchdLabel(scope.scopeId)}`],
   ])
   assert.equal(existsSync(join(scope.dir, 'host.log')), false, 'the managed public start must never spawn the detached Host fallback')
+})
+
+test('the public managed start reloads an edited idle LaunchAgent before starting', { skip: process.platform !== 'darwin' ? 'the launchd public-start route requires macOS' : false }, async t => {
+  const fx = fixture(t)
+  const launchctl = fakeLaunchctl(fx, { loaded: false })
+  const deps = depsOf(fx, { launchctl: launchctl.run })
+  const installed = await installLaunchdUnit(fx.facts, deps)
+  const scope = scopeFromInstalledProfile({
+    dshHome: fx.dshHome,
+    profileDir: fx.profileDir,
+    packageRoot: fx.packageRoot,
+    dshVersion: DSH_VERSION,
+  })
+  // launchd still holds an older cached definition while the user edited the
+  // on-disk plist; a public cold start must load the CURRENT user definition.
+  launchctl.job.loaded = true
+  launchctl.job.state = 'not running'
+  delete launchctl.job.pid
+  const edited = readFileSync(installed.filePath, 'utf8')
+    .replace('    <key>SPLIT_PROCESS_PROFILE</key>', '    <key>PUBLIC_EDIT_FLAG</key>\n    <string>on</string>\n    <key>SPLIT_PROCESS_PROFILE</key>')
+  writeFileSync(installed.filePath, edited, { mode: 0o600 })
+  launchctl.calls.length = 0
+  const observation = await startManagedHostCandidate(
+    {
+      scope,
+      hostEntryPath: join(fx.packageRoot, 'dist', 'local-host.mjs'),
+      dshAnchor: realpathSync(fx.anchor),
+      profile: 'pi-tui',
+      hostStartPolicy: 'public',
+    },
+    { launchd: deps },
+  )
+  assert.equal(observation(), undefined)
+  assert.deepEqual(launchctl.calls, [
+    ['print', `gui/${String(UID)}/${buildLaunchdLabel(scope.scopeId)}`],
+    ['print', `gui/${String(UID)}/${buildLaunchdLabel(scope.scopeId)}`],
+    ['bootout', `gui/${String(UID)}/${buildLaunchdLabel(scope.scopeId)}`],
+    ['print', `gui/${String(UID)}/${buildLaunchdLabel(scope.scopeId)}`],
+    ['print', `gui/${String(UID)}/${buildLaunchdLabel(scope.scopeId)}`],
+    ['bootstrap', `gui/${String(UID)}`, installed.filePath],
+    ['print', `gui/${String(UID)}/${buildLaunchdLabel(scope.scopeId)}`],
+    ['kickstart', `gui/${String(UID)}/${buildLaunchdLabel(scope.scopeId)}`],
+  ])
+  assert.equal(readFileSync(installed.filePath, 'utf8'), edited, 'the public route never rewrites the user plist')
 })
 
 /** Remove only this test run's verified plist/job. A loaded process is
