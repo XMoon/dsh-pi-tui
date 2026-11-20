@@ -271,6 +271,15 @@ export function createExitIntentCoordinator(deps: ExitIntentCoordinatorDeps): Ex
     const epoch = operationEpoch
     const facts = deps.facts.capture()
     const backend = deps.facts.currentBackend()
+    // An ALREADY-ACCEPTED `!`/`!!` submission can start its shell owner AFTER
+    // this choice opened (`ensureSession().then(shell.run)` in the submission
+    // controller). Re-read the live shell fact before acting: a Busy/Unknown
+    // confirmation must never Keep/Stop/exit over a shell it did not present.
+    // The truthful shell choice replaces it; the old operation cannot commit.
+    if (facts.shellRunning && identity.kind !== 'shell') {
+      openChoice('shell', facts, backend)
+      return
+    }
     // The choice captured an exact identity. A backend flip retires it with no
     // action; the user re-triggers a fresh Exit Intent.
     if (backend !== identity.backend) {

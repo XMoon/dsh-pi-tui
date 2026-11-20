@@ -11,7 +11,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { createExitController, formatDaemonDetachHint } from '../../src/app/bootstrap/exit.ts'
+import { createExitController, daemonResumeBackendOverride, formatDaemonDetachHint } from '../../src/app/bootstrap/exit.ts'
 import { createExitIntentCoordinator, type ExitIntentCoordinator, type StopCurrentWorkOutcome } from '../../src/app/bootstrap/exit-intent.ts'
 import { createExitIntentFacts } from '../../src/app/bootstrap/exit-facts.ts'
 import type { ExitChoiceModel, SurfaceExitChoiceSeam } from '../../src/app/surface/exit-choice.ts'
@@ -1277,6 +1277,20 @@ test('daemon detach hint: sessionless omits Resume; a verified stop adds the one
   const stopped = formatDaemonDetachHint({ profile: 'pi-tui-dev', sessionId: 'session-42', workStopped: true })
   assert.match(stopped, /^Current work: stopped\.$/m)
   assert.equal(stopped.split('Current work: stopped.').length - 1, 1, 'printed at most once')
+})
+
+test('daemon detach hint: a temporary backend override is preserved and arguments are shell-safe', () => {
+  const override = formatDaemonDetachHint({ profile: 'pi-tui-dev', sessionId: 'session-42', workStopped: false, backendOverride: true })
+  assert.match(override, /DSH_PI_TUI_BACKEND=daemon dsh --profile pi-tui-dev --session session-42/u)
+  const persisted = formatDaemonDetachHint({ profile: 'pi-tui-dev', sessionId: 'session-42', workStopped: false, backendOverride: false })
+  assert.ok(!persisted.includes('DSH_PI_TUI_BACKEND'), 'a Profile-persisted daemon needs no override')
+  const quoted = formatDaemonDetachHint({ profile: "team's profile", sessionId: 'session 42', workStopped: false, backendOverride: true })
+  assert.match(quoted, /--profile 'team'\\''s profile' --session 'session 42'/u)
+  assert.equal(daemonResumeBackendOverride(undefined), true)
+  assert.equal(daemonResumeBackendOverride(''), true)
+  assert.equal(daemonResumeBackendOverride('{"value":"daemon","source":"env"}'), true)
+  assert.equal(daemonResumeBackendOverride('{"value":"daemon","source":"profile"}'), false)
+  assert.equal(daemonResumeBackendOverride('not-json'), true)
 })
 
 test('classifyExitIntent: the frozen decision matrix, unknown never idle', () => {

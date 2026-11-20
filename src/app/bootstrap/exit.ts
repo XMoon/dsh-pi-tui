@@ -39,22 +39,60 @@ export function formatDaemonDetachHint(facts: {
   readonly profile: string
   readonly sessionId: string
   readonly workStopped: boolean
+  /**
+   * Whether the resume command must carry `DSH_PI_TUI_BACKEND=daemon`. A
+   * temporary environment override is NOT persisted in the Profile, so a plain
+   * `dsh --profile ... --session ...` would select the Profile's (possibly
+   * Direct) backend on the next launch instead of reconnecting to this daemon.
+   */
+  readonly backendOverride?: boolean
 }): string {
+  const profile = shellQuote(facts.profile)
   const lines = [
     'Disconnected from dsh-pi-tui (daemon client).',
     'The daemon Host was not stopped by this action.',
     ...(facts.workStopped ? ['Current work: stopped.'] : []),
   ]
   const sessionId = facts.sessionId.trim()
-  if (sessionId !== '') lines.push('', 'Resume this session:', `  dsh --profile ${facts.profile} --session ${sessionId}`)
+  if (sessionId !== '') {
+    const backend = facts.backendOverride === true ? 'DSH_PI_TUI_BACKEND=daemon ' : ''
+    lines.push('', 'Resume this session:', `  ${backend}dsh --profile ${profile} --session ${shellQuote(sessionId)}`)
+  }
   lines.push(
     '',
     'Manage the daemon:',
-    `  dsh --profile ${facts.profile} daemon status`,
-    `  dsh --profile ${facts.profile} daemon logs`,
-    `  dsh --profile ${facts.profile} daemon stop`,
+    `  dsh --profile ${profile} daemon status`,
+    `  dsh --profile ${profile} daemon logs`,
+    `  dsh --profile ${profile} daemon stop`,
   )
   return lines.join('\n')
+}
+
+/**
+ * Whether a daemon resume hint must pin the backend. The Client launch
+ * envelope records the ONE frozen backend decision (`value` + `source`); only
+ * a Profile-persisted daemon backend can be resumed by the plain command. An
+ * environment override (or an unrecorded decision) must be carried explicitly,
+ * because `DSH_PI_TUI_BACKEND` is deliberately cleared in the Client and is
+ * never written back to the Profile.
+ * @param raw - the `SPLIT_PROCESS_CLIENT_LAUNCH_BACKEND` JSON, if recorded.
+ * @returns true when the resume command needs `DSH_PI_TUI_BACKEND=daemon`.
+ */
+export function daemonResumeBackendOverride(raw: string | undefined): boolean {
+  if (raw === undefined || raw === '') return true
+  try {
+    const parsed = JSON.parse(raw) as { readonly value?: unknown; readonly source?: unknown }
+    return !(parsed.value === 'daemon' && parsed.source === 'profile')
+  } catch {
+    // An unparseable record cannot prove the Profile is daemon: fail safe.
+    return true
+  }
+}
+
+/** POSIX-safe single-argument quoting for a copy-paste shell hint. */
+function shellQuote(value: string): string {
+  if (/^[A-Za-z0-9_@%+=:,./-]+$/u.test(value)) return value
+  return `'${value.replace(/'/gu, `'\\''`)}'`
 }
 
 /** Diagnostics sink used by the exit controller (subset of Diag). */

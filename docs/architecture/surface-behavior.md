@@ -89,7 +89,9 @@ it with no business action and it is never restored automatically.
 Session/connection rollover retires the old choice with zero side effects (the
 user re-triggers the intent), an Idle→Working transition re-opens the Busy
 Choice through the normal entry, and a Busy→Idle transition lets Keep proceed
-and lets Stop detach without a cancel. A real Host Question/Approval withdraws
+and lets Stop detach without a cancel. A user shell that starts AFTER the choice
+opened (an already-accepted `!`/`!!` submission whose session creation was still
+pending) re-presents the shell choice before any Keep/Stop can act. A real Host Question/Approval withdraws
 the Client choice with zero business action. `Esc` and `Ctrl+C` inside the choice
 mean `Stay`; no Host work is cancelled by either. The exit controller is called
 only at the final commit.
@@ -111,7 +113,9 @@ exit.
 `Disconnected from dsh-pi-tui (daemon client).` block with the REAL effective
 profile and Session (no Session line without a Session) plus `daemon status`,
 `daemon logs` and `daemon stop` commands; it never claims a Host state, PID or
-Turn outcome it cannot observe. A verified Stop may add the one
+Turn outcome it cannot observe. The resume command preserves a temporary
+`DSH_PI_TUI_BACKEND=daemon` override (the Profile may still be Direct) and
+shell-quotes the profile/session arguments so the hint is copy-paste safe. A verified Stop may add the one
 `Current work: stopped.` line. A Direct exit keeps only the existing resume
 line. Fatal/sudden termination never prints the detach block.
 

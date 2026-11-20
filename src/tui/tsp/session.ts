@@ -4482,7 +4482,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
    * the PR3-A compatibility window) bypass the queue and route the same exit
    * controller; nothing else acts before the binding exists.
    */
-  const heldKeys: Key[] = []
+  const heldKeys: Array<{ readonly key: Key; readonly at: number }> = []
   const HELD_KEYS_LIMIT = 128
   let heldOverflowed = false
   /** M6 UX PR1: the semantic identity of one armed raw exit key. The two
@@ -4504,8 +4504,8 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
    * Arm or confirm one raw exit key. Returns true only when the SAME key was
    * pressed within the live window (the ONE exit intent to forward).
    */
-  const armOrConfirmRawExit = (identity: RawExitIdentity): boolean => {
-    const now = Date.now()
+  const armOrConfirmRawExit = (identity: RawExitIdentity, at: number = Date.now()): boolean => {
+    const now = at
     const armed = lastExitKey
     if (armed !== undefined && armed.identity === identity && now - armed.at < RAW_EXIT_CONFIRM_WINDOW_MS) {
       lastExitKey = undefined
@@ -5473,7 +5473,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     })
   }
 
-  const dispatchKey = (key: Key, handlers: TspInputHandlers): boolean => {
+  const dispatchKey = (key: Key, handlers: TspInputHandlers, at: number = Date.now()): boolean => {
     // M6 UX PR1: only the two exit keys may confirm an armed exit window, and
     // only the SAME one. Pressing the OTHER exit key is an intervening gesture
     // even when its own edit action is a no-op (e.g. Ctrl+D on a non-empty
@@ -5577,17 +5577,19 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
         display.notify("The current session's running state cannot be verified.", 'error')
         return false
       }
-      if (armOrConfirmRawExit('interrupt')) {
-        handlers.exit()
-        return false
-      }
-      // The FIRST idle press clears the draft, exactly like the PiTui
-      // clear-then-arm ladder; the SECOND same-key press inside the window
-      // exits. Busy/unknown never reach this branch (they cancel/refuse above
-      // and never clear the draft).
+      // Inspect the CURRENT draft BEFORE confirming: a late paste/clipboard
+      // insert may have filled it after the first press. PiTui's ladder clears
+      // the live draft and re-arms; the same-key window never exits over text
+      // that arrived between the presses.
       if (composer.state().text !== '') {
         composer.clearDraftStateOnly()
         render()
+        lastExitKey = { identity: 'interrupt', at }
+        return false
+      }
+      if (armOrConfirmRawExit('interrupt', at)) {
+        handlers.exit()
+        return false
       }
       return false
     }
@@ -5746,7 +5748,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     if (edit.kind === 'exit-empty') {
       // M6 UX PR1: an empty-draft Ctrl+D is a same-key double-press exit, the
       // same contract as PiTui's effective exit key. Never an immediate exit.
-      if (armOrConfirmRawExit('exit')) handlers.exit()
+      if (armOrConfirmRawExit('exit', at)) handlers.exit()
       return false
     }
     return false
@@ -6151,7 +6153,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     if (fencedOut(key)) return false
     if (!inputBound) {
       if (heldKeys.length < HELD_KEYS_LIMIT) {
-        heldKeys.push(key)
+        heldKeys.push({ key, at: Date.now() })
       } else if (!heldOverflowed) {
         // Fail loud ONCE (never a silent drop): the pre-bind window received
         // more input than the bounded queue holds. The dropped tail is
@@ -6553,12 +6555,14 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       // routes the exit through the same bound handler; the caller's
       // handlers now observe every subsequent key.
       const held = heldKeys.splice(0, heldKeys.length)
-      for (const key of held) {
+      for (const entry of held) {
         if (disposed) return
         // The SAME fence as the live path: a key held across a generation bump
         // must not be applied to a subject the surface is replacing.
-        if (fencedOut(key)) continue
-        if (dispatchKey(key, handlers)) routeExit(true)
+        if (fencedOut(entry.key)) continue
+        // Replay with the ORIGINAL arrival time: the held window must not
+        // compress two same-key presses into one 1.5 s confirmation.
+        if (dispatchKey(entry.key, handlers, entry.at)) routeExit(true)
       }
     },
     // B3-A2 §9: the disposal is a STORED promise, not an async wrapper. The

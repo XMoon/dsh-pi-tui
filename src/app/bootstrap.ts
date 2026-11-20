@@ -103,7 +103,7 @@ import type { ImageLimitsLike } from '../domain/media/types.ts'
 import { consumeDraftAttachments } from '../client/media/draft-attachments.ts'
 import type { DirectPrepareInputDeps } from './submission/direct-message-preparation.ts'
 import { dshVersion } from '../client/launcher/version.ts'
-import { createExitController, formatDaemonDetachHint } from './bootstrap/exit.ts'
+import { createExitController, daemonResumeBackendOverride, formatDaemonDetachHint } from './bootstrap/exit.ts'
 import { createExitIntentCoordinator, type StopCurrentWorkOutcome } from './bootstrap/exit-intent.ts'
 import { createExitIntentFacts } from './bootstrap/exit-facts.ts'
 import { type SessionRetirementReport } from '../app/session/owner-access.ts'
@@ -3254,7 +3254,12 @@ export function applyRunnerWithRuntime(
         // the exact management facts and never claim a Host state or PID the
         // Client cannot observe. Direct keeps its original resume line.
         if (selectedRuntime.kind === 'remote') {
-          return formatDaemonDetachHint({ profile, sessionId, workStopped: exitWorkStopped })
+          return formatDaemonDetachHint({
+            profile,
+            sessionId,
+            workStopped: exitWorkStopped,
+            backendOverride: daemonResumeBackendOverride(process.env.SPLIT_PROCESS_CLIENT_LAUNCH_BACKEND),
+          })
         }
         const resume = resumeCommand(profile, sessionId)
         return resume === undefined ? undefined : `${color.textDim('To resume this session:')} ${resume}`
