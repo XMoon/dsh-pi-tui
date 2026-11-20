@@ -219,15 +219,22 @@ export function createExitController(deps: ExitControllerDeps): {
       // plane's own result. An unexpected throw is the manager/OS failure
       // class (4): the Client still exits, never claiming success.
       let hostStop: { readonly code: number; readonly detail?: string } | undefined
-      if (hostStopRequested && deps.adminStop !== undefined) {
-        try {
-          const result = await deps.adminStop()
-          hostStop = result.code === 0
-            ? { code: 0 }
-            : { code: result.code, detail: adminStopDetail(result) }
-        } catch (adminError) {
-          safeDiag(deps.diag, 'error', 'daemon host stop failed', { error: safeErrorMessage(adminError) })
-          hostStop = { code: 4, detail: 'the management call failed before the control plane reported a result' }
+      if (hostStopRequested) {
+        if (deps.adminStop === undefined) {
+          // A confirmed Stop verdict with no admin capability is NOT a success:
+          // report the unconfirmed result and a non-zero exit (the manager/OS
+          // failure class), never a silent exit 0.
+          hostStop = { code: 4, detail: 'the daemon administration capability is unavailable' }
+        } else {
+          try {
+            const result = await deps.adminStop()
+            hostStop = result.code === 0
+              ? { code: 0 }
+              : { code: result.code, detail: adminStopDetail(result) }
+          } catch (adminError) {
+            safeDiag(deps.diag, 'error', 'daemon host stop failed', { error: safeErrorMessage(adminError) })
+            hostStop = { code: 4, detail: 'the management call failed before the control plane reported a result' }
+          }
         }
       }
       // pi parity: after the terminal restores, print how to re-enter the

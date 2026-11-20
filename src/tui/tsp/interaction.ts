@@ -1905,7 +1905,7 @@ export function createTspInteractionSeat(options: TspInteractionSeatOptions): Ts
     if (buttons.length > 0) body.push(ui.col({ key: 'options', gap: 'xs' }, ...buttons))
     body.push(ui.text({
       key: 'hint',
-      text: model.phase === 'stopping' ? 'Waiting for the Host…' : '↑↓ Select · Enter Confirm · Esc Stay',
+      text: model.phase === 'stopping' ? 'Waiting for the Host…' : model.phase === 'verifying' ? 'Verifying the saved Backend…' : '↑↓ Select · Enter Confirm · Esc Stay',
     }))
     return ui.overlay({ key: `${EXIT_CHOICE_KEY}-${epoch}`, modal: true, head: model.title, anchor: 'center', size: 'md' }, ...body)
   }
@@ -1935,7 +1935,7 @@ export function createTspInteractionSeat(options: TspInteractionSeatOptions): Ts
     const model = exitChoice
     if (model === undefined) return false
     // A Stop in flight locks the window: no key dispatches a second cancel.
-    if (model.phase === 'stopping') return true
+    if (model.phase === 'stopping' || model.phase === 'verifying') return true
     if (key.name === 'escape' || (key.ctrl === true && key.name === 'c')) {
       model.select('stay')
       return true

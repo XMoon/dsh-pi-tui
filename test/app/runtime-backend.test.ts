@@ -213,7 +213,7 @@ test('the Direct backend is the current production surface and serves EXACTLY th
       setAutoStart: async (_value: boolean, _revision: number) => {},
     },
     backendStartupPreference: {
-      read: () => undefined,
+      read: () => undefined, readFresh: async () => undefined,
       setBackend: async (_value: 'direct' | 'daemon', _revision: number) => {},
     },
     acpStartupPreference: {

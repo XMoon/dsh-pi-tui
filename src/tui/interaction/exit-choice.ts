@@ -129,7 +129,7 @@ export class ExitChoicePanel implements Component, Focusable {
     if (this.disposed) return
     // While the daemon Stop is in flight the choice is LOCKED: no key can
     // dispatch a second cancel or turn the wait into an exit.
-    if (this.model.phase === 'stopping') return
+    if (this.model.phase === 'stopping' || this.model.phase === 'verifying') return
     if (matchesKey(data, 'escape') || matchesKey(data, 'ctrl+c')) {
       // Any intervening gesture cancels a pending pointer press: the release
       // can only ever complete the gesture the user CURRENTLY sees.
@@ -276,7 +276,7 @@ export class ExitChoicePanel implements Component, Focusable {
       ? 0
       : 1 + wrapRows(model.status)
     const minimal = (): FramePlan => ({
-      minimal: model.phase === 'stopping' ? 'Stopping current work…' : 'Esc Stay',
+      minimal: model.phase === 'stopping' ? 'Stopping current work…' : model.phase === 'verifying' ? 'Verifying the saved Backend…' : 'Esc Stay',
       title: false,
       body: 'none',
       status: false,
@@ -304,9 +304,16 @@ export class ExitChoicePanel implements Component, Focusable {
     }
     // The risk sentence is part of the decision contract: a box that cannot
     // host it WITH every action must not keep the destructive actions actable.
-    const compactNeeded = 1 + shortRows + widthOptions.length
+    // For the whole-Host stop confirm the short body does NOT carry the full
+    // risk (ALL Clients/Sessions/Jobs/pending interactions vs a Turn), so the
+    // destructive Stop is dropped there — only the safe Leave/Stay remain
+    // (G5: never keep a hidden destructive Stop actable).
+    const safeOptions = model.kind === 'daemon-host-stop'
+      ? widthOptions.filter(option => option.id !== 'stop-host-and-exit')
+      : widthOptions
+    const compactNeeded = 1 + shortRows + safeOptions.length
     if (this.maxRows >= compactNeeded) {
-      return { minimal: undefined, title: true, body: 'short', status: false, options: widthOptions, hint: false }
+      return { minimal: undefined, title: true, body: 'short', status: false, options: safeOptions, hint: false }
     }
     // The box cannot host the risk line plus every actable option: keep ONLY
     // the safe path, with the risk line when it still fits.
@@ -326,7 +333,7 @@ export class ExitChoicePanel implements Component, Focusable {
   }
 
   private hintText(): string {
-    if (this.model.phase === 'stopping') return 'Waiting for the Host…'
+    if (this.model.phase === 'stopping' || this.model.phase === 'verifying') return 'Waiting for the Host…'
     return '↑↓ Select · Enter Confirm · Esc Stay'
   }
 

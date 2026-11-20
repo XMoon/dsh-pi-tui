@@ -73,22 +73,30 @@ test('the PRODUCTION run seam passes the bound Profile into the real control pla
   const life = testLifecycle(t)
   const accountHome = life.tempDir('m62c-acct-')
   const mkProfile = (name: string): DaemonControlProfile => {
+    // Build a real installed-profile layout and resolve the identity through
+    // the SAME Direct composition resolver the production admin port uses
+    // (`resolveDirectDaemonAdminProfile`), so the profile under test is the
+    // official one, not a hand-made object.
     const root = life.tempDir(`m62c-sink-${name}-`)
+    const packageRoot = join(root, 'packages', 'bundle')
     const dir = join(root, `profiles/${name}`)
-    mkdirSync(dir, { recursive: true })
-    mkdirSync(join(root, 'anchor'), { recursive: true })
-    writeFileSync(join(root, 'anchor', 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh', version: '0.2.2-rc.5' }))
-    writeFileSync(join(root, 'package.json'), JSON.stringify({ name: '@xmoon76/dsh-pi-tui', version: '0.5.7' }))
-    mkdirSync(join(root, 'dist'), { recursive: true })
-    writeFileSync(join(root, 'dist', 'local-client.mjs'), 'export {}\n')
-    return {
+    mkdirSync(join(packageRoot, 'dist'), { recursive: true })
+    writeFileSync(join(packageRoot, 'package.json'), JSON.stringify({ name: '@xmoon76/dsh-pi-tui', version: '0.5.7' }))
+    writeFileSync(join(packageRoot, 'dist', 'local-client.mjs'), 'export {}\n')
+    mkdirSync(join(root, 'anchor', 'node_modules', '@deepseek-ai', 'dsh'), { recursive: true })
+    writeFileSync(join(root, 'anchor', 'node_modules', '@deepseek-ai', 'dsh', 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh', version: '0.2.2-rc.5' }))
+    const installed = join(dir, 'node_modules', '@xmoon76')
+    mkdirSync(installed, { recursive: true })
+    symlinkSync(packageRoot, join(installed, 'dsh-pi-tui'), 'dir')
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ name }))
+    const resolved = resolveDirectDaemonAdminProfile({
       name,
       dir,
       home: root,
-      installAnchor: join(root, 'anchor', 'package.json'),
-      packageRoot: root,
-      dshVersion: '0.2.2-rc.5',
-    }
+      installAnchor: join(root, 'anchor', 'node_modules', '@deepseek-ai', 'dsh', 'package.json'),
+    })
+    assert.ok(resolved !== undefined, 'the official Direct resolver proves the installed profile identity')
+    return resolved
   }
   const observed: Array<{ name: string; profileRealpath: string; scopeId: string }> = []
   // The admin seat is platform-owned: Darwin binds a file seat under the

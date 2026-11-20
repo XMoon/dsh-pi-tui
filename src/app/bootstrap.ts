@@ -3508,16 +3508,29 @@ export function applyRunnerWithRuntime(
             },
           }
           : {}),
-        // M6 UX PR2: the LIVE whole-Host stop eligibility. It re-reads the
-        // transient conversion intent AND the authoritative Profile preference
-        // on every call: a stale intent, a reverted Profile or a Direct
-        // process never asks. It is a permission to ASK, never a command.
-        hostStopEligible: () => {
+        // M6 UX PR2: the whole-Host stop eligibility. The SYNC intent check decides
+        // whether to intercept at all (transient daemon→direct intent + daemon
+        // backend + the admin capability to actually run the stop). The FULL
+        // check additionally forces a FRESH authoritative Profile Backend read
+        // (never a stale mirror snapshot) before the dangerous option is shown
+        // or accepted: a concurrent revert by another Client is observed even
+        // before its invalidation event arrives. A permission to ASK, never a
+        // command to stop.
+        hostStopIntentCurrent: () => selectedRuntime.kind === 'remote'
+          && backendExitTransition === 'daemon-to-direct'
+          && profileDaemonAdmin !== undefined,
+        hostStopEligible: async () => {
           if (selectedRuntime.kind !== 'remote') return false
           if (backendExitTransition !== 'daemon-to-direct') return false
+          if (profileDaemonAdmin === undefined) return false
           const config = backend.config
+          // The FRESH authoritative read: forces a new official settings read on
+          // Remote (or the live Host read on Direct), never just the snapshot.
+          const state = await config.backendStartupPreference.readFresh()
+          // The generation/revision evidence: only a current, ready config that
+          // still reads `direct` confirms the transition. A stale/unready read
+          // is NOT verified and must never authorize the Host stop.
           if (config.configReadiness() !== 'ready') return false
-          const state = config.backendStartupPreference.read()
           return state?.backend === 'direct'
         },
       }),

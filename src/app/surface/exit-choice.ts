@@ -52,7 +52,7 @@ export interface ExitChoiceOptionView {
 }
 
 /** The transient phase of one open choice. */
-export type ExitChoicePhase = 'choose' | 'stopping' | 'unconfirmed'
+export type ExitChoicePhase = 'choose' | 'stopping' | 'unconfirmed' | 'verifying'
 
 /**
  * The complete renderer-facing model of ONE open choice. Every field is a
@@ -205,6 +205,34 @@ export function exitChoiceHostStop(
   shellRunning = false,
 ): ExitChoiceModel {
   return exitChoiceAsking('daemon-host-stop', select, dismiss, shellRunning)
+}
+
+/**
+ * The non-repeatable verification wait (M6 UX PR2): the same seat, no actable
+ * option, while a FRESH authoritative Backend read settles before a dangerous
+ * whole-Host stop may be offered or accepted. A stale/unready read never opens
+ * the confirm and never executes the stop.
+ */
+export function exitChoiceVerifying(
+  select: (option: ExitChoiceOption) => void,
+  dismiss: () => void,
+): ExitChoiceModel {
+  return {
+    kind: 'daemon-host-stop',
+    phase: 'verifying',
+    title: exitChoiceTitle('daemon-host-stop'),
+    body: [
+      'Verifying the saved Backend before the whole-Host stop…',
+      'Reading the current Profile setting from the Host.',
+    ],
+    shortBody: 'Verifying the saved Backend…',
+    shellRunning: false,
+    status: undefined,
+    options: [],
+    focus: undefined,
+    select,
+    dismiss,
+  }
 }
 
 /**

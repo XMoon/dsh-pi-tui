@@ -66,7 +66,7 @@ export const SETTINGS_DIRECT_PAGE_STUBS = {
   /** The profile-owned startup backend: the schema default (`direct`, no user
    *  override) at revision 1. Read on every `/settings` snapshot. */
   backendStartupPreference: {
-    read: () => ({ backend: 'direct' as const, revision: 1, userOverridden: false }),
+    read: () => ({ backend: 'direct' as const, readFresh: async () => undefined, revision: 1, userOverridden: false }),
     setBackend: async (_value: 'direct' | 'daemon', _revision: number) => {},
   },
   /** The profile-owned ACP startup preference: the schema default (OFF, no user

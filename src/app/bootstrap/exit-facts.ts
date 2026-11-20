@@ -54,11 +54,17 @@ export interface ExitIntentFactSources {
   /** Direct only: the attached Agent's official running/idle status. */
   directAgentRunning?(): boolean | undefined
   /**
-   * M6 UX PR2: whether THIS Client may ask, at exit, about stopping the old
-   * Profile Host. Reads LIVE facts on every call; absent means the composition
-   * cannot prove the conversion intent (the exit then never asks).
+   * M6 UX PR2: the SYNC local part of the whole-Host-stop eligibility — the
+   * process-lifetime transient daemon→direct intent, the daemon backend and
+   * the admin capability. Absent means the composition cannot prove the
+   * conversion intent (the exit then never asks).
    */
-  hostStopEligible?(): boolean
+  hostStopIntentCurrent?(): boolean
+  /**
+   * M6 UX PR2: the FULL eligibility including a FRESH authoritative Profile
+   * Backend read. Absent means the composition cannot prove it (never asks).
+   */
+  hostStopEligible?(): Promise<boolean>
 }
 
 /**
@@ -143,6 +149,7 @@ export function createExitIntentFacts(sources: ExitIntentFactSources): ExitInten
       if (facts === undefined) return false
       return facts.isTransportTokenCurrent(scope.sessionId ?? SESSIONLESS_TRANSPORT_SENTINEL, transportToken)
     },
-    hostStopEligible: sources.hostStopEligible ?? (() => false),
+    hostStopIntentCurrent: sources.hostStopIntentCurrent ?? (() => false),
+    hostStopEligible: sources.hostStopEligible ?? (async () => false),
   }
 }

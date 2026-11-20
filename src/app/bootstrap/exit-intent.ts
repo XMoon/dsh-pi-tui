@@ -47,6 +47,7 @@ import {
   exitChoiceHostStop,
   exitChoiceStopping,
   exitChoiceUnconfirmed,
+  exitChoiceVerifying,
   type ExitChoiceKind,
   type ExitChoiceModel,
   type ExitChoiceOption,
@@ -88,14 +89,22 @@ export interface ExitIntentFacts {
   /** Whether a captured scope still pins the live owner AND its transport. */
   isScopeCurrent(scope: SessionScope, transportToken: unknown): boolean
   /**
+   * M6 UX PR2: the SYNC local part of the whole-Host-stop eligibility — the
+   * process-lifetime transient daemon→direct intent, the daemon backend and
+   * the admin capability. It decides whether to intercept at all; the FRESH
+   * authoritative read runs in {@link hostStopEligible}.
+   */
+  hostStopIntentCurrent(): boolean
+  /**
    * M6 UX PR2: whether THIS Client may ask, at exit, about stopping the old
    * Profile Host. It re-reads the LIVE facts on every check: the process must
    * still run the daemon backend, the process-lifetime transient
-   * daemon→direct conversion intent must still hold, and the authoritative
-   * Profile preference must still read `direct` with a ready configuration.
-   * It is a permission to ASK — never a command to stop.
+   * daemon→direct conversion intent must still hold, and a FRESH authoritative
+   * Profile preference read (never a stale mirror snapshot) must still read
+   * `direct` with a ready configuration. It is a permission to ASK — never a
+   * command to stop. Async because the fresh read is a Host round-trip.
    */
-  hostStopEligible(): boolean
+  hostStopEligible(): Promise<boolean>
 }
 
 /** The narrow dependencies of the coordinator. */
@@ -245,9 +254,10 @@ export function createExitIntentCoordinator(deps: ExitIntentCoordinatorDeps): Ex
     if (operationEpoch !== epoch) return
     if (!identityCurrent(identity)) return
     // A Host-stop verdict must ALSO survive the close-time re-read: a close
-    // callback can change the Profile/readiness, and an unproven transition
-    // must never execute the stop (plan §3.3 — unknown is never verified).
-    if (hostStopRequested && !deps.facts.hostStopEligible()) {
+    // callback can change the local intent, and an unproven transition must
+    // never execute the stop (the FRESH authoritative read already ran just
+    // before this commit; this catches a synchronous close-time revert).
+    if (hostStopRequested && !deps.facts.hostStopIntentCurrent()) {
       safeDiag('info', 'host stop declined: the transition intent is no longer current at commit')
       deps.commit({ workStopped })
       return
@@ -255,6 +265,89 @@ export function createExitIntentCoordinator(deps: ExitIntentCoordinatorDeps): Ex
     deps.commit(hostStopRequested
       ? { workStopped, hostStopRequested: true }
       : { workStopped })
+  }
+
+  /**
+   * M6 UX PR2: the non-repeatable verification wait. Runs ONE owned async
+   * fresh authoritative Backend read on the SAME seat/operation (no epoch
+   * bump), then commits. A failure/disconnect/rollover/abort degrades to the
+   * ordinary detach and never executes the Host stop. The verdict is captured
+   * for the final exit root; the OS stop itself runs only after the terminal
+   * restore.
+   */
+  const verifyThenAcceptStop = (identity: CapturedChoice, workStopped: boolean, epoch: number): void => {
+    if (disposed) return
+    // Non-repeatable: the verifying seat owns every key (no second submission).
+    open = exitChoiceVerifying(select, dismiss)
+    presenter()?.update(open)
+    const controller = new AbortController()
+    stopWait = controller
+    runOwned('exit intent host-stop verify', async () => {
+      let ok = false
+      try {
+        ok = await deps.facts.hostStopEligible()
+      } catch {
+        ok = false
+      }
+      if (disposed || stopWait !== controller) return
+      stopWait = undefined
+      if (!ok) {
+        safeDiag('info', 'host stop declined: the fresh authoritative Backend read did not confirm the transition')
+        commitAfterClose(identity, workStopped, epoch)
+        return
+      }
+      commitAfterClose(identity, workStopped, epoch, true)
+    }, {
+      diag: deps.diag,
+      onCancel: () => { if (stopWait === controller) stopWait = undefined },
+      onError: (error) => {
+        if (stopWait === controller) stopWait = undefined
+        safeDiag('error', 'host stop verification failed', { error: safeErrorMessage(error) })
+        if (!disposed && operationEpoch === epoch) commitAfterClose(identity, workStopped, epoch)
+      },
+    })
+  }
+
+  /**
+   * M6 UX PR2: verify BEFORE offering the whole-Host stop confirm. The
+   * non-repeatable verifying seat shows while the fresh authoritative read
+   * settles; only a confirmed transition opens the dangerous confirm, otherwise
+   * the exit commits the ordinary detach with zero Host management.
+   */
+  const verifyThenOpenHostStop = (
+    facts: ReturnType<ExitIntentFacts['capture']>,
+    backend: ExitBackendKind,
+    workStopped: boolean,
+  ): void => {
+    if (disposed) return
+    open = exitChoiceVerifying(select, dismiss)
+    presenter()?.update(open)
+    const controller = new AbortController()
+    stopWait = controller
+    runOwned('exit intent host-stop verify', async () => {
+      let ok = false
+      try {
+        ok = await deps.facts.hostStopEligible()
+      } catch {
+        ok = false
+      }
+      if (disposed || stopWait !== controller) return
+      stopWait = undefined
+      if (!ok) {
+        safeDiag('info', 'host stop not offered: the fresh authoritative Backend read did not confirm the transition')
+        commitAfterClose({ kind: 'daemon-host-stop', backend, scope: facts.scope, live: facts.live, transportToken: facts.transportToken }, workStopped, operationEpoch)
+        return
+      }
+      openHostStopChoice(facts, backend, workStopped)
+    }, {
+      diag: deps.diag,
+      onCancel: () => { if (stopWait === controller) stopWait = undefined },
+      onError: (error) => {
+        if (stopWait === controller) stopWait = undefined
+        safeDiag('error', 'host stop verification failed', { error: safeErrorMessage(error) })
+        if (!disposed) commitAfterClose({ kind: 'daemon-host-stop', backend, scope: facts.scope, live: facts.live, transportToken: facts.transportToken }, workStopped, operationEpoch)
+      },
+    })
   }
 
   /** Show the same-seat unconfirmed state; never a stopped claim. */
@@ -284,7 +377,7 @@ export function createExitIntentCoordinator(deps: ExitIntentCoordinatorDeps): Ex
     if (model === undefined || identity === undefined) return
     // The Stop-in-flight window is locked: repeated confirmations must never
     // dispatch a second cancel.
-    if (model.phase === 'stopping') return
+    if (model.phase === 'stopping' || model.phase === 'verifying') return
     // Only an option the CURRENT model really offered may act. A renderer
     // cannot reach a business path its painted frame never presented.
     if (!model.options.some(candidate => candidate.id === option)) {
@@ -360,17 +453,13 @@ export function createExitIntentCoordinator(deps: ExitIntentCoordinatorDeps): Ex
       return
     }
     if (option === 'stop-host-and-exit') {
-      // The verdict is only valid while the LIVE Profile facts still prove the
-      // daemon→direct transition. A revert by another Client, a stale/unknown
-      // configuration or a Direct re-read must NOT execute the Host stop: the
-      // exit degrades to the ordinary detach (plan §3.3 — never treat unknown
-      // as verified).
-      if (!identityCurrent(identity) || !deps.facts.hostStopEligible()) {
-        safeDiag('info', 'host stop declined: the transition intent is no longer current')
-        commitAfterClose(identity, pendingHostStopWorkStopped, epoch)
-        return
-      }
-      commitAfterClose(identity, pendingHostStopWorkStopped, epoch, true)
+      // The verdict is only valid after a FRESH authoritative Backend read
+      // confirms the daemon→direct transition. A revert by another Client, a
+      // stale/unknown configuration or a Direct re-read must NOT execute the
+      // Host stop: the exit degrades to the ordinary detach (plan §3.3 — never
+      // treat unknown as verified). The check runs on the SAME seat/operation
+      // with a non-repeatable verifying state.
+      verifyThenAcceptStop(identity, pendingHostStopWorkStopped, epoch)
       return
     }
     if (option === 'keep-and-disconnect' || option === 'disconnect-without-stop') {
@@ -442,9 +531,12 @@ export function createExitIntentCoordinator(deps: ExitIntentCoordinatorDeps): Ex
     _epoch: number,
   ): boolean => {
     // Only a daemon Client has an old shared Host to ask about; a Direct exit
-    // always commits directly even if a stale intent somehow lingers.
+    // always commits directly even if a stale intent somehow lingers. The
+    // cheap SYNC intent check decides whether to intercept at all; the FRESH
+    // authoritative read runs in verifyThenOpenHostStop before the option is
+    // ever shown.
     if (identity.backend !== 'daemon') return false
-    if (!deps.facts.hostStopEligible()) return false
+    if (!deps.facts.hostStopIntentCurrent()) return false
     // The SAME identity, revalidated live; the confirm is a NEW operation.
     if (facts.shellRunning && open?.shellRunning !== true) {
       // A user shell reminder must be seen before the dangerous confirm too;
@@ -454,7 +546,7 @@ export function createExitIntentCoordinator(deps: ExitIntentCoordinatorDeps): Ex
       presenter()?.update(open)
       return true
     }
-    openHostStopChoice(facts, identity.backend, workStopped)
+    verifyThenOpenHostStop(facts, identity.backend, workStopped)
     return true
   }
 
@@ -575,12 +667,12 @@ export function createExitIntentCoordinator(deps: ExitIntentCoordinatorDeps): Ex
       case 'direct-exit':
       case 'client-detach': {
         // M6 UX PR2: the ONE post-decision confirm. Only a daemon Client that
-        // earned the transient daemon→direct conversion intent (and still
-        // proves it against the LIVE Profile facts) is asked about the old
-        // Host; every ordinary exit/detach commits directly and never stops a
-        // Host. A Direct exit always commits directly.
-        if (backend === 'daemon' && deps.facts.hostStopEligible()) {
-          openHostStopChoice(facts, backend, false)
+        // earned the transient daemon→direct conversion intent is asked about
+        // the old Host, and only after a FRESH authoritative Backend read
+        // confirms it; every ordinary exit/detach commits directly and never
+        // stops a Host. A Direct exit always commits directly.
+        if (backend === 'daemon' && deps.facts.hostStopIntentCurrent()) {
+          verifyThenOpenHostStop(facts, backend, false)
           return
         }
         deps.commit({ workStopped: false })
