@@ -16,6 +16,11 @@ on:
         required: false
         type: boolean
         default: false
+      split_process_case:
+        description: Optional registered Split case id for the manual qualification (empty runs the full lane)
+        required: false
+        type: string
+        default: ''
 
 # Default to the minimum permission required by normal CI jobs.
 # The publish job explicitly adds id-token: write for npm Trusted Publishing.
@@ -1099,6 +1104,7 @@ jobs:
       # candidate. Playwright Chromium lives in an isolated tools directory and
       # never enters the product tarball or the runtime dependency graph.
       - name: Install the isolated Playwright Chromium qualification tools
+        if: ${{ inputs.split_process_case == '' }}
         run: |
           set -euo pipefail
           TOOLS="$RUNNER_TEMP/m5-web-product-tools"
@@ -1152,7 +1158,15 @@ jobs:
 
       - name: Host/Client split-process bootstrap
         id: split_smoke
-        run: pnpm smoke:split-process -- "$CANDIDATE"
+        env:
+          SPLIT_PROCESS_CASE: ${{ inputs.split_process_case }}
+        run: |
+          set -euo pipefail
+          if [ -n "${SPLIT_PROCESS_CASE}" ]; then
+            pnpm smoke:split-process -- --case "$SPLIT_PROCESS_CASE" "$CANDIDATE"
+          else
+            pnpm smoke:split-process -- "$CANDIDATE"
+          fi
 
       - name: Upload sanitized Split smoke failure report
         if: always()
