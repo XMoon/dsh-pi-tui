@@ -115,10 +115,12 @@ export async function runExtensionConfigPr2(context) {
       `installed patch rows do not match the manifest-derived ids: ${JSON.stringify({ expectedRowA, expectedRowB })}`)
     assert(extensionConfigRowId(`${installedManifestA.name}-renamed`) !== expectedRowA,
       'the renamed-manifest negative control must not reuse the installed row id')
-    const preferencesBefore = preferencesRows(patchPath)
 
     const startedHost = await scene.startC1Host('r8-extension-config-pr2', 'R8-E PR-2 Host')
     host = startedHost.host
+    // The official Host boot may perform its own legacy preference migration;
+    // capture the canonical row AFTER that boot, before the Client probe.
+    const preferencesBefore = preferencesRows(patchPath)
     const startedClient = await scene.startC1Client('R8-E PR-2 Client', {
       SPLIT_PROCESS_CLIENT_EXTENSION_CONFIG_PROBE: '1',
       SPLIT_PROCESS_CLIENT_EXTENSION_CONFIG_PACKAGES: JSON.stringify({
