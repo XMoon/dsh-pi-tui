@@ -350,6 +350,18 @@ the kernel seat where one is required.
   registry/launch files untouched. A Client whose protocol or DSH runtime
   differs is refused before authentication, also leaving the live Host
   untouched.
+- **Explicit Host-stop-on-exit (M6 UX PR2).** The ordinary Client detach above
+  is the default and never stops a Host. ONE narrow, separately authorized
+  exception exists: when a running Daemon Client has itself made a verified
+  `daemon → direct` Profile transition and the user then explicitly chooses
+  `Stop daemon Host and exit` in the whole-Host stop confirm, the final exit
+  root runs ONE authenticated `daemon stop` for that exact Profile AFTER the
+  terminal is restored. It is a Profile-management action (not a Session Turn
+  cancel), it interrupts every connected Client/Session/Job of that Host, and
+  it requires the confirm's destructive choice — a save, a preference change or
+  an ordinary exit never triggers it. The stop's own pre/post proof is the only
+  success source; a refusal keeps the truthful "not confirmed" wording and the
+  control plane's stable exit code.
 - **Session boundary.** The Client derives `connecting | connected | disconnected`
   from the official Connection state and generation on every read and never
   copies it into a long-lived flag. `sessionOpen` is a LIVE projection of the

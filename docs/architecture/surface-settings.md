@@ -232,6 +232,16 @@ specialist-page contract below).
     surface receives ONE physical switch with the preference persistence
     skipped. A forced teardown, a newer blocking owner or any unverified outcome
     switches nothing; the stored preference then applies at the next TUI mount.
+  - `Backend` (`startup-backend`) is a NEXT cold-launch fact only: a save never
+    switches the running TUI/Host. A verified NEW value may open ONE transient
+    follow-up inside the SAME lease (`direct → daemon` offers the optional
+    service install; `daemon → direct` records the process-lifetime
+    exit-transition intent). The follow-up is presentation state of that lease:
+    `Not now`/Esc/row change withdraws it with zero management IO, one explicit
+    `Install service` confirmation drives exactly one profile-scoped install
+    through the existing control plane (never a start/enable/migrate), and a
+    platform without the local capability paints only the truthful refusal
+    line. A stale settlement never repaints a newer follow-up.
   - `Git attribution`, `Home/End keys`, `Mouse wheel lines`, `Notifications`,
     `Notification method` and `Terminal progress` are APPLY-FIRST like
     `icon-style`/`progress-updates`/`response-style`, each driving its ONE
