@@ -481,6 +481,128 @@ test('a merged read group renders one tree row per file on the Client presenter 
   assert.ok(!view.includes('total lines: 1'), `the merged group rendered as ONE file:\n${view}`)
 })
 
+test('a foreign tool with read-shaped metadata renders identically with and without the client presenter', async (t) => {
+  // R11 Web-parity negative control on a REAL visible sink: a NON-read tool
+  // that returns valid read-shaped metadata + a file envelope must NOT gain a
+  // presenter-only Read card. Drive the SAME foreign `tool/call` +
+  // `tool/result` through two serial TuiApps — one with
+  // `createClientToolPresenter()` installed, one WITHOUT a presenter — each on
+  // its own isolated VirtualTerminal, started/stopped one at a time (the
+  // process's single-live-TUI slot). The two visible sinks must be IDENTICAL:
+  // the Client presenter adds no increment for a foreign tool. This isolates
+  // the presenter increment instead of string-guessing (the generic
+  // `parseReadEnvelopes` may legitimately render the same body either way).
+  const life = testLifecycle(t)
+  const dir = life.tempDir('dsh-pi-tui-foreign-read-')
+
+  const envelope = '<path>src/a.ts</path>\n<type>file</type>\n<content>\n1: a\n</content>'
+  const readMeta = { path: 'src/a.ts', offset: 1, lines: [{ number: 1, text: 'a' }], totalLines: 1 }
+  const eventsFor = (name: string): SessionEvent[] => ([
+    {
+      type: 'tool/call',
+      seq: SessionSeq(0),
+      time: 1_700_000_000_000,
+      data: { turn: 0, step: 0, callId: ToolCallId('call-1'), name, arguments: JSON.stringify({ file_path: 'src/a.ts' }) },
+    },
+    {
+      type: 'tool/result',
+      surfaceOp: 'append',
+      seq: SessionSeq(1),
+      time: 1_700_000_000_001,
+      data: {
+        turn: 0,
+        step: 0,
+        message: createToolResultMessage({ callId: ToolCallId('call-1'), content: [{ type: 'text', text: envelope }], isError: false }),
+        meta: readMeta as JsonValue,
+      },
+    },
+  ])
+
+  // Run one TuiApp to a settled viewport and release its process slot before
+  // the next (the two apps are strictly serial).
+  const run = async (name: string, present: ReturnType<typeof createClientToolPresenter> | undefined): Promise<string> => {
+    const vt = new VirtualTerminal(100, 24)
+    const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+      workspaceRoot: dir,
+      ...(present === undefined ? {} : { present }),
+    })
+    app.start()
+    startedApps.add(app)
+    app.setTranscriptDetailExpanded(true)
+    const folder = new TranscriptFolder()
+    folder.apply(eventsFor(name))
+    app.setTranscript(folder.messages())
+    await vt.waitForRender()
+    const view = vt.getViewport()
+      .map(line => line.replace(/\x1b\[[0-9;]*m/g, '').replace(/\s+$/, ''))
+      .join('\n')
+    app.dispose()
+    return view
+  }
+
+  const foreignWith = await run('third_party_probe', createClientToolPresenter())
+  const foreignWithout = await run('third_party_probe', undefined)
+
+  // DECISIVE: the foreign tool's visible sink is IDENTICAL with and without
+  // the presenter — no presenter-only Read-card increment (R11-WEB-01).
+  assert.equal(foreignWith, foreignWithout,
+    `the presenter must not add a Read card for a foreign tool:\n=== with presenter ===\n${foreignWith}\n=== without presenter ===\n${foreignWithout}`)
+  // The raw result body is preserved on the generic path (not swallowed).
+  assert.ok(foreignWithout.includes('third_party_probe'), `the foreign tool row is missing:\n${foreignWithout}`)
+
+  // The same shape on the REAL `read` name still renders its Read card through
+  // the Client presenter — the dedicated read capability is intact (the
+  // positive counterpart, so tightening the foreign case cannot hide a read
+  // regression).
+  const readView = await run('read', createClientToolPresenter())
+  assert.ok(readView.includes('path: src/a.ts'), `the read card path is missing:\n${readView}`)
+  assert.ok(readView.includes('total lines: 1'), `the read card line count is missing:\n${readView}`)
+})
+
+test('a settled write with no result metadata still paints its args diff', async (t) => {
+  // Owner W05 correction: a write that succeeded but carries NO result path
+  // has no Result View (never a synthetic `args.file_path` result path), yet
+  // the user must still SEE the args-derived diff — the call-view fallback in
+  // the settled card paints it. This is the source -> decision -> painted-sink
+  // proof (not merely `presenter.call() !== undefined`).
+  const life = testLifecycle(t)
+  const dir = life.tempDir('dsh-pi-tui-write-call-diff-')
+  const callEvent: SessionEvent = {
+    type: 'tool/call',
+    seq: SessionSeq(0),
+    time: 1_700_000_000_000,
+    data: { turn: 0, step: 0, callId: ToolCallId('call-1'), name: 'write', arguments: JSON.stringify({ file_path: 'src/b.ts', content: 'the-written-body' }) },
+  }
+  const resultEvent: SessionEvent = {
+    type: 'tool/result',
+    surfaceOp: 'append',
+    seq: SessionSeq(1),
+    time: 1_700_000_000_001,
+    data: {
+      turn: 0,
+      step: 0,
+      message: createToolResultMessage({ callId: ToolCallId('call-1'), content: [{ type: 'text', text: 'Updated file' }], isError: false }),
+      // NO result metadata: the args diff must still be painted via the call view.
+    },
+  }
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    workspaceRoot: dir,
+    present: createClientToolPresenter(),
+  })
+  app.start()
+  startedApps.add(app)
+  life.defer(() => app.stop())
+  app.setTranscriptDetailExpanded(true)
+  const folder = new TranscriptFolder()
+  folder.apply([callEvent, resultEvent])
+  app.setTranscript(folder.messages())
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  // The args-derived diff body is painted in the settled write card.
+  assert.ok(view.includes('the-written-body'), `the settled write's args diff body is missing:\n${view}`)
+})
+
 
 test('footer mode slot badges every permission preset', async () => {
   const { vt, app } = startApp()
