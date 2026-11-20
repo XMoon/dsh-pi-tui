@@ -479,12 +479,33 @@ class RemoteConfigMirror {
     this.constructed = true
   }
 
+  /**
+   * Qualification-only deferral: when this narrow seam is set, an invalidation
+   * is HELD as a deferred fact instead of being applied. `readiness()` therefore
+   * keeps reporting the last committed snapshot as ready and `read()` keeps its
+   * value, while `describeFresh()` still forces a real authoritative describe.
+   * This lets the real two-Client qualification prove that a fresh read — not a
+   * notification — catches another Client's write. Production never sets it.
+   */
+  private deferredInvalidations = 0
+
   /** Mark the committed snapshot non-current and rerun the read (§2.3). A
    *  read must not treat the snapshot as authoritative until a fresh
    *  describe commits. */
   private invalidate(): void {
+    if (process.env.SPLIT_PROCESS_CLIENT_DEFER_SETTINGS_INVALIDATION === '1') {
+      // Do NOT bump `invalidation`: the stale-but-ready mirror is the exact
+      // precondition this qualification exists to create.
+      this.deferredInvalidations += 1
+      return
+    }
     this.invalidation += 1
     this.scheduleRefresh()
+  }
+
+  /** The qualification-only deferred invalidation count (0 in production). */
+  deferredInvalidationCount(): number {
+    return this.deferredInvalidations
   }
 
   /**

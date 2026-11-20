@@ -20,7 +20,7 @@
  * @module split-process/daemon-ui-host-stop-m6-ux-pr2
  */
 
-import { writeFileSync } from 'node:fs'
+import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 import { SplitSmokeAssertionError } from '../../lib/split-smoke-diagnostics.mjs'
@@ -297,5 +297,83 @@ export async function runDaemonUiHostStop(context) {
     scope: 'REAL_SPLIT_PROCESS_L6',
     leave: { hostKept: true, siblingKept: true },
     stop: { hostVerifiedGone: true, noTerminalTransportFailure: true, siblingLostInstance: true },
+  }
+}
+
+/**
+ * Path 3 (A14) on the REAL wire: a second Client's real Settings write is only
+ * observable through the FIRST Client's fresh authoritative read.
+ *
+ * The first Client's committed config mirror is deliberately held stale (a
+ * qualification-only deferred invalidation) so `read()` still reports `direct`
+ * while the Host already persists `daemon`. The exit intent therefore opens the
+ * whole-Host stop verification with a stale-but-ready mirror, and the REAL
+ * `readFresh()` must reject the transition — a plain `read()` would have
+ * authorized the Stop. The old Host must keep its exact kernel identity (ZERO
+ * admin stops) and the Client must exit as a plain detach.
+ */
+export async function runDaemonUiHostStopPath3(context) {
+  const { trace, dshHome } = context
+  writeFileSync(join(dshHome, 'settings.yaml'), 'tui-startup:\n  backend: direct\n')
+  const scene = createC1Scene(context)
+  const { startC1Host, startC1Client, hostIdentityFacts, assertHostIdentityKept, dispose } = scene
+  try {
+    const { host } = await startC1Host('daemon-control.m6-ux-pr2-ui-host-stop-path3', 'PR3 Host')
+    const before = await hostIdentityFacts(host)
+    // A: the Client that will attempt the Stop. Its invalidation is deferred, so
+    // its committed mirror keeps the last value it read.
+    const { client: clientA } = await startC1Client('PR3 A', { SPLIT_PROCESS_CLIENT_DEFER_SETTINGS_INVALIDATION: '1' })
+    // A arms the transient daemon→direct transition with two REAL verified saves.
+    await saveBackend(clientA, 'Daemon', 'PR3 A')
+    await closeSettings(clientA, 'PR3 A')
+    await saveBackend(clientA, 'Direct', 'PR3 A')
+    await closeSettings(clientA, 'PR3 A')
+
+    // B changes the Profile back to Daemon through its OWN real Settings UI.
+    const { client: clientB } = await startC1Client('PR3 B')
+    await saveBackend(clientB, 'Daemon', 'PR3 B')
+    await closeSettings(clientB, 'PR3 B')
+    trace('pr3.second-client-wrote', { value: 'daemon' })
+
+    // A's committed mirror is still `direct` (stale-but-ready): the Settings
+    // detail it paints comes from that snapshot.
+    await openBackendDetail(clientA, 'PR3 A')
+    const staleFrame = await frameOf(clientA)
+    assert(/Value\s+Direct/u.test(staleFrame),
+      `A's committed mirror must still read Direct before the exit; frame=${JSON.stringify(staleFrame)}`)
+    await closeSettings(clientA, 'PR3 A')
+    trace('pr3.stale-mirror', { readBackend: 'direct' })
+
+    // A /exit: the REAL fresh read must observe B's `daemon` and refuse the Stop.
+    clientA.send('/exit\r')
+    const exit = await clientA.waitForExit(90_000)
+    assert(exit.code === 0 && exit.signal === null,
+      `a refused Stop is a plain detach and must exit 0, saw ${JSON.stringify(exit)}`)
+    trace('pr3.stop-refused-exit', { exitCode: exit.code })
+    assert(!clientA.records.some(record => record.m4a0 === 'failure'),
+      'the refused Stop must not produce a terminal transport failure')
+
+    // The refusal is a POSITIVE fact: the coordinator records that the fresh
+    // authoritative read did not confirm the transition. Without this line a
+    // silently refreshed mirror (confirm never opened) could look identical.
+    const pid = clientA.records.find(record => record.m4a0 === 'ready')?.pid
+    const clientLog = readFileSync(join(dshHome, 'logs', `pi-tui-${String(pid)}.log`), 'utf8')
+    assert(clientLog.includes('host stop declined: the fresh authoritative Backend read did not confirm the transition'),
+      `the production coordinator must record the fresh-read refusal; log tail=${JSON.stringify(clientLog.slice(-800))}`)
+    assert(clientA.raw.includes('The daemon Host was not stopped by this action.'),
+      `the hint must state the Host was not stopped; raw tail=${JSON.stringify(clientA.raw.slice(-500))}`)
+    trace('pr3.fresh-read-refused', { adminStops: 0 })
+
+    // ZERO admin stops: the old Host instance keeps its exact kernel identity.
+    await assertHostIdentityKept(host, before, 'PR3 Host after the refused Stop')
+    trace('pr3.host-kept', { identityUnchanged: true })
+    await clientB.dispose().catch(() => {})
+  } finally {
+    await dispose()
+  }
+  return {
+    status: 'PASS',
+    scope: 'REAL_SPLIT_PROCESS_L6',
+    path3: { staleMirror: true, freshReadRefused: true, adminStops: 0, hostKept: true },
   }
 }

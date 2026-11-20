@@ -19,7 +19,7 @@ import { runAuthenticatedLifecycle } from '../smoke/split-process/authenticated-
 import { runClientHmrSignals } from '../smoke/split-process/client-hmr-signals.mjs'
 import { runDetachedTurnInteractions } from '../smoke/split-process/detached-turn-interactions.mjs'
 import { runNonDestructiveClientLifecycle } from '../smoke/split-process/non-destructive-client-lifecycle.mjs'
-import { runDaemonUiHostStop } from '../smoke/split-process/daemon-ui-host-stop-m6-ux-pr2.mjs'
+import { runDaemonUiHostStop, runDaemonUiHostStopPath3 } from '../smoke/split-process/daemon-ui-host-stop-m6-ux-pr2.mjs'
 import { runReadAuthority } from '../smoke/split-process/read-authority.mjs'
 import { runHostDirectoryBrowse } from '../smoke/split-process/host-directory-browse.mjs'
 import { runHostDirectoryInlineChooser } from '../smoke/split-process/host-directory-inline-chooser.mjs'
@@ -228,6 +228,13 @@ const CASE_REGISTRY = Object.freeze([
     id: 'daemon-control.m6-ux-pr2-ui-host-stop',
     title: 'the real Settings/Exit UI Leave keeps the old Host and a sibling Client alive, and an explicit Stop stops it exactly once',
     run: runDaemonUiHostStop,
+  }),
+  Object.freeze({
+    suite: 'daemon-control',
+    defaultLane: false,
+    id: 'daemon-control.m6-ux-pr2-ui-host-stop-path3',
+    title: 'a real second Client write is caught by the real fresh read: the Stop confirm is refused, ZERO admin stops, and the old Host stays alive',
+    run: runDaemonUiHostStopPath3,
   }),
   Object.freeze({
     suite: 'read',
