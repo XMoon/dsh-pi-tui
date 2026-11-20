@@ -110,6 +110,13 @@ export interface InstalledLocalClientTransport extends LocalClientTransport {
 export interface StartLocalTransportOptions {
   /** Installed `@deepseek-ai/dsh/package.json` anchor. */
   readonly dshAnchor: string
+  /**
+   * Test-only seam over the installed-module loader: a disposal-contract test
+   * supplies the structural module set instead of a real DSH installation.
+   * Production never passes this; the anchor path stays the only production
+   * source of the official client modules.
+   */
+  readonly modulesOverride?: LoadedLocalTransportModules
   /** Optional lifecycle signal for the first-generation wait. */
   readonly signal?: AbortSignal
   /** Authenticated Host candidate and this Client process's Cookie. */
@@ -820,9 +827,17 @@ export async function installLocalTransport(
   options: StartLocalTransportOptions,
 ): Promise<InstalledLocalClientTransport> {
   const { dshAnchor, host, scope, diag } = options
-  const modules = await loadLocalTransportModules(dshAnchor)
+  const modules = options.modulesOverride ?? await loadLocalTransportModules(dshAnchor)
   const origin = host.record.origin
   let disposed = false
+  /**
+   * The ONE in-flight/completed disposal. Every caller of `dispose()` — the
+   * exit root's early release, the surface handle teardown, the startup
+   * failure unwind — awaits the SAME settlement and observes the SAME failure:
+   * a later call must never return success over an unwind that already failed
+   * (the release's `cleanupFailed` would otherwise be silently lost).
+   */
+  let disposalPromise: Promise<void> | undefined
   const disposal = new AbortController()
   let fatalReported = false
   let live = false
@@ -1073,14 +1088,20 @@ export async function installLocalTransport(
         }
       },
       async dispose(): Promise<void> {
-        if (disposed) return
+        if (disposalPromise !== undefined) return await disposalPromise
         disposed = true
-        const errors = await unwind()
-        if (errors.length === 0) return
-        const primary = errors[0] instanceof Error ? errors[0] : new Error(String(errors[0]))
-        for (const secondary of errors.slice(1)) mergeCause(primary, secondary)
-        ;(primary as Error & { cleanupFailed?: boolean }).cleanupFailed = true
-        throw primary
+        disposalPromise = (async () => {
+          const errors = await unwind()
+          if (errors.length === 0) return
+          const primary = errors[0] instanceof Error ? errors[0] : new Error(String(errors[0]))
+          for (const secondary of errors.slice(1)) mergeCause(primary, secondary)
+          ;(primary as Error & { cleanupFailed?: boolean }).cleanupFailed = true
+          throw primary
+        })()
+        // A later caller awaiting the same disposal must not swallow the
+        // unhandled-rejection contract of the first caller's race slot.
+        disposalPromise.catch(() => {})
+        return await disposalPromise
       },
     }
     return handle
