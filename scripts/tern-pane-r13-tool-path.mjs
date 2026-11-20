@@ -38,7 +38,7 @@
  */
 import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { containedXY, containedX, visibleSpan, visibleBox } from './tern-pane-geometry.mjs'
+import { containedXY, containedX, fullyVisible, visibleSpan, visibleBox } from './tern-pane-geometry.mjs'
 
 const EVIDENCE_TIER = 'REAL_TERN_HEADLESS_RENDERER_SURFACE'
 const USER_TEXT = 'inspect the current workspace file'
@@ -161,6 +161,17 @@ const collapsibleHeads = (snap) => snap.nodes
   .filter(node => String(node.class ?? '').includes('sf-section-head')
     || String(node.class ?? '').includes('sf-tool-head'))
 
+/**
+ * Whether one probe verdict qualifies as a VISUALLY PROVEN required sink:
+ * present in the tree, fully inside every clipping ancestor AND of positive
+ * visible extent. `containedXY` alone is NOT enough (RFL-004): the geometry
+ * oracle returns true for a zero-width/height node whose empty rect happens
+ * to sit inside its ancestors, while `fullyVisible` rejects zero extent.
+ * Exported so the zero-size negative probe exercises the REAL gate predicate.
+ */
+export const requiredSinkVisuallyProven = (verdict) =>
+  verdict.found === true && verdict.containedXY === true && verdict.fullyVisible === true
+
 /** The node that carries one exact text, with its geometry-oracle verdict.
  *  The comparison is on TRIMMED text: the client keeps a row segment's leading
  *  separator space (` · <summary>`), while the expected form is trimmed. */
@@ -171,6 +182,7 @@ function proveText(snap, text) {
     found: true,
     node,
     containedXY: containedXY(snap.chains, node),
+    fullyVisible: fullyVisible(snap.chains, node),
     containedX: containedX(snap.chains, node),
     span: { x: visibleSpan(snap.chains, node, 'x'), y: visibleSpan(snap.chains, node, 'y') },
     box: visibleBox(snap.chains, node),
@@ -185,6 +197,7 @@ function proveAllText(snap, text) {
       found: true,
       node,
       containedXY: containedXY(snap.chains, node),
+      fullyVisible: fullyVisible(snap.chains, node),
       containedX: containedX(snap.chains, node),
       span: { x: visibleSpan(snap.chains, node, 'x'), y: visibleSpan(snap.chains, node, 'y') },
       box: visibleBox(snap.chains, node),
@@ -342,17 +355,19 @@ export default async function (h) {
     const probe = preset === 'full' ? targetProbe : proveText(snap, actionHeadText(expected))
     const summaryProbe = proveText(snap, paintedSummary(expected))
     const visible = { actionHead: probe, toolTarget: targetProbe, preparingSummary: summaryProbe }
-    // ── R13-RV-01: EVERY required painted path sink must be VISUALLY PROVEN
-    // (present in the client tree AND fully contained through every clipping
-    // ancestor) as a DECISIVE check. A clipped or missing required sink FAILS
+    // ── R13-RV-01 / RFL-004: EVERY required painted path sink must be
+    // VISUALLY PROVEN (present in the client tree, fully contained through
+    // every clipping ancestor AND of positive visible extent — `fullyVisible`
+    // rejects the zero-geometry node `containedXY` alone accepts) as a
+    // DECISIVE check. A clipped, zero-extent or missing required sink FAILS
     // the run; a measurement can never carry that weight, so a CLIPPED /
     // NOT_VISUALLY_PROVEN item can no longer coexist with a run-level PASS. ──
     const provenance = (verdict) => verdict.found === true
-      ? { containedXY: verdict.containedXY, box: verdict.box }
+      ? { containedXY: verdict.containedXY, fullyVisible: verdict.fullyVisible, box: verdict.box }
       : { found: false }
     const requireVisible = (label, verdict) => h.check(
       `[${state}] ${label} is visually proven (geometry oracle)`,
-      verdict.found === true && verdict.containedXY === true,
+      requiredSinkVisuallyProven(verdict),
       JSON.stringify(provenance(verdict)))
     // The path sinks of this state: the Full Tool target (EVERY painted card
     // instance), the Compact/Focus collapsed Action head, and the Preparing
@@ -375,17 +390,17 @@ export default async function (h) {
     for (const [index, instance] of summaryInstances.entries()) {
       requireVisible(`the Preparing summary (instance ${index + 1})`, instance)
     }
-    const clipped = (probe.found === true && probe.containedXY !== true)
-      || targetInstances.some(instance => instance.containedXY !== true)
-      || summaryInstances.some(instance => instance.containedXY !== true)
+    const clipped = (probe.found === true && !requiredSinkVisuallyProven(probe))
+      || targetInstances.some(instance => !requiredSinkVisuallyProven(instance))
+      || summaryInstances.some(instance => !requiredSinkVisuallyProven(instance))
       || (preset === 'full' && targetInstances.length === 0)
       || summaryInstances.length === 0
     if (clipped) {
       const item = {
         state, viewport: record.viewport,
-        actionHead: probe.found ? { containedXY: probe.containedXY, box: probe.box } : 'absent',
-        toolTarget: targetInstances.map(instance => ({ containedXY: instance.containedXY, box: instance.box })),
-        preparingSummary: summaryInstances.map(instance => ({ containedXY: instance.containedXY, box: instance.box })),
+        actionHead: probe.found ? provenance(probe) : 'absent',
+        toolTarget: targetInstances.map(provenance),
+        preparingSummary: summaryInstances.map(provenance),
         verdict: 'CLIPPED / NOT_VISUALLY_PROVEN',
       }
       ledger.clipped.push(item)
