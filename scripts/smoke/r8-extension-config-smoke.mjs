@@ -644,9 +644,11 @@ function main() {
       && afterBad !== undefined && describeRow(afterBad, aRow)?.value.data.label === 'alpha-user',
     'a non-JSON write is rejected before persistence', JSON.stringify(badOutcome?.errorMessage))
     const savedUserPatch = readFileSync(join(profileDir, 'cordis.patch.yml'), 'utf8')
-    check('P1-04g', savedUserPatch.includes(`- id: ${aRow}`) && savedUserPatch.includes('alpha-user')
-      && savedUserPatch.includes(`- id: ${bRow}`) && savedUserPatch.includes('bravo-user'),
-    'USER patch carries exactly the two saved rows', savedUserPatch)
+    const patchRowIds = savedUserPatch.split('\n').filter(line => line.startsWith('- id: ')).map(line => line.slice(6).trim())
+    check('P1-04g', patchRowIds.length === 2 && patchRowIds.includes(aRow) && patchRowIds.includes(bRow)
+      && savedUserPatch.includes('alpha-user') && savedUserPatch.includes('bravo-user')
+      && !savedUserPatch.includes('pi-tui-preferences'),
+    'USER patch carries exactly the two saved Config rows and nothing else', JSON.stringify(patchRowIds))
 
     const restart = runHost({ env, runRoot, stampDir, sentinel, label: 'restart' })
     const restarted = restart.snapshots[0]
@@ -809,7 +811,7 @@ function main() {
     check('P1-08e', carrierShape.name === 'pi-tui-extension-config' && carrierShape.config === true && carrierShape.apply === 'function',
       'the packed carrier imports with name/Config/apply', JSON.stringify(carrierShape))
     const tsc = spawnSync(process.execPath, [join(PACKAGE_ROOT, 'node_modules', 'typescript', 'bin', 'tsc'),
-      '--noEmit', '--strict', '--skipLibCheck', '--module', 'nodenext', '--moduleResolution', 'nodenext', '--target', 'es2022', 'index.ts'], { cwd: consumerDir, env, encoding: 'utf8' })
+      '--noEmit', '--strict', '--module', 'nodenext', '--moduleResolution', 'nodenext', '--target', 'es2022', 'index.ts'], { cwd: consumerDir, env, encoding: 'utf8' })
     check('P1-08f', tsc.status === 0, 'a real tsc consumer typechecks ./extension-config',
       tsc.status === 0 ? 'tsc --noEmit exit 0' : `${String(tsc.status)}: ${tsc.stdout ?? ''}${tsc.stderr ?? ''}`)
 
