@@ -12,7 +12,10 @@
  * @module @xmoon76/dsh-pi-tui/app/plugin-manager/client-extension-discovery
  */
 
-import { createHash } from 'node:crypto'
+import { extensionConfigRowId } from '../../domain/extension-config/row-id.ts'
+
+/** The ONE row-id derivation rule, re-exported from its neutral home. */
+export { extensionConfigRowId } from '../../domain/extension-config/row-id.ts'
 
 /** The ONE trusted Host-safe module every opted-in package's row names. */
 export const EXTENSION_CONFIG_MODULE = '@xmoon76/dsh-pi-tui/extension-config'
@@ -25,22 +28,6 @@ export const CLIENT_TUI_LOCAL = 'tui-local'
 
 /** The only `dshPiTui.manifestVersion` PiTui currently understands. */
 export const CLIENT_MANIFEST_VERSION = 1
-
-/**
- * Derive one package's profile-owned Config row id.
- *
- * The id is `sha256(packageName)`'s first 32 lowercase hex characters under a
- * stable prefix: the exact UTF-8 npm `package.json#name`, never a display name,
- * alias, directory or version. One function owns this rule so fixture
- * generation, discovery and the qualification gate cannot drift; Node-only
- * callers (profile/package discovery) may use it, the TUI never needs to.
- *
- * @param packageName - the resolved npm package name (the manifest `name`).
- * @returns the Loader row id that package's patch must insert.
- */
-export function extensionConfigRowId(packageName: string): string {
-  return `pi-tui-extcfg-${createHash('sha256').update(packageName, 'utf8').digest('hex').slice(0, 32)}`
-}
 
 /** The official package identity discovery needs. */
 export interface ClientExtensionPackage {

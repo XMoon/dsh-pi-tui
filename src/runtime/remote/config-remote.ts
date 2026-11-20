@@ -120,7 +120,12 @@ import type {
   McpServerConfiguration,
   McpServerConfigurationConfig,
   McpConfigWriteOutcome,
+  ExtensionConfigDataOp,
+  ExtensionConfigRead,
+  ExtensionConfigsConfig,
 } from '../config-port.ts'
+import { extensionConfigRowId } from '../../domain/extension-config/row-id.ts'
+import { extensionConfigUserDataPresent, projectExtensionConfigData } from '../../domain/extension-config/data.ts'
 import {
   baseDictKeysOf,
   classifyMcpServerProvenance,
@@ -2284,6 +2289,7 @@ export class RemoteConfigPort implements ConfigPort {
   readonly webStartupPreference: WebStartupPreferenceConfig
   readonly backendStartupPreference: BackendStartupPreferenceConfig
   readonly acpStartupPreference: AcpStartupPreferenceConfig
+  readonly extensionConfigs: ExtensionConfigsConfig
   readonly mcpServerSources: McpServerSourcesConfig
   readonly mcpServerConfiguration: McpServerConfigurationConfig
 
@@ -2343,6 +2349,7 @@ export class RemoteConfigPort implements ConfigPort {
     this.webStartupPreference = new RemoteWebStartupPreferenceConfig(this.mirror)
     this.backendStartupPreference = new RemoteBackendStartupPreferenceConfig(this.mirror)
     this.acpStartupPreference = new RemoteAcpStartupPreferenceConfig(this.mirror)
+    this.extensionConfigs = new RemoteExtensionConfigsConfig(this.mirror, () => this.describe())
     // The MCP configuration-source read reuses the SAME settings mirror (no
     // second long-lived mirror): `refresh()` drives its existing serialized
     // describe(), so a just-opened page reads a current key set instead of
@@ -3254,5 +3261,147 @@ class RemoteMcpServerConfigurationConfig implements McpServerConfigurationConfig
       }
     }
     return { kind: 'saved', revision: readBack.revision }
+  }
+}
+
+/* ------------------------------------------------------------------------- *
+ * R8-E PR-2: per-package extension configuration.
+ * ------------------------------------------------------------------------- */
+
+function validRemoteSettingsRevision(revision: unknown): revision is number {
+  return typeof revision === 'number' && Number.isSafeInteger(revision) && revision >= 0
+}
+
+/**
+ * The Remote per-package extension-config domain over the ONE committed
+ * Settings mirror. A `ready` read requires a CURRENT mirror generation and a
+ * readable `data` projection. A write joins the EXISTING serialized mirror
+ * queue, re-checks the captured generation and revision at dispatch, and is
+ * `accepted` only when a post-write authoritative `describe()` still serves
+ * the same generation. No second mirror, write counter or optimistic value.
+ */
+class RemoteExtensionConfigsConfig implements ExtensionConfigsConfig {
+  private readonly mirror: RemoteConfigMirror
+  private readonly refreshRead: () => Promise<void>
+
+  constructor(mirror: RemoteConfigMirror, refreshRead: () => Promise<void>) {
+    this.mirror = mirror
+    this.refreshRead = refreshRead
+  }
+
+  read(packageName: string): ExtensionConfigRead {
+    const readiness = this.mirror.readiness()
+    if (readiness === 'unavailable') {
+      const failure = this.mirror.lastRefreshFailure()
+      if (this.mirror.usable() && failure !== undefined) {
+        return { kind: 'unreadable', reason: `the Host settings read failed: ${remoteFailureMessage(failure)}` }
+      }
+      return { kind: 'unavailable', reason: 'no current Host settings snapshot is available' }
+    }
+    if (readiness !== 'ready') {
+      return { kind: 'stale', reason: 'the Host settings snapshot is not current' }
+    }
+    const generation = this.mirror.readyGeneration()
+    if (generation === undefined) {
+      return { kind: 'stale', reason: 'the Host settings snapshot is not current' }
+    }
+    const namespace = extensionConfigRowId(packageName)
+    const view = this.mirror.namespace(namespace)
+    if (view === undefined) {
+      return { kind: 'unavailable', reason: `the "${namespace}" extension Config row is not mounted` }
+    }
+    if (!validRemoteSettingsRevision(view.revision)) {
+      return { kind: 'unreadable', reason: 'the official Host settings revision is not readable' }
+    }
+    const effective = projectExtensionConfigData(view.value)
+    const inherited = projectExtensionConfigData(view.base)
+    const user = projectExtensionConfigData(view.user)
+    if (effective.kind === 'invalid') return { kind: 'unreadable', reason: effective.reason }
+    if (inherited.kind === 'invalid') return { kind: 'unreadable', reason: inherited.reason }
+    if (user.kind === 'invalid') return { kind: 'unreadable', reason: user.reason }
+    return {
+      kind: 'ready',
+      packageName,
+      generation,
+      revision: view.revision,
+      effective: effective.value,
+      inherited: inherited.value,
+      user: user.value,
+      userDataPresent: extensionConfigUserDataPresent(view.user),
+    }
+  }
+
+  async refresh(): Promise<void> {
+    await this.refreshRead()
+  }
+
+  async mutate(
+    packageName: string,
+    ops: readonly ExtensionConfigDataOp[],
+    expectedRevision: number,
+    pinnedGeneration: object,
+  ): Promise<SectionMutationOutcome> {
+    // The generation fence runs TWICE: here (fail fast) and inside the shared
+    // serialized queue at dispatch. A Connection may swap Hosts while the write
+    // waits; a Host B carrying the same revision must never receive Host A's
+    // intent.
+    const currentGeneration = this.mirror.readyGeneration()
+    if (currentGeneration === undefined || !Object.is(currentGeneration, pinnedGeneration)) {
+      return { kind: 'rejected', reason: 'the Host authority changed; refresh before saving' }
+    }
+    if (ops.length === 0) return { kind: 'rejected', reason: 'no settings fields were staged' }
+    const namespace = extensionConfigRowId(packageName)
+    const current = this.mirror.namespace(namespace)
+    if (current === undefined) {
+      return { kind: 'rejected', reason: `the "${namespace}" extension Config row is not mounted` }
+    }
+    if (!validRemoteSettingsRevision(current.revision)) {
+      return { kind: 'rejected', reason: 'the official Host settings revision is not readable' }
+    }
+    if (current.revision !== expectedRevision) {
+      return { kind: 'conflict', reason: 'the Host settings section changed since it was read' }
+    }
+    const wireOps: readonly RemoteSettingsPathOp[] = ops.map(op => op.op === 'set'
+      ? { op: 'set' as const, path: ['data', ...op.path], value: op.value }
+      : { op: 'unset' as const, path: ['data', ...op.path] })
+    let dispatchAdmitted = false
+    try {
+      // `record`: a committed write whose post-settlement refresh cannot
+      // complete remains `outcome-unconfirmed`, never a fake refusal. The
+      // mirror's post-write `describe()` is the only new authority.
+      await this.mirror.mutate(namespace, wireOps, expectedRevision, 'record', (descriptor, queuedRevision) => {
+        if (!Object.is(this.mirror.readyGeneration(), pinnedGeneration)) {
+          throw Object.assign(new Error('the Host authority changed before dispatch'), { code: 'settings/writer-superseded' })
+        }
+        if (descriptor.revision !== expectedRevision || queuedRevision !== expectedRevision) {
+          throw Object.assign(new Error('the Host settings section changed since it was read'), { code: 'settings/conflict' })
+        }
+        dispatchAdmitted = true
+      })
+    } catch (error) {
+      const reason = remoteFailureMessage(error)
+      const code = remoteFailureCode(error)
+      if (code === 'settings/conflict' || code === 'SETTINGS_CONFLICT') {
+        return { kind: 'conflict', reason }
+      }
+      if (!dispatchAdmitted) {
+        return { kind: 'rejected', reason }
+      }
+      // The official controller can label a post-persistence Loader failure as
+      // `settings/rejected`; only Gateway pre-invocation refusals prove the
+      // write never ran. Everything else stays unconfirmed and is never retried.
+      if (code === 'gateway/bad-request' || (code !== undefined && GATEWAY_PRE_INVOCATION_CODES.has(code))) {
+        return { kind: 'rejected', reason }
+      }
+      return { kind: 'outcome-unconfirmed', reason }
+    }
+    const readBack = this.read(packageName)
+    if (readBack.kind !== 'ready') {
+      return { kind: 'outcome-unconfirmed', reason: readBack.reason }
+    }
+    if (!Object.is(readBack.generation, pinnedGeneration)) {
+      return { kind: 'outcome-unconfirmed', reason: 'the Host authority changed while the write settled' }
+    }
+    return { kind: 'accepted' }
   }
 }
