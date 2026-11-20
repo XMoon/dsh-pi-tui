@@ -913,7 +913,7 @@ owns only the lease, focus and write-lifecycle mechanics.
   same L2 transition. `Esc`/`Backspace` step back (and close at L0) — wide,
   medium and narrow behave identically, and a new open starts on the About
   home. The `Tab`/`Shift+Tab` region-key contract is owned by
-  [surface-behavior.md](./surface-settings.md#settings-workspace); those keys
+  [surface-settings.md](./surface-settings.md#settings-workspace); those keys
   only re-focus an existing region and never activate a page, row or write.
   Leaving the workspace is therefore always one reachable key (the Action Bar
   is pinned to the physical last row at every height, down to a one-row
