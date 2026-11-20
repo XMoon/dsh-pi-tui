@@ -3430,16 +3430,28 @@ export function applyRunnerWithRuntime(
       rendererReleased: surfaceLifecycle.surfaceReleased,
       hint: (message) => process.stdout.write(`\n${message}\n`),
       resumeHint: () => {
-        // The Host's profileContext names the profile for EVERY launch form,
-        // including the positional `dsh <name>` (see hostRunningProfile): the
-        // argv scrape alone would answer the pi-tui fallback there and hand the
-        // user a resume command for the wrong profile.
-        const profile = hostRunningProfile(ctx)
         const sessionId = ownership.currentSessionId() ?? agentNow()?.session.id ?? ''
         // M6 UX PR1: leaving a daemon Client is NOT stopping the Host. Print
         // the exact management facts and never claim a Host state or PID the
         // Client cannot observe. Direct keeps its original resume line.
         if (selectedRuntime.kind === 'remote') {
+          // A Split Client's profile identity is the official Client launch
+          // fact carried by its process-local admin port. hostRunningProfile()
+          // would read the Host profileContext (absent here) or the internal
+          // local-client.mjs argv (which never carries the outer CLI flag),
+          // and would answer the pi-tui default for a non-default Profile.
+          const profile = profileDaemonAdmin?.profile
+          if (profile === undefined) {
+            // The optional port is absent only for a composition that cannot
+            // prove the local Profile identity. Never guess pi-tui, and never
+            // throw here: the exit controller deliberately contains a hint
+            // failure, so this visible line is the only honest channel.
+            diag.warn('daemon resume hint: profile identity unavailable', {})
+            return [
+              'Disconnected from dsh-pi-tui (daemon client).',
+              'Profile identity unavailable; resume and daemon management commands were not generated.',
+            ].join('\n')
+          }
           return formatDaemonDetachHint({
             profile,
             sessionId,
@@ -3454,6 +3466,12 @@ export function applyRunnerWithRuntime(
             ...(exitHostStop === undefined ? {} : { hostStop: exitHostStop }),
           })
         }
+        // The Direct Host's official profileContext names the profile for EVERY
+        // launch form, including the positional `dsh <name>` (see
+        // hostRunningProfile): the argv scrape alone would answer the pi-tui
+        // fallback there and hand the user a resume command for the wrong
+        // profile.
+        const profile = hostRunningProfile(ctx)
         const resume = resumeCommand(profile, sessionId)
         return resume === undefined ? undefined : `${color.textDim('To resume this session:')} ${resume}`
       },

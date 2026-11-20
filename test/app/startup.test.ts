@@ -54,6 +54,9 @@ function mountStartup(t: TestContext, args: string[] = []): Context {
   ctx.provide('cmdlineArgs', { get: () => args })
   // parseCmdline requires the launcher pair (cmdlineArgs + appExit).
   ctx.provide('appExit', ((code: number) => { void code }) as never)
+  // The official Profile Loader identity every runtime recovery message must
+  // name; a non-default value makes the authority observable in the tests.
+  ctx.provide('profileContext', ({ name: 'tui-custom' }) as never)
   // A normal invocation installs the temporary model-listing console
   // interception, which mutates process-global console methods; every mount
   // must unload its row so the wrapper (and any language-level leak) cannot
@@ -112,6 +115,7 @@ test('an older harness gets actionable npm upgrade guidance without a hard Loade
     const ctx = new Context()
     ctx.provide('cmdlineArgs', { get: () => ['--session', 's1'] })
     ctx.provide('appExit', ((code: number) => { void code }) as never)
+    ctx.provide('profileContext', ({ name: 'tui-custom' }) as never)
     // The normal action installs the process-global model-listing console
     // interception, so this row must unload like any other mounted row.
     t.after(async () => { await ctx.fiber.dispose() })
@@ -121,6 +125,8 @@ test('an older harness gets actionable npm upgrade guidance without a hard Loade
     assert.ok(joined.includes(`running dsh 0.1.0-rc.8`), `stderr must name the installed version:\n${joined}`)
     assert.ok(joined.includes(EXPECTED_REQUIREMENT), `stderr must name the npm floor:\n${joined}`)
     assert.ok(joined.includes(EXPECTED_UPGRADE), `stderr must give the exact npm upgrade:\n${joined}`)
+    assert.ok(joined.includes('--profile tui-custom'), `stderr must name the launched Profile, not the default:\n${joined}`)
+    assert.doesNotMatch(joined, /--profile pi-tui/u, `stderr must not offer a pi-tui recovery for a custom Profile:\n${joined}`)
     assert.doesNotMatch(joined, /pinned master source|pinned DSH master source distribution/u, `stderr must not keep Source Mode wording:\n${joined}`)
   } finally {
     stderr.restore()
@@ -360,6 +366,7 @@ function mountStartupWithReady(t: TestContext, args: string[] = []): {
   const ctx = new Context()
   ctx.provide('cmdlineArgs', { get: () => args })
   ctx.provide('appExit', ((code: number) => { exitCodes.push(code) }) as never)
+  ctx.provide('profileContext', ({ name: 'tui-custom' }) as never)
   ctx.provide('appReady', ({
     onReady: (listener: () => void) => { listeners.push(listener); return () => {} },
   }) as never)
@@ -382,7 +389,8 @@ test('committed readiness without a mounted TUI surface exits nonzero with an ac
   assert.deepEqual(exitCodes, [1], 'a missing required surface must exit nonzero')
   const joined = stderr.lines.join('')
   assert.match(joined, /required TUI surface did not mount/u)
-  assert.match(joined, /--profile pi-tui/u)
+  assert.match(joined, /--profile tui-custom/u)
+  assert.doesNotMatch(joined, /--profile pi-tui/u, 'the recovery command must not fall back to the default Profile')
 })
 
 test('a mounted surface leaves committed readiness untouched', (t) => {
@@ -412,7 +420,7 @@ test('--help never arms the missing-surface handshake', (t) => {
 test('incompatibleHarnessMessage is actionable and names both versions', () => {
   const entry = harnessCompatEntryFor('0.1.0-rc.8')
   assert.ok(entry !== undefined, 'rc.8 must match an incompatible entry')
-  const message = incompatibleHarnessMessage('0.1.0-rc.8', entry!)
+  const message = incompatibleHarnessMessage('0.1.0-rc.8', entry!, 'tui-custom')
   // The bundle version is read from package.json at runtime (never
   // hardcoded), so the assertion reads it the same way.
   const pkg = JSON.parse(readFileSync(join(import.meta.dirname, '..', '..', 'package.json'), 'utf8')) as { version?: string }
@@ -420,7 +428,8 @@ test('incompatibleHarnessMessage is actionable and names both versions', () => {
   assert.ok(message.includes(EXPECTED_REQUIREMENT), 'must name the requirement')
   assert.ok(message.includes('0.1.0-rc.8'), 'must name the installed version')
   assert.ok(message.includes(EXPECTED_UPGRADE), 'must give the exact npm upgrade')
-  assert.ok(message.includes('dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.2'), 'must offer the compatible 0.2 fallback for the official rc.8 runtime')
+  assert.ok(message.includes('dsh plugin --profile tui-custom -- add @xmoon76/dsh-pi-tui@0.2'), 'must offer the compatible 0.2 fallback for the official rc.8 runtime')
+  assert.doesNotMatch(message, /--profile pi-tui/u, 'must not offer a pi-tui recovery for a custom Profile')
   assert.doesNotMatch(message, /pinned master source|pinned DSH master source distribution/u, 'must not keep Source Mode wording')
 })
 
@@ -501,7 +510,7 @@ test('harnessCompatEntryFor follows the official DSH tag matrix below the publis
     assert.ok(entry !== undefined, `${version} must match an incompatible entry`)
     assert.equal(entry.upgradeDsh, FLOOR_ENTRY?.upgradeDsh)
     assert.equal(entry.fallbackTui, fallback, `${version} must use its historically compatible TUI line`)
-    const message = incompatibleHarnessMessage(version, entry)
+    const message = incompatibleHarnessMessage(version, entry, 'tui-custom')
     if (fallback === undefined) {
       assert.doesNotMatch(message, /compatible TUI line/u, `${version} must not advertise an unknown fallback`)
     } else {

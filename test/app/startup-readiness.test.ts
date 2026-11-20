@@ -65,6 +65,9 @@ function mountStartup(t: TestContext, readiness: LauncherReadiness, exitCodes: n
   const ctx = new Context()
   ctx.provide('cmdlineArgs', { get: () => [] })
   ctx.provide('appExit', ((code: number) => { exitCodes.push(code) }) as never)
+  // The official Profile Loader identity; the missing-surface recovery text
+  // must name the Profile the user actually launched.
+  ctx.provide('profileContext', ({ name: 'tui-custom' }) as never)
   ctx.provide('appReady', readiness.service as never)
   t.after(async () => { await ctx.fiber.dispose() })
   applyStartup(ctx)
@@ -102,6 +105,8 @@ test('a cold startup whose TUI surface never mounts exits nonzero', (t) => {
   }
   assert.deepEqual(exitCodes, [1], 'a missing required surface must exit nonzero')
   assert.match(stderr.lines.join(''), /required TUI surface did not mount/u)
+  assert.match(stderr.lines.join(''), /--profile tui-custom/u)
+  assert.doesNotMatch(stderr.lines.join(''), /--profile pi-tui/u, 'must not name the default Profile')
 })
 
 test('a cold startup whose TUI surface mounted does not exit', (t) => {
@@ -151,6 +156,7 @@ test('the re-applied row observes the SYNCHRONOUS callback inside its own apply(
   const ctx = new Context()
   ctx.provide('cmdlineArgs', { get: () => [] })
   ctx.provide('appExit', ((code: number) => { exitCodes.push(code) }) as never)
+  ctx.provide('profileContext', ({ name: 'tui-custom' }) as never)
   ctx.provide('appReady', ({
     onReady: (listener: () => void) => {
       order.push('onReady:enter')
