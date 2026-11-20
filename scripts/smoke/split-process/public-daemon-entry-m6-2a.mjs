@@ -698,7 +698,7 @@ async function runSceneAcceptance(installation, trace) {
           `A15: daemon ${verb} did not name the real Profile`)
       }
       assert(!block.includes('--profile pi-tui'), 'A15: the detach block contained the default Profile')
-      assert(block.includes('Daemon Host was not stopped by this action.'),
+      assert(block.includes('The daemon Host was not stopped by this action.'),
         'A15: an ordinary detach claimed a Host stop')
       assert(processCounts(installation.dshHome).client === 0, 'A15: the Client was still alive after /exit')
       // Recover through the SAME printed public command: same Host, same Session.
