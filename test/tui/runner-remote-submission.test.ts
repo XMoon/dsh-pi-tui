@@ -262,6 +262,23 @@ function submitDraft(fixture: Pr3Fixture, text: string): void {
   app.submitDraft()
 }
 
+/** Wait for a viewport fact, failing with the FULL viewport so a rendering
+ * mismatch is distinguishable from an execution failure. */
+async function waitForViewport(
+  fixture: Pr3Fixture,
+  label: string,
+  predicate: (view: string) => boolean,
+  timeoutMs = 20_000,
+): Promise<string> {
+  const started = Date.now()
+  for (;;) {
+    const view = fixture.vt.getViewport().join('\n')
+    if (predicate(view)) return view
+    if (Date.now() - started > timeoutMs) throw new Error(`timed out waiting for ${label}:\n${view}`)
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
+}
+
 /** Collect the notices the mounted surface posts (the canonical prototype
  * recorder: unbound original, same function identity restored on teardown). */
 function recordNotices(life: TestLifecycle, fixture: Pr3Fixture): string[] {
@@ -428,13 +445,25 @@ test('shell (Remote): `!!` and `!` execute in the effective Host working directo
   const durableBefore = hostUserRows(fixture, mainId).length
 
   submitDraft(fixture, '!!pwd; echo remote-shell-local-marker')
-  await waitFor('Remote `!!` output card', () => {
-    // The `pwd` value can wrap across the card's rows for a long private root:
-    // compare the whitespace-free stream against the whitespace-free path.
-    const view = fixture.vt.getViewport().join('')
-    return view.includes('remote-shell-local-marker') && view.replace(/\s+/gu, '').includes(effectiveCwd)
-      && view.includes('exit 0')
-  }, 20_000)
+  // The folded local-shell card is the Host execution's settlement surface:
+  // the command row carries the marker and the one outcome row carries the
+  // exit status. The pwd VALUE stays in the retained body until Ctrl+O.
+  await waitForViewport(fixture, 'the folded Remote `!!` output card', view =>
+    view.includes('$ pwd; echo remote-shell-local-marker') && view.includes('[exit 0]'))
+
+  // The default card is folded (local-shell-card.test.ts owns that display
+  // contract): the command output is reachable through the existing Ctrl+O
+  // expansion, not through the folded header/outcome rows. The expanded body
+  // renders the command row immediately followed by the captured stdout and
+  // exit marker; compare the whitespace-free stream so a long private-root
+  // pwd can wrap across physical rows without matching an unrelated footer
+  // copy of the same path.
+  fixture.vt.sendInput('\x0f')
+  await waitForViewport(fixture, 'the expanded Remote `!!` card body', view =>
+    view.replace(/\s+/gu, '')
+      .includes(`$pwd;echoremote-shell-local-marker${effectiveCwd}remote-shell-local-marker[exit0]`))
+  fixture.vt.sendInput('\x0f')
+  await fixture.vt.waitForRender()
   assert.equal(hostUserRows(fixture, mainId).length, durableBefore,
     '!! executes on the Host but adds no Session/model message')
 
