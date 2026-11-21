@@ -3121,8 +3121,13 @@ test('a large-paste registry entry survives a PiTui browse reseed', async () => 
   const cursorAtBrowse = editor.getCursor()
   vt.sendInput('\x1b[A')
   await vt.waitForRender()
+  const holder = (app as unknown as { editorSeatHolder: { notifyChanged(): void } }).editorSeatHolder
+  const originalNotify = holder.notifyChanged.bind(holder)
+  let notifications = 0
+  holder.notifyChanged = () => { notifications += 1; originalNotify() }
   app.resetInputHistory(['new row'])
   await vt.waitForRender()
+  assert.ok(notifications > 0, 'the restored draft is published through the host onChange/seat notification channel')
   assert.equal(app.seatTextForTest(), document, 'the marker document survives the browse reseed byte for byte')
   assert.equal(app.getDraft(), expanded, 'the paste registry still resolves to the full payload')
   assert.deepEqual(editor.getCursor(), cursorAtBrowse, 'the browse-entry caret survives the reseed')

@@ -8697,8 +8697,17 @@ export class TuiApp {
       // large-paste markers. setText() would clear the editor's paste registry
       // (turning `[paste #N …]` into literal text); setTextAndCursor() keeps
       // surviving registry entries and leaves undo/transient state alone.
+      // setTextAndCursor deliberately fires no onChange, so publish the one
+      // host document-change notification through the REAL onChange channel:
+      // seat subscribers, widget budget, edit epoch and undo leases must see
+      // the visible draft change. A mode change already fires that onChange.
+      const previousMode = this.editor.getInputMode()
       this.editor.setTextAndCursor(browseDraft.text, browseDraft.cursor)
-      this.editor.setInputMode(browseDraft.mode)
+      if (browseDraft.mode === previousMode) {
+        this.editor.onChange?.(this.editor.getText())
+      } else {
+        this.editor.setInputMode(browseDraft.mode)
+      }
     }
   }
 
