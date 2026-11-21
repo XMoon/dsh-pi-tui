@@ -135,7 +135,7 @@ export async function runOfficialWebComposition(context) {
   }
   /** The Host authorities the Web composition must not duplicate. */
   const assertHostOwnersUnchanged = (ready, label) => {
-    for (const owner of ['connection', 'apiRemotes', 'workspaceRegistry', 'workspaceController', 'sessionController', 'fileUpload', 'settingsController', 'typertGateway', 'jobController', 'piTuiHostRuntime']) {
+    for (const owner of ['connection', 'apiRemotes', 'workspaceRegistry', 'workspaceController', 'sessionController', 'fileUpload', 'settingsController', 'typertGateway', 'jobController', 'piTuiHostRuntime', 'cordisInspectProviders']) {
       assert(ready.ownerEntries?.[owner]?.length === 1,
         `${label}: the ${owner} owner count is ${JSON.stringify(ready.ownerEntries?.[owner])}, expected exactly one`)
     }
@@ -186,6 +186,10 @@ export async function runOfficialWebComposition(context) {
     assert(declared.length === 1, `PA-01 expected ONE overlay written by this Host, found ${declared.length}`)
     const declaredRows = assertDeclaredWebRows(declared[0], 'PA-01')
     assertHostOwnersUnchanged(plainReady, 'PA-01')
+    for (const service of ['messageFeedback', 'pluginInventory', 'sessionReferenceResolver']) {
+      assert(plainReady.services?.[service] !== true,
+        `PA-01 the Web-only Host service "${service}" is published with Web off`)
+    }
     const declaredById = new Map(plainReady.entries.map(entry => [entry.id, entry]))
     const notAbsent = PR_A_WEB_ROWS.map(row => row.id)
       .filter(id => declaredById.get(id)?.state !== 'absent')
@@ -204,6 +208,10 @@ export async function runOfficialWebComposition(context) {
     assert(plainApi.status === 401, `PA-01 the unauthenticated /api route must stay 401, got ${plainApi.status}`)
     const plainConnect = await fetchStatus(`${plainOrigin}/connect`)
     assert(plainConnect.status === 401, `PA-01 the unfunded /connect route must stay 401, got ${plainConnect.status}`)
+    // The open-in-app Host routes belong to the toggleable Web graph: with Web
+    // off they are not registered at all.
+    const plainOpenInApp = await fetchStatus(`${plainOrigin}/open-in-app/apps`)
+    assert(plainOpenInApp.status === 404, `PA-01 GET /open-in-app/apps must be 404 with Web off, got ${plainOpenInApp.status}`)
     // A real TUI Session still works on this plain Host.
     await seatFree(`\0dsh-pi-tui-c-${webScopeSuffix}`, 15_000)
     const plainClient = new SurfaceEntryProcess(entries.client, { ...base, workDir })
@@ -249,6 +257,7 @@ export async function runOfficialWebComposition(context) {
       webSseStatus: plainSse.status,
       apiStatus: plainApi.status,
       connectStatus: plainConnect.status,
+      openInAppStatus: plainOpenInApp.status,
       tuiSession: 'painted',
       tuiAnswer: 'painted',
       standardPrompt: 'official delivery guidance once; present tool available',
@@ -298,8 +307,15 @@ export async function runOfficialWebComposition(context) {
     webHosts.push(webHost)
     const webReady = await webHost.waitFor(record => record.m4a0 === 'ready', 'PR-A Web Host ready', 240_000)
     assertSingleWebOwners(webReady, 'PA-04')
+    for (const service of ['messageFeedback', 'pluginInventory', 'sessionReferenceResolver']) {
+      assert(webReady.services?.[service] === true,
+        `PA-02 the Web-only Host service "${service}" is not published by the enabled Host`)
+    }
     const webEntriesById = new Map(webReady.entries.map(entry => [entry.id, entry]))
-    for (const id of [PR_A_WEB_RUNTIME_ID, 'modules', 'client-hmr', 'cordis-client-runner', 'terminal-controller']) {
+    for (const id of [
+      PR_A_WEB_RUNTIME_ID, 'modules', 'client-hmr', 'cordis-client-runner', 'terminal-controller',
+      'message-feedback', 'open-in-app', 'session-reference', 'plugin-inventory',
+    ]) {
       assert(webEntriesById.get(id)?.state === 'active', `PA-02 the qualified Host did not activate "${id}"`)
     }
     // S5-PR5: the changed-files provider and its consumer are BOTH part of the
@@ -366,6 +382,23 @@ export async function runOfficialWebComposition(context) {
     assert(webConnect.status === 401, `PA-04 the unauthenticated /connect must stay 401, got ${webConnect.status}`)
     const peerCookie = await connectCookie(webReady.localHost.origin, launch)
     assert(peerCookie !== '', 'PA-04 the authenticated /connect minted no peer cookie')
+    // Open-in-app is Host-owned and Web-only. A valid same-Host credential is
+    // required; anonymous and cross-site requests are refused before the route
+    // handler, and no application is launched here.
+    const openInAppApps = await fetchStatus(`${webReady.localHost.origin}/open-in-app/apps`, {
+      headers: { cookie: peerCookie },
+    })
+    assert(openInAppApps.status === 200, `PA-04 GET /open-in-app/apps with a valid cookie returned ${openInAppApps.status}`)
+    const openInAppBody = JSON.parse(openInAppApps.body)
+    assert(Array.isArray(openInAppBody.apps), 'PA-04 GET /open-in-app/apps did not return an "apps" array')
+    const openInAppAnonymous = await fetchStatus(`${webReady.localHost.origin}/open-in-app/apps`)
+    assert(openInAppAnonymous.status === 401 || openInAppAnonymous.status === 403,
+      `PA-04 anonymous GET /open-in-app/apps must be refused, got ${openInAppAnonymous.status}`)
+    const openInAppCrossSite = await fetchStatus(`${webReady.localHost.origin}/open-in-app/apps`, {
+      headers: { cookie: peerCookie, origin: 'http://evil.example', 'sec-fetch-site': 'cross-site' },
+    })
+    assert(openInAppCrossSite.status === 403,
+      `PA-04 cross-site GET /open-in-app/apps must be 403, got ${openInAppCrossSite.status}`)
     // PA-06: the runtime values stay silent — no printed token URL, no
     // auto-opened browser line and no Web shell variable in this process.
     const hostOutput = `${webHost.records.map(record => JSON.stringify(record)).join('\n')}\n${webHost.stderr}`

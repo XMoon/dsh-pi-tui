@@ -446,7 +446,7 @@ export const runWebProductQualification = async context => {
   /** The single official owner graph, asserted on every Product Host edge. */
   const assertSingleHostOwners = (ready, label) => {
     for (const owner of ['connection', 'apiRemotes', 'typertGateway', 'workspaceRegistry', 'workspaceController',
-      'sessionController', 'fileUpload', 'settingsController', 'jobController', 'piTuiHostRuntime']) {
+      'sessionController', 'fileUpload', 'settingsController', 'jobController', 'piTuiHostRuntime', 'cordisInspectProviders']) {
       assert(ready.ownerEntries?.[owner]?.length === 1,
         `${label}: the ${owner} owner count is ${JSON.stringify(ready.ownerEntries?.[owner])}, expected exactly one`)
     }
@@ -840,6 +840,23 @@ export const runWebProductQualification = async context => {
         'WP-01 Browser prompt committed', 180_000)
       await waitForHostSessionEventAfter(dshHome, browserSession.sessionId, boundary,
         event => event.type === 'turn/end', 'WP-01 Browser turn settled', 180_000)
+      const wiring = await handle.waitFact('rc5-host-wiring', 'WP-01 rc.5 Host wiring', 240_000)
+      assert(wiring.inventoryModule === '@deepseek-ai/dsh-client-connection'
+        && wiring.enabled !== false && wiring.inventoryPhase === 'active'
+        && wiring.feedback === 'positive',
+      `WP-01 the Browser did not report the rc.5 Host wiring facts: ${JSON.stringify(wiring)}`)
+      const feedbackEvents = durableOf(browserSession.sessionId)
+        .filter(event => event.type === 'feedback/message-put')
+      assert(feedbackEvents.length === 1,
+        `WP-01 the message-feedback write produced ${feedbackEvents.length} Host events, expected exactly 1`)
+      const feedbackItem = feedbackEvents[0].data?.item
+      assert(feedbackItem?.rating === 'positive' && feedbackItem?.category === 'task-result',
+        `WP-01 the Host feedback item does not match the Browser action: ${JSON.stringify(feedbackItem)}`)
+      assert(typeof feedbackItem?.messageId === 'string' && feedbackItem.messageId !== '',
+        'WP-01 the Host feedback event carries no message identity')
+      const assistantEvents = durableOf(browserSession.sessionId).filter(event => event.type === 'assistant/message')
+      assert(assistantEvents.some(event => JSON.stringify(event).includes(feedbackItem.messageId)),
+        'WP-01 the feedback message id does not identify an assistant message in the same Session log')
       await handle.signal('runner-go')
     })
     const wp01Session = wp01.sessionId

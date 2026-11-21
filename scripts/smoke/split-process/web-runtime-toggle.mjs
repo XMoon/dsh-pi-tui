@@ -84,6 +84,7 @@ export async function runWebRuntimeToggle(context) {
     'connection', 'apiRemotes', 'typertGateway', 'workspaceRegistry', 'workspaceController',
     'directoryPicker',
     'sessionController', 'fileUpload', 'settingsController', 'deepseekAccount', 'jobController', 'piTuiHostRuntime',
+    'cordisInspectProviders',
   ]
   /** `id -> live Loader fiber UID` for EVERY row the Host status reports. */
   const rowUids = ready => Object.fromEntries((ready.entries ?? [])
@@ -106,6 +107,8 @@ export async function runWebRuntimeToggle(context) {
     assert(ready.services?.piTuiWebAccess === true,
       `${label}: the private Web access service is not part of the Host readiness record`)
   }
+  /** The Web-only Host services whose lifetime follows the toggle. */
+  const WEB_HOST_SERVICES = ['messageFeedback', 'pluginInventory', 'sessionReferenceResolver']
   /**
    * Every declared Web row is plainly OFF. `absent` is a row that never
    * mounted on this cold boot; `state-4` is the DISPOSED fiber a row keeps
@@ -118,6 +121,10 @@ export async function runWebRuntimeToggle(context) {
     assert(live.length === 0, `${label}: these Web rows are not plainly disabled: ${live.join(',')}`)
     assert((ready.entries ?? []).filter(entry => entry.name === PR_A_CLIENT_MODULES_PACKAGE && entry.state === 'active').length === 0,
       `${label}: an official Web module graph owner is active with Web off`)
+    for (const service of WEB_HOST_SERVICES) {
+      assert(ready.services?.[service] !== true,
+        `${label}: the Web-only Host service "${service}" is still published with Web off`)
+    }
   }
   /** EVERY declared Web row is ACTIVE: the toggle has no tolerated PENDING row. */
   const assertWebFullyOn = (ready, label) => {
@@ -128,6 +135,10 @@ export async function runWebRuntimeToggle(context) {
       .filter(([, state]) => state !== 'active')
       .map(([id, state]) => `${id}:${state}`)
     assert(notActive.length === 0, `${label}: these Web rows are not active: ${notActive.join(',')}`)
+    for (const service of WEB_HOST_SERVICES) {
+      assert(ready.services?.[service] === true,
+        `${label}: the Web-only Host service "${service}" is not published while Web is enabled`)
+    }
     return states
   }
   /** The Host's own HTTP surface in the OFF state. */
@@ -368,7 +379,7 @@ export async function runWebRuntimeToggle(context) {
     const enabledUids = rowUids(enabledStatus)
     for (const id of ['agent', 'session', 'job-controller', 'typert-gateway', 'split-host-connection',
       'split-host-api-remotes', 'split-host-session-controller', 'deepseek-account',
-      'split-host-pi-tui-runtime', 'directory-picker']) {
+      'split-host-cordis-inspect-providers', 'split-host-pi-tui-runtime', 'directory-picker']) {
       assert(enabledUids[id] === protectedUids[id], `PB-05 the "${id}" Host owner was re-mounted by the Web enable`)
     }
     const serving = await assertWebServing(origin, launch, 'PB-03')
@@ -414,7 +425,7 @@ export async function runWebRuntimeToggle(context) {
     const disabledUids = rowUids(disabledStatus)
     for (const id of ['agent', 'session', 'job-controller', 'typert-gateway', 'split-host-connection',
       'split-host-api-remotes', 'split-host-session-controller', 'deepseek-account',
-      'split-host-pi-tui-runtime', 'directory-picker']) {
+      'split-host-cordis-inspect-providers', 'split-host-pi-tui-runtime', 'directory-picker']) {
       assert(disabledUids[id] === protectedUids[id], `PB-05 the "${id}" Host owner changed identity across the disable`)
     }
     const offAfterDisable = await assertWebOffHttp(origin, 'PB-04')
@@ -492,7 +503,7 @@ export async function runWebRuntimeToggle(context) {
     const reenabledUids = rowUids(reenabledStatus)
     for (const id of ['agent', 'session', 'job-controller', 'typert-gateway', 'split-host-connection',
       'split-host-api-remotes', 'split-host-session-controller', 'deepseek-account',
-      'split-host-pi-tui-runtime', 'directory-picker']) {
+      'split-host-cordis-inspect-providers', 'split-host-pi-tui-runtime', 'directory-picker']) {
       assert(reenabledUids[id] === protectedUids[id], `PB-07 the "${id}" Host owner changed identity across the re-enable`)
     }
     const servingAgain = await assertWebServing(origin, launch, 'PB-07')

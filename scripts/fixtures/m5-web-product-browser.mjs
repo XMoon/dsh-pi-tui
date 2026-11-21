@@ -883,6 +883,75 @@ async function findControl(page, match, timeoutMs = 3_000) {
   return null
 }
 
+/**
+ * RC.5 Host-wiring observation: open Settings -> Built-in plugins and observe
+ * the real Browser `pluginInventory/list` Remote response. The Settings tab is
+ * the official consumer of that response; reading its payload proves the
+ * Browser reached the Host inventory Remote over the authenticated transport.
+ */
+async function openBuiltInPluginInventory(page) {
+  const inventoryResponse = page.waitForResponse(response =>
+    new URL(response.url()).pathname === '/api/pluginInventory/list'
+    && response.request().method() === 'POST'
+    && response.status() === 200, { timeout: 60_000 }).catch(() => undefined)
+  // The official `settings.open` shortcut: primary+Alt+Comma on the Web
+  // platform. The sidebar trigger is icon-only in narrow shells, so the
+  // registered shortcut is the stable, user-reachable entry.
+  const primary = process.platform === 'darwin' ? 'Meta' : 'Control'
+  await page.keyboard.press(`${primary}+Alt+Comma`)
+  await page.getByText('Settings', { exact: true }).last().waitFor({ state: 'visible', timeout: 30_000 })
+  const pluginsNav = await findControlMatching(page, /Built-in plugins/iu, 10_000)
+  if (pluginsNav === null) throw new Error('Settings exposes no Built-in plugins section')
+  await clickCentre(page, pluginsNav)
+  const response = await inventoryResponse
+  if (response === undefined) throw new Error('the Browser never issued the pluginInventory/list Remote request')
+  const payload = await response.json().catch(() => undefined)
+  const value = payload?.result?.value ?? payload?.result ?? payload?.value
+  const entries = Array.isArray(value?.entries) ? value.entries : undefined
+  if (entries === undefined) throw new Error('the pluginInventory/list reply carries no entry array')
+  const entry = entries.find(candidate =>
+    candidate.moduleName === '@deepseek-ai/dsh-client-connection' && candidate.enabled === true)
+  if (entry === undefined) {
+    throw new Error(`the Host inventory has no enabled dsh-client-connection entry (${entries.length} entries)`)
+  }
+  driverFact('plugin-inventory', {
+    remote: 'pluginInventory/list',
+    entryId: entry.entryId,
+    moduleName: entry.moduleName,
+    enabled: entry.enabled,
+    fiberPhase: entry.fiberPhase,
+  })
+  await page.keyboard.press('Escape')
+  await page.waitForTimeout(300)
+  return entry
+}
+
+/**
+ * RC.5 Host-wiring observation: one real Like opens the official feedback
+ * dialog; choosing a category and submitting writes through
+ * `messageFeedback.put` into the same Session log.
+ */
+async function submitPositiveFeedback(page) {
+  const like = page.getByRole('button', { name: 'Good response', exact: true }).last()
+  await like.waitFor({ state: 'visible', timeout: 60_000 })
+  await like.click()
+  await page.getByText('Submit feedback', { exact: true }).last().waitFor({ state: 'visible', timeout: 30_000 })
+  await page.getByRole('button', { name: 'Task result', exact: true }).last().click()
+  await page.locator('button').filter({ hasText: /^submit$/iu }).last().click()
+  const deadline = Date.now() + 60_000
+  let submitted = false
+  while (Date.now() < deadline) {
+    const body = await page.evaluate(() => document.body.innerText ?? '')
+    if (body.includes('Thanks for your feedback') || !body.includes('Submit feedback')) {
+      submitted = true
+      break
+    }
+    await page.waitForTimeout(150)
+  }
+  if (!submitted) throw new Error('the feedback dialog did not settle after Submit')
+  driverFact('message-feedback', { rating: 'positive', category: 'task-result' })
+}
+
 /** WP-10: the honest inventory of the Web UI's really reachable features. */
 async function inventory(page) {
   // Session create/list/open are the core MUST surfaces.
@@ -1331,8 +1400,19 @@ const cases = {
     const sessionId = await newSession(page)
     driverFact('session', { sessionId })
     await promptAndWait(page, marker, caseConfig.expectedAnswer ?? 'long-turn answer')
+    // RC.5 Host-wiring facts on the SAME authenticated Browser Session: one
+    // real message-feedback write and the real PluginInventory Remote read.
+    await submitPositiveFeedback(page)
+    const inventory = await openBuiltInPluginInventory(page)
+    driverFact('rc5-host-wiring', {
+      inventoryEntry: inventory.entryId,
+      inventoryModule: inventory.moduleName,
+      inventoryPhase: inventory.fiberPhase,
+      feedback: 'positive',
+    })
     await screenshot(page, 'home-session')
     step('login-and-session', true, { sessionId, marker, negatives: result.negatives })
+    step('rc5-official-host-wiring', true, { inventoryEntry: 'split-host-connection', feedback: 'positive' })
     await waitSignal('runner-go')
   },
 
