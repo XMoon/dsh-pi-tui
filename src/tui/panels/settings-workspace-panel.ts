@@ -3591,7 +3591,8 @@ export class SettingsWorkspacePanel implements Component {
         if (edit.runtimeEffect !== undefined) field('Runtime', edit.runtimeEffect, color.textDim, true)
         if (edit.primary === 'persisted') {
           if (edit.persistedFacts === undefined) field('Runtime', edit.runtime, color.textDim, true)
-          else for (const fact of edit.persistedFacts) field('', fact, color.textDim, true)
+          // The first fact is the row's primary Value; never paint it twice.
+          else for (const fact of edit.persistedFacts.slice(1)) field('', fact, color.textDim, true)
         } else field('Persisted', edit.persisted, color.textDim, true)
       }
       lines.push(...fullFacts)
@@ -3615,7 +3616,8 @@ export class SettingsWorkspacePanel implements Component {
         if (edit.runtimeEffect !== undefined) field('Runtime', edit.runtimeEffect)
         if (edit.primary === 'persisted') {
           if (edit.persistedFacts === undefined) field('Runtime', edit.runtime)
-          else for (const fact of edit.persistedFacts) field('', fact)
+          // The first fact is the row's primary Value; never paint it twice.
+          else for (const fact of edit.persistedFacts.slice(1)) field('', fact)
         } else field('Persisted', edit.persisted)
       }
       const status = this.editStatus(row, edit.field)

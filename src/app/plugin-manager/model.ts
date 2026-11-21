@@ -844,8 +844,16 @@ export function buildPluginDetailView(
   exemptions: readonly PluginExemptionFact[] = [],
   liveClientObservations?: readonly ClientExtensionObservation[],
 ): PluginDetailView {
+  const clientFacts = clientStatusFacts(card, liveClientObservations)
+  // With a Client observation source the bundle Status group carries the
+  // explicit Host package/profile facts; the older short `Installed` /
+  // `Selected in profile` rows would state the same Host truth twice, so they
+  // are replaced only on that path. A standalone entry keeps the original rows.
+  const hostFacts = clientFacts.length === 0
+    ? cardStatusFacts(card)
+    : cardStatusFacts(card).filter(fact => fact.label !== 'Installed' && fact.label !== 'Selected in profile')
   const groups: PluginDetailGroup[] = [
-    { title: 'Status', facts: [...cardStatusFacts(card), ...clientStatusFacts(card, liveClientObservations)] },
+    { title: 'Status', facts: [...hostFacts, ...clientFacts] },
     { title: 'Source', facts: cardSourceFacts(card) },
   ]
   if (card.description !== undefined && card.description !== '') {

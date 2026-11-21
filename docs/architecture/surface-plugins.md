@@ -81,7 +81,7 @@ a bundle's flag is the profile SELECTION (`Selected in profile`), while a
 standalone Loader entry's flag is its effective enablement (`Effective enabled`,
 including disabled ancestor groups). `Fiber` stays the separate runtime fact in
 both cases, so a bundle the Host refuses with `unsupported-platform` is never
-presented as running and an entry is never mislabelled as a profile selection. That refusal blocks only the official catalog Install; itnever locks the recoveries the Host still permits. A selected bundle can always
+presented as running and an entry is never mislabelled as a profile selection. That refusal blocks only the official catalog Install; it never locks the recoveries the Host still permits. A selected bundle can always
 be disabled through the real `setBundleEnabled(name,false)` plus the
 authoritative reread — including while its files are missing or its platform is
 refused — and a profile-owned bundle's Remove is answered independently by the
