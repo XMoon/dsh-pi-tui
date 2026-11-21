@@ -1210,6 +1210,40 @@ test('/keybindings conflicts: pointer mode span → Action detail → save → v
   startedApps.delete(h.app)
 })
 
+test('/keybindings conflicts: a failed Action write stays readable and exitable after a one-row resize', async () => {
+  const fixture = createDirectSettingsFixture({ footer: 'default' })
+  const settings: TuiSettingsLike = {
+    get: () => fixture.settings.get(),
+    replace: () => { throw new Error('save failed on the host') },
+  }
+  const h = setup({ columns: 120, rows: 40, settings, fixture })
+  h.app.keybindingsManager().setUserConfiguration(parseUserKeybindings({
+    'app.input.submit': 'ctrl+shift+h',
+    'app.todo.toggle': 'ctrl+shift+h',
+  }))
+  await h.invoke('keybindings', 'conflicts')
+  await frames(h.vt)
+  await press(h.vt, '\r') // Submit draft detail
+  assert.match(h.view(), /Action ID: app\.input\.submit/u)
+  await press(h.vt, 'r') // failing reset write
+  await flushOwnedTurns()
+  await frames(h.vt, 2)
+  h.vt.resize(120, 5)
+  await frames(h.vt, 2)
+  const view = h.vt.getViewport().map(stripTerminalSequences)
+  const last = view[view.length - 1] ?? ''
+  assert.match(last, /save failed on the host/u, `the one-row settlement stays visible:
+${view.join('\n')}`)
+  assert.match(last, /Back \[Esc\]/u, 'the one-row settlement keeps the only exit affordance')
+  h.vt.sendInput(`\x1b[<0;${last.indexOf('Back [Esc]') + 1};${view.length}M`)
+  await frames(h.vt)
+  h.vt.sendInput(`\x1b[<0;${last.indexOf('Back [Esc]') + 1};${view.length}m`)
+  await frames(h.vt)
+  assert.match(h.view(), /Settings · Input & Terminal/u, 'the visible Back leaves the Action detail without losing the lease')
+  h.app.dispose()
+  startedApps.delete(h.app)
+})
+
 test('/keybindings conflicts: pointer journey opens c details and returns through the visible Back', async () => {
   const fixture = createDirectSettingsFixture({ footer: 'default' })
   const h = setup({ columns: 120, rows: 40, fixture })

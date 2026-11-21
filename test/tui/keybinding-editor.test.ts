@@ -2350,6 +2350,8 @@ test('action editor: a one-row grant paints the failed settlement before unlocki
     failWrite()
     const frame = plain(editor.render(60).join('\n'))
     assert.match(frame, /save failed/u, 'the one-row frame paints the failure itself')
+    assert.match(frame, /Back \[Esc\]/u, 'the one-row frame still exposes its ONE exit affordance')
+    assert.ok(editor.paintedEscapeSpan() !== undefined, 'the visible Back span is a real pointer target')
     assert.doesNotMatch(frame, /Saving…/u)
   } finally {
     editor.dispose()

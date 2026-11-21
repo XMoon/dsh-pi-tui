@@ -309,9 +309,9 @@ export class ActionEditorPanel implements Component {
     if (this.mode === 'choose-binding') return this.renderBindingChoice(safeWidth)
     if (this.mode === 'conflict-details') return this.renderConflictDetails(safeWidth)
     if (this.maxRows() === 1 && this.message !== undefined) {
-      // A one-row grant cannot paint both the bar and the settlement result;
-      // paint the result itself so the navigation lock is released only after
-      // the user could really see it.
+      // A one-row grant cannot paint a separate bar; keep the settlement
+      // result and the SAME exit affordance in that ONE row, so the user can
+      // really read the result and still leave (keyboard or pointer).
       this.hitMap = [{ kind: 'inert' }]
       this.hasPainted = true
       this.paintedBodyRows = 0
@@ -320,9 +320,17 @@ export class ActionEditorPanel implements Component {
       this.paintedChoice = false
       this.selectableKeys = []
       this.lastRenderWidth = Math.max(1, width)
-      this.paintedEscapeSpanValue = undefined
       this.paintedBarSpansValue = []
-      return [color.error(truncateToWidth(this.message, safeWidth))]
+      const escape = 'Back [Esc]'
+      const escapeWidth = visibleWidth(escape)
+      if (safeWidth < escapeWidth + 3) {
+        this.paintedEscapeSpanValue = undefined
+        return [color.error(truncateToWidth(this.message, safeWidth))]
+      }
+      const message = truncateToWidth(this.message, safeWidth - escapeWidth - 3)
+      const startCol = visibleWidth(message) + 3
+      this.paintedEscapeSpanValue = { startCol, endCol: startCol + escapeWidth }
+      return [truncateToWidth(`${color.error(message)}${color.textDim(' · ')}${paintActionSpan(escape, 'secondary')}`, safeWidth)]
     }
 
     const lines: string[] = [
