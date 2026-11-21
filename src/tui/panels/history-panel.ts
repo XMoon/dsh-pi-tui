@@ -347,6 +347,7 @@ interface HistoryFooterAction {
 type HistoryMouseHit =
   | { readonly kind: 'inert' }
   | { readonly kind: 'search'; readonly xOffset: number }
+  | { readonly kind: 'scope-tabs'; readonly spans: readonly { readonly scope: HistoryScope; readonly from: number; readonly to: number }[] }
   | { readonly kind: 'result'; readonly id: string }
   | { readonly kind: 'preview'; readonly row: number }
   | { readonly kind: 'actions'; readonly actions: readonly { readonly from: number; readonly to: number; readonly action: HistoryPointerAction }[] }
@@ -375,6 +376,17 @@ interface HistoryMouseFrame {
 }
 
 type HistoryPointerGesture =
+  | {
+      readonly kind: 'scope-tab'
+      readonly generation: number
+      readonly sourceScope: HistoryScope
+      readonly targetScope: HistoryScope
+      readonly row: number
+      readonly from: number
+      readonly to: number
+      readonly width: number
+      readonly height: number
+    }
   | {
       readonly kind: 'result'
       readonly generation: number
@@ -719,6 +731,24 @@ export class HistoryPanel implements Component, Focusable {
     if (hit === undefined) return undefined
 
     if (event.type === 'press') {
+      if (hit.kind === 'scope-tabs') {
+        const span = hit.spans.find(candidate => event.x >= candidate.from && event.x < candidate.to)
+        if (span === undefined) return undefined
+        // Capture the complete painted identity NOW: source scope, target,
+        // row/span/grant and the search generation the frame was painted with.
+        this.gesture = {
+          kind: 'scope-tab',
+          generation: frame.generation,
+          sourceScope: this.state.scope,
+          targetScope: span.scope,
+          row: event.y,
+          from: span.from,
+          to: span.to,
+          width: event.width,
+          height: event.height,
+        }
+        return { handled: true }
+      }
       if (hit.kind === 'search') {
         const result = dispatchMouseEvent(this.input, { ...event, x: event.x - hit.xOffset, y: 0 })
         // The Input's own focus intent is deliberately DROPPED: the panel is the
@@ -793,6 +823,20 @@ export class HistoryPanel implements Component, Focusable {
       const generation = frame.generation
       this.gesture = undefined
       if (gesture === undefined || gesture.generation !== generation) return undefined
+      if (gesture.kind === 'scope-tab') {
+        // The release must still describe the SAME painted header and the SAME
+        // source scope: a query/scope change, a repaint at another row/grant or
+        // a stale tenant retires the press instead of retargeting the click.
+        if (frame.generation !== this.state.generation) return undefined
+        if (event.y !== gesture.row || event.width !== gesture.width || event.height !== gesture.height) return undefined
+        if (hit.kind !== 'scope-tabs') return undefined
+        const span = hit.spans.find(candidate => candidate.scope === gesture.targetScope
+          && candidate.from === gesture.from && candidate.to === gesture.to)
+        if (span === undefined || event.x < span.from || event.x >= span.to) return undefined
+        if (this.state.scope !== gesture.sourceScope || !this.tenantIsCurrent()) return undefined
+        this.selectScope(gesture.targetScope)
+        return { handled: true, render: true }
+      }
       if (gesture.kind === 'footer') {
         const current = hit.kind === 'footer' ? this.footerActionAt(hit, event.x) : undefined
         if (current === undefined
@@ -942,7 +986,10 @@ export class HistoryPanel implements Component, Focusable {
     // last row, BELOW the action bar. Both are decoration: the plan drops the
     // bottom rule first, then the top one, before any Preview region shrinks.
     if (layout.topRule) push(color.border('─'.repeat(layout.width)), { kind: 'inert' })
-    if (layout.header) push(this.renderHeader(layout.width), { kind: 'inert' })
+    if (layout.header) {
+      const header = this.renderHeader(layout.width)
+      push(header.text, header.hit)
+    }
     if (layout.query) push(this.renderQueryRow(layout.width), { kind: 'search', xOffset: visibleWidth('Search: ') })
 
     const previewable = this.previewable()
@@ -1037,24 +1084,44 @@ export class HistoryPanel implements Component, Focusable {
 
   // ── rendering ────────────────────────────────────────────────────────────
 
-  private renderHeader(width: number): string {
+  private renderHeader(width: number): { text: string; hit: HistoryMouseHit } {
     // Identity is Title Case, role 1 (`textStrong`); the leading/trailing blank
     // width of the old ` Input history ` is preserved.
     const title = ' Input History '
     const hint = `${HISTORY_CHORDS.expand.label} ${this.expanded ? 'collapse' : 'expand'}`
     const tabs = this.renderTabs(width)
     const headPlain = `${title}${tabs.plain}`
+    // The hit spans are resolved from the SAME text the final row paints: a
+    // label clipped by the head clamp (or covered by its trailing ellipsis)
+    // never publishes a target. Coordinates stay panel-local in terminal cells.
+    const publishHit = (paintedHead: string, truncated: boolean): HistoryMouseHit => {
+      if (!this.pointerEnabled()) return { kind: 'inert' }
+      const paintedLimit = truncated
+        ? Math.max(0, visibleWidth(paintedHead) - 1)
+        : visibleWidth(paintedHead)
+      const titleWidth = visibleWidth(title)
+      const spans = tabs.spans
+        .map(span => ({ scope: span.scope, from: span.from + titleWidth, to: span.to + titleWidth }))
+        .filter(span => span.to <= paintedLimit)
+      return spans.length === 0 ? { kind: 'inert' } : { kind: 'scope-tabs', spans }
+    }
     const gap = width - visibleWidth(headPlain) - visibleWidth(hint)
     if (gap >= 2) {
       // Styles are applied AFTER the widths are resolved, so the line can never
       // exceed the frame. The F2 hint is role 13 (`textMuted`).
-      return `${color.textStrong(title)}${tabs.styled}${' '.repeat(gap)}${color.textMuted(hint)}`
+      return {
+        text: `${color.textStrong(title)}${tabs.styled}${' '.repeat(gap)}${color.textMuted(hint)}`,
+        hit: publishHit(headPlain, false),
+      }
     }
     // Cramped: the F2 hint is removed WHOLE (never a partial `F2 exp…`); the
     // scope tabs keep their own ink while the head fits, and the head is
     // clamped plain only below the frozen 44-column matrix minimum.
-    if (visibleWidth(headPlain) <= width) return `${color.textStrong(title)}${tabs.styled}`
-    return color.textStrong(clampLine(headPlain, width))
+    if (visibleWidth(headPlain) <= width) {
+      return { text: `${color.textStrong(title)}${tabs.styled}`, hit: publishHit(headPlain, false) }
+    }
+    const clamped = clampLine(headPlain, width)
+    return { text: color.textStrong(clamped), hit: publishHit(clamped, true) }
   }
 
   /**
@@ -1063,19 +1130,34 @@ export class HistoryPanel implements Component, Focusable {
    * the short forms (`Session` / `Directory` / `All`). Each Header paints
    * exactly ONE active scope as a bold-`primary` `[Label]`; the others are
    * `textDim`. The session tab exists only when a live session identity was
-   * injected.
+   * injected. `spans` are the complete VISIBLE label cells in the returned
+   * plain text, with the active label's brackets included and the inactive
+   * labels' surrounding decoration excluded.
    */
-  private renderTabs(width: number): { plain: string; styled: string } {
+  private renderTabs(width: number): {
+    plain: string
+    styled: string
+    spans: readonly { scope: HistoryScope; from: number; to: number }[]
+  } {
     const wide = width >= 85
     const sessionLabel = this.sessionId !== undefined ? (wide ? 'Current Session' : 'Session') : null
     const currentLabel = wide ? 'Current Directory' : 'Directory'
     const allLabel = wide ? 'All Directories' : 'All'
-    const parts: Array<{ plain: string; styled: string }> = []
+    const parts: Array<{ plain: string; styled: string; scope: HistoryScope; from: number; to: number }> = []
+    let cursor = 2 // the fixed two-cell lead before the first tab
     const push = (scope: HistoryScope, label: string): void => {
       const active = this.state.scope === scope
-      parts.push(active
-        ? { plain: `[${label}]`, styled: color.textStrong(`[${label}]`, 'primary') }
-        : { plain: ` ${label} `, styled: ` ${color.textDim(label)} ` })
+      const plain = active ? `[${label}]` : ` ${label} `
+      parts.push({
+        plain,
+        styled: active
+          ? color.textStrong(plain, 'primary')
+          : ` ${color.textDim(label)} `,
+        scope,
+        from: cursor + (active ? 0 : 1),
+        to: cursor + (active ? visibleWidth(plain) : 1 + visibleWidth(label)),
+      })
+      cursor += visibleWidth(plain) + 1
     }
     if (sessionLabel !== null) push('session', sessionLabel)
     push('current', currentLabel)
@@ -1083,6 +1165,7 @@ export class HistoryPanel implements Component, Focusable {
     return {
       plain: `  ${parts.map(part => part.plain).join(' ')}`,
       styled: `  ${parts.map(part => part.styled).join(' ')}`,
+      spans: parts.map(part => ({ scope: part.scope, from: part.from, to: part.to })),
     }
   }
 
@@ -1402,14 +1485,24 @@ export class HistoryPanel implements Component, Focusable {
 
   // ── navigation ───────────────────────────────────────────────────────────
 
+  /** The ONE directed Scope transition. The keyboard/Footer cycle computes its
+   *  next scope and lands here too; the same-scope click is a strict no-op. */
+  private selectScope(target: HistoryScope): void {
+    if (target === this.state.scope) return
+    if (target === 'session' && this.sessionId === undefined) return
+    this.state.scope = target
+    this.state.selectedIndex = 0
+    this.gesture = undefined
+    this.scheduleSearch()
+  }
+
   private toggleScope(): void {
-    this.state.scope = this.sessionId !== undefined
+    const next: HistoryScope = this.sessionId !== undefined
       ? this.state.scope === 'session' ? 'current'
         : this.state.scope === 'current' ? 'all'
           : 'session'
       : this.state.scope === 'current' ? 'all' : 'current'
-    this.state.selectedIndex = 0
-    this.scheduleSearch()
+    this.selectScope(next)
   }
 
   private moveSelection(data: string): void {

@@ -1609,6 +1609,155 @@ test('B3 gesture: a wheel between a Footer Scope/Expand press and release never 
   panel.dispose()
 })
 
+test('scope-tabs: a wide session header publishes all three complete labels and clicks the requested scope directly', async () => {
+  const source = new FakeSource()
+  source.rows = [row('alpha prompt', 1, '/a', 'id-a')]
+  const { panel } = makePanel(source, {
+    geometry: seatGeometry(100, 30, 2),
+    pointerEnabled: () => true,
+    sessionId: 'ses_a',
+  })
+  panel.start()
+  const initial = plain(await waitForHistoryRender(
+    panel,
+    rows => rows.some(line => line.includes('alpha prompt')),
+    'the initial session page',
+  ))
+  const headerRow = initial.findIndex(line => line.includes('Input History'))
+  assert.ok(headerRow >= 0, `the header must paint:\n${initial.join('\n')}`)
+  assert.ok(initial[headerRow]!.includes('[Current Session]')
+    && initial[headerRow]!.includes('Current Directory')
+    && initial[headerRow]!.includes('All Directories'), `all three labels must paint:\n${initial[headerRow]}`)
+  const height = panel.render(100).length
+  const clickHeader = (label: string): boolean => {
+    const frame = plain(panel.render(100))
+    const row = frame.findIndex(line => line.includes('Input History'))
+    const col = frame[row]!.indexOf(label)
+    assert.ok(row >= 0 && col >= 0, `'${label}' must paint:\n${frame[row]}`)
+    const press = panel.handleMouse(historyPointer('press', col, row, 100, height))
+    if (press === undefined) return false
+    return panel.handleMouse(historyPointer('click', col, row, 100, height)) !== undefined
+  }
+  assert.equal(clickHeader('All Directories'), true)
+  const all = plain(await waitForHistoryRender(
+    panel,
+    rows => rows.some(line => line.includes('[All Directories]')),
+    'the directly selected all-directory scope',
+  ))
+  await settle()
+  assert.ok(all.some(line => line.includes('Scope: all')), `the metadata names the requested scope:\n${all.join('\n')}`)
+  assert.equal(source.requests.at(-1)?.scope, 'all')
+  // The same active label is a strict no-op: no new search request.
+  const requests = source.requests.length
+  assert.equal(clickHeader('[All Directories]'), true)
+  await settle()
+  assert.equal(source.requests.length, requests, 'clicking the current scope never starts another search')
+  panel.dispose()
+})
+
+test('scope-tabs: a narrow sessionless header keeps Directory/All, preserves the query and never targets title/gap/F2/clipped text', async () => {
+  const source = new FakeSource()
+  source.rows = [row('alpha prompt', 1, '/a', 'id-a')]
+  const { panel } = makePanel(source, {
+    geometry: seatGeometry(44, 20, 2),
+    pointerEnabled: () => true,
+  })
+  panel.start()
+  const initial = plain(await renderUntil(
+    panel,
+    44,
+    rows => rows.some(line => line.includes('alpha prompt')),
+    'the initial sessionless page',
+  ))
+  const headerRow = initial.findIndex(line => line.includes('Input History'))
+  assert.ok(headerRow >= 0, `the header must paint:\n${initial.join('\n')}`)
+  assert.ok(initial[headerRow]!.includes('[Directory]') && initial[headerRow]!.includes('All'), initial[headerRow]!)
+  assert.ok(!initial[headerRow]!.includes('Session'), 'a sessionless History never paints a Session tab')
+  panel.handleInput('alp')
+  await renderUntil(panel, 44, rows => rows.some(line => line.includes('alpha prompt')), 'the query result')
+  const before = source.requests.length
+  const height = panel.render(44).length
+  const click = (label: string): boolean => {
+    const frame = plain(panel.render(44))
+    const row = frame.findIndex(line => line.includes('Input History'))
+    const col = frame[row]!.indexOf(label)
+    assert.ok(row >= 0 && col >= 0, `'${label}' must paint:\n${frame[row]}`)
+    const press = panel.handleMouse(historyPointer('press', col, row, 44, height))
+    if (press === undefined) return false
+    return panel.handleMouse(historyPointer('click', col, row, 44, height)) !== undefined
+  }
+  assert.equal(click('All'), true)
+  await renderUntil(panel, 44, rows => rows.some(line => line.includes('[All]')), 'the selected All scope')
+  await settle()
+  assert.equal(source.requests.at(-1)?.scope, 'all')
+  assert.equal(source.requests.at(-1)?.query, 'alp', 'the query survives a direct scope jump')
+  // The active label is a strict no-op.
+  const afterJump = source.requests.length
+  assert.equal(click('[All]'), true)
+  await settle()
+  assert.equal(source.requests.length, afterJump, 'a same-scope click starts no search')
+  // Title/blank/F2 are inert at a comfortable width.
+  const wide = makePanel(source, { geometry: seatGeometry(100, 30, 2), pointerEnabled: () => true })
+  wide.panel.start()
+  const wideFrame = plain(await waitForHistoryRender(
+    wide.panel,
+    rows => rows.some(line => line.includes('Input History')),
+    'the wide header',
+  ))
+  const wideRow = wideFrame.findIndex(line => line.includes('Input History'))
+  const wideHeight = wide.panel.render(100).length
+  for (const x of [0, wideFrame[wideRow]!.indexOf('F2 ')]) {
+    if (x < 0) continue
+    assert.equal(wide.panel.handleMouse(historyPointer('press', x, wideRow, 100, wideHeight)), undefined,
+      'title/blank/F2 header cells are inert')
+  }
+  // A clipped narrow header publishes no hit for the clipped tail.
+  const clipped = makePanel(source, { geometry: seatGeometry(30, 20, 2), pointerEnabled: () => true })
+  clipped.panel.start()
+  const clippedFrame = plain(await renderUntil(clipped.panel, 30, rows => rows.some(line => line.includes('Input History')), 'the clipped header'))
+  const clippedRow = clippedFrame.findIndex(line => line.includes('Input History'))
+  const clippedHeight = clipped.panel.render(30).length
+  assert.equal(clipped.panel.handleMouse(historyPointer('press', 28, clippedRow, 30, clippedHeight)), undefined,
+    'a clipped label tail is not a pointer target')
+  panel.dispose(); wide.panel.dispose(); clipped.panel.dispose()
+})
+
+test('scope-tabs: a scope press is invalidated by intervening keyboard state and a late old-scope page never commits', async () => {
+  const source = new FakeSource()
+  source.rows = [row('alpha prompt', 1, '/a', 'id-a')]
+  source.manual = true
+  const { panel } = makePanel(source, {
+    geometry: seatGeometry(100, 30, 2),
+    pointerEnabled: () => true,
+    sessionId: 'ses_a',
+  })
+  panel.start()
+  panel.handleInput('a')
+  await settle()
+  assert.ok(source.pending.length >= 2, `the query request must be pending:\n${source.requests.map(request => request.query).join(',')}`)
+  const frame = plain(panel.render(100))
+  const headerRow = frame.findIndex(line => line.includes('Input History'))
+  const allCol = frame[headerRow]!.indexOf('All Directories')
+  const height = panel.render(100).length
+  assert.ok(panel.handleMouse(historyPointer('press', allCol, headerRow, 100, height)) !== undefined)
+  // Keyboard input between press and release retires the header gesture.
+  panel.handleInput('\t')
+  await settle()
+  assert.equal(panel.handleMouse(historyPointer('click', allCol, headerRow, 100, height)), undefined,
+    'a keyboard scope change retires the pressed Scope target')
+  // An old-scope response that ignores abort cannot commit into the newer scope.
+  source.resolveNext([row('STALE old-scope row', 2, '/a', 'id-stale')])
+  await flushMicrotasks()
+  assert.ok(!plain(panel.render(100)).some(line => line.includes('STALE old-scope row')),
+    'a late old-scope page must never commit')
+  const pending = source.pending.pop()
+  assert.ok(pending !== undefined)
+  pending.resolve({ results: [row('fresh current row', 3, '/a', 'id-fresh')], exhausted: true })
+  const fresh = plain(await renderUntil(panel, 100, rows => rows.some(line => line.includes('fresh current row')), 'the fresh scope page'))
+  assert.ok(fresh.some(line => line.includes('Scope: directory')), `the newer scope remains authoritative:\n${fresh.join('\n')}`)
+  panel.dispose()
+})
+
 test('B3 gesture: a wheel between a narrow Footer Use press and release never accepts', async () => {
   const source = new FakeSource()
   source.rows = [row('alpha prompt', 1, '/a', 'id-a')]

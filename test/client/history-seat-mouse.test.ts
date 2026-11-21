@@ -89,7 +89,7 @@ interface Harness {
  *  really executes (so the payload chain stays real). The search source reads a
  *  mutable page, so a test can commit a DIFFERENT result set under the same
  *  painted cells. */
-function startApp(rows: HistorySearchResult[], columns = 100, terminalRows = 30): Harness {
+function startApp(rows: HistorySearchResult[], columns = 100, terminalRows = 30, sessionId?: string): Harness {
   const vt = new VirtualTerminal(columns, terminalRows)
   // Record the PHYSICAL byte stream the surface writes: the regular-root
   // negative must prove that no mouse mode was ever enabled, and the viewport
@@ -121,7 +121,7 @@ function startApp(rows: HistorySearchResult[], columns = 100, terminalRows = 30)
       },
     } satisfies HistorySearchSource,
     historySearchCwd: () => '/work/a',
-    captureHistoryScope: () => ({ sessionId: undefined, isCurrent: () => true }),
+    captureHistoryScope: () => ({ sessionId, isCurrent: () => true }),
     copySelection: async (text: string) => {
       copied.push(text)
       return true
@@ -701,6 +701,83 @@ test('B3: a Footer Cancel pressed before a Question park never acts after the re
   await flush(2)
   assert.ok(view(h.vt).includes('Input History'), 'the stale footer release must not close the restored seat')
   assert.equal(h.app.getDraft(), '', 'the stale release never accepts')
+})
+
+test('B3: a pure-mouse Header scope → result → Use journey writes the editor draft without submitting', async () => {
+  const h = startApp([
+    row('alpha prompt', 3, '/work/a', 'id-a'),
+    row('beta prompt', 2, '/work/a', 'id-b'),
+  ], 100, 30, 'ses_a')
+  h.app.setDraft('keep this draft')
+  await h.vt.waitForRender()
+  await openFullscreenHistory(h)
+  const header = rawView(h.vt).find(line => line.includes('Input History')) ?? ''
+  assert.ok(header.includes('[Current Session]')
+    && header.includes('Current Directory')
+    && header.includes('All Directories'), `the Session header paints three labels:\n${header}`)
+  const before = h.searches()
+  await clickPainted(h, 'All Directories')
+  await waitFor(() => h.searches() > before, 'the direct scope search')
+  await h.vt.waitForRender()
+  assert.ok(rawView(h.vt).some(line => line.includes('[All Directories]')),
+    `the Header click selects All directly:\n${view(h.vt)}`)
+  assert.equal(h.app.getDraft(), 'keep this draft', 'a scope click never touches the draft')
+  // A result row click only selects; the explicit Use action is the one write.
+  const betaRow = rowOf(h.vt, 'beta prompt')
+  assert.ok(betaRow >= 0, `the All page paints beta:\n${view(h.vt)}`)
+  press(h.vt, betaRow, colOf(h.vt, betaRow, 'beta prompt'))
+  release(h.vt, betaRow, colOf(h.vt, betaRow, 'beta prompt'))
+  await h.vt.waitForRender()
+  await flush(2)
+  await clickPainted(h, 'Use Selected [Enter]')
+  assert.equal(h.app.getDraft(), 'beta prompt', 'Use writes the pressed result into the draft')
+  assert.deepEqual(h.submitted, [], 'the pointer journey never submits')
+  await flush(2)
+})
+
+test('B3: a Header scope press never survives resize or a Question park, while Footer Scope still cycles', async () => {
+  const h = startApp([row('alpha prompt', 1, '/work/a', 'id-a')])
+  await openFullscreenHistory(h)
+  const allRow = rowOf(h.vt, 'All Directories')
+  const allCol = colOf(h.vt, allRow, 'All Directories')
+  assert.ok(allRow >= 0 && allCol >= 0, `the All label must paint:\n${view(h.vt)}`)
+  assert.equal(h.searches(), 1, 'the initial Directory search is the only request')
+  press(h.vt, allRow, allCol)
+  await h.vt.waitForRender()
+  h.vt.resize(90, 30)
+  await h.vt.waitForRender()
+  release(h.vt, allRow, allCol)
+  await h.vt.waitForRender()
+  await flush(2)
+  assert.ok(rawView(h.vt).some(line => line.includes('[Current Directory]')),
+    `a resize must retire the Header press:\n${view(h.vt)}`)
+  assert.equal(h.searches(), 1, 'the resize-stale Header release starts no search')
+  // A Question parks the seat; the restored frame must not consume the old press.
+  const restoredRow = rowOf(h.vt, 'All Directories')
+  const restoredCol = colOf(h.vt, restoredRow, 'All Directories')
+  press(h.vt, restoredRow, restoredCol)
+  await h.vt.waitForRender()
+  const question = h.app.askQuestions([{ id: 'q1', question: 'park the header press?', options: [{ label: 'Yes' }] }])
+  await h.vt.waitForRender()
+  assert.ok(!view(h.vt).includes('Input History'), 'the Question parks History')
+  h.vt.sendInput('\r')
+  h.vt.sendInput('\r')
+  await question
+  await h.vt.waitForRender()
+  await flush(2)
+  release(h.vt, restoredRow, restoredCol)
+  await h.vt.waitForRender()
+  await flush(2)
+  assert.ok(rawView(h.vt).some(line => line.includes('[Current Directory]')),
+    `the restored Header stays on Directory:\n${view(h.vt)}`)
+  // Footer Scope [Tab] keeps the original cycle semantics.
+  const searches = h.searches()
+  await clickPainted(h, 'Scope [Tab]')
+  await waitFor(() => h.searches() > searches, 'the Footer Scope search')
+  await h.vt.waitForRender()
+  assert.ok(rawView(h.vt).some(line => line.includes('[All Directories]')),
+    `Footer Scope still cycles:\n${view(h.vt)}`)
+  await flush(2)
 })
 
 test('B3 gesture: a real wheel between a Footer Cancel/Scope press and release is inert', async () => {
