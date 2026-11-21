@@ -676,7 +676,12 @@ async function runDirectTuiQualification({ env, runRoot, stampDir, sentinel }) {
           }
           check('P4-08', true, 'real PTY SGR pointer journey enters Settings, selects A, confirms Reset/set and refuses a stale resize gesture',
             JSON.stringify({ reset: 'alpha', set: 'omega', finalReset: 'alpha', stalePatch: afterStale.a }))
-          send('-l', '/settings')
+        } catch (error) {
+          gate('P4-08', 'FAIL', 'real PTY SGR pointer journey enters Settings, selects A, confirms Reset/set and refuses a stale resize gesture',
+            error instanceof Error ? error.message : String(error))
+        }
+        // P4-10 keyboard journey on the same real PTY, in its own try/scope.
+        send('-l', '/settings')
         await waitForText(['/settings'], 20_000)
         send('Enter')
         await waitForText(['Settings · Categories'], 30_000)
@@ -716,10 +721,6 @@ async function runDirectTuiQualification({ env, runRoot, stampDir, sentinel }) {
         'real Direct TUI edits A and B persisted settings through Settings → Extensions and survives a restart',
         JSON.stringify({ userPatchOk, aUser: aRead?.user, aValue: aRead?.value, bUser: bRead?.user, bValue: bRead?.value }))
 
-      } catch (error) {
-          gate('P4-08', 'FAIL', 'real PTY SGR pointer journey enters Settings, selects A, confirms Reset/set and refuses a stale resize gesture',
-            error instanceof Error ? error.message : String(error))
-        }
       } catch (error) {
         gate('P4-10', 'FAIL', 'real Direct TUI edits A and B persisted settings through Settings → Extensions and survives a restart',
           error instanceof Error ? error.message : String(error))
