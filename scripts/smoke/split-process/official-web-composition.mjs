@@ -70,7 +70,7 @@ function assert(condition, message) {
 
 export async function runOfficialWebComposition(context) {
   const { EntryProcess, SurfaceEntryProcess, workDir, dshHome, base, entries, tarball, candidateSha256, targetDshVersion, trace, mode } = context
-  const { env, anchor, surfaceLlm } = context.installation
+  const { env, anchor, surfaceLlm, profilePackage } = context.installation
   const promptEvidence = () => {
     const text = readFileSync(surfaceLlm.promptEvidencePath, 'utf8').trim()
     return text === '' ? [] : text.split('\n').map(line => JSON.parse(line))
@@ -110,12 +110,23 @@ export async function runOfficialWebComposition(context) {
     }
     return overlays
   }
-  /** Compare the LIVE overlay against the frozen roster (id, name, order, disabled). */
+  /** Compare the live Host overlay and the installed bundle declaration against the frozen roster. */
   const assertDeclaredWebRows = (overlayPath, label) => {
     const entries = parseYaml(readFileSync(overlayPath, 'utf8'))
     const inserts = entries.filter(entry => Array.isArray(entry.insert))
-    assert(inserts.length === 2, `${label}: expected the Host execution insert and ONE Web insert, found ${inserts.length}`)
-    const rows = inserts[inserts.length - 1].insert
+    assert(inserts.length === 1, `${label}: expected ONE Host execution insert, found ${inserts.length}`)
+    const hostRows = inserts[0].insert
+    assert(hostRows.some(row => row.id === 'split-host-cordis-inspect-providers'),
+      `${label}: the Host execution insert does not own the Cordis Inspect provider row`)
+    // The Web roster is declared by the BUNDLE patch, not inserted by the
+    // Host-only overlay: the official ConfigEditor must be able to persist
+    // every Web row. Read the installed bundle patch that the candidate
+    // actually ships and compare it with the frozen production roster.
+    const bundlePatch = join(profilePackage, 'generated', 'web-access', 'cordis.patch.yml')
+    const bundleEntries = parseYaml(readFileSync(bundlePatch, 'utf8'))
+    const bundleInserts = bundleEntries.filter(entry => Array.isArray(entry.insert))
+    assert(bundleInserts.length === 1, `${label}: expected ONE Web bundle insert, found ${bundleInserts.length}`)
+    const rows = bundleInserts[0].insert
     assert(rows.length === PR_A_WEB_ROWS.length,
       `${label}: the Web insert declares ${rows.length} rows, expected ${PR_A_WEB_ROWS.length}`)
     // The lane's `assert` is a plain predicate, not node:assert: compare the
