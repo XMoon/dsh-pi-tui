@@ -39,8 +39,6 @@ dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.5.7
 dsh --profile pi-tui
 ~~~
 
-从源码构建或验证时，可以运行 `pnpm compat:dsh:npm` 检查仓库锁定的 npm DSH 配对。
-
 | TUI | DSH | 状态 |
 |---|---|---|
 | `0.5.7` | `>=0.2.2-rc.3`；推荐 `0.2.2-rc.5` | **当前 latest** |
@@ -56,12 +54,6 @@ dsh --profile pi-tui
 npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty @deepseek-ai/dsh@alpha
 dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@next
 dsh --profile pi-tui
-~~~
-
-从本仓库验证锁定的 npm 配对：
-
-~~~sh
-pnpm compat:dsh:npm
 ~~~
 
 ## 功能

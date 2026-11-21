@@ -39,8 +39,6 @@ dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.5.7
 dsh --profile pi-tui
 ~~~
 
-When building or validating from source, run `pnpm compat:dsh:npm` to check the pinned npm DSH family.
-
 | TUI | DSH | Status |
 |---|---|---|
 | `0.5.7` | `>=0.2.2-rc.3`; recommended `0.2.2-rc.5` | **Current latest** |
@@ -56,12 +54,6 @@ The TUI `@next` channel and DSH `@alpha` channel are independent moving pointers
 npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty @deepseek-ai/dsh@alpha
 dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@next
 dsh --profile pi-tui
-~~~
-
-To verify this checkout's pinned npm pairing:
-
-~~~sh
-pnpm compat:dsh:npm
 ~~~
 
 ## Features
