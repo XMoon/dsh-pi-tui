@@ -417,6 +417,29 @@ test('an unexpected management throw is a sanitized non-zero failure', async () 
   assert.doesNotMatch(stderr.join(''), /raw secret|\/home\/u/u)
 })
 
+test('the web-control runner uses its fixed WEB prefix for an unexpected throw', async () => {
+  const exitCodes: number[] = []
+  const stderr: string[] = []
+  let exited: (() => void) | undefined
+  const settled = new Promise<void>(resolve => { exited = resolve })
+  const runner = new DaemonControlRunner({
+    run: async () => { throw new Error('raw secret at /home/u/.dsh') },
+    appExit: code => { exitCodes.push(code); exited?.() },
+    writeStdout: () => {},
+    writeStderr: text => { stderr.push(text) },
+    fallback: {
+      code: 4,
+      stdout: '',
+      stderr: 'dsh-pi-tui web: WEB_CLI_UNAVAILABLE: an unexpected local web CLI failure occurred\n',
+    },
+  })
+  runner.start()
+  await settled
+  assert.deepEqual(exitCodes, [4])
+  assert.match(stderr.join(''), /^dsh-pi-tui web: WEB_CLI_UNAVAILABLE: /u)
+  assert.doesNotMatch(stderr.join(''), /daemon:|raw secret|\/home\/u/u)
+})
+
 // ── B3: the budget deadline is a fallback, never a lingering referenced timer ──
 
 /**

@@ -393,8 +393,24 @@ export interface TuiDaemonControlStartup {
   markCoordinatorMounted?(): void
 }
 
+/** The public headless Web CLI verbs (M6 Web CLI). */
+export type WebControlVerb = 'status' | 'enable' | 'disable' | 'url' | 'open'
+
+/** One immutable headless Web control intent parsed by the nested CLI grammar. */
+export interface WebControlIntent {
+  readonly verb: WebControlVerb
+}
+
+/** The headless Web CLI arm: no TUI, no Client, no Host start. */
+export interface TuiWebControlStartup {
+  readonly kind: 'web-control'
+  readonly control: WebControlIntent
+  /** Same one-shot cold-ready handshake as the client arm. */
+  markCoordinatorMounted?(): void
+}
+
 /** What the daemon-launcher row reads from {@link TUI_DAEMON_STARTUP_SERVICE}. */
-export type TuiDaemonStartupValues = TuiDaemonClientStartup | TuiDaemonControlStartup
+export type TuiDaemonStartupValues = TuiDaemonClientStartup | TuiDaemonControlStartup | TuiWebControlStartup
 
 /**
  * The row's Profile Config: the persisted backend selector. `.volatile()`
@@ -527,13 +543,13 @@ function withUsageExitCode(command: Command): Command {
   return command
 }
 
-/** Reject the public Session launch flags on a daemon management invocation.
+/** Reject the public Session launch flags on a management invocation.
  *  Commander parses root options before the subcommand, so a flag placed before
  *  the verb reaches this action instead of being an unknown subcommand option. */
-function rejectSessionFlags(program: Command, command: Command): void {
+function rejectSessionFlags(program: Command, command: Command, family: 'daemon' | 'web'): void {
   const options = program.opts<{ session?: string | boolean; continue?: boolean; preset?: string }>()
   if (options.continue === true || options.session !== undefined || options.preset !== undefined) {
-    command.error('error: --session, --continue and --preset are only valid for a normal TUI launch, not with daemon commands')
+    command.error(`error: --session, --continue and --preset are only valid for a normal TUI launch, not with ${family} commands`)
   }
 }
 
@@ -561,7 +577,7 @@ function tuiCommand(ctx: Context): Command {
     const command = withUsageExitCode(daemon.command(name).description(description))
     configure?.(command)
     command.action((options: { readonly lines?: string } = {}) => {
-      rejectSessionFlags(program, command)
+      rejectSessionFlags(program, command, 'daemon')
       // A Host-only process must never acquire the public management route: it
       // already owns the Host business and would recurse into a second
       // supervisor. Reject before publishing any service.
@@ -599,6 +615,38 @@ Examples:
   dsh --profile pi-tui daemon uninstall
 `)
 
+  // The headless Web CLI is nested under the same ONE command. It never selects
+  // the Direct/daemon backend and never opens a TUI/Client/Host: each verb
+  // publishes one immutable web-control intent for the manager row.
+  const web = withUsageExitCode(program.command('web').description('Inspect or control the running Host\'s official Web frontend.'))
+  web.action(() => {
+    web.error('error: a web command is required (status, enable, disable, url or open)')
+  })
+  const addWebVerb = (name: WebControlVerb, description: string): Command => {
+    const command = withUsageExitCode(web.command(name).description(description))
+    command.action(() => {
+      rejectSessionFlags(program, command, 'web')
+      // A Host-only process already owns the Host business and must never
+      // acquire the public management route.
+      if (isHostOnlyRole()) command.error('error: web commands are not available in a Host-only process')
+      publishDaemonService(ctx, { kind: 'web-control', control: { verb: name } })
+    })
+    return command
+  }
+  addWebVerb('status', 'show the running Host\'s Web frontend state')
+  addWebVerb('enable', 'enable the running Host\'s Web frontend')
+  addWebVerb('disable', 'disable the running Host\'s Web frontend')
+  addWebVerb('url', 'print the authenticated Web URL of the running Host')
+  addWebVerb('open', 'request the local browser opener for the authenticated Web URL')
+  web.addHelpText('after', `
+Examples:
+  dsh --profile pi-tui web status
+  dsh --profile pi-tui web enable
+  dsh --profile pi-tui web disable
+  dsh --profile pi-tui web url
+  dsh --profile pi-tui web open
+`)
+
   program.addHelpText('after', `
 Examples:
   dsh --profile pi-tui                       start the terminal UI
@@ -608,6 +656,8 @@ Examples:
   dsh --profile pi-tui --continue            continue the last session in this workspace
   dsh --profile pi-tui --session <id> --preset minimal
   dsh --profile pi-tui daemon status         inspect the local daemon Host
+  dsh --profile pi-tui web status            inspect the Host's Web frontend
+  dsh --profile pi-tui web url               print the authenticated Web URL
 `)
   return program
 }
@@ -913,6 +963,17 @@ function controlNotMountedMessage(): string {
   ].join('\n')
 }
 
+/** The actionable error for a committed Web CLI startup whose launcher row
+ *  never mounted. A missing/failed supervisor must not look like a successful
+ *  web command, and the text must not claim the daemon TUI was requested. */
+function webControlNotMountedMessage(profile: string): string {
+  return [
+    `dsh-pi-tui ${bundleVersionLabel(CURRENT_DSH_REQUIREMENT.since)} was invoked for a web CLI command, but the daemon launcher row did not mount.`,
+    'The pi-tui-daemon-launcher row failed to import/apply or stayed pending on tuiDaemonStartup (see the loader warnings above); DSH app-boot treats that as an optional plugin failure.',
+    `This installation cannot run the web CLI; reinstall the profile or fix its composition, then re-run: dsh --profile ${shellQuoteProfile(profile)} web status`,
+  ].join('\n')
+}
+
 /**
  * Publish the daemon startup service. The daemon-launcher row injects it,
  * spawns exactly ONE foreground Client OS process and waits for its real exit.
@@ -939,7 +1000,12 @@ function publishDaemonService(ctx: Context, values: TuiDaemonStartupValues): voi
       // startup and delivers no verdict.
       if (!registrationReturned) return
       if (coordinatorMounted) return
-      process.stderr.write(`\n${values.kind === 'control' ? controlNotMountedMessage() : coordinatorNotMountedMessage(runningProfileName(ctx))}\n\n`)
+      const message = values.kind === 'control'
+        ? controlNotMountedMessage()
+        : values.kind === 'web-control'
+          ? webControlNotMountedMessage(runningProfileName(ctx))
+          : coordinatorNotMountedMessage(runningProfileName(ctx))
+      process.stderr.write(`\n${message}\n\n`)
       ctx.get('appExit')?.(1)
     })
     registrationReturned = true
