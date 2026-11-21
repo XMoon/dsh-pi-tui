@@ -3,7 +3,6 @@ import {
   chmodSync,
   existsSync,
   mkdirSync,
-  mkdtempSync,
   readdirSync,
   realpathSync,
   rmSync,
@@ -14,9 +13,12 @@ import { isAbsolute, join, relative, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { createInterface } from 'node:readline'
 import { setTimeout as sleep } from 'node:timers/promises'
+import type { TestContext } from 'node:test'
 
 import { TuiTest, sessions as openTuiSessions } from '@microsoft/tui-test'
 import { test as base } from 'vitest'
+
+import { testLifecycle } from './temp-lifecycle.ts'
 
 const SUPPORT_DIR = fileURLToPath(new URL('.', import.meta.url))
 const REPO_ROOT = realpathSync(join(SUPPORT_DIR, '..', '..'))
@@ -618,7 +620,11 @@ class Scene implements SplitS0Scene {
 async function createScene(): Promise<Scene> {
   const tmpBase = requireAbsoluteDirectory('S0_TMP_BASE')
   const tarball = requireCandidateTarball()
-  const workDir = mkdtempSync(join(tmpBase, 'scene-'))
+  // The repository temp-hygiene gate requires every test-owned temp root to
+  // come from the ONE lifecycle helper; this fixture owns its own deletion, so
+  // the helper is used only as the permitted creation seam.
+  const tempLife = testLifecycle({ after: () => {} } as unknown as TestContext)
+  const workDir = tempLife.tempDir('scene-', tmpBase)
   chmodSync(workDir, 0o700)
   try {
     const candidate = profileModule.inspectSplitCandidate(tarball)
