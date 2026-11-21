@@ -118,6 +118,15 @@ export function writeC1WorkFixture(profileDir, workDir, options = {}) {
   const fixturePath = join(profileDir, 'split-process-host-work.mjs')
   writeFileSync(fixturePath, readFileSync(source), { mode: 0o600 })
   chmodSync(fixturePath, 0o600)
+  // B0 only: the run-owned stdio MCP server lives in the SAME isolated profile
+  // as the Host fixture, so the Host fixture can hand its absolute path to the
+  // official McpClient without ever resolving it from the checkout.
+  let scopedMcpServerPath
+  if (options.scopedMcpB0 === true) {
+    scopedMcpServerPath = join(profileDir, 'scoped-mcp-b0-server.mjs')
+    writeFileSync(scopedMcpServerPath, readFileSync(join(SCRIPT_DIR, '..', 'fixtures', 'scoped-mcp-b0-server.mjs')), { mode: 0o600 })
+    chmodSync(scopedMcpServerPath, 0o600)
+  }
   const rows = [
     '- insert:',
     '    - id: split-process-host-work',
@@ -212,6 +221,7 @@ export function writeC1WorkFixture(profileDir, workDir, options = {}) {
     patchPath,
     timedPatchPath,
     seedMigratedPreferences,
+    ...(scopedMcpServerPath === undefined ? {} : { scopedMcpServerPath }),
     ...policyPatches,
   }
 }

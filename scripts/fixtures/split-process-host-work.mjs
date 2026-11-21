@@ -24,6 +24,7 @@
 
 import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
+import { spawnSync } from 'node:child_process'
 import { isAbsolute, join } from 'node:path'
 import { credentialKey } from '@deepseek-ai/dsh-credentials'
 import { LlmAdapter } from '@deepseek-ai/dsh-llm'
@@ -44,6 +45,9 @@ const SCENARIOS = new Set([
   // PO-3B: held long turns + ONE official approval tool call + the never
   // policy negative, staged against the scoped ACP cancel/approval owner.
   'acp-po3b',
+  // G-ACP1B/B0: one live Agent mounts an official Agent-scoped MCP client
+  // through `agent.runMaintenance()` and a run-owned control file sequence.
+  'acp-scoped-mcp-b0',
   // PO-4A content admission: only this scenario declares the test route's image modality.
   'acp-po4a',
   // PO-4C committed output: the offline model emits standard assistant/tool
@@ -329,6 +333,752 @@ function recordPromptFacts(options) {
     responseSection: systemText.includes('# Response style:'),
     gitSection: systemText.includes('# Git attribution'),
   }) + '\n', { mode: 0o600 })
+}
+
+/** G-ACP1B/B0 prompt markers and the official MCP public tool names. */
+const B0_HOLD_MARKER = 'B0_HOLD_A'
+const B0_FAIL_MARKER = 'B0_FAIL_A'
+const B0_PLAIN_MARKER = 'B0_PLAIN_A'
+const B0_ECHO_TOOL = 'mcp__b0scope__echo'
+const B0_HOLD_TOOL = 'mcp__b0scope__hold'
+const B0_FAIL_TOOL = 'mcp__b0scope__fail'
+const B0_PROMPT_PATTERN = /\b(B0_(?:ECHO|HOLD|FAIL|PLAIN)_[AB])\b(?:\s+([A-Za-z0-9_-]+))?/u
+
+/** The newest authored B0 prompt marker and its optional nonce. */
+function b0PromptOf(messages) {
+  for (const message of [...(messages ?? [])].reverse()) {
+    if (message?.role !== 'user') continue
+    const text = (message.content ?? [])
+      .map(part => (part?.type === 'text' && typeof part.text === 'string' ? part.text : ''))
+      .join('')
+    const match = text.match(B0_PROMPT_PATTERN)
+    if (match !== null) return { marker: match[1], nonce: match[2] }
+  }
+  return undefined
+}
+
+function sleepB0(ms) {
+  return new Promise(resolveSleep => setTimeout(resolveSleep, ms))
+}
+
+function b0Alive(pid) {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * The live process identity used as the terminal-signal fence:
+ * `pid + kernel start time + current parent`. Linux reads procfs; Darwin uses
+ * `ps lstart`; any unreadable shape fails closed.
+ */
+function b0ProcessIdentity(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return undefined
+  if (process.platform === 'linux') {
+    try {
+      const stat = readFileSync(`/proc/${String(pid)}/stat`, 'utf8')
+      const fields = stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\s+/)
+      return { pid, ppid: Number(fields[1]), started: fields[19] }
+    } catch {
+      return undefined
+    }
+  }
+  if (process.platform === 'darwin') {
+    const result = spawnSync('ps', ['-axo', 'pid=,ppid=,lstart=,command='], {
+      encoding: 'utf8',
+      timeout: 15_000,
+      env: { ...process.env, LC_ALL: 'C' },
+    })
+    if (result.error !== undefined || result.status !== 0) return undefined
+    for (const line of result.stdout.split('\n')) {
+      const match = /^\s*(\d+)\s+(\d+)\s+(\w{3}\s+\w{3}\s+\d+\s+\d{2}:\d{2}:\d{2}\s+\d{4})\s+(.*)$/u.exec(line)
+      if (match !== null && Number(match[1]) === pid) {
+        return { pid, ppid: Number(match[2]), started: match[3].replace(/\s+/gu, ' ') }
+      }
+    }
+    return undefined
+  }
+  return undefined
+}
+
+/**
+ * G-ACP1B/B0 test-owned Host workload.
+ *
+ * The workload owns exactly one run/one Agent A handle. It never creates an
+ * Agent/Session, never registers through the global `ctx.mcpManager`, and
+ * every control request is a fixed file name consumed once. All replies are
+ * JSONL facts with actionId/sessionId/agentId/hostPid/kind and never carry a
+ * command or env value.
+ */
+function createScopedMcpB0Workload(ctx, { root, record }) {
+  const controlPath = process.env.C1_B0_CONTROL ?? join(root, 'b0-control.json')
+  const serverPath = process.env.C1_B0_MCP_SERVER
+  const proofPath = process.env.C1_B0_PROOF
+  const holdArm = process.env.C1_B0_HOLD_ARM
+  const holdRelease = process.env.C1_B0_HOLD_RELEASE
+  const runNonce = process.env.C1_B0_RUN_NONCE
+  if ([controlPath, serverPath, proofPath, holdArm, holdRelease, runNonce].some(value => typeof value !== 'string' || value === '')) {
+    throw new Error('m4-c1-host-work: acp-scoped-mcp-b0 requires C1_B0_CONTROL, C1_B0_MCP_SERVER, C1_B0_PROOF, C1_B0_HOLD_ARM, C1_B0_HOLD_RELEASE and C1_B0_RUN_NONCE')
+  }
+  const state = {
+    fiberA: undefined,
+    fiberCrash: undefined,
+    crashStatusDispose: undefined,
+    crashIdentity: undefined,
+    globalDispose: undefined,
+    stopped: false,
+    pinnedAgentA: undefined,
+    pinnedSessionA: undefined,
+    pinnedAgentB: undefined,
+    pinnedSessionB: undefined,
+    retireRequest: undefined,
+  }
+  const calls = new Map()
+  const results = new Set()
+  /** Session id -> highest observed durable turn/end turn. */
+  const lastTurnEnd = new Map()
+  let current
+  let timer
+
+  const fact = (actionId, action, fields = {}) => {
+    record('b0-fact', {
+      actionId,
+      action,
+      sessionId: fields.sessionId ?? '',
+      agentId: fields.agentId ?? '',
+      hostPid: process.pid,
+      ...fields,
+    })
+  }
+  const requireAgent = sessionId => {
+    if (typeof sessionId !== 'string' || sessionId === '') throw new Error('m4-c1-host-work: B0 control requires a sessionId')
+    const agent = ctx.agents.get(sessionId)
+    if (agent === undefined) throw new Error(`m4-c1-host-work: B0 control could not resolve live Agent ${sessionId}`)
+    return agent
+  }
+  /** Pin and re-check the exact Agent/Session object identities for one slot. */
+  const pinAgent = (sessionId, slot) => {
+    const agent = requireAgent(sessionId)
+    const sessions = ctx.reflect.get('sessions')
+    const session = sessions?.get(sessionId)
+    if (session === undefined || session !== agent.session) {
+      throw new Error(`m4-c1-host-work: B0 ${slot} requires the exact live Session store identity`)
+    }
+    const agentKey = `pinnedAgent${slot}`
+    const sessionKey = `pinnedSession${slot}`
+    if (state[agentKey] === undefined) {
+      state[agentKey] = agent
+      state[sessionKey] = session
+    } else if (!Object.is(state[agentKey], agent) || !Object.is(state[sessionKey], session)) {
+      throw new Error(`m4-c1-host-work: B0_AGENT_STALE: ${slot} Agent/Session identity changed`)
+    }
+    return agent
+  }
+  const assertPinned = slot => {
+    const agent = state[`pinnedAgent${slot}`]
+    const session = state[`pinnedSession${slot}`]
+    if (agent === undefined || session === undefined) return
+    const sessions = ctx.reflect.get('sessions')
+    const current = ctx.agents.get(String(session.id))
+    const currentSession = sessions?.get(String(session.id))
+    if (!Object.is(current, agent) || !Object.is(currentSession, session)) {
+      throw new Error(`m4-c1-host-work: B0_AGENT_STALE: ${slot} Agent/Session identity changed after await`)
+    }
+  }
+  const schemaNames = agent => ctx.tools.schemas(agent).map(schema => schema.name)
+  const proofLines = () => {
+    if (!existsSync(proofPath)) return []
+    return readFileSync(proofPath, 'utf8').split('\n').filter(Boolean).flatMap(line => {
+      try {
+        return [JSON.parse(line)]
+      } catch {
+        return []
+      }
+    })
+  }
+  const proofOf = (kind, tag) => [...proofLines()].reverse().find(line => line.kind === kind && line.tag === tag)
+  const serverStartOf = tag => proofOf('server-start', tag)
+  const activeCallsOf = sessionId => [...calls.values()].filter(call => call.sessionId === sessionId && !results.has(call.callId))
+  const waitForProcessGone = async (pid, timeoutMs = 8_000) => {
+    const deadline = Date.now() + timeoutMs
+    while (Date.now() < deadline) {
+      if (!b0Alive(pid)) return true
+      await sleepB0(25)
+    }
+    return !b0Alive(pid)
+  }
+  const clientConfig = (McpClient, agent, serverName, tag, extraEnv = {}) => {
+    // The action already resolved its exact Agent; its committed Host Session
+    // cwd is the only directory authority, never a client/request directory.
+    return McpClient.Config({
+      transport: 'stdio',
+      serverName,
+      command: process.execPath,
+      args: [serverPath],
+      env: {
+        B0_RUN_NONCE: runNonce,
+        B0_FIXTURE_PROOF: proofPath,
+        B0_HOLD_ARM: holdArm,
+        B0_HOLD_RELEASE: holdRelease,
+        B0_SERVER_TAG: tag,
+        ...(typeof process.env.C1_B0_SECRET_SENTINEL === 'string' && process.env.C1_B0_SECRET_SENTINEL !== ''
+          ? { B0_SECRET_SENTINEL: process.env.C1_B0_SECRET_SENTINEL }
+          : {}),
+        ...extraEnv,
+      },
+      cwd: realpathSync(agent.session.header.cwd),
+      toolCallTimeoutMs: 15_000,
+      startupTimeoutMs: 20_000,
+      closeTimeoutMs: 5_000,
+      expandTemplates: false,
+      failOnStartupError: true,
+      reconnect: { enabled: false, initialDelayMs: 500, maxDelayMs: 500, maxAttempts: 1 },
+    })
+  }
+
+  const handleMountA = async (request) => {
+    const agent = pinAgent(request.sessionId, 'A')
+    const sessions = ctx.reflect.get('sessions')
+    const cwd = agent.session.header.cwd
+    if (typeof cwd !== 'string' || !isAbsolute(cwd) || !existsSync(cwd)) {
+      throw new Error('m4-c1-host-work: B0 mount-A requires the existing absolute Host Session cwd')
+    }
+    const canonicalCwd = realpathSync(cwd)
+    const agentCountBefore = ctx.agents.list().length
+    const sessionCountBefore = sessions.list().length
+    const McpClient = await import('@deepseek-ai/dsh-mcp-client')
+    let handle
+    let abortDisposal
+    try {
+      await agent.runMaintenance(async signal => {
+        const onAbort = () => {
+          if (handle !== undefined) abortDisposal ??= handle.dispose().catch(() => {})
+        }
+        signal.addEventListener('abort', onAbort, { once: true })
+        try {
+          if (signal.aborted) throw signal.reason ?? new Error('B0 mount-A aborted')
+          // The exact Agent already exists; this only mounts the official
+          // plugin on its Context and never creates/replaces an Agent.
+          handle = agent.ctx.plugin(McpClient, clientConfig(McpClient, agent, 'b0scope', 'b0scope'))
+          await handle.await()
+          if (signal.aborted) throw signal.reason ?? new Error('B0 mount-A aborted')
+          const status = McpClient.connectionStatusOf(handle)?.current()
+          if (status?.state !== 'connected') {
+            throw new Error(`m4-c1-host-work: B0 mount-A fiber is ${String(status?.state)} instead of connected`)
+          }
+        } finally {
+          signal.removeEventListener('abort', onAbort)
+        }
+      })
+      assertPinned('A')
+      state.fiberA = handle
+      handle = undefined
+      const status = McpClient.connectionStatusOf(state.fiberA)?.current()
+      const server = serverStartOf('b0scope')
+      const agentCountAfter = ctx.agents.list().length
+      const sessionCountAfter = sessions.list().length
+      fact(request.actionId, 'mount-A', {
+        ok: status?.state === 'connected' && agentCountAfter === agentCountBefore && sessionCountAfter === sessionCountBefore,
+        agentCountBefore,
+        agentCountAfter,
+        sessionCountBefore,
+        sessionCountAfter,
+        sessionId: String(agent.id),
+        agentId: String(agent.id),
+        cwd: canonicalCwd,
+        toolNames: schemaNames(agent),
+        connectionState: status?.state,
+        toolCount: status?.state === 'connected' ? status.toolCount : undefined,
+        serverPid: server?.pid,
+        serverPpid: server?.ppid,
+      })
+    } catch (error) {
+      if (abortDisposal !== undefined) await abortDisposal
+      if (handle !== undefined) {
+        try { await handle.dispose() } catch { /* the failed fiber owns its rollback */ }
+      }
+      fact(request.actionId, 'mount-A', {
+        ok: false,
+        sessionId: request.sessionId,
+        agentId: String(agent.id),
+        error: error instanceof Error ? error.message : String(error),
+        errorCode: typeof error?.code === 'string' ? error.code : undefined,
+      })
+    }
+  }
+
+  const handleProbeB = async (request) => {
+    const agentA = pinAgent(request.sessionId, 'A')
+    const agentB = pinAgent(request.sessionIdB, 'B')
+    const sessions = ctx.reflect.get('sessions')
+    assertPinned('A')
+    assertPinned('B')
+    const aToolNames = schemaNames(agentA)
+    const bToolNames = schemaNames(agentB)
+    const agentCount = ctx.agents.list().length
+    const sessionCount = sessions?.list().length
+    fact(request.actionId, 'probe-B', {
+      ok: sessions !== undefined && sessions.get(request.sessionId) === agentA.session
+        && sessions.get(request.sessionIdB) === agentB.session,
+      sessionId: String(agentB.id),
+      agentId: String(agentB.id),
+      agentAId: String(agentA.id),
+      agentBId: String(agentB.id),
+      agentASessionExact: sessions?.get(request.sessionId) === agentA.session,
+      agentBSessionExact: sessions?.get(request.sessionIdB) === agentB.session,
+      agentAToolNames: aToolNames,
+      agentBToolNames: bToolNames,
+      agentAHasEcho: aToolNames.includes(B0_ECHO_TOOL),
+      agentBHasEcho: bToolNames.includes(B0_ECHO_TOOL),
+      agentCount,
+      sessionCount,
+    })
+  }
+
+  const handleMountDuplicate = async (request) => {
+    const agent = pinAgent(request.sessionId, 'A')
+    const McpClient = await import('@deepseek-ai/dsh-mcp-client')
+    const serverStartsBefore = proofLines().filter(line => line.kind === 'server-start' && line.tag === 'b0scope').length
+    let duplicate
+    let rejected = false
+    let message
+    try {
+      duplicate = agent.ctx.plugin(McpClient, clientConfig(McpClient, agent, 'b0scope', 'b0scope'))
+      await duplicate.await()
+    } catch (error) {
+      rejected = true
+      message = error instanceof Error ? error.message : String(error)
+    }
+    assertPinned('A')
+    if (duplicate !== undefined) {
+      try { await duplicate.dispose() } catch { /* rollback already owns it */ }
+    }
+    const firstStatus = state.fiberA === undefined ? undefined : McpClient.connectionStatusOf(state.fiberA)?.current()
+    const serverStartsAfter = proofLines().filter(line => line.kind === 'server-start' && line.tag === 'b0scope').length
+    const duplicateClosure = duplicate === undefined ? undefined : McpClient.connectionStatusOf(duplicate)?.closure()
+    fact(request.actionId, 'mount-duplicate-A', {
+      ok: rejected && firstStatus?.state === 'connected'
+        && serverStartsAfter === serverStartsBefore
+        && typeof message === 'string' && message.includes('serverName "b0scope" is already in use'),
+      sessionId: String(agent.id),
+      agentId: String(agent.id),
+      rejected,
+      error: message,
+      duplicateClosure,
+      serverStartsBefore,
+      serverStartsAfter,
+      firstConnectionState: firstStatus?.state,
+      firstToolNames: schemaNames(agent),
+    })
+  }
+
+  const handleGlobalShadow = async (request) => {
+    if (state.globalDispose !== undefined) throw new Error('m4-c1-host-work: B0 global shadow is already installed')
+    const agentA = pinAgent(request.sessionId, 'A')
+    const agentB = pinAgent(request.sessionIdB, 'B')
+    state.globalDispose = ctx.tools.register(defineTool({
+      name: B0_ECHO_TOOL,
+      description: 'B0 GLOBAL_ONLY shadow tool',
+      parameters: {},
+      output: {
+        schema: { type: 'string' },
+        render: () => [{ type: 'text', text: 'GLOBAL_ONLY' }],
+      },
+      async execute() {
+        return 'GLOBAL_ONLY'
+      },
+    }))
+    const aDefinition = ctx.tools.get(B0_ECHO_TOOL, agentA)
+    const bDefinition = ctx.tools.get(B0_ECHO_TOOL, agentB)
+    fact(request.actionId, 'global-shadow-A', {
+      ok: aDefinition?.description === 'B0 scoped echo tool: returns the caller nonce'
+        && bDefinition?.description === 'B0 GLOBAL_ONLY shadow tool',
+      sessionId: String(agentA.id),
+      agentId: String(agentA.id),
+      aDescription: aDefinition?.description,
+      bDescription: bDefinition?.description,
+      aToolNames: schemaNames(agentA),
+      bToolNames: schemaNames(agentB),
+      collisionGuardRequired: true,
+      marker: 'B1_COLLISION_GUARD_REQUIRED',
+    })
+  }
+
+  const handleClearGlobalShadow = async (request) => {
+    const disposer = state.globalDispose
+    if (disposer === undefined) throw new Error('m4-c1-host-work: B0 global shadow is not installed')
+    disposer()
+    state.globalDispose = undefined
+    const agentB = pinAgent(request.sessionIdB, 'B')
+    fact(request.actionId, 'clear-global-shadow', {
+      ok: !schemaNames(agentB).includes(B0_ECHO_TOOL),
+      sessionId: String(agentB.id),
+      agentId: String(agentB.id),
+      bToolNames: schemaNames(agentB),
+    })
+  }
+
+  const handleRequestRetire = async (request) => {
+    const agent = pinAgent(request.sessionId, 'A')
+    if (state.fiberA === undefined) throw new Error('m4-c1-host-work: request-retire-A requires a mounted B0 fiber')
+    const active = activeCallsOf(request.sessionId)
+    state.retireRequest = {
+      actionId: request.actionId,
+      requestedAt: Date.now(),
+      sessionId: request.sessionId,
+      activeCallIds: active.map(call => call.callId),
+      lastTurnEnd: lastTurnEnd.get(request.sessionId) ?? null,
+    }
+    fact(request.actionId, 'request-retire-A', {
+      ok: true,
+      retireRequested: true,
+      deferred: active.length > 0,
+      activeCallIds: active.map(call => call.callId),
+      sessionId: String(agent.id),
+      agentId: String(agent.id),
+      lastTurnEnd: lastTurnEnd.get(request.sessionId) ?? null,
+    })
+  }
+
+  const handleRetireAfterTerminal = async (request) => {
+    const agent = pinAgent(request.sessionId, 'A')
+    const pending = state.retireRequest
+    if (pending === undefined || pending.sessionId !== request.sessionId) {
+      fact(request.actionId, 'retire-after-terminal', {
+        ok: false,
+        reason: 'B0_RETIRE_NOT_REQUESTED',
+        sessionId: String(agent.id),
+        agentId: String(agent.id),
+      })
+      return
+    }
+    // whole-Agent quiescence is the ONLY admission before the synchronous
+    // maintenance owner; a status snapshot alone is not an atomic fact.
+    await agent.whenIdle()
+    assertPinned('A')
+    const active = activeCallsOf(request.sessionId)
+    if (active.length > 0) {
+      fact(request.actionId, 'retire-after-terminal', {
+        ok: false,
+        reason: 'B0_RETIRE_DEFERRED',
+        activeCallIds: active.map(call => call.callId),
+        sessionId: String(agent.id),
+        agentId: String(agent.id),
+      })
+      return
+    }
+    const missingTerminal = pending.activeCallIds.filter(callId => !results.has(callId))
+    const currentTurnEnd = lastTurnEnd.get(request.sessionId) ?? -1
+    if (missingTerminal.length > 0 || currentTurnEnd < (pending.lastTurnEnd ?? -1)) {
+      fact(request.actionId, 'retire-after-terminal', {
+        ok: false,
+        reason: 'B0_RETIRE_TERMINAL_UNCONFIRMED',
+        missingTerminal,
+        lastTurnEnd: currentTurnEnd,
+        requestedLastTurnEnd: pending.lastTurnEnd,
+        sessionId: String(agent.id),
+        agentId: String(agent.id),
+      })
+      return
+    }
+    if (agent.status !== 'idle') {
+      fact(request.actionId, 'retire-after-terminal', {
+        ok: false,
+        reason: 'B0_AGENT_NOT_IDLE',
+        agentStatus: agent.status,
+        sessionId: String(agent.id),
+        agentId: String(agent.id),
+      })
+      return
+    }
+    const handle = state.fiberA
+    if (handle === undefined) {
+      fact(request.actionId, 'retire-after-terminal', {
+        ok: false,
+        reason: 'B0_MCP_NOT_MOUNTED',
+        sessionId: String(agent.id),
+        agentId: String(agent.id),
+      })
+      return
+    }
+    const server = serverStartOf('b0scope')
+    const serverAliveBeforeDispose = server !== undefined && b0Alive(server.pid)
+    const McpClient = await import('@deepseek-ai/dsh-mcp-client')
+    try {
+      await agent.runMaintenance(async signal => {
+        if (signal.aborted) throw signal.reason ?? new Error('B0 retire aborted')
+        await handle.dispose()
+      })
+      assertPinned('A')
+      state.fiberA = undefined
+      state.retireRequest = undefined
+      const closure = McpClient.connectionStatusOf(handle)?.closure()
+      const toolNames = schemaNames(agent)
+      const serverExited = server === undefined ? false : await waitForProcessGone(server.pid)
+      const stdinClosed = server === undefined ? undefined : proofOf('server-stdin-closed', 'b0scope')
+      fact(request.actionId, 'retire-after-terminal', {
+        ok: closure?.closeConfirmed === true && closure?.cleanupError === undefined
+          && !toolNames.includes(B0_ECHO_TOOL) && serverAliveBeforeDispose && serverExited
+          && stdinClosed !== undefined && stdinClosed.pid === server.pid,
+        sessionId: String(agent.id),
+        agentId: String(agent.id),
+        closure,
+        toolNames,
+        serverPid: server?.pid,
+        serverAliveBeforeDispose,
+        serverExited,
+        stdinClosed: stdinClosed !== undefined,
+        lastTurnEnd: lastTurnEnd.get(request.sessionId) ?? null,
+      })
+    } catch (error) {
+      fact(request.actionId, 'retire-after-terminal', {
+        ok: false,
+        reason: 'B0_MCP_CLEANUP_UNCONFIRMED',
+        sessionId: String(agent.id),
+        agentId: String(agent.id),
+        error: error instanceof Error ? error.message : String(error),
+      })
+    }
+  }
+
+  const handleMountFailing = async (request) => {
+    const agent = pinAgent(request.sessionId, 'A')
+    const McpClient = await import('@deepseek-ai/dsh-mcp-client')
+    let handle
+    let rejected = false
+    let message
+    try {
+      handle = agent.ctx.plugin(McpClient, clientConfig(McpClient, agent, 'b0fail', 'b0fail', { B0_BOOT_FAIL: '1' }))
+      await handle.await()
+    } catch (error) {
+      rejected = true
+      message = error instanceof Error ? error.message : String(error)
+    }
+    const bootFail = proofOf('server-boot-fail', 'b0fail')
+    const childExited = bootFail === undefined ? false : await waitForProcessGone(bootFail.pid)
+    assertPinned('A')
+    const connectionLostClosure = handle === undefined ? undefined : McpClient.connectionStatusOf(handle)?.closure()
+    if (handle !== undefined) {
+      try { await handle.dispose() } catch { /* failed activation already rolled back */ }
+    }
+    const retireClosure = handle === undefined ? undefined : McpClient.connectionStatusOf(handle)?.closure()
+    fact(request.actionId, 'mount-failing-A', {
+      ok: rejected && bootFail !== undefined && childExited
+        && retireClosure?.closeConfirmed === true && retireClosure?.cleanupError === undefined,
+      rejected,
+      error: message,
+      childPid: bootFail?.pid,
+      childPpid: bootFail?.ppid,
+      childExited,
+      connectionLostClosure,
+      retireClosure,
+      sessionId: String(agent.id),
+      agentId: String(agent.id),
+    })
+  }
+
+  const handleMountCrash = async (request) => {
+    const agent = pinAgent(request.sessionId, 'A')
+    const McpClient = await import('@deepseek-ai/dsh-mcp-client')
+    state.fiberCrash = agent.ctx.plugin(McpClient, clientConfig(McpClient, agent, 'b0crash', 'b0crash'))
+    await state.fiberCrash.await()
+    assertPinned('A')
+    const status = McpClient.connectionStatusOf(state.fiberCrash)
+    state.crashStatusDispose = status?.onChange(next => {
+      record('b0-crash-status', { tag: 'b0crash', state: next.state, reason: next.reason, lastError: next.lastError })
+    })
+    const server = serverStartOf('b0crash')
+    const liveIdentity = server === undefined ? undefined : b0ProcessIdentity(server.pid)
+    if (liveIdentity === undefined || liveIdentity.ppid !== process.pid) {
+      throw new Error('m4-c1-host-work: mount-crash-A cannot prove the live MCP child parent identity')
+    }
+    state.crashIdentity = liveIdentity
+    fact(request.actionId, 'mount-crash-A', {
+      ok: status?.current().state === 'connected' && server !== undefined
+        && liveIdentity.started !== undefined && liveIdentity.ppid === process.pid,
+      sessionId: String(agent.id),
+      agentId: String(agent.id),
+      connectionState: status?.current().state,
+      serverPid: server?.pid,
+      serverPpid: liveIdentity.ppid,
+      serverStarttime: liveIdentity.started,
+    })
+  }
+
+  const handleCrashFailing = async (request) => {
+    const agent = pinAgent(request.sessionId, 'A')
+    const McpClient = await import('@deepseek-ai/dsh-mcp-client')
+    const server = serverStartOf('b0crash')
+    const recorded = state.crashIdentity
+    if (server === undefined || recorded === undefined || recorded.pid !== server.pid) {
+      throw new Error('m4-c1-host-work: B0 crash-failing-A has no recorded live child identity')
+    }
+    const live = b0ProcessIdentity(recorded.pid)
+    if (live === undefined || live.pid !== recorded.pid || live.started !== recorded.started || live.ppid !== process.pid) {
+      fact(request.actionId, 'crash-failing-A', {
+        ok: false,
+        reason: 'B0_MCP_PID_REUSED',
+        sessionId: String(agent.id),
+        agentId: String(agent.id),
+        serverPid: recorded.pid,
+        recordedStarttime: recorded.started,
+        observedStarttime: live?.started,
+        recordedPpid: recorded.ppid,
+        observedPpid: live?.ppid,
+      })
+      return
+    }
+    process.kill(recorded.pid, 'SIGKILL')
+    const deadline = Date.now() + 10_000
+    let status
+    while (Date.now() < deadline) {
+      status = McpClient.connectionStatusOf(state.fiberCrash)?.current()
+      if (status?.state === 'failed') break
+      await sleepB0(25)
+    }
+    const handle = state.fiberCrash
+    state.fiberCrash = undefined
+    const connectionLostClosure = handle === undefined ? undefined : McpClient.connectionStatusOf(handle)?.closure()
+    if (handle !== undefined) await handle.dispose()
+    const retireClosure = handle === undefined ? undefined : McpClient.connectionStatusOf(handle)?.closure()
+    if (state.crashStatusDispose !== undefined) {
+      state.crashStatusDispose()
+      state.crashStatusDispose = undefined
+    }
+    assertPinned('A')
+    const serverExited = await waitForProcessGone(recorded.pid)
+    state.crashIdentity = undefined
+    fact(request.actionId, 'crash-failing-A', {
+      ok: status?.state === 'failed' && retireClosure?.closeConfirmed === true && retireClosure?.cleanupError === undefined
+        && serverExited && !schemaNames(agent).includes('mcp__b0crash__echo'),
+      sessionId: String(agent.id),
+      agentId: String(agent.id),
+      connectionState: status?.state,
+      failureReason: status?.reason,
+      connectionLostClosure,
+      retireClosure,
+      serverPid: recorded.pid,
+      serverStarttime: recorded.started,
+      serverExited,
+    })
+  }
+
+  const runAction = async request => {
+    if (typeof request?.actionId !== 'string' || request.actionId === '') {
+      throw new Error('m4-c1-host-work: B0 control request has no actionId')
+    }
+    switch (request.action) {
+      case 'mount-A': return await handleMountA(request)
+      case 'probe-B': return await handleProbeB(request)
+      case 'mount-duplicate-A': return await handleMountDuplicate(request)
+      case 'global-shadow-A': return await handleGlobalShadow(request)
+      case 'clear-global-shadow': return await handleClearGlobalShadow(request)
+      case 'request-retire-A': return await handleRequestRetire(request)
+      case 'retire-after-terminal': return await handleRetireAfterTerminal(request)
+      case 'mount-failing-A': return await handleMountFailing(request)
+      case 'mount-crash-A': return await handleMountCrash(request)
+      case 'crash-failing-A': return await handleCrashFailing(request)
+      default:
+        throw new Error(`m4-c1-host-work: unknown B0 control action ${JSON.stringify(request.action)}`)
+    }
+  }
+
+  ctx.effect(() => {
+    timer = setInterval(() => {
+      if (state.stopped || current !== undefined || !existsSync(controlPath)) return
+      let request
+      try {
+        request = JSON.parse(readFileSync(controlPath, 'utf8'))
+      } catch (error) {
+        rmSync(controlPath, { force: true })
+        record('b0-control-invalid', { message: error instanceof Error ? error.message : String(error) })
+        return
+      }
+      // Consume the request BEFORE any action: one request means one attempt.
+      rmSync(controlPath, { force: true })
+      current = runAction(request)
+        .catch(error => {
+          fact(request?.actionId, request?.action ?? 'unknown', {
+            ok: false,
+            error: error instanceof Error ? error.message : String(error),
+            errorCode: typeof error?.code === 'string' ? error.code : undefined,
+          })
+        })
+        .finally(() => { current = undefined })
+    }, 25)
+    return async () => {
+      state.stopped = true
+      clearInterval(timer)
+      if (current !== undefined) await current
+      if (state.globalDispose !== undefined) {
+        state.globalDispose()
+        state.globalDispose = undefined
+      }
+      if (state.crashStatusDispose !== undefined) {
+        state.crashStatusDispose()
+        state.crashStatusDispose = undefined
+      }
+      for (const key of ['fiberCrash', 'fiberA']) {
+        const handle = state[key]
+        if (handle === undefined) continue
+        state[key] = undefined
+        try { await handle.dispose() } catch (error) {
+          record('b0-dispose-failed', { handle: key, message: error instanceof Error ? error.message : String(error) })
+        }
+      }
+    }
+  }, 'b0-workload-owner')
+
+  ctx.effect(() => ctx.on('session/event', (session, event) => {
+    const sessionId = String(session.id)
+    if (event?.type === 'tool/call') {
+      const callId = String(event.data?.callId)
+      calls.set(callId, {
+        callId,
+        sessionId,
+        turn: event.data?.turn,
+        step: event.data?.step,
+        name: event.data?.name,
+        arguments: event.data?.arguments,
+      })
+      record('b0-session-tool-call', {
+        sessionId,
+        callId,
+        turn: event.data?.turn,
+        name: event.data?.name,
+      })
+      return
+    }
+    if (event?.type === 'tool/result') {
+      const callId = String(event.data?.message?.toolCallId)
+      results.add(callId)
+      record('b0-session-tool-result', {
+        sessionId,
+        callId,
+        turn: event.data?.turn,
+        isError: event.data?.message?.isError === true,
+        errorCode: event.data?.error?.code,
+        text: (event.data?.message?.content ?? [])
+          .map(part => (part?.type === 'text' ? part.text : ''))
+          .join('')
+          .slice(0, 500),
+      })
+      return
+    }
+    if (event?.type === 'turn/end') {
+      lastTurnEnd.set(sessionId, event.data?.turn)
+      record('b0-session-turn-end', {
+        sessionId,
+        turn: event.data?.turn,
+        reason: event.data?.reason,
+      })
+    }
+  }), 'b0-session-event-observer')
+
+  return { state }
 }
 
 class C1Model extends LlmAdapter {
@@ -1048,6 +1798,65 @@ class C1Model extends LlmAdapter {
       return
     }
 
+    if (this.scenario === 'acp-scoped-mcp-b0') {
+      const prompt = b0PromptOf(options.messages ?? [])
+      const toolNames = Array.isArray(options.tools)
+        ? options.tools.map(tool => tool?.name).filter(name => typeof name === 'string').sort()
+        : []
+      if (prompt === undefined) {
+        // The Host appends its own runtime/time context as a later user message;
+        // a request with no B0 marker is an ordinary final answer, never a call.
+        yield { type: 'block-start', index: 0, blockType: 'text' }
+        yield { type: 'text-delta', index: 0, text: `b0 plain ${token}` }
+        yield { type: 'block-end', index: 0, block: { type: 'text', text: `b0 plain ${token}` } }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+        return
+      }
+      this.record('b0-model-tools', {
+        sessionId,
+        marker: prompt.marker,
+        nonce: prompt.nonce,
+        toolNames,
+        hasEchoTool: toolNames.includes(B0_ECHO_TOOL),
+        hasHoldTool: toolNames.includes(B0_HOLD_TOOL),
+        hasFailTool: toolNames.includes(B0_FAIL_TOOL),
+        afterTool,
+      })
+      if (prompt.marker === B0_PLAIN_MARKER) {
+        yield { type: 'block-start', index: 0, blockType: 'text' }
+        yield { type: 'text-delta', index: 0, text: `b0 plain settled ${prompt.nonce ?? ''} ${token}` }
+        yield { type: 'block-end', index: 0, block: { type: 'text', text: `b0 plain settled ${prompt.nonce ?? ''} ${token}` } }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+        return
+      }
+      if (afterTool) {
+        yield { type: 'block-start', index: 0, blockType: 'text' }
+        yield { type: 'text-delta', index: 0, text: `b0 ${prompt.marker} settled ${prompt.nonce ?? ''} ${token}` }
+        yield { type: 'block-end', index: 0, block: { type: 'text', text: `b0 ${prompt.marker} settled ${prompt.nonce ?? ''} ${token}` } }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+        return
+      }
+      const toolName = prompt.marker === B0_HOLD_MARKER
+        ? B0_HOLD_TOOL
+        : prompt.marker === B0_FAIL_MARKER
+          ? B0_FAIL_TOOL
+          : B0_ECHO_TOOL
+      const callId = `b0-${prompt.marker.toLowerCase()}-${sessionId}-${prompt.nonce ?? '0'}`
+      yield { type: 'block-start', index: 0, blockType: 'tool-call' }
+      yield {
+        type: 'block-end',
+        index: 0,
+        block: {
+          type: 'tool-call',
+          id: callId,
+          name: toolName,
+          arguments: JSON.stringify({ nonce: prompt.nonce ?? '' }),
+        },
+      }
+      yield { type: 'finish', reason: { kind: 'tool-calls' } }
+      return
+    }
+
     throw new Error(`m4-c1-host-work: unsupported scenario ${JSON.stringify(this.scenario)}`)
   }
 }
@@ -1179,6 +1988,10 @@ export async function apply(ctx) {
   }, neverSetup, imageProbe, markdownFileProbe, po4c)
 
   ctx.effect(() => ctx.llm.registerAdapter(['c1-qualification'], model))
+
+  if (scenario === 'acp-scoped-mcp-b0') {
+    createScopedMcpB0Workload(ctx, { root, record })
+  }
 
   if (scenario === 'acp-po4c') {
     ctx.effect(() => ctx.on('agent/error', payload => {

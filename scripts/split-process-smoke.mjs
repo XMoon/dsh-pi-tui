@@ -127,6 +127,15 @@ export {
   runSelectedCases,
 }
 
+/**
+ * Select the evidence JSON of exactly one named case. A suite can contain
+ * several cases that already carry `evidence`; returning the first one would
+ * write another case's artifact to the B0 evidence path.
+ */
+export function selectedEvidenceFor(verdictReport, caseId) {
+  return verdictReport?.find(entry => entry.id === caseId && entry.evidence !== undefined)?.evidence
+}
+
 
 const TRACE_PATH = process.env.SPLIT_PROCESS_TRACE
 const KEEP = process.env.SPLIT_PROCESS_SMOKE_KEEP === '1'
@@ -858,6 +867,50 @@ export function assertSelectedVerdict(caseId, result) {
     `selected ${caseId}: the Host/Client Browser callback verdict ended as ${String(result?.browser ?? 'missing')}/${String(result?.status ?? 'missing')}`)
     return
   }
+  if (caseId === 'acp.scoped-mcp-b0') {
+    const evidence = result?.evidence
+    assert(result?.status === 'PASS'
+      && result?.scope === 'REAL_SPLIT_PROCESS_L6'
+      && result?.liveAgentScopedMount === true
+      && result?.officialAgentLoopToolCall === true
+      && result?.mcpChildStdioCall === true
+      && result?.agentBIsolation === true
+      && result?.duplicateSameAgentRejected === true
+      && result?.globalShadowObserved === true
+      && result?.acpCloseKeepsTui === true
+      && result?.retireDeferredDuringTuiCall === true
+      && result?.retireAfterTerminalClosure === true
+      && result?.tuiContinuesAfterRetire === true
+      && result?.initialHandshakeFailureRolledBack === true
+      && result?.crashCleanupConfirmed === true
+      && result?.hostIdentityKept === true
+      && result?.l6EvidenceRecorded === true
+      && evidence?.schema === 'gacp-b0-evidence/1'
+      && evidence?.case_id === 'acp.scoped-mcp-b0'
+      && typeof evidence?.candidate_sha256 === 'string' && /^[0-9a-f]{64}$/u.test(evidence.candidate_sha256)
+      && typeof evidence?.dsh_version === 'string' && evidence.dsh_version.length > 0
+      && Number.isInteger(evidence?.host?.pid) && evidence.host.pid > 0
+      && typeof evidence?.host?.instanceId === 'string'
+      && typeof evidence?.host?.scopeId === 'string' && evidence.host.scopeId.length === 64
+      && typeof evidence?.sessions?.A === 'string' && typeof evidence?.sessions?.B === 'string'
+      && evidence.sessions.A !== evidence.sessions.B
+      && Number.isInteger(evidence?.mcp?.processPid) && evidence.mcp.processPid > 0
+      && typeof evidence?.call?.callId === 'string' && evidence.call.callId.length > 0
+      && typeof evidence?.call?.nonceDigest === 'string' && /^[0-9a-f]{64}$/u.test(evidence.call.nonceDigest)
+      && Number.isInteger(evidence?.call?.toolResultSeq) && Number.isInteger(evidence?.call?.turnEndSeq)
+      && evidence.call.turnEndSeq > evidence.call.toolResultSeq
+      && evidence?.negative?.agentBToolVisible === false
+      && evidence?.negative?.duplicateRejected === true
+      && evidence?.negative?.duplicateServerStarted === false
+      && evidence?.negative?.globalShadowObserved === true
+      && evidence?.negative?.collisionGuardRequired === true
+      && evidence?.negative?.retireDeferredDuringTuiCall === true
+      && evidence?.negative?.secretLeak === false
+      && evidence?.quiesced === true
+      && evidence?.verdict === 'PASS',
+    `selected ${caseId}: the Agent-scoped MCP verdict ended as ${String(result?.status ?? 'missing')}/${String(result?.scope ?? 'missing')}`)
+    return
+  }
   if (caseId === 'profile.preferences') {
     assert(result?.status === 'PASS'
       && result?.scope === 'REAL_SPLIT_PROCESS_L6'
@@ -1034,6 +1087,7 @@ async function runSelectedCases(selection) {
         status: typeof result?.status === 'string' ? result.status : 'PASS',
         reason: typeof result?.reason === 'string' ? result.reason : undefined,
         identities: createdProcesses.slice(createdMark).map(process => process.identityFacts()),
+        evidence: result?.evidence === undefined ? undefined : result.evidence,
       })
     }
     assert(createHash('sha256').update(readFileSync(tarball)).digest('hex') === candidateSha256,
@@ -1066,7 +1120,15 @@ async function runSelectedCases(selection) {
     // Quiescence is decided BEFORE the private work root is removed: a
     // NOT_QUIESCED run must keep its scene for diagnosis, and no verdict may be
     // printed for a run that still owns a live process.
-    if (verdictReport !== undefined) await assertSelectedQuiesced(verdictReport)
+    if (verdictReport !== undefined) {
+      await assertSelectedQuiesced(verdictReport)
+      const evidencePath = process.env.SPLIT_PROCESS_B0_EVIDENCE
+      const evidence = selectedEvidenceFor(verdictReport, 'acp.scoped-mcp-b0')
+      if (typeof evidencePath === 'string' && evidencePath !== '' && evidence !== undefined) {
+        mkdirSync(dirname(evidencePath), { recursive: true, mode: 0o700 })
+        writeFileSync(evidencePath, `${JSON.stringify(evidence, null, 2)}\n`, { mode: 0o600 })
+      }
+    }
     if (workDir === undefined) {
       // Nothing was created: setup failed before the work root existed.
     } else if (!KEEP) rmSync(workDir, { recursive: true, force: true })
