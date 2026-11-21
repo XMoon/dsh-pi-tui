@@ -1451,9 +1451,15 @@ export function registerTuiCommands(
    * its contribution and reported. Never a silent shadow, never a partial
    * list.
    * @param host - the host catalog rows for the current scope.
+   * @param reservedHostNames - genuine Host names retained as the last-good
+   *   reservation during a Remote target transition, even though their rows
+   *   are no longer displayed.
    * @throws when a contribution collides with a host name.
    */
-  const mergeContributions = (host: readonly SurfaceCommandSummary[]): readonly SurfaceCommandSummary[] => {
+  const mergeContributions = (
+    host: readonly SurfaceCommandSummary[],
+    reservedHostNames?: ReadonlySet<string>,
+  ): readonly SurfaceCommandSummary[] => {
     const bridge = runner.extensions?.commands
     if (bridge === undefined) return host
     const contributions = bridge.snapshot().entries
@@ -1478,7 +1484,13 @@ export function registerTuiCommands(
     const collisions: { identity: string; message: string }[] = []
     let firstCollision: Error | undefined
     for (const contribution of contributions) {
-      if (!byName.has(contribution.name)) continue
+      // A target-changing transition hides the previous target's Host rows but
+      // retains `hostOriginDescriptors` as its name reservation until the new
+      // snapshot installs. Extension rows are synthesized in this sibling
+      // pass, so the reservation must participate here too — otherwise an
+      // extension row is advertised for a name the live classifier still
+      // routes to Host, and the old collision health is falsely recovered.
+      if (!byName.has(contribution.name) && reservedHostNames?.has(contribution.name) !== true) continue
       const identity = contributionIdentity(contribution)
       colliding.add(identity)
       const collision = new Error(`command contribution /${contribution.name} collides with a host command`)
@@ -1562,7 +1574,11 @@ export function registerTuiCommands(
   const skillDisposers = new Map<string, () => void>()
   const installCompletions = (
     entries: readonly SurfaceCommandSummary[],
-    options: { display?: 'merged' | 'none'; claimsFrom?: readonly SurfaceCommandSummary[] } = {},
+    options: {
+      display?: 'merged' | 'none'
+      claimsFrom?: readonly SurfaceCommandSummary[]
+      reservedHostNames?: ReadonlySet<string>
+    } = {},
   ): void => {
     const sorted = [...entries].sort((left, right) => left.name < right.name ? -1 : 1)
     // PR4 §D3: the CLAIM set is the Host authority record. On the Remote
@@ -1596,7 +1612,7 @@ export function registerTuiCommands(
     // stay live.
     const display = options.display === 'none'
       ? []
-      : [...mergeContributions(sorted)]
+      : [...mergeContributions(sorted, options.reservedHostNames)]
           .sort((left, right) => left.name < right.name ? -1 : 1)
     // M5: the plugin autocomplete chain (AutocompleteRegistry) is consulted
     // after the host's own provider returns null. The registry's suggest()
@@ -1818,6 +1834,27 @@ export function registerTuiCommands(
     return [...byName.values()]
   }
   /**
+   * The Remote transition's retained Host-name reservation, or undefined on
+   * Direct and while the installed Host catalog is display-active. The
+   * extension-contribution pass consumes this set so its sibling synthesis
+   * cannot advertise a row the Host still owns.
+   */
+  const remoteReservedHostNames = (): ReadonlySet<string> | undefined =>
+    commands === undefined && !remoteHostDisplayActive
+      ? new Set(hostOriginDescriptors.keys())
+      : undefined
+  /** The Remote-only completion options for one install: last-good claims
+   *  (when the caller owns them) plus the retained transition reservation. */
+  const remoteDisplayOptions = (
+    claimsFrom?: readonly SurfaceCommandSummary[],
+  ): { claimsFrom?: readonly SurfaceCommandSummary[]; reservedHostNames?: ReadonlySet<string> } => {
+    const reserved = remoteReservedHostNames()
+    return {
+      ...(claimsFrom === undefined ? {} : { claimsFrom }),
+      ...(reserved === undefined ? {} : { reservedHostNames: reserved }),
+    }
+  }
+  /**
    * Refresh completions from the registry: the LIVE agent's effective view
    * when one exists (global + its scoped shadows), else the global layer
    * overlaid with the saved scoped overrides (sessionless merge). The agent
@@ -1836,7 +1873,10 @@ export function registerTuiCommands(
    */
   const installCompletionsContained = (
     entries: readonly SurfaceCommandSummary[],
-    options: { claimsFrom?: readonly SurfaceCommandSummary[] } = {},
+    options: {
+      claimsFrom?: readonly SurfaceCommandSummary[]
+      reservedHostNames?: ReadonlySet<string>
+    } = {},
   ): void => {
     try {
       installCompletions(entries, options)
@@ -1912,7 +1952,7 @@ export function registerTuiCommands(
       }
       installCompletionsContained(
         commands === undefined ? mergeRemoteVisibleHostCommands(entries) : entries,
-        commands === undefined ? { claimsFrom: authoritativeHostCatalog } : {},
+        commands === undefined ? remoteDisplayOptions(authoritativeHostCatalog) : {},
       )
       return
     }
@@ -1929,7 +1969,7 @@ export function registerTuiCommands(
     const clientRows = [...byName.values()]
     installCompletionsContained(
       commands === undefined ? mergeRemoteVisibleHostCommands(clientRows) : clientRows,
-      commands === undefined ? { claimsFrom: authoritativeHostCatalog } : {},
+      commands === undefined ? remoteDisplayOptions(authoritativeHostCatalog) : {},
     )
   }
   // ── registry-change coalescing ─────────────────────────────────────────
@@ -2541,6 +2581,7 @@ export function registerTuiCommands(
       const clientRows = mergeGlobalAndSavedScoped()
       installCompletionsContained(
         commands === undefined ? mergeRemoteVisibleHostCommands(clientRows) : clientRows,
+        commands === undefined ? remoteDisplayOptions() : {},
       )
     })
   }

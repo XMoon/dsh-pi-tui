@@ -713,6 +713,70 @@ test('a late extension refresh keeps Host rows, and a Host/extension collision w
   }
 })
 
+test('a held Remote target transition never advertises an extension row reserved by the old Host name', async () => {
+  const source = controlledRemoteSource({})
+  let generation = 1
+  let currentSession: string | undefined = 'session-a'
+  const harness = fakeRunnerDeps({
+    remoteSource: source,
+    currentSessionId: () => currentSession,
+    generation: () => generation,
+    extensionCommands: [{
+      id: 'ext-alpha-reserved',
+      name: 'alpha-only',
+      description: 'extension alpha-only',
+    }],
+  })
+  try {
+    harness.register()
+    source.script([[{ name: 'alpha-only', description: 'Host A alpha-only' }]])
+    await harness.surface.refreshLiveCatalogById('session-a')
+    // Normal live synthesis: the Host row wins, so the same-named extension
+    // contribution is a real fail-loud collision and no row is displayed.
+    assert.deepEqual(harness.completions(), [], 'the live Host/extension collision withdraws the display')
+    assert.equal(harness.extensionHealth().length, 1, 'the live collision is recorded')
+    const healthAfterLive = harness.extensionHealth()[0]!.lastError
+
+    // Hold B's read after entering the target-changing transition. The old
+    // Host row is hidden, but its genuine name reservation must still keep
+    // the extension row out of the display and keep the collision health.
+    generation = 2
+    currentSession = 'session-b'
+    source.script(['hold'])
+    const pending = harness.surface.refreshLiveCatalogById('session-b')
+    await waitUntil(() => source.reads.length === 2, 'the held B read')
+    assert.deepEqual(harness.completions(), [],
+      'the transition gap never advertises the extension row for the reserved Host name')
+    assert.equal(harness.extensionHealth().length, 1,
+      'the transition does not falsely recover the retained Host/extension collision')
+    assert.equal(harness.extensionHealth()[0]!.lastError, healthAfterLive,
+      'the retained collision health record is unchanged during the transition')
+
+    // B retains the name: the collision survives the new target snapshot.
+    source.releaseRead(0, [{ name: 'alpha-only', description: 'Host B alpha-only' }])
+    await pending
+    assert.deepEqual(harness.completions(), [],
+      'B retaining the Host name keeps the display withdrawn')
+    assert.equal(harness.extensionHealth().length, 1,
+      'B retaining the Host name keeps the collision health failed')
+
+    // B retires the name: the next same-target snapshot may advertise the
+    // extension row cleanly and the collision health recovers exactly then.
+    source.script([[]])
+    await harness.surface.refreshLiveCatalogById('session-b')
+    const rows = harness.completions()
+    assert.equal(rows.some(row => row.name === 'alpha-only' && row.description === 'extension alpha-only'), true,
+      'after B retires the Host row the extension row is a legitimate Client candidate')
+    assert.equal(rows.some(row => row.name === 'alpha-only' && row.description === 'Host B alpha-only'), false,
+      'the old Host metadata never repaints')
+    assert.deepEqual(harness.extensionHealth(), [],
+      'the collision health recovers only after the Host name is genuinely retired')
+  } finally {
+    source.releaseRead(0, [])
+    harness.dispose()
+  }
+})
+
 test('a target change withdraws the old Host rows immediately and installs only the new target catalog', async () => {
   const source = controlledRemoteSource({})
   let generation = 1
