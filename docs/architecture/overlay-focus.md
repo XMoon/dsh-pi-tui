@@ -298,9 +298,29 @@ Fullscreen Question pointer handling uses the same semantic boundary:
 - the Question frame's one bottom Action Bar is shared by pointer actions and
   keyboard hints within the original row budget. On Fullscreen it carries the
   complete visible Back, Progress/Edit, Leave edit, Submit and Cancel spans;
-  the top tab names the inert `Review` stage, and Submit appears only once in
-  the bottom bar. Each span calls the same flow method as its keyboard action.
-  The final keyboard hint is replaced, not duplicated.
+  Submit appears only once in the bottom bar. Each span calls the same flow
+  method as its keyboard action. The final keyboard hint is replaced, not
+  duplicated.
+- on Fullscreen the generic Question's top stage row is a pointer surface:
+  every completely painted `Qn` / `Review` tab is a pure navigation target
+  (the currently painted tab is a no-op), and `Review` only shows the summary
+  page — it is never Submit. Hits are derived from the SAME last-painted tab
+  row that painted the labels (never from clipped or re-measured text), carry
+  the source page/question identity, and a release must match the same
+  target, row, start/end span and content width. Status-row appearance,
+  resize, keyboard paging, inter-tab gaps, overflow `…` and omitted tabs are
+  inert. A narrow strip keeps the current page and the complete `Review` tab
+  when both fit; otherwise it keeps the current page first and paints no
+  partial hit. Regular/Main and the official plan-review branch expose no
+  generic stage-tab pointer route.
+- the ordinary Question body owns the Fullscreen wheel: a wheel over its
+  last-painted body scrollport moves only that body by the configured line
+  step (never a page step), and a real scroll cancels the pending cursor
+  follow instead of snapping back. The tab row, action bar, frame chrome,
+  borders and the area outside the frame are inert while the Question is the
+  visible seat owner and must never scroll the transcript or a hidden
+  Approval. PlanReview keeps its own reading path and enters no generic
+  Question wheel route; Regular/Main has no application wheel route.
 - the action bar keeps required keyboard guidance in the same row as muted,
   lower-priority hints: list selection/choice/toggle, edit cursor, scroll/expand,
   and only an eligible Split browse hint. `Esc` always names the real state
