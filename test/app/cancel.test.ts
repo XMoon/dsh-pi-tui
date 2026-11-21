@@ -149,6 +149,25 @@ function footerLine(vt: VirtualTerminal): string {
   return ''
 }
 
+/** The visible frame facts the transient-instruction contract must keep:
+ * the Footer's physical row set and the Editor frame's top/bottom rows. */
+function frameFacts(vt: VirtualTerminal, app: TuiApp): {
+  footerRows: string[]
+  editorTop: number
+  editorBottom: number
+} {
+  const lines = vt.getViewport()
+  const borderRows = lines
+    .map((line, row) => (line.includes('─'.repeat(10)) ? row : -1))
+    .filter(row => row >= 0)
+  assert.ok(borderRows.length >= 2, `the editor frame must be painted:\n${lines.join('\n')}`)
+  return {
+    footerRows: app.footerRenderRowsForTest().map(row => row.replace(/\x1b\[[0-9;]*m/g, '')),
+    editorTop: borderRows[0]!,
+    editorBottom: borderRows[borderRows.length - 1]!,
+  }
+}
+
 /** Poll until the predicate holds (bounded) — never a fixed sleep, which
  * would make the timer tests timing-sensitive (AGENTS.md trap). Flushes a
  * render between polls so the predicate sees settled frames. */
@@ -208,14 +227,56 @@ test('the exit hint renders in the FOOTER, never the transcript notify', async (
   await surface.vt.waitForRender()
   const lines = surface.vt.getViewport()
   // The 100x24 layout: header (0), editor (1-3), then the footer rows. The
-  // instruction is an INDEPENDENT surface (plan 2026-08-31 §7): it APPENDS
-  // after the layout's rows instead of replacing the stats line-2 slot, so
-  // the hint is the viewport's LAST line (the footer's bottom; an
-  // all-unavailable status row may leave the footer with a single row).
+  // instruction transiently replaces the Footer's last EXISTING physical
+  // row, so the hint is the viewport's LAST line without adding a row.
   assert.ok(footerLine(surface.vt).includes('Press Ctrl+C again to exit'),
     `the hint must sit in the footer's last line:\n${lines.join('\n')}`)
   assert.ok(!lines.slice(0, 4).join('\n').includes('Press Ctrl+C again to exit'),
     `the hint must never enter the transcript notify area:\n${lines.join('\n')}`)
+})
+
+test('the exit hint replaces the last Footer row without moving the Editor', async () => {
+  // Zero-jitter contract: the armed hint is a transient overlay of the
+  // Footer's last EXISTING physical row. The Footer row count and the
+  // Editor's top/bottom coordinates are identical in the initial, armed and
+  // expired frames; only the last Footer row changes, and the effective key
+  // label is bold (never dimmed by the footer-wide pass).
+  const surface = startAppWithExits({ exitConfirmWindowMs: 120 })
+  surface.app.setStatus({
+    model: 'deepseek/flash',
+    cwd: '/home/x/project',
+    branch: 'main',
+    turns: 1,
+    steps: 2,
+    permission: 'workspace-write',
+    contextTokens: 1000,
+    contextWindow: 10000,
+  })
+  await surface.vt.waitForRender()
+  const before = frameFacts(surface.vt, surface.app)
+
+  surface.vt.sendInput('\x03') // empty editor: arm the window
+  await surface.vt.waitForRender()
+  const armed = frameFacts(surface.vt, surface.app)
+  assert.equal(armed.footerRows.length, before.footerRows.length, 'the hint must not change the Footer height')
+  assert.deepEqual(armed.footerRows.slice(0, -1), before.footerRows.slice(0, -1), 'earlier Footer rows stay unchanged')
+  assert.ok(armed.footerRows[armed.footerRows.length - 1]!.includes('Press Ctrl+C again to exit'),
+    `the hint must own the last Footer row:\n${armed.footerRows.join('\n')}`)
+  assert.equal(armed.editorTop, before.editorTop, 'the Editor top must not move')
+  assert.equal(armed.editorBottom, before.editorBottom, 'the Editor bottom must not move')
+  const hintRow = surface.vt.getViewport().findIndex(line => line.includes('Press Ctrl+C again to exit'))
+  assert.ok(hintRow >= 0, 'the hint must be painted in the viewport')
+  const hintLine = surface.vt.getViewport()[hintRow]!
+  const keyCol = hintLine.indexOf('Ctrl+C')
+  assert.equal(surface.vt.getCellBold(hintRow, keyCol), true, 'the effective key label must be bold')
+  assert.equal(surface.vt.getCellFgRgb(hintRow, keyCol), 0xF5F5F5, 'the effective key label uses textStrong')
+  assert.notEqual(surface.vt.getCellFgRgb(hintRow, 0), 0x888888, 'the instruction row must not be dimmed')
+
+  // Past the window: the ORIGINAL Footer comes back byte-identically and
+  // the Editor geometry is still unchanged.
+  await waitFor(() => !footerLine(surface.vt).includes('Press Ctrl+C again to exit'), surface.vt)
+  const expired = frameFacts(surface.vt, surface.app)
+  assert.deepEqual(expired, before, 'the expired frame must restore the initial Footer and Editor geometry')
 })
 
 test('the exit hint disappears when the window expires (one shared timer)', async () => {

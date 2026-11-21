@@ -23818,8 +23818,8 @@ export class TuiApp {
       // widget-zone change must recompose the footer at the fresh surface
       // budget before the frame paints. A freshly shrunk viewport would
       // otherwise keep the old (taller) footer text and clip its own
-      // bottom rows — the appended Host instruction FIRST ("the
-      // instruction always survives" would break); a regular ->
+      // bottom rows (its last row included, where the Host instruction is
+      // painted); a regular ->
       // fullscreen switch at unchanged geometry would keep a budget
       // measured against chrome the fullscreen root doesn't mount. The
       // recompose runs AFTER the extension-host refresh below (widget
@@ -25525,8 +25525,8 @@ export class TuiApp {
    * layouts). */
   private customFooterLayout: FooterLayoutV1 | undefined
   /** M5: the command surface's sanitized rows (undefined = the native
-   * composer surface). The command owns the Status Surface; the Host
-   * instruction surface still merges on top. */
+   * composer surface). The command owns the Status Surface; a transient
+   * Host instruction replaces its last visible row. */
   private commandRows: string[] | undefined
 
   /** Set the footer density preset and repaint. Switching the preset
@@ -25611,7 +25611,8 @@ export class TuiApp {
 
   /** M5: set the command surface's sanitized rows (undefined restores the
    * native composer surface). The rows are already sanitized + capped by
-   * the runner; the Host instruction still merges on top. */
+   * the runner; a transient Host instruction replaces the last visible
+   * row. */
   setFooterCommandRows(rows: string[] | undefined): void {
     this.commandRows = rows
     this.renderFooter()
@@ -25686,8 +25687,9 @@ export class TuiApp {
    *  are read-only presentation geometry — business availability is checked
    *  again on release, never inferred from a painted badge. */
   private composeFooterProjection(width: number, taskBrowserAvailable: boolean): FooterPaintProjection {
-    // A pending leader sequence is an independent Host instruction, appended
-    // after the layout rows; it never replaces a Footer row.
+    // A pending leader sequence is a transient Host instruction: it
+    // replaces the last existing layout row for its lifetime, so the
+    // Footer height never changes.
     const leader = this.keybindings.leaderMachine()
     const instruction = resolveFooterInstruction({
       exitConfirmKeyLabel: this.exitConfirmTrigger?.label,
@@ -25696,9 +25698,9 @@ export class TuiApp {
     })
     if (this.commandRows !== undefined) {
       // M5: the command surface owns the Status Surface; the Host
-      // instruction still merges on top and reserves its own budget. Command
-      // rows never publish a first-party footer hit (even when their text
-      // mimics a badge).
+      // instruction replaces its last visible command row for the
+      // instruction's lifetime. Command rows never publish a first-party
+      // footer hit (even when their text mimics a badge).
       return {
         text: mergeCommandSurface(this.commandRows, instruction, width, this.footerPhysicalLineBudget()),
         hits: [],
@@ -25815,8 +25817,8 @@ export class TuiApp {
    *   rows are measured — on fullscreen the widget zones are pinned rows
    *   above the footer and are measured here too (PR-D);
    * - the command surface consumes the same effective total through
-   *   mergeCommandSurface (instruction reserves first, trusted rows keep
-   *   the remaining slots in order).
+   *   mergeCommandSurface (its visible rows are capped first, then the
+   *   Host instruction replaces the last one — no extra row).
    *
    * Floored at 0: when the pinned chrome alone already fills the
    * viewport the granted budget is ZERO and the footer renders nothing

@@ -460,10 +460,20 @@ test('the pending leader shows the which-key hint in the footer', async () => {
     leader: 'ctrl+x',
     bindings: { 'app.tasks.open': '<leader>t' },
   }))
+  const before = app.footerRenderRowsForTest().map(row => row.replace(/\x1b\[[0-9;]*m/g, ''))
   vt.sendInput('\x18') // leader
   await vt.waitForRender()
   const view = vt.getViewport().join('\n')
   assert.ok(view.includes('Leader: waiting'), `the which-key hint must render:\n${view}`)
+  const pending = app.footerRenderRowsForTest().map(row => row.replace(/\x1b\[[0-9;]*m/g, ''))
+  assert.equal(pending.length, before.length, 'the which-key hint must not change the Footer height')
+  assert.deepEqual(pending.slice(0, -1), before.slice(0, -1), 'the hint overlays the last row only')
+  assert.ok(pending[pending.length - 1]!.includes('Leader: waiting'),
+    `the hint must own the last Footer row:\n${pending.join('\n')}`)
+  vt.sendInput('\x1b') // Esc cancels the pending leader
+  await vt.waitForRender()
+  const after = app.footerRenderRowsForTest().map(row => row.replace(/\x1b\[[0-9;]*m/g, ''))
+  assert.deepEqual(after, before, 'Esc must restore the pre-leader Footer byte-identically')
   app.stop()
 })
 

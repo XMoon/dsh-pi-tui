@@ -59,6 +59,16 @@ const press = (vt: VirtualTerminal, x: number, y: number): void => { vt.sendInpu
 const release = (vt: VirtualTerminal, x: number, y: number): void => { vt.sendInput(`\x1b[<0;${x + 1};${y + 1}m`) }
 const click = (vt: VirtualTerminal, x: number, y: number): void => { press(vt, x, y); release(vt, x, y) }
 
+/** Poll until the predicate holds (bounded), flushing a render each step. */
+async function waitFor(predicate: () => boolean, vt: VirtualTerminal, timeoutMs = 2000): Promise<void> {
+  const start = Date.now()
+  while (!predicate()) {
+    if (Date.now() - start > timeoutMs) throw new Error('timed out waiting for the condition')
+    await new Promise(resolve => setTimeout(resolve, 10))
+    await vt.waitForRender()
+  }
+}
+
 /** The painted cell of one known footer text, searched from the bottom. */
 function cellOf(vt: VirtualTerminal, needle: string): { row: number; x: number } | undefined {
   const lines = rows(vt)
@@ -597,6 +607,109 @@ test('a footer model click travels the real surface→command→picker chain', a
     assert.ok(view.includes('DeepSeek V4 Flash'), `the picker hydrates from the real command read owner:\n${view}`)
     assert.deepEqual(h.loads(), ['loadDirectory'], 'exactly ONE directory read ran through the registered handler')
     assert.equal(h.app.isFullscreen(), true, 'the footer click does not leave fullscreen')
+  } finally {
+    h.dispose()
+  }
+})
+
+test('an armed exit hint removes the compact Footer hits and restores them after expiry', async () => {
+  // The compact Footer is ONE physical row that carries both model and
+  // tasks. The transient instruction replaces that row, so no hit may
+  // survive there: a click while armed never opens the picker, a press
+  // begun before the arm cannot complete after it, and the same cell works
+  // again once the hint expires and the original row is repainted.
+  const h = await startHarness({ jobs: [] })
+  try {
+    // A short status keeps the compact preset on ONE physical row, so the
+    // instruction replaces the row that carries the model/tasks hits.
+    h.app.setStatus({
+      model: 'deepseek/deepseek-v4-flash',
+      cwd: '/p',
+      branch: 'm',
+      turns: 1,
+      steps: 1,
+      permission: 'workspace-write',
+      contextTokens: 1000,
+      contextWindow: 10000,
+    })
+    h.app.setFooterPreset('compact')
+    await h.vt.waitForRender()
+    await h.vt.waitForRender()
+    const model = cellOf(h.vt, '[deepseek/deepseek-v4-flash]')
+    assert.ok(model, `the compact model placement must be painted:\n${screen(h.vt)}`)
+    const beforeRows = h.app.footerRenderRowsForTest()
+    assert.equal(beforeRows.length, 1, `the compact Footer must stay one physical row:\n${beforeRows.join('\n')}`)
+
+    // A press begun before the arm must not complete after it. (A mouse
+    // report is fresh input and clears the confirmation window; the point
+    // here is that the stale footer gesture never opens the picker.)
+    press(h.vt, model.x, model.row)
+    h.vt.sendInput('\x04')
+    await h.vt.waitForRender()
+    release(h.vt, model.x, model.row)
+    await h.vt.waitForRender()
+    assert.equal(h.loads().length, 0, 'a pre-arm press must not complete against the armed frame')
+
+    // Re-arm: while armed the compact row is gone and the saved cell is inert.
+    h.vt.sendInput('\x04')
+    await h.vt.waitForRender()
+    const armedScreen = screen(h.vt)
+    assert.ok(armedScreen.includes('Press Ctrl+D again to exit'), `the exit hint must be painted:\n${armedScreen}`)
+    assert.ok(!armedScreen.includes('[deepseek/deepseek-v4-flash]'), 'the covered model placement must not be painted')
+    assert.equal(h.app.footerRenderRowsForTest().length, beforeRows.length, 'the compact Footer height must stay one row')
+    click(h.vt, model.x, model.row)
+    await h.vt.waitForRender()
+    assert.equal(h.loads().length, 0, 'the covered model cell is inert while the hint is armed')
+    assert.ok(!screen(h.vt).includes('Models'), 'no picker opens from the covered cell')
+
+    // Expiry/restore: the original row returns; the same cell opens the picker.
+    await waitFor(() => !screen(h.vt).includes('Press Ctrl+D again to exit'), h.vt)
+    await h.vt.waitForRender()
+    const restored = cellOf(h.vt, '[deepseek/deepseek-v4-flash]')
+    assert.ok(restored, `the compact model placement must return:\n${screen(h.vt)}`)
+    click(h.vt, restored.x, restored.row)
+    await h.vt.waitForRender()
+    await h.vt.waitForRender()
+    assert.equal(h.loads().length, 1, 'the restored model cell opens the real picker')
+    assert.ok(screen(h.vt).includes('Models'), 'the picker is open after expiry')
+  } finally {
+    h.dispose()
+  }
+})
+
+test('an armed exit hint keeps earlier Footer rows painted with their hits', async () => {
+  // The default full Footer has the model/tasks hits on its FIRST row and
+  // the stats row last. The hint replaces only the stats row, so the
+  // earlier row stays painted and its projection hits stay in the live
+  // hit map; after expiry the real model click still opens the picker.
+  const h = await startHarness()
+  try {
+    const model = cellOf(h.vt, '[deepseek/deepseek-v4-flash]')
+    assert.ok(model, `the model placement must be painted:\n${screen(h.vt)}`)
+    const beforeRows = h.app.footerRenderRowsForTest()
+    h.vt.sendInput('\x04')
+    await h.vt.waitForRender()
+    const armedRows = h.app.footerRenderRowsForTest()
+    assert.equal(armedRows.length, beforeRows.length, 'the footer height must not change')
+    assert.ok(screen(h.vt).includes('Press Ctrl+D again to exit'), 'the hint must be painted')
+    assert.ok(screen(h.vt).includes('[deepseek/deepseek-v4-flash]'), 'the earlier model row must stay painted')
+    const painted = (h.app as unknown as {
+      footerPaintedProjection?: { hits: readonly { id: string; row: number }[]; height: number; top: number }
+    }).footerPaintedProjection
+    assert.ok(painted !== undefined, 'the armed frame must publish a hit map')
+    const instructionRow = painted.top + painted.height - 1
+    const ids = painted.hits.filter(hit => hit.row !== instructionRow).map(hit => hit.id)
+    assert.ok(ids.includes('model') && ids.includes('tasks'),
+      `the earlier row must keep its model/tasks hits: ${JSON.stringify(ids)}`)
+    await waitFor(() => !screen(h.vt).includes('Press Ctrl+D again to exit'), h.vt)
+    await h.vt.waitForRender()
+    const restored = cellOf(h.vt, '[deepseek/deepseek-v4-flash]')
+    assert.ok(restored, `the model placement must remain after expiry:\n${screen(h.vt)}`)
+    click(h.vt, restored.x, restored.row)
+    await h.vt.waitForRender()
+    await h.vt.waitForRender()
+    assert.equal(h.loads().length, 1, 'the model hit opens the real picker after expiry')
+    assert.ok(screen(h.vt).includes('Models'), 'the real picker opens')
   } finally {
     h.dispose()
   }

@@ -15,13 +15,18 @@
  * - a left-only row joins in layout order and wraps into 1..2 physical
  *   lines; a row with a right zone keeps its single-line fitZone contract
  *   (the right zone reserves first, the left fits the remainder);
- * - the Host instruction (plan §19) is an INDEPENDENT surface: it reserves
- *   its own physical line from the global budget and never replaces a
- *   user row. Allocation is sequential (plan §8): every renderable row
+ * - the Host instruction is a transient OVERLAY of the last EXISTING
+ *   physical row: the normal layout is composed first with its full
+ *   budget, then that final row is replaced for the instruction's
+ *   lifetime; an otherwise row-less Footer with a positive budget paints
+ *   the one-line safety exception instead;
+ * - allocation is sequential (plan §8): every renderable row
  *   earns a baseline line first, the leftover buys second lines for rows
  *   that demand them, in layout order — a layout wider than the budget
  *   drops its tail rows as a global-budget decision;
- * - every physical row is dimmed (the legacy footer's final pass).
+ * - every normal physical row is dimmed (the legacy footer's final pass);
+ *   the instruction row keeps its own span contrast and is never dimmed by
+ *   that outer pass.
  *
  * The composer consumes ONLY the StatusSnapshot + the host-owned surface
  * context (task-browser availability — the exact ↓ routing gate — and the
@@ -48,7 +53,7 @@ import type {
 } from './presentation-types.ts'
 import { FOOTER_MAX_PHYSICAL_LINES, FOOTER_MAX_PHYSICAL_LINES_PER_ROW } from './presentation-types.ts'
 
-/** The Host instruction surface's render contract (plan §19). */
+/** The Host instruction surface's render contract. */
 export interface FooterInstructionLike {
   readonly id: string
   readonly text: readonly FooterSpan[]
@@ -61,8 +66,9 @@ export interface FooterComposerOptions {
   readonly layout: FooterLayoutV1
   readonly width: number
   readonly context: FooterRenderContext
-  /** The active Host instruction; an independent reserved line (plan §7),
-   * never the replacement of a user row. */
+  /** The active Host instruction: a transient overlay of the last EXISTING
+   * physical row, never an extra appended line (unless the normal layout
+   * is entirely empty — see the one-line safety exception in `compose`). */
   readonly instruction?: FooterInstructionLike
   /** The host-owned physical-line budget; defaults to the built-in
    * surface policy (plan §6.1). */
@@ -251,18 +257,14 @@ export class FooterComposer {
     // budget at all.
     const resolved = layout.rows.map((row, rowIndex) => this.resolveRow(row, snapshot, context, width, rowIndex))
     const renderable = resolved.filter(row => !row.isEmpty)
-    // 2. The Host instruction reserves ONE physical line up front (plan
-    // §7): it is an independent surface — never the replacement of a user
-    // row — and always survives.
-    const rowsBudget = Math.max(0, hasInstruction ? total - 1 : total)
-    // 3. Sequential allocation (plan §8): every renderable row earns its
+    // 2. Sequential allocation (plan §8): every renderable row earns its
     // BASELINE physical line first (while the budget lasts); the leftover
     // then buys a second line for rows that demand one, in layout order,
     // capped at perRow. A layout wider than the budget drops its tail
-    // rows — a global-budget decision, never an instruction row-swap — so
-    // any future N-row layout flows through the same rule.
+    // rows. The instruction never participates in this budget: it only
+    // replaces a row that the normal layout already produced.
     const allowances: number[] = []
-    let remaining = rowsBudget
+    let remaining = total
     for (let index = 0; index < renderable.length; index += 1) {
       const baseline = Math.min(1, remaining)
       allowances.push(baseline)
@@ -275,7 +277,7 @@ export class FooterComposer {
       allowances[index]! += extra
       remaining -= extra
     }
-    // 4. Render every row within its allowance, in layout order. Only the
+    // 3. Render every row within its allowance, in layout order. Only the
     // lines that actually reach the final text earn hits, so the physical
     // row number always describes a line the user can see.
     const physical: string[] = []
@@ -294,14 +296,27 @@ export class FooterComposer {
         this.collectHits(fitted.runs[lineIndex]!, physicalRow, width, hits)
       }
     }
-    // 5. The instruction: its own line, capped to one physical row. An
-    // instruction with no VISIBLE content paints nothing (and reserved
-    // nothing). Instruction cells never carry a hit.
-    if (hasInstruction) physical.push(renderInstructionLine(instructionText!, width))
-    // The legacy footer's final pass: every physical row is dimmed.
+    // 4. The instruction: replace the last EXISTING physical row for its
+    // lifetime, so the Footer height never changes. Hits on that row are
+    // gone (the instruction is not clickable). An otherwise row-less
+    // Footer with a positive budget paints the one-line safety exception
+    // (the ONLY case where an instruction changes the height from 0 to 1).
+    let instructionRow: number | undefined
+    if (hasInstruction) {
+      const instructionLine = renderInstructionLine(instructionText!, width)
+      if (physical.length > 0) {
+        instructionRow = physical.length - 1
+        physical[instructionRow] = instructionLine
+      } else {
+        physical.push(instructionLine)
+        instructionRow = 0
+      }
+    }
+    // The legacy footer's final pass dims every NORMAL physical row; the
+    // instruction row keeps its own text/textStrong contrast.
     return {
-      text: physical.map(row => color.textDim(row)).join('\n'),
-      hits,
+      text: physical.map((row, index) => index === instructionRow ? row : color.textDim(row)).join('\n'),
+      hits: instructionRow === undefined ? hits : hits.filter(hit => hit.row !== instructionRow),
     }
   }
 
@@ -703,11 +718,10 @@ function renderInstruction(instruction: FooterInstructionLike): string {
   return renderSpans(instruction.text)
 }
 
-/** Render the Host instruction as its own INDEPENDENT physical line (plan
- * 2026-08-31 §7): reserved from the global budget up front, wrapped to the
- * width and capped to one physical row (its own line contract). The
- * caller passes the ALREADY-RENDERED instruction text (empty text never
- * reaches this point). */
+/** Render the Host instruction as ONE physical row: wrapped to the width
+ * and capped to one line so the replacement can never change the Footer
+ * height. The caller passes the ALREADY-RENDERED instruction text (empty
+ * text never reaches this point). */
 function renderInstructionLine(rendered: string, width: number): string {
   const wrapped = wrapTextWithAnsi(rendered, width)
   return wrapped.length > 1 ? capRowWithEllipsis(wrapped[0]!, width) : wrapped[0]!
@@ -716,31 +730,40 @@ function renderInstructionLine(rendered: string, width: number): string {
 /** M5: merge the Host instruction onto a COMMAND surface (the command owns
  * the Status Surface; the instruction is never user-hideable).
  *
- * Without a budget the LEGACY command contract applies: the instruction
- * replaces the second command row when present, appends otherwise.
+ * Both branches use the SAME visible rule: compose the rows this branch
+ * would paint WITHOUT an instruction, then replace the LAST existing row
+ * with the one-line instruction. That keeps the command surface's height
+ * stable exactly like the native composer.
+ *
+ * Without a budget the LEGACY command contract applies: the caller's rows
+ * pass through byte-identically when no instruction is active; with an
+ * instruction the last row is replaced (an empty row set paints the single
+ * instruction row).
  *
  * WITH a surface budget (PR #57 review) the command surface consumes the
- * same effective total as the native composer: the instruction reserves
- * ONE physical line first, the trusted command rows keep the FIRST
- * remaining slots in order (they carry no importance metadata — layout
- * order is the priority), and a zero-grant surface renders nothing at
- * all — the hint is never the row that gets viewport-clipped. */
+ * same effective total as the native composer: `rows.slice(0, total)` are
+ * the command's own visible rows, then the instruction replaces the last
+ * one. A zero-grant surface renders nothing at all; an empty command row
+ * set with a positive budget paints the single-line instruction safety
+ * exception. */
 export function mergeCommandSurface(
   rows: readonly string[],
   instruction: FooterInstructionLike | undefined,
   width: number,
   budget?: Pick<FooterPhysicalLineBudget, 'total'>,
 ): string {
-  // NO budget = the legacy command contract, byte-identical: the
-  // caller's width passes through EXACTLY as before (no normalization —
-  // the legacy path predates the budget work and its edge-width
-  // behavior is pinned by tests).
+  // NO budget = the legacy command contract, byte-identical when no
+  // instruction is active: the caller's width passes through EXACTLY as
+  // before (no normalization — the legacy path predates the budget work
+  // and its edge-width behavior is pinned by tests).
   if (budget === undefined) {
     if (instruction === undefined) return rows.join('\n')
-    const legacyWrapped = wrapTextWithAnsi(renderInstruction(instruction), width)
+    const legacyInstruction = renderInstruction(instruction)
+    if (stripSgr(legacyInstruction).trim() === '') return rows.join('\n')
+    const legacyWrapped = wrapTextWithAnsi(legacyInstruction, width)
     const legacyRow = legacyWrapped.length > 1 ? capRowWithEllipsis(legacyWrapped[0]!, width) : legacyWrapped[0]!
-    const legacyMerged = rows.length > 1 ? [...rows.slice(0, -1), legacyRow] : [...rows, legacyRow]
-    return legacyMerged.join('\n')
+    if (rows.length === 0) return legacyRow
+    return [...rows.slice(0, -1), legacyRow].join('\n')
   }
   // A SUPPLIED budget normalizes its inputs ALWAYS — even a non-finite
   // total falls back to the hard capacity instead of bypassing the
@@ -752,18 +775,16 @@ export function mergeCommandSurface(
   if (budget.total === 0) return ''
   const total = Math.min(FOOTER_MAX_PHYSICAL_LINES, normalizePositiveInt(budget.total, FOOTER_MAX_PHYSICAL_LINES))
   const truncate = (row: string): string => truncateToWidth(row, w, '…')
+  const base = rows.slice(0, total).map(truncate)
   // An INVISIBLE instruction (empty/whitespace/blank-SGR spans) is
   // treated as absent, exactly like the native composer.
   const instructionText = instruction === undefined ? undefined : renderInstruction(instruction)
   const hasInstruction = instructionText !== undefined && stripSgr(instructionText).trim() !== ''
-  if (!hasInstruction) return rows.slice(0, total).map(truncate).join('\n')
-  // The instruction reserves 1 first; the trusted command rows keep the
-  // remaining slots in layout order — a wrapped row would silently spend
-  // a second slot and push the hint out of the budget.
+  if (!hasInstruction) return base.join('\n')
   const wrapped = wrapTextWithAnsi(instructionText!, w)
   const instructionRow = wrapped.length > 1 ? capRowWithEllipsis(wrapped[0]!, w) : wrapped[0]!
-  const kept = rows.slice(0, Math.max(0, total - 1)).map(truncate)
-  return [...kept, instructionRow].join('\n')
+  if (base.length === 0) return instructionRow
+  return [...base.slice(0, -1), instructionRow].join('\n')
 }
 
 /** Strip SGR sequences — params may be `;`- or colon-separated (e.g.

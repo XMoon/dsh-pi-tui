@@ -668,7 +668,7 @@ test('failure notifies once per error generation; recovery clears it', async () 
   }
 })
 
-test('the app renders the command surface; the Host instruction still merges on top', async () => {
+test('the app renders the command surface; the Host instruction replaces its last row', async () => {
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
@@ -677,13 +677,17 @@ test('the app renders the command surface; the Host instruction still merges on 
   await vt.waitForRender()
   let view = vt.getViewport().join('\n')
   assert.ok(view.includes('red line'), `the command surface must render:\n${view}`)
-  // With an EMPTY editor, the Ctrl+D exit hint (Host-owned) still merges on
-  // top of the command surface — the command can never hide it.
+  // With an EMPTY editor, the Ctrl+D exit hint (Host-owned) replaces the
+  // command surface's last visible row — the command can never hide it and
+  // the Footer height stays unchanged.
   vt.sendInput('\x04')
   await vt.waitForRender()
   view = vt.getViewport().join('\n')
   assert.ok(view.includes('Press Ctrl+D again'), `the Host instruction must survive the command surface:\n${view}`)
-  // Clearing the command surface restores the native composer.
+  assert.ok(!view.includes('red line'), `the covered command row must not be painted:\n${view}`)
+  // Clearing the command surface restores the native composer; clear the
+  // exit confirmation first so the native rows are not covered by the hint.
+  app.clearExitConfirmation()
   app.setFooterCommandRows(undefined)
   await vt.waitForRender()
   view = vt.getViewport().join('\n')
