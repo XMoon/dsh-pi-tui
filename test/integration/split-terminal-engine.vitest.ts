@@ -1,3 +1,4 @@
+import assert from 'node:assert/strict'
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 
@@ -42,6 +43,35 @@ test('the xtermjs engine paints a real PTY frame, accepts Enter, and reports a c
     // For a `run()` session the native state carries the child's exit status;
     // getExitCode() only tracks shell-command execution.
     expect((await terminal.state()).exited).toBe(0)
+  } finally {
+    await terminal.closeQuiet()
+  }
+})
+
+test('a missing terminal locator rejects with a diagnosable expectation error', async () => {
+  const terminal = TuiTest.ephemeral('split-terminal-engine-negative', {
+    backend: 'xtermjs',
+    trace: { mode: 'on-failure', directory: join(engineRoot, 'trace') },
+    artifacts: { dir: join(engineRoot, 'artifacts'), onFailure: 'text' },
+  })
+  try {
+    await terminal.run(process.execPath, ['-e', [
+      "process.stdout.write('S0_ENGINE_NEGATIVE_READY\\n')",
+      'setInterval(() => {}, 1000)',
+    ].join(';')], {
+      cwd: process.cwd(),
+      cols: 100,
+      rows: 30,
+      waitReady: false,
+    })
+    await terminal.getByText('S0_ENGINE_NEGATIVE_READY').expect()
+    await assert.rejects(
+      terminal.getByText('S0_NEVER_PAINTED').wait({ timeout: 500 }),
+      error => {
+        assert.match(String(error), /S0_NEVER_PAINTED/u)
+        return true
+      },
+    )
   } finally {
     await terminal.closeQuiet()
   }

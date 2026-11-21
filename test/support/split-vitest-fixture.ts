@@ -8,6 +8,7 @@ import {
   realpathSync,
   rmSync,
   statSync,
+  writeFileSync,
 } from 'node:fs'
 import { isAbsolute, join, relative, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -225,16 +226,34 @@ class Scene implements SplitS0Scene {
   readonly workDir: string
   readonly installation: SplitInstallation
   readonly candidate: CandidateFacts
+  readonly #resourcePath: string
+  readonly #resources: {
+    workDir: string
+    startedAt: string
+    hosts: Record<string, any>[]
+    clients: Record<string, any>[]
+  }
   readonly #c1WorkFixture: C1WorkFixture
   readonly #hosts: HostHandle[] = []
   readonly #clients: ClientHandle[] = []
   #clientSequence = 0
 
-  constructor(workDir: string, installation: SplitInstallation, candidate: CandidateFacts, c1WorkFixture: C1WorkFixture) {
+  constructor(
+    tmpBase: string,
+    workDir: string,
+    installation: SplitInstallation,
+    candidate: CandidateFacts,
+    c1WorkFixture: C1WorkFixture,
+  ) {
     this.workDir = workDir
     this.installation = installation
     this.candidate = candidate
     this.#c1WorkFixture = c1WorkFixture
+    const evidenceRoot = join(tmpBase, 's0-resources')
+    mkdirSync(evidenceRoot, { recursive: true, mode: 0o700 })
+    this.#resourcePath = join(evidenceRoot, `${workDir.split(sep).pop() ?? 'scene'}.json`)
+    this.#resources = { workDir, startedAt: new Date().toISOString(), hosts: [], clients: [] }
+    this.#writeResources()
     mkdirSync(join(workDir, 'trace'), { recursive: true, mode: 0o700 })
     mkdirSync(join(workDir, 'artifacts'), { recursive: true, mode: 0o700 })
     mkdirSync(join(workDir, 'clients'), { recursive: true, mode: 0o700 })
@@ -300,6 +319,14 @@ class Scene implements SplitS0Scene {
     }
     ;(host as { ready: Record<string, any> }).ready = ready
     this.#hosts.push(host)
+    this.#resources.hosts.push({
+      scenario,
+      businessPid: ready.pid ?? null,
+      childPid: child.pid ?? null,
+      workRoot,
+      startedAt: new Date().toISOString(),
+    })
+    this.#writeResources()
     return host
   }
 
@@ -318,6 +345,7 @@ class Scene implements SplitS0Scene {
       }
     }
     const result = host.exitResult ?? { code: host.child.exitCode, signal: host.child.signalCode }
+    this.#writeResources()
     assert(result.code === 0 && result.signal === null,
       `Host ${String(host.child.pid)} shutdown was ${JSON.stringify(result)}`)
     return result
@@ -349,7 +377,7 @@ class Scene implements SplitS0Scene {
       SPLIT_PROCESS_SCRATCH: scratch,
       ...(options.sessionId === undefined ? {} : { SPLIT_PROCESS_CLIENT_SESSION: options.sessionId }),
     }
-    await terminal.run(process.execPath, [this.installation.entries.client], {
+    const opened = await terminal.run(process.execPath, [this.installation.entries.client], {
       cwd: this.installation.profileDir,
       cols: 100,
       rows: 30,
@@ -386,6 +414,14 @@ class Scene implements SplitS0Scene {
       },
     }
     this.#clients.push(client)
+    this.#resources.clients.push({
+      label,
+      session: terminal.session,
+      shellPid: opened.shell_pid ?? null,
+      workDir: scratch,
+      startedAt: new Date().toISOString(),
+    })
+    this.#writeResources()
     return client
   }
 
@@ -406,6 +442,7 @@ class Scene implements SplitS0Scene {
         assert(current.exited === 0, `${client.label} exit code was ${String(current.exited)}`)
         client.closed = true
         await client.terminal.closeQuiet()
+        this.#writeResources()
         assert(!(await openTuiSessions()).includes(client.terminal.session),
           `${client.label} left its native TUI session open after exit`)
         return
@@ -469,6 +506,7 @@ class Scene implements SplitS0Scene {
 
   async dispose(): Promise<void> {
     const errors: Error[] = []
+    this.#writeResources()
     for (const client of [...this.#clients].reverse()) {
       if (client.closed) continue
       try {
@@ -561,6 +599,20 @@ class Scene implements SplitS0Scene {
       try { host.child.kill('SIGTERM') } catch { /* already gone */ }
     }
   }
+
+  #writeResources(): void {
+    this.#resources.hosts = this.#resources.hosts.map(host => ({
+      ...host,
+      exited: this.#hosts.find(candidate => candidate.child.pid === host.childPid)?.exited ?? false,
+    }))
+    this.#resources.clients = this.#resources.clients.map(client => ({
+      ...client,
+      exited: this.#clients.find(candidate => candidate.label === client.label
+        && candidate.terminal.session === client.session)?.closed ?? false,
+    }))
+    const payload = JSON.stringify({ ...this.#resources, updatedAt: new Date().toISOString() }, null, 2) + '\n'
+    writeFileSync(this.#resourcePath, payload, { mode: 0o600 })
+  }
 }
 
 async function createScene(): Promise<Scene> {
@@ -576,7 +628,7 @@ async function createScene(): Promise<Scene> {
       workDir,
     })
     const c1WorkFixture = fixturesModule.writeC1WorkFixture(installation.profileDir, workDir)
-    return new Scene(workDir, installation, candidate, c1WorkFixture)
+    return new Scene(tmpBase, workDir, installation, candidate, c1WorkFixture)
   } catch (error) {
     rmSync(workDir, { recursive: true, force: true })
     throw error
