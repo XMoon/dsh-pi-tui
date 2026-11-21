@@ -1319,10 +1319,13 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
      *  before the root intents are built (the Settings root/TuiApp API does not
      *  know about it). */
     readonly initialKeybindingsFilter?: KeybindingEditorFilter
+    /** PR2: the concrete error from the per-open Keyboard page factory (the
+     *  conflicts deeplink owns its exact reason instead of a second notice). */
+    readonly onKeybindingsPageFailure?: (error: unknown) => void
   }
 
   const openSettingsWorkspaceWith = (spec: WorkspaceOpenSpec): import('../../tui-app.ts').SettingsWorkspaceHandle => {
-    const { initialKeybindingsFilter, ...workspaceSpec } = spec
+    const { initialKeybindingsFilter, onKeybindingsPageFailure, ...workspaceSpec } = spec
     // C2-R5: a typed deeplink NEVER guesses its row. Validate the exact pair
     // BEFORE the screen lease is taken, so a mismatched request fails as a real
     // command error and leaves no Settings/overlay behind.
@@ -1630,6 +1633,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
           onAuthoritativeChange,
           initialKeybindingsFilter ?? 'all',
           initialKeybindingsFilter !== 'conflicts',
+          onKeybindingsPageFailure,
         ),
         // FR3: the ONE per-open MCP servers page. The controller holds only
         // this open's transient state; it starts its ONE watch only after the
@@ -1904,6 +1908,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     onModelChange: (model: KeybindingEditorModel) => void = () => {},
     initialFilter: KeybindingEditorFilter = 'all',
     notifyOnFailure = true,
+    onFailure?: (error: unknown) => void,
   ): KeybindingEditorPanel | undefined => {
     const settings = runner.tuiSettings
     if (settings === undefined) return undefined
@@ -1938,7 +1943,9 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
       return panel
     } catch (error) {
       // The conflicts deeplink owns its own degraded report (with the live
-      // runtime records); the ordinary entries keep this notification.
+      // runtime records and this exact cause); the ordinary entries keep the
+      // historical notification.
+      onFailure?.(error)
       if (notifyOnFailure) {
         app.notify(`Could not open keyboard shortcuts: ${safeErrorMessage(error)}`, 'error')
       }
@@ -5036,8 +5043,9 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     onAuthoritativeChange: () => void,
     initialFilter: KeybindingEditorFilter = 'all',
     notifyOnFailure = true,
+    onFailure?: (error: unknown) => void,
   ): import('../panels/settings-workspace-panel.ts').EmbeddedSpecialistPage | undefined {
-    return createKeybindingEditorPanel(done, () => { onAuthoritativeChange() }, initialFilter, notifyOnFailure)
+    return createKeybindingEditorPanel(done, () => { onAuthoritativeChange() }, initialFilter, notifyOnFailure, onFailure)
   }
 
   const registerFooter = (): void => {
@@ -5157,10 +5165,14 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
       }
     }
     const message = lines.join('\n')
-    // The card-less Remote PiTui client registry has no command card: this
-    // branch is the ONE owner of the visible error there. Direct keeps its
-    // existing command-result page as the visible owner.
-    if (runner.backendKind === 'remote') app.notify(message, 'error')
+    // A REMOTE card-less command with a live Session has no command card:
+    // this branch is its ONE visible owner. The sessionless local-command
+    // route is already owned by the submission controller's returned-error
+    // notice, so it must NOT be notified here a second time. Direct keeps its
+    // command-result page as the visible owner.
+    if (runner.backendKind === 'remote' && runner.currentSessionId !== undefined) {
+      app.notify(message, 'error')
+    }
     return { kind: 'error', text: message }
   }
 
@@ -5183,11 +5195,17 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
         : { kind: 'error', text: `could not open keyboard shortcuts: ${safeErrorMessage(error)}` }
     }
     let handle: import('../../tui-app.ts').SettingsWorkspaceHandle
+    let pageFailure: unknown
     try {
       handle = openSettingsWorkspaceWith({
         initialRowId: 'keyboard-shortcuts',
         initialSpecialist: 'keybindings',
-        ...(initialFilter === 'conflicts' ? { initialKeybindingsFilter: 'conflicts' as const } : {}),
+        ...(initialFilter === 'conflicts'
+          ? {
+            initialKeybindingsFilter: 'conflicts' as const,
+            onKeybindingsPageFailure: (error: unknown) => { pageFailure = error },
+          }
+          : {}),
       })
     } catch (error) {
       return initialFilter === 'conflicts'
@@ -5197,9 +5215,10 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     const settlement = await handle.whenInitialSpecialistSettled()
     if (!settlement.ok) {
       handle.close()
+      const reason = pageFailure === undefined ? settlement.reason : safeErrorMessage(pageFailure)
       return initialFilter === 'conflicts'
-        ? reportConflictDegraded(`the Keyboard shortcuts page could not be created: ${settlement.reason}`)
-        : { kind: 'error', text: `could not open keyboard shortcuts: ${settlement.reason}` }
+        ? reportConflictDegraded(`the Keyboard shortcuts page could not be created: ${reason}`)
+        : { kind: 'error', text: `could not open keyboard shortcuts: ${reason}` }
     }
     return { kind: 'success' }
   }

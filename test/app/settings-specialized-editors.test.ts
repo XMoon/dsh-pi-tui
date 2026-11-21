@@ -85,13 +85,14 @@ function makeRunner(
   fixture: DirectSettingsFixture | undefined,
   rawUnavailable = false,
   backendKind: 'direct' | 'remote' = 'direct',
+  currentSessionId: string | undefined = undefined,
 ): TuiCommandRunner {
   const base: Record<string, unknown> = {
     ctx,
     app,
     diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
     ...sessionScopeFacts(() => undefined, () => 0),
-    currentSessionId: undefined,
+    currentSessionId,
     ensureSession: async () => {},
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
     get defaultIntentOutcome() { return undefined },
@@ -209,6 +210,7 @@ function setup(options: {
   readonly fixture?: DirectSettingsFixture
   readonly rawUnavailable?: boolean
   readonly backendKind?: 'direct' | 'remote'
+  readonly currentSessionId?: string
 }): Harness {
   const ctx = new Context()
   const vt = new VirtualTerminal(options.columns ?? 120, options.rows ?? 40)
@@ -248,6 +250,7 @@ function setup(options: {
     fixture,
     options.rawUnavailable === true,
     options.backendKind ?? 'direct',
+    options.currentSessionId,
   ))
   return {
     vt,
@@ -799,8 +802,31 @@ test('/keybindings conflicts degrades with the CURRENT runtime records when sett
   h.app.stop()
 })
 
-test('/keybindings conflicts publishes exactly one targeted error on the card-less Remote route', async () => {
+test('/keybindings conflicts leaves the sessionless Remote returned error to the submission owner', async () => {
+  // The sessionless local-command route in src/app/submission/controller.ts
+  // already publishes a returned CommandResult.error exactly once. The
+  // conflicts branch must stay silent there; notifying here would double it.
   const h = setup({ settings: null, backendKind: 'remote' })
+  const notifications: string[] = []
+  const originalNotify = h.app.notify
+  h.app.notify = ((message: string, kind?: 'info' | 'error') => {
+    notifications.push(`${kind ?? 'info'}:${message}`)
+    originalNotify.call(h.app, message, kind)
+  }) as TuiApp['notify']
+  try {
+    const result = await h.invoke('keybindings', 'conflicts') as { kind: string; text?: string }
+    assert.equal(result.kind, 'error')
+    assert.match(result.text ?? '', /Runtime keybinding conflict records: 0\./u)
+    assert.deepEqual(notifications, [],
+      'the sessionless submission route owns the returned error notice, never the handler')
+  } finally {
+    h.app.notify = originalNotify
+    h.app.stop()
+  }
+})
+
+test('/keybindings conflicts publishes exactly one targeted error on the live-session card-less Remote route', async () => {
+  const h = setup({ settings: null, backendKind: 'remote', currentSessionId: 'session-remote' })
   h.app.keybindingsManager().setUserConfiguration(parseUserKeybindings({
     'app.input.submit': 'ctrl+shift+h',
     'app.todo.toggle': 'ctrl+shift+h',
@@ -1093,7 +1119,7 @@ test('a page factory failure after the lease is a real command error, never a si
   try {
     const conflictsResult = await conflicts.invoke('keybindings', 'conflicts') as { kind: string; text?: string }
     assert.equal(conflictsResult.kind, 'error')
-    assert.match(conflictsResult.text ?? '', /^Could not open Keyboard shortcuts: the Keyboard shortcuts page could not be created: /u)
+    assert.match(conflictsResult.text ?? '', /^Could not open Keyboard shortcuts: the Keyboard shortcuts page could not be created: settings vanished before the conflicts page opened\./u)
     assert.match(conflictsResult.text ?? '', /Runtime keybinding conflict records: 1\./u)
     assert.deepEqual(notifications, [],
       'the conflicts page factory failure is reported by the command result, never by a generic duplicate notice')

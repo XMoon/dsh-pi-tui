@@ -2077,7 +2077,14 @@ test('keybinding editor: mode spans are the only clickable cells and stale gestu
     assert.ok(panel.handleMouse(mouse('press', 7, conflictsModeRow, 88, 30))?.handled)
     panel.handleInput('q')
     assert.equal(panel.handleMouse(mouse('click', 7, conflictsModeRow, 88, 30)), undefined,
-      'a query change under the gesture refuses the stale release')
+      'an empty → non-empty query change under the gesture refuses the stale release')
+    // Non-empty → non-empty is a REAL query change too: the identity must not
+    // collapse every non-empty query into one state.
+    panel.render(88)
+    assert.ok(panel.handleMouse(mouse('press', 7, conflictsModeRow, 88, 30))?.handled)
+    panel.handleInput('r')
+    assert.equal(panel.handleMouse(mouse('click', 7, conflictsModeRow, 88, 30)), undefined,
+      'a non-empty → non-empty query change refuses the stale release')
   } finally {
     panel.dispose()
     manager.dispose()
@@ -2091,10 +2098,14 @@ test('keybinding editor: a narrow/absent mode row makes Tab and spans inert', ()
     assert.match(narrow, /View: \[All\]/u, 'the narrow row states the active mode read-only')
     panel.handleInput('\t')
     assert.match(plain(panel.render(20).join('\n')), /View: \[All\]/u, 'Tab is inert without painted spans')
-    // The 2-row grant has no mode row at all; Tab must not switch a hidden mode.
+    // The 2-row grant has no mode row at all; Tab must not switch a hidden mode,
+    // even when the PREVIOUS frame was a fully painted mode row.
+    panel.setMaxRows(30)
+    panel.render(88)
     panel.setMaxRows(2)
     const two = plain(panel.render(88).join('\n'))
     assert.match(two, /^Search: /mu)
+    assert.doesNotMatch(two, /Tab view/u, 'the two-row bar must not advertise the hidden mode switch')
     panel.handleInput('\t')
     assert.match(plain(panel.render(88).join('\n')), /^Search: /mu)
   } finally {
@@ -2136,6 +2147,49 @@ test('action editor: a runtime record with a non-builtin counterpart is stated r
     assert.match(view, /Key Ctrl\+Alt\+X: app\.input\.submit \(editor, user\) vs submit-draft \(global, plugin\)/u)
   } finally {
     editor.dispose()
+    manager.dispose()
+  }
+})
+
+test('keybinding editor: a short-grant readonly record detail keeps every field reachable', () => {
+  const manager = new HostKeybindingManager()
+  manager.setPluginRules([
+    { id: 'plugin-a', action: 'submit-draft-with-a-very-long-action-name', key: 'ctrl+alt+x' },
+    { id: 'plugin-b', action: 'open-search-with-another-very-long-action-name', key: 'ctrl+alt+x' },
+  ])
+  const parsed = parseUserKeybindings(undefined)
+  manager.setUserConfiguration(parsed)
+  let rows = 30
+  const panel = new KeybindingEditorPanel({
+    model: buildKeybindingEditorModel(manager, parsed),
+    initialFilter: 'conflicts',
+    onClose: () => {},
+    runMutation: () => {},
+    maxRows: () => rows,
+  })
+  try {
+    panel.render(36)
+    panel.handleInput('\r') // open the readonly record at the full grant
+    rows = 3 // then exercise its short-grant scroll port
+    const seen: string[] = []
+    for (let step = 0; step < 12; step += 1) {
+      seen.push(plain(panel.render(36).join('\n')))
+      panel.handleInput('\x1b[6~') // PageDown
+    }
+    const bodies = seen.map(frame => frame.split('\n').slice(0, -1).join('')).join('\n')
+    assert.match(bodies, /submit-draft-with-a-very-long-action-name/u, 'the first long action is reachable across its wrapped lines')
+    assert.match(bodies, /open-search-with-another-very-long-action-name/u, 'the second long action is reachable across its wrapped lines')
+    assert.match(bodies, /Scope: global · Source: plugin/u, 'the scope/source line is reachable')
+    // The back row stays the ONE last row on every short frame.
+    for (const frame of seen) assert.match(frame.split('\n').at(-1)!, /Back \[Esc\]/u)
+    // Every short frame still contains at least one real content line, never
+    // two scroll markers with no field text.
+    for (const frame of seen) {
+      const body = frame.split('\n').slice(0, -1)
+      if (body.length > 0) assert.ok(body.some(line => !/^[↑↓] \d+ more lines$/u.test(line)), 'a marker must not consume the whole body')
+    }
+  } finally {
+    panel.dispose()
     manager.dispose()
   }
 })

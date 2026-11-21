@@ -3,7 +3,7 @@
  * the shared detail/editor child view.
  */
 
-import { matchesKey, truncateToWidth, visibleWidth, type Component, type Focusable } from '@xmoon76/pi-tui'
+import { matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi, type Component, type Focusable } from '@xmoon76/pi-tui'
 import { Input } from '@xmoon76/pi-tui'
 import { dispatchMouseEvent } from '@xmoon76/pi-tui'
 import type { TuiMouseEvent, TuiMouseEventResult } from '@xmoon76/pi-tui'
@@ -272,6 +272,7 @@ export class KeybindingEditorPanel implements Component, Focusable {
   /** A read-only runtime conflict record detail, owned by this same panel. */
   private selectedConflictRecord: { readonly id: string; readonly record: KeybindingConflict } | undefined
   private recordScroll = 0
+  private recordDetailLineCount = 0
   private actionEditor: ActionEditorPanel | undefined
   private leaderRecorder: KeyRecorder | undefined
   private leaderEditing = false
@@ -381,6 +382,7 @@ export class KeybindingEditorPanel implements Component, Focusable {
     // This frame is about to carry whatever the mounted detail settled with.
     this.settlementAwaitingPaint = false
     this.paintedEscapeSpanValue = undefined
+    this.paintedFilterSpans = undefined
     if (this.actionEditor !== undefined) {
       // The detail page owns its bar; this page renders it at full width (no
       // rail/inset), so the child's page-local span is already the physical one.
@@ -395,6 +397,9 @@ export class KeybindingEditorPanel implements Component, Focusable {
     const searchRow = this.searchRow(safeWidth)
     const filterRow = this.filterRow(safeWidth)
     const filterSwitchable = filterRow.spans.length > 0
+    // The mode row is only PAINTED from three content rows up; below that the
+    // bar must not advertise a mode switch the frame does not show.
+    const filterPainted = filterSwitchable && limit >= 3
     // The Esc verb follows the two-stage lifecycle: a non-empty query clears
     // first, an empty query returns to Settings. The sub-10-column fallback
     // keeps the historical hint and carries NO geometry: a half token is never
@@ -406,7 +411,7 @@ export class KeybindingEditorPanel implements Component, Focusable {
     // is advertised ONLY where it is accepted: an empty query means the search
     // Input does not own `←`; a non-empty one never claims the back verb.
     const back = this.query === '' ? ' · ← Back' : ''
-    const viewHint = filterSwitchable ? 'Tab view · ' : ''
+    const viewHint = filterPainted ? 'Tab view · ' : ''
     const hintWording = pickWording([
       escapeWording(`${viewHint}Enter details · type search · ←→ edit · ↑↓ move${back}`, escVerb),
       escapeWording(`${viewHint}Enter details · type search · ←→ edit${back}`, escVerb),
@@ -461,7 +466,7 @@ export class KeybindingEditorPanel implements Component, Focusable {
         { kind: 'inert' },
       ]
       this.paintedSelectableIds = new Set()
-      this.paintedFilterSpans = filterSwitchable ? filterRow.spans : undefined
+      this.paintedFilterSpans = filterPainted ? filterRow.spans : undefined
       this.paintedEscapeSpanValue = modeWording.escape
       return [filterRow.text, searchRow, paintBarWording(modeWording)]
     }
@@ -507,11 +512,11 @@ export class KeybindingEditorPanel implements Component, Focusable {
     const end = Math.min(entries.length, start + listBudget)
     rows.push({ text: '', hit: { kind: 'inert' }, drop: 10 })
     if (entries.length === 0) {
-      rows.push({ text: color.textDim(this.emptyListText()), hit: { kind: 'inert' } })
+      rows.push({ text: color.textDim(truncateToWidth(this.emptyListText(), safeWidth)), hit: { kind: 'inert' } })
     } else {
       for (const entry of entries.slice(start, end)) {
         if (entry.kind === 'header') {
-          rows.push({ text: color.textStrong(entry.label), hit: { kind: 'inert' }, drop: 22 })
+          rows.push({ text: color.textStrong(truncateToWidth(entry.label, safeWidth)), hit: { kind: 'inert' }, drop: 22 })
         } else {
           const selectableIndex = selectable.indexOf(entry)
           rows.push({
@@ -617,16 +622,21 @@ export class KeybindingEditorPanel implements Component, Focusable {
       this.paintedEscapeSpanValue = bar.escape
       return [paintBarWording(bar)]
     }
+    // Wrap first, then scroll: a long key/action/scope/source field stays
+    // reachable at narrow widths instead of being silently clipped.
+    const wrapped = lines.flatMap(line => wrapTextWithAnsi(line, Math.max(1, width)))
+    this.recordDetailLineCount = wrapped.length
     const bodyLimit = limit - 1
-    const maxStart = Math.max(0, lines.length - bodyLimit)
+    const maxStart = Math.max(0, wrapped.length - bodyLimit)
     this.recordScroll = Math.min(Math.max(0, this.recordScroll), maxStart)
-    let body = lines.slice(this.recordScroll, this.recordScroll + bodyLimit)
-    if (this.recordScroll > 0 && bodyLimit >= 2) {
-      body = [color.textDim(`↑ ${this.recordScroll} more lines`), ...body.slice(1)]
-    }
-    const remaining = lines.length - (this.recordScroll + body.length)
-    if (remaining > 0 && bodyLimit >= 2) {
-      body = [...body.slice(0, -1), color.textDim(`↓ ${remaining} more lines`)]
+    let body = wrapped.slice(this.recordScroll, this.recordScroll + bodyLimit)
+    // At a two-row body a scroll marker would consume one of the only two
+    // content rows, leaving the field text permanently unreachable; below
+    // three rows keep the real lines instead.
+    if (bodyLimit >= 3) {
+      if (this.recordScroll > 0) body = [color.textDim(`↑ ${this.recordScroll} more lines`), ...body.slice(1)]
+      const remaining = wrapped.length - (this.recordScroll + body.length)
+      if (remaining > 0) body = [...body.slice(0, -1), color.textDim(`↓ ${remaining} more lines`)]
     }
     const rendered = [...body, paintBarWording(bar)]
     this.hitMap = rendered.map(() => ({ kind: 'inert' as const }))
@@ -672,6 +682,7 @@ export class KeybindingEditorPanel implements Component, Focusable {
     if (matchesKey(data, 'escape')) {
       if (this.query !== '') {
         this.searchInput.setValue('')
+        this.mousePressedFilter = undefined
         this.selectedId = 'leader'
         this.selectedIndex = 0
         this.message = undefined
@@ -739,6 +750,7 @@ export class KeybindingEditorPanel implements Component, Focusable {
     this.searchInput.handleInput(data)
     if (this.searchInput.getValue() !== before) {
       // The query changed: filter again and reset the selection to the top.
+      this.mousePressedFilter = undefined
       this.selectedId = 'leader'
       this.selectedIndex = 0
       this.message = undefined
@@ -898,7 +910,7 @@ export class KeybindingEditorPanel implements Component, Focusable {
    *  at press and re-proves it at the release. */
   gestureIdentity(): string {
     const detail = this.actionEditor === undefined ? '' : this.actionEditor.gestureIdentity()
-    return `${this.viewKey()}:${detail}:${this.query === '' ? 'empty' : 'query'}:${this.leaderPending ? 'pending' : 'idle'}`
+    return `${this.viewKey()}:${detail}:${this.query === '' ? 'empty' : `query:${this.query}`}:${this.leaderPending ? 'pending' : 'idle'}`
   }
 
   dispose(): void {
@@ -1109,11 +1121,9 @@ export class KeybindingEditorPanel implements Component, Focusable {
   }
 
   private scrollRecordDetail(delta: number): void {
-    const record = this.selectedConflictRecord?.record
-    if (record === undefined) return
+    if (this.selectedConflictRecord === undefined) return
     const bodyLimit = Math.max(1, this.maxRows() - 1)
-    const contentLines = 5 + record.actions.length * 2
-    const maxStart = Math.max(0, contentLines - bodyLimit)
+    const maxStart = Math.max(0, this.recordDetailLineCount - bodyLimit)
     this.recordScroll = Math.min(maxStart, Math.max(0, this.recordScroll + delta))
     this.requestRender()
   }
