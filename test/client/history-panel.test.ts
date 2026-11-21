@@ -1726,6 +1726,36 @@ test('scope-tabs: a narrow sessionless header keeps Directory/All, preserves the
   panel.dispose(); wide.panel.dispose(); clipped.panel.dispose()
 })
 
+test('scope-tabs: complete label hit and width at the frozen History matrix', async () => {
+  for (const [cols, rows] of [[44, 20], [80, 24], [120, 40], [200, 50]] as const) {
+    const source = new FakeSource()
+    source.rows = [row('alpha prompt', 1, '/a', 'id-a')]
+    const { panel } = makePanel(source, {
+      geometry: seatGeometry(cols, rows, 2),
+      pointerEnabled: () => true,
+    })
+    panel.start()
+    const frame = plain(await renderUntil(
+      panel,
+      cols,
+      lines => lines.some(line => line.includes('Input History')),
+      `${cols}x${rows} History header`,
+    ))
+    const headerRow = frame.findIndex(line => line.includes('Input History'))
+    const header = frame[headerRow]!
+    assert.ok(visibleWidth(header) <= cols, `${cols}x${rows} header must not overflow: ${JSON.stringify(header)}`)
+    const target = cols >= 85 ? 'All Directories' : 'All'
+    const col = header.indexOf(target)
+    assert.ok(col >= 0, `${cols}x${rows} must paint ${target}: ${header}`)
+    const height = panel.render(cols).length
+    assert.ok(panel.handleMouse(historyPointer('press', col, headerRow, cols, height)) !== undefined)
+    assert.ok(panel.handleMouse(historyPointer('click', col, headerRow, cols, height)) !== undefined)
+    assert.ok(plain(panel.render(cols))[headerRow]!.includes(`[${target}]`),
+      `${cols}x${rows} complete label must select ${target}`)
+    panel.dispose()
+  }
+})
+
 test('scope-tabs: a scope press is invalidated by intervening keyboard state and a late old-scope page never commits', async () => {
   const source = new FakeSource()
   source.rows = [row('alpha prompt', 1, '/a', 'id-a')]

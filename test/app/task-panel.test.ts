@@ -2261,6 +2261,28 @@ test('PR2: empty-with-history Work header publishes its tab hit', () => {
   panel.dispose()
 })
 
+test('PR2: complete compact tab geometry across widths with a CJK header', () => {
+  for (const cols of [44, 72, 80, 100, 120] as const) {
+    const { panel } = makePanel([subagent()], {
+      enableSearch: false,
+      header: 'Tasks · 任务',
+      team: readyTeam([teamTask()]),
+      interactionCurrent: () => true,
+    })
+    panel.setMaxRows(3)
+    const frame = panel.render(cols).map(strip)
+    for (const line of frame) assert.ok(visibleWidth(line) <= cols, `${cols}: no row may overflow: ${JSON.stringify(line)}`)
+    const header = frame[0]!
+    const teamIndex = header.indexOf('Team')
+    assert.ok(teamIndex >= 0, `${cols}: Team must paint: ${header}`)
+    const teamCol = visibleWidth(header.slice(0, teamIndex))
+    assert.ok(panel.handleMouse(mouse('press', teamCol, 0, cols, 3))?.handled, `${cols}: Team press must hit`)
+    assert.ok(panel.handleMouse(mouse('click', teamCol, 0, cols, 3))?.handled, `${cols}: Team click must hit`)
+    assert.ok(panel.render(cols).map(strip).join('\n').includes('[Team]'), `${cols}: the complete Team label switches`)
+    panel.dispose()
+  }
+})
+
 test('PR2: keyboard navigation retires a pressed compact Header tab', () => {
   const { panel } = makePanel([subagent()], {
     enableSearch: false,
