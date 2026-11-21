@@ -22,7 +22,7 @@
  * @module @xmoon76/dsh-pi-tui/tui/interaction/tui-editor
  */
 
-import { decodePrintableKey, Editor, matchesKey, truncateToWidth, type AutocompleteProvider, type EditorTheme, type SelectListLayoutOptions, type TUI } from '@xmoon76/pi-tui'
+import { decodePrintableKey, Editor, matchesKey, truncateToWidth, type AutocompleteProvider, type EditorTheme, type SelectListLayoutOptions, type TUI, type TuiMouseEvent, type TuiMouseEventResult } from '@xmoon76/pi-tui'
 import { SelectedMarquee } from '../components/marquee.ts'
 import { color } from '../theme/runtime.ts'
 import { classifyFileCompletionContext } from '../file-completion/context.ts'
@@ -245,6 +245,10 @@ export class TuiEditor extends Editor {
     readonly cursor: { readonly line: number; readonly col: number }
     readonly mode: EditorInputMode
   } | undefined
+  /** True only inside the fork's synchronous left-click handler. The fork
+   *  exits history browsing on a click without firing onChange; its own
+   *  "navigation" boundary notification is the post-exit proof we consume. */
+  private pointerClickInFlight = false
 
   constructor(tui: TUI, theme: EditorTheme, options: TuiEditorOptions = {}) {
     // paddingX: 2 reserves the left two cells for the mode prompt painted
@@ -302,6 +306,27 @@ export class TuiEditor extends Editor {
         this.setInputMode(state)
       }
     }
+  }
+
+  /** The host boundary callback forwards "navigation" events here. A left
+   *  click on an editor row is the only navigation event produced inside
+   *  `handleMouse`; it exits browse without onChange, so the bookmark dies. */
+  consumePointerBrowseExit(reason: string): void {
+    if (reason === 'navigation' && this.pointerClickInFlight) this.clearHistoryBrowseDraft()
+  }
+
+  override handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+    if (event.type === 'click' && event.button === 'left') this.pointerClickInFlight = true
+    try {
+      return super.handleMouse(event)
+    } finally {
+      this.pointerClickInFlight = false
+    }
+  }
+
+  override clearDraftAfterSubmit(): void {
+    super.clearDraftAfterSubmit()
+    this.clearHistoryBrowseDraft()
   }
 
   /** Consume ONE onChange caused by the current recall application. Returns

@@ -5446,6 +5446,7 @@ export class TuiApp {
     // moving the cursor. Text edits invalidate the rendered snapshot; the next
     // Editor render republishes the exact layout boundary.
     this.editor.onVisualLineBoundaryChanged = (reason, onLastVisualLine) => {
+      this.editor.consumePointerBrowseExit(reason)
       if (reason === 'navigation' && onLastVisualLine === this.taskQuickPaintedBoundary) return
       this.taskQuickPaintedBoundary = onLastVisualLine
       this.quickHintCurrentEditorLayout = undefined
@@ -8692,8 +8693,11 @@ export class TuiApp {
       this.editor.addToHistory(entries[index]!)
     }
     if (restoreBrowseDraft && browseDraft !== undefined) {
-      this.editor.setText(browseDraft.text)
-      this.editor.setCursor(browseDraft.cursor)
+      // Lossless document restore: the raw draft may contain registry-bound
+      // large-paste markers. setText() would clear the editor's paste registry
+      // (turning `[paste #N …]` into literal text); setTextAndCursor() keeps
+      // surviving registry entries and leaves undo/transient state alone.
+      this.editor.setTextAndCursor(browseDraft.text, browseDraft.cursor)
       this.editor.setInputMode(browseDraft.mode)
     }
   }
