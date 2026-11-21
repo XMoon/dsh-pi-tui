@@ -952,6 +952,36 @@ async function submitPositiveFeedback(page) {
   driverFact('message-feedback', { rating: 'positive', category: 'task-result' })
 }
 
+/**
+ * RC.5 Host-wiring observation: create a second real Session, return to the
+ * original one, open the official `@` candidate menu (the real Browser
+ * `sessionReferenceResolver/candidates` Remote), then submit a canonical
+ * session mention. The Host-side `agent/pre-step` listener is what turns that
+ * mention into model input; the runner verifies the resulting prompt record.
+ */
+async function observeSessionReference(page, originalSessionId) {
+  const siblingId = await newSession(page)
+  await openSession(page, originalSessionId)
+  const candidates = page.waitForResponse(response =>
+    new URL(response.url()).pathname === '/api/sessionReferenceResolver/candidates'
+    && response.request().method() === 'POST'
+    && response.status() === 200, { timeout: 60_000 }).catch(() => undefined)
+  const composer = page.locator('[role=textbox]').last()
+  await composer.click()
+  await composer.type('@')
+  const response = await candidates
+  if (response === undefined) throw new Error('the Browser never issued the sessionReferenceResolver/candidates Remote request')
+  await page.keyboard.press('Escape')
+  const marker = `wp01-ref-${nonce}`
+  const payload = Buffer.from(JSON.stringify(siblingId), 'utf8').toString('base64url')
+  // A bare canonical URI is accepted by the official Host parser and survives
+  // the Browser composer unchanged; the `@` menu above separately proves the
+  // candidate Remote was really called.
+  await sendPrompt(page, `dsh-session:${payload} ${marker}`)
+  driverFact('session-reference', { siblingId, marker, candidatesStatus: response.status() })
+  return { siblingId, marker }
+}
+
 /** WP-10: the honest inventory of the Web UI's really reachable features. */
 async function inventory(page) {
   // Session create/list/open are the core MUST surfaces.
@@ -1404,11 +1434,14 @@ const cases = {
     // real message-feedback write and the real PluginInventory Remote read.
     await submitPositiveFeedback(page)
     const inventory = await openBuiltInPluginInventory(page)
+    const reference = await observeSessionReference(page, sessionId)
     driverFact('rc5-host-wiring', {
       inventoryEntry: inventory.entryId,
       inventoryModule: inventory.moduleName,
       inventoryPhase: inventory.fiberPhase,
       feedback: 'positive',
+      sessionReference: true,
+      referenceMarker: reference.marker,
     })
     await screenshot(page, 'home-session')
     step('login-and-session', true, { sessionId, marker, negatives: result.negatives })

@@ -375,6 +375,11 @@ export const runWebProductQualification = async context => {
 
   /** The durable events of one Session (empty before its first write). */
   const durableOf = sessionId => hostSessionEvents(dshHome, sessionId) ?? []
+  /** One offline model request record per call (the fixture's model-facing sink). */
+  const promptEvidence = () => {
+    const text = readFileSync(context.installation.surfaceLlm.promptEvidencePath, 'utf8').trim()
+    return text === '' ? [] : text.split('\n').map(line => JSON.parse(line))
+  }
   const requestIdOf = event => event.data?.source?.rpcId ?? event.data?.rpcId ?? event.data?.requestId ?? event.data?.id
   const userEvents = (sessionId, text) => durableOf(sessionId)
     .filter(event => event.type === 'user/message' && JSON.stringify(event).includes(text))
@@ -518,6 +523,9 @@ export const runWebProductQualification = async context => {
       && record.transport === 'connected', `${label} /resume`, 120_000)
     return opened
   }
+  /** The canonical Host-neutral mention dropped into a real TUI/Browser draft. */
+  const canonicalSessionMention = sessionId =>
+    `@[r](dsh-session:${Buffer.from(JSON.stringify(sessionId), 'utf8').toString('base64url')})`
   /** One real TUI prompt with its durable user/message and turn/end. */
   const tuiTurn = async (tui, sessionId, text, label) => {
     const boundary = durableOf(sessionId).length
@@ -562,6 +570,18 @@ export const runWebProductQualification = async context => {
       if (composer === undefined || !composer.includes(text)) break
       tui.send('\r')
     }
+  }
+  /** One real TUI prompt citing a canonical session reference. */
+  const tuiReferenceTurn = async (tui, sessionId, targetSessionId, marker, label) => {
+    const boundary = durableOf(sessionId).length
+    tui.send(`${canonicalSessionMention(targetSessionId)} ${marker}\r`)
+    await tui.waitForScreen(marker, `${label} prompt painted`, 120_000)
+    await waitForHostSessionEventAfter(dshHome, sessionId, boundary,
+      event => event.type === 'user/message' && JSON.stringify(event).includes(marker),
+      `${label} user/message`, 180_000)
+    await waitForHostSessionEventAfter(dshHome, sessionId, boundary,
+      event => event.type === 'turn/end', `${label} turn/end`, 180_000)
+    return boundary
   }
   /** One correlated `qualification-web-access` round trip. */
   const webAccess = async (peer, label, value) => {
@@ -845,6 +865,26 @@ export const runWebProductQualification = async context => {
         && wiring.enabled !== false && wiring.inventoryPhase === 'active'
         && wiring.feedback === 'positive',
       `WP-01 the Browser did not report the rc.5 Host wiring facts: ${JSON.stringify(wiring)}`)
+      const reference = handle.readFact('session-reference')
+      assert(reference.candidatesStatus === 200 && typeof reference.siblingId === 'string'
+        && reference.siblingId !== browserSession.sessionId,
+      `WP-01 the Browser did not observe a real session-reference candidate: ${JSON.stringify(reference)}`)
+      assert(wiring.sessionReference === true && wiring.referenceMarker === reference.marker,
+        `WP-01 the session-reference fact does not match the wiring report: ${JSON.stringify({ wiring, reference })}`)
+      await waitForHostSessionEventAfter(dshHome, browserSession.sessionId, 0,
+        event => event.type === 'user/message' && JSON.stringify(event).includes(reference.marker),
+        'WP-01 canonical session-reference user/message', 120_000)
+      const referenceDeadline = Date.now() + 120_000
+      let referenceReached = false
+      while (Date.now() < referenceDeadline) {
+        if (promptEvidence().some(record => record.referencedSessions === true)) {
+          referenceReached = true
+          break
+        }
+        await sleep(250)
+      }
+      assert(referenceReached,
+        `WP-01 canonical session reference reaches the Host model input: ${JSON.stringify(promptEvidence().slice(-4))}`)
       const feedbackEvents = durableOf(browserSession.sessionId)
         .filter(event => event.type === 'feedback/message-put')
       assert(feedbackEvents.length === 1,
@@ -1097,6 +1137,13 @@ export const runWebProductQualification = async context => {
     // Browser and a live TUI.
     const sessionToggle = await tuiNewSession(groupTui, 'WP-08')
     await tuiTurn(groupTui, sessionToggle, `W-${productNonce}-seed`, 'WP-08 seed')
+    // The official `session-reference` listener is live while Web is enabled:
+    // a canonical mention from the TUI Session must reach the Host model input.
+    const referenceOnBefore = promptEvidence().length
+    await tuiReferenceTurn(groupTui, sessionToggle, sessionLife,
+      `W-${productNonce}-ref-before-off`, 'WP-08 reference before off')
+    assert(promptEvidence().slice(referenceOnBefore).some(record => record.referencedSessions === true),
+      'WP-08 the enabled Web composition did not inject the canonical session reference into the model input')
     const togglePeer = await startPeer('WP-08')
     assertToggle(await webAccess(togglePeer, 'WP-08 initial', undefined), 'enabled', 'WP-08 initial')
     const toggleIdentity = (await hostStatus(groupA.host)).localHost
@@ -1112,11 +1159,28 @@ export const runWebProductQualification = async context => {
       assert(root.status === 404, `WP-08 the disabled Host still serves the Web root (HTTP ${root.status})`)
       // The TUI keeps working on the SAME Host while Web is off.
       await tuiTurn(groupTui, sessionToggle, `W-${productNonce}-tui-while-off`, 'WP-08 TUI while off')
+      // The same canonical mention while Web is off must not reach the model
+      // as a session-reference context: the resolver's pre-step listener was
+      // disposed with its Web row. Use a CLEAN Session because a prior ON
+      // reference turn remains in the older Session's model history.
+      const sessionOffReference = await tuiNewSession(groupTui, 'WP-08 off reference')
+      const referenceOffBefore = promptEvidence().length
+      await tuiReferenceTurn(groupTui, sessionOffReference, sessionLife,
+        `W-${productNonce}-ref-while-off`, 'WP-08 reference while off')
+      const referenceOffRecords = promptEvidence().slice(referenceOffBefore)
+      assert(referenceOffRecords.length > 0 && referenceOffRecords.every(record => record.referencedSessions !== true),
+        'WP-08 the Web-off Host still injected a session-reference context from a disposed listener')
       // The old page is deliberately NOT guaranteed to stay usable: the
       // product contract stops serving the page and unloads the Web rows;
       // the re-enable is proved by a NEW authenticated page below.
       await enableWeb(groupTui, 'WP-08 re-enable')
       assertToggle(await webAccess(togglePeer, 'WP-08 after re-enable', undefined), 'enabled', 'WP-08 after re-enable')
+      // Re-enabling Web must restore the listener on the same Host process.
+      const referenceOnAgain = promptEvidence().length
+      await tuiReferenceTurn(groupTui, sessionOffReference, sessionLife,
+        `W-${productNonce}-ref-after-on`, 'WP-08 reference after re-enable')
+      assert(promptEvidence().slice(referenceOnAgain).some(record => record.referencedSessions === true),
+        'WP-08 the re-enabled Web composition did not restore the session-reference listener')
       handle.writeCommand({ seq: 3, kind: 'reconnect', sessionId: sessionToggle })
       await handle.waitStep(3, 'WP-08 Browser reconnected')
       handle.writeCommand({ seq: 4, kind: 'prompt', prompt: `W-${productNonce}-after-on`, marker: `W-${productNonce}-after-on` })
