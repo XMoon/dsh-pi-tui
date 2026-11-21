@@ -428,6 +428,15 @@ Full:
   application mouse route at all.
 - This pointer path is Fullscreen-only. Regular/Main retains terminal-native
   selection and scrolling behavior and has no application Task pointer routing.
+- Fullscreen `[Work] Team` Header labels remain last-painted pointer targets in
+  the normal and short/degraded/slim layouts alike: a label is hit only while
+  its complete painted span survives the sanitized header text and truncation
+  (a clipped or omitted label is inert), and the existing pending-Stop,
+  Team-eligibility and interaction-currentness gates stay authoritative. The
+  same rule keeps the Work type-filter exit usable in short grants: with at
+  least two rows the complete current candidate and clickable `Cancel [Esc]`
+  remain, with one row only the candidate is painted and no exit target is
+  invented. Regular/Main stays keyboard-only.
 - Reading Job output belongs to the Job Workspace, not the Task Browser.
 - The Full Task Center is ONE physical overlay with two pages: `Work`
   (default) and `Team`. A proved Root `agentTeam` projection shows the
