@@ -187,9 +187,10 @@ test('known credential carriers are redacted in the file and the locator has no 
     'visit https://127.0.0.1:9/connect?token=secret-connect',
     'token=secret-token password=secret-pass access_token=secret-access',
     'token="secret-quoted" password=\'secret-single\'',
+    'token=\\"secret escaped space\\"',
   ].join('\n'))
   const preview = clientFatalErrorDetails(error, 'client-assembly')
-  for (const secret of ['secret-auth', 'secret-cookie', 'secret-set-cookie', 'secret-connect', 'secret-token', 'secret-pass', 'secret-access', 'secret-quoted', 'secret-single']) {
+  for (const secret of ['secret-auth', 'secret-cookie', 'secret-set-cookie', 'secret-connect', 'secret-token', 'secret-pass', 'secret-access', 'secret-quoted', 'secret-single', 'secret escaped space']) {
     assert.ok(!preview.text.includes(secret), `secret leaked: ${secret}`)
   }
   assert.match(preview.text, /<redacted>/u)

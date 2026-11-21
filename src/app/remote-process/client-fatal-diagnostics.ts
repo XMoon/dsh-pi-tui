@@ -60,6 +60,9 @@ const MAX_FILE_BYTES = 32 * 1024
 const MAX_MESSAGE_BYTES = 2 * 1024
 const MAX_STACK_BYTES = 12 * 1024
 const MAX_CAUSE_DEPTH = 4
+/** AggregateError branches are siblings at the same depth, so the bound is
+ *  per layer with a separate generous node ceiling. */
+const MAX_CAUSE_NODES = 16
 const MAX_NAME_BYTES = 128
 const ERROR_CODE_PATTERN = /^[A-Z][A-Z0-9_]{0,63}$/u
 /** Only the Node module-loader codes are Client dependency misses. */
@@ -138,9 +141,10 @@ function redactPrivateText(text: string): string {
     // A private incident file is not a place for any live Host/launch URL.
     .replace(/\b[a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^\s'"]+/gu, '<url>')
     .replace(/([?&](?:token|access_token|cookie)=)[^&#\s]+/giu, '$1<redacted>')
-    // Quoted values are common in self-authored diagnostics; consume the whole
-    // quoted literal so its closing quote cannot leave the secret visible.
-    .replace(/\b(token|access_token|password)\s*=\s*(?:"[^"]*"|'[^']*'|[^\s&;,]+)/giu, '$1=<redacted>')
+    // Quoted values are common in self-authored diagnostics, including
+    // JSON-escaped quotes (`token=\"...\"`). Consume the whole literal so a
+    // closing quote or embedded space cannot leave the secret visible.
+    .replace(/\b(token|access_token|password)\s*=\s*(?:\\?"(?:\\.|[^"\\])*\\?"|\\?'(?:\\.|[^'\\])*\\?'|[^\s&;,]+)/giu, '$1=<redacted>')
 }
 
 /** Truncate a string to at most `maxBytes` UTF-8 bytes without splitting a code point. */
@@ -212,25 +216,23 @@ function appendErrorFields(lines: string[], error: unknown, depth: number): void
  */
 function appendCauseChain(lines: string[], root: unknown): void {
   const seen = new Set<unknown>()
-  let remaining = MAX_CAUSE_DEPTH
-  let index = 0
-  const visit = (value: unknown): void => {
-    if (remaining <= 0 || value === undefined) return
+  let nodes = 0
+  const visit = (value: unknown, depth: number): void => {
+    if (value === undefined || depth > MAX_CAUSE_DEPTH || nodes >= MAX_CAUSE_NODES) return
     if (seen.has(value)) {
-      lines.push(`cause[${index + 1}].name: <circular cause>`)
+      lines.push(`cause[${nodes + 1}].name: <circular cause>`)
       return
     }
     seen.add(value)
-    remaining -= 1
-    index += 1
-    appendErrorFields(lines, value, index)
-    if (remaining <= 0) return
+    nodes += 1
+    appendErrorFields(lines, value, nodes)
+    if (depth === MAX_CAUSE_DEPTH || nodes >= MAX_CAUSE_NODES) return
     for (const child of causeChildren(value)) {
-      if (remaining <= 0) break
-      visit(child)
+      if (nodes >= MAX_CAUSE_NODES) break
+      visit(child, depth + 1)
     }
   }
-  for (const child of causeChildren(root)) visit(child)
+  for (const child of causeChildren(root)) visit(child, 1)
 }
 
 /** Bound the whole document to the frozen 32 KiB contract. */

@@ -236,6 +236,22 @@ test('a handoff self-authored reason never leaks an envelope secret or private p
   assert.ok(!line.includes('/very/private/path'), 'private path leaked')
 })
 
+test('an unknown envelope key carrying a JSON-quoted token with spaces never reaches either terminal summary', () => {
+  let error: unknown
+  try {
+    decodeClientLaunchEnvelope(JSON.stringify({ version: 1, ['token="first second-secret"']: true }))
+  } catch (caught) {
+    error = caught
+  }
+  assert.ok(error instanceof Error)
+  const surface = surfaceStartupFailureLine(error, 'pi-tui')
+  const handoff = handoffStartupFailureLine(error)
+  for (const line of [surface, handoff]) {
+    assert.ok(!line.includes('second-secret'), `quoted token leaked: ${line}`)
+    assert.ok(!line.includes('first second'), `quoted token leaked: ${line}`)
+  }
+})
+
 test('terminal failure summaries survive a hostile thrown proxy', () => {
   const hostile = new Proxy({}, {
     get() { throw new Error('get trap') },

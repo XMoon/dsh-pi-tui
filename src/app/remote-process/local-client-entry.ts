@@ -77,6 +77,7 @@ import {
 } from './client-interaction-delivery.ts'
 import { createLocalClientSurfaceBridge } from './local-client-surface.ts'
 import { runDetached } from '../../runtime/process/tasks.ts'
+import { safeErrorMessage } from '../../runtime/process/errors.ts'
 import type { ClientReloadProcessRefusal, ClientReloadRequestResult } from '../application-runtime.ts'
 
 /**
@@ -419,9 +420,31 @@ function isLocalScopeErrorValue(value: unknown): value is LocalScopeError {
  * failure; only the artifact needs the cleanup cause chain.
  */
 export function clientFatalPrimaryWithCleanup(failure: unknown, cleanupErrors: readonly unknown[]): Error {
-  let primary = isErrorValue(failure) ? failure : new Error(String(failure))
-  for (const cleanupError of cleanupErrors) primary = mergeCause(primary, cleanupError)
-  return primary
+  const primary = isErrorValue(failure) ? failure : new Error(safeErrorMessage(failure))
+  if (cleanupErrors.length === 0) return primary
+  try {
+    let merged = primary
+    for (const cleanupError of cleanupErrors) merged = mergeCause(merged, cleanupError)
+    return merged
+  } catch {
+    // A frozen/non-extensible primary cannot take a cause without mutating the
+    // caller's error. Fall back to a fresh root that still names the original
+    // failure and every cleanup failure; the original classification stays on
+    // the separately passed `failure`.
+    const root = new Error(safeErrorMessage(failure))
+    if (isErrorValue(failure)) {
+      try {
+        root.name = failure.name
+        root.stack = failure.stack
+        const code = (failure as { code?: unknown }).code
+        if (typeof code === 'string') (root as { code?: string }).code = code
+      } catch {
+        // Best effort: the message plus cleanup causes are the required facts.
+      }
+    }
+    root.cause = new AggregateError([failure, ...cleanupErrors], 'local client entry: fatal failure with cleanup causes')
+    return root
+  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -1449,8 +1472,7 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
         // The incident file records the real primary with every cleanup cause
         // collected by this ONE coordinator; the terminal classification stays
         // on the original failure so a typed scope code is never lost.
-        const primary = clientFatalPrimaryWithCleanup(failure, errors)
-        process.stderr.write(`${reportSurfaceClientFatal(failure, options.profile, phase, expectedHostInstanceId !== undefined, process.env, primary)}\n`)
+        process.stderr.write(`${reportStopClientFatal(failure, options.profile, phase, expectedHostInstanceId !== undefined, process.env, errors)}\n`)
       }
       process.stdin.pause()
       resolveStopped?.()
@@ -2760,14 +2782,30 @@ export function reportSurfaceClientFatal(
   return `${summary} ${clientDiagnosticLocation(result)}`
 }
 
+/**
+ * The stop-coordinator report entry: merge its collected cleanup causes into
+ * the ONE artifact primary while the terminal classification stays on the
+ * original failure.
+ */
+export function reportStopClientFatal(
+  failure: unknown,
+  profile: string,
+  phase: ClientFatalPhase,
+  isHandoff: boolean,
+  env: NodeJS.ProcessEnv,
+  cleanupErrors: readonly unknown[],
+): string {
+  return reportSurfaceClientFatal(failure, profile, phase, isHandoff, env, clientFatalPrimaryWithCleanup(failure, cleanupErrors))
+}
+
 /** Strip control characters, known credential carriers, URLs and absolute paths; bound the length. */
 export function sanitizeSurfaceText(text: string): string {
   let out = text
     .replace(/\b(Authorization|Cookie|Set-Cookie)\s*:\s*[^\r\n]*/giu, '$1: <redacted>')
     .replace(/([?&](?:token|access_token|cookie)=)[^&#\s]+/giu, '$1<redacted>')
-    // Quoted values must consume the whole literal; otherwise the closing
-    // quote would leave the secret visible in the terminal line.
-    .replace(/\b(token|access_token|password)\s*=\s*(?:"[^"]*"|'[^']*'|[^\s&;,]+)/giu, '$1=<redacted>')
+    // Quoted values must consume the whole literal, including JSON-escaped
+    // quotes; otherwise the closing quote/space leaves the secret visible.
+    .replace(/\b(token|access_token|password)\s*=\s*(?:\\?"(?:\\.|[^"\\])*\\?"|\\?'(?:\\.|[^'\\])*\\?'|[^\s&;,]+)/giu, '$1=<redacted>')
   out = out.replace(/[\u0000-\u001f\u007f]/gu, ' ')
   out = out.replace(/[a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^\s'"]+/gu, '<url>')
   out = out.replace(/(?:\/[\w.@+-]+){2,}\/?/gu, '<path>')
