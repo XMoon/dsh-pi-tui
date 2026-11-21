@@ -334,6 +334,14 @@ export async function runOfficialWebComposition(context) {
         `PA-02 the Web-only Host service "${service}" is not published by the enabled Host`)
     }
     const webEntriesById = new Map(webReady.entries.map(entry => [entry.id, entry]))
+    // PA-02: the SAME live Host status must expose every declared Web row as
+    // ACTIVE after the enabled composition, not just the core safety subset.
+    // A PENDING/absent non-core row is a real composition failure.
+    for (const row of declaredRows) {
+      const state = webEntriesById.get(row.id)?.state
+      assert(state === 'active',
+        `PA-02 the qualified Host did not activate the declared Web row "${row.id}" (state ${String(state ?? 'missing')})`)
+    }
     for (const id of [
       PR_A_WEB_RUNTIME_ID, 'modules', 'client-hmr', 'cordis-client-runner', 'terminal-controller',
       'message-feedback', 'open-in-app', 'session-reference', 'plugin-inventory',
