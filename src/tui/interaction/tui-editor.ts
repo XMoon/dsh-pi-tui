@@ -231,6 +231,11 @@ export class TuiEditor extends Editor {
     readonly cursor: { readonly line: number; readonly col: number }
     readonly mode: EditorInputMode
   } | undefined
+  /** Number of synchronously scheduled onChange calls that belong to the
+   *  CURRENT recall application (a mode change + the row setText). It is not a
+   *  time window: the next real edit in the same stdin chunk/JS turn must see
+   *  zero and invalidate the host bookmark. */
+  private historyRecallChangesRemaining = 0
 
   constructor(tui: TUI, theme: EditorTheme, options: TuiEditorOptions = {}) {
     // paddingX: 2 reserves the left two cells for the mode prompt painted
@@ -256,6 +261,11 @@ export class TuiEditor extends Editor {
     // recalled as `!!pwd` must never come back as `❯ pwd`).
     this.onRecall = (entry) => {
       const { mode, text } = editorModeFromHistoryEntry(entry)
+      // The mode change (when it changes) and the row setText each fire ONE
+      // synchronous onChange. Count exactly those, then the next change is a
+      // real edit — no microtask/JS-turn window that could swallow input
+      // arriving later in the same stdin chunk.
+      this.historyRecallChangesRemaining = this.inputMode === mode ? 1 : 2
       this.setInputMode(mode)
       return text
     }
@@ -269,10 +279,21 @@ export class TuiEditor extends Editor {
     }
     this.onHistoryDraftRestore = (state) => {
       this.historyBrowseDraft = undefined
+      this.historyRecallChangesRemaining = 0
       if (state === 'prompt' || state === 'shell-context' || state === 'shell-local') {
         this.setInputMode(state)
       }
     }
+  }
+
+  /** Consume ONE onChange caused by the current recall application. Returns
+   *  false for the first change after it (a real edit/programmatic mutation),
+   *  so the host can drop the browse bookmark immediately — including a key
+   *  delivered synchronously later in the SAME stdin chunk. */
+  consumeHistoryRecallChange(): boolean {
+    if (this.historyRecallChangesRemaining <= 0) return false
+    this.historyRecallChangesRemaining -= 1
+    return true
   }
 
   /** The current input mode (read-only for the host). */
@@ -288,17 +309,21 @@ export class TuiEditor extends Editor {
    * The caller replaces the history list and restores this snapshot itself, so
    * an asynchronous recall reseed can never lose a non-empty draft.
    */
-  takeHistoryBrowseDraft(entries: readonly string[]): {
+  takeHistoryBrowseDraft(): {
     readonly text: string
     readonly cursor: { readonly line: number; readonly col: number }
     readonly mode: EditorInputMode
   } | undefined {
     const draft = this.historyBrowseDraft
     this.historyBrowseDraft = undefined
-    if (draft === undefined) return undefined
-    const current = this.getText()
-    const stillBrowsing = entries.some(entry => editorModeFromHistoryEntry(entry).text === current)
-    return stillBrowsing ? draft : undefined
+    this.historyRecallChangesRemaining = 0
+    return draft
+  }
+
+  /** A real document mutation exits the base editor's browse; erase the host
+   *  bookmark so a later cold seed can never restore a stale draft. */
+  clearHistoryBrowseDraft(): void {
+    this.historyBrowseDraft = undefined
   }
 
   /**

@@ -2955,7 +2955,7 @@ async function submitThroughEditor(app: TuiApp, vt: VirtualTerminal, text: strin
   await vt.waitForRender()
 }
 
-test('R11 PiTui: the cold cross-cwd session seed drives real ↑/↓ recall', async (t) => {
+test('the cold cross-cwd session seed drives real PiTui ↑/↓ recall', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('pi-tui-app-cross-cwd-')
   // The same Session in two cwd files; the OTHER cwd row is newer.
@@ -2984,7 +2984,7 @@ test('R11 PiTui: the cold cross-cwd session seed drives real ↑/↓ recall', as
   app.stop()
 })
 
-test('RFL-005 PiTui: an async recall reseed restores the non-empty draft abandoned to ↑ browse', async () => {
+test('an async recall reseed restores the PiTui draft abandoned to ↑ browse', async () => {
   const { vt, app } = startApp()
   app.resetInputHistory(['old row'])
   app.setDraft('my draft')
@@ -3000,6 +3000,73 @@ test('RFL-005 PiTui: an async recall reseed restores the non-empty draft abandon
   await vt.waitForRender()
   assert.equal(app.getDraft(), 'my draft', 'the async reseed restores the abandoned draft')
   assert.deepEqual(app.getInputHistory(), ['new row'], 'and commits the new projection')
+  app.stop()
+})
+
+test('a PiTui edit that happens to equal another history row is never overwritten by a reseed', async () => {
+  const { vt, app } = startApp()
+  app.resetInputHistory(['abc', 'abcd'])
+  app.setDraft('mine')
+  await vt.waitForRender()
+  vt.sendInput('\x1b[H')
+  await vt.waitForRender()
+  vt.sendInput('\x1b[A')
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), 'abc', 'the browse replaced the draft with the newest row')
+  vt.sendInput('\x1b[F') // End: edit the recalled row itself
+  await vt.waitForRender()
+  vt.sendInput('d')
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), 'abcd', 'the user now owns a real draft that happens to equal an older history row')
+  app.resetInputHistory(['new row'])
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), 'abcd', 'the cold seed keeps the REAL edited draft, never restores the stale bookmark')
+  app.stop()
+})
+
+test('a PiTui prompt draft survives a browse across a shell row and an async reseed', async () => {
+  const { vt, app } = startApp()
+  const editor = (app as unknown as { editor: { getInputMode(): string } }).editor
+  app.resetInputHistory(['!echo shell', 'plain row'])
+  app.setDraft('my prompt')
+  await vt.waitForRender()
+  vt.sendInput('\x1b[H')
+  await vt.waitForRender()
+  vt.sendInput('\x1b[A')
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), '!echo shell', 'the shell row is recalled')
+  assert.equal(editor.getInputMode(), 'shell-context', 'the recalled row switched the real input mode')
+  app.resetInputHistory(['new row'])
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), 'my prompt', 'the original prompt draft is restored')
+  assert.equal(editor.getInputMode(), 'prompt', 'the original prompt mode is restored, not the shell row mode')
+  app.stop()
+})
+
+test('a PiTui edit after a recall in the same turn never leaves a restore bookmark', async () => {
+  const { vt, app } = startApp()
+  app.resetInputHistory(['abc'])
+  app.setDraft('mine')
+  await vt.waitForRender()
+  const editor = (app as unknown as {
+    editor: {
+      setCursor(cursor: { line: number; col: number }): void
+      handleInput(data: string): unknown
+    }
+  }).editor
+  editor.setCursor({ line: 0, col: 0 })
+  // The REAL StdinBuffer splits ONE raw stdin chunk into two synchronous
+  // editor input events: ↑ recalls `abc`, then `d` edits, same JS turn.
+  const { StdinBuffer } = await import('@xmoon76/pi-tui')
+  const buffer = new StdinBuffer({ timeout: 5, escapeTimeout: 5 })
+  buffer.on('data', sequence => editor.handleInput(sequence))
+  buffer.process('\x1b[Ad')
+  buffer.removeAllListeners()
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), 'dabc', 'the same-turn edit is the real draft')
+  app.resetInputHistory(['new row'])
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), 'dabc', 'the cold seed never restores a stale browse bookmark over it')
   app.stop()
 })
 

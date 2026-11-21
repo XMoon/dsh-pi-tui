@@ -396,7 +396,7 @@ test('the Session Browser and the Work Hub consume the arrows before the compose
   assert.deepEqual(h.editor(), { text: 'newest entry', cursor: 0 }, 'and the recall resumes for the composer')
 })
 
-test('RFL-005 TSP: an async recall reseed restores the non-empty draft/caret from an active browse', async (t) => {
+test('an async recall reseed restores the TSP draft/caret from an active browse', async (t) => {
   const h = await mountRecallPane(t)
   h.seed(['old row'])
   await h.key('my draft')
@@ -411,6 +411,42 @@ test('RFL-005 TSP: an async recall reseed restores the non-empty draft/caret fro
     'the same-owner reseed restores the exact abandoned draft and caret')
   await h.quietKey(DOWN)
   assert.deepEqual(h.editor(), { text: 'my draft', cursor: 8 }, 'the browse is closed, not left half-active')
+  await h.dispose()
+})
+
+test('a TSP edit that happens to equal another history row is never overwritten by a reseed', async (t) => {
+  const h = await mountRecallPane(t)
+  h.seed(['abc', 'abcd'])
+  await h.key('mine')
+  await h.key(UP)
+  await h.key(UP)
+  assert.deepEqual(h.editor(), { text: 'abc', cursor: 0 })
+  await h.key('\x1b[F') // End: edit the recalled row itself
+  await h.key('d')
+  assert.deepEqual(h.editor(), { text: 'abcd', cursor: 4 },
+    'the user now owns a real draft that happens to equal an older history row')
+  const mark = h.frameCount()
+  h.seed(['new row'])
+  await h.observeAbsence()
+  assert.deepEqual(h.editor(), { text: 'abcd', cursor: 4 },
+    'the cold seed keeps the REAL edited draft, never restores the stale bookmark')
+  await h.dispose()
+})
+
+test('a TSP browse bookmark restores a multi-line Unicode draft and exact caret', async (t) => {
+  const h = await mountRecallPane(t)
+  h.seed(['old row'])
+  const draft = 'line1\n😀 draft'
+  h.renderer.composer.setDraft(draft)
+  await h.key(UP) // bookmark at the real end caret, move to the previous line
+  await h.key(UP) // move to the first line's start
+  await h.key(UP) // enters the browse
+  assert.deepEqual(h.editor(), { text: 'old row', cursor: 0 })
+  const mark = h.frameCount()
+  h.seed(['new row'])
+  await h.awaitFrame(mark, 'the multiline reseed restored the draft')
+  assert.deepEqual(h.editor(), { text: draft, cursor: 14 },
+    'the multi-line draft and its emoji-contiguous caret are exact')
   await h.dispose()
 })
 

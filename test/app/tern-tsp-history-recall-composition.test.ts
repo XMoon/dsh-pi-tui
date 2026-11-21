@@ -597,7 +597,7 @@ test('the same chain keeps a written occurrence, a policy skip and two identical
   }
 })
 
-test('R05 real writer + kernel: true append order beats the stored submission ts', async (t) => {
+test('the true append order beats the stored submission timestamp across a cold reseed', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('pi-tui-tsp-recall-write-order-')
   const h = await mountChain(life, home)
@@ -636,7 +636,7 @@ test('R05 real writer + kernel: true append order beats the stored submission ts
   }
 })
 
-test('R11 TSP: the cold cross-cwd seed drives the real composer ↑/↓ without a submit', async (t) => {
+test('the cold cross-cwd seed drives the real TSP composer ↑/↓ without a submit', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('pi-tui-tsp-recall-cross-cwd-')
   const h = await mountChain(life, home)

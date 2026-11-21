@@ -59,7 +59,7 @@ import test from 'node:test'
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
 import { mkdirSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { isDeepStrictEqual } from 'node:util'
 import { Context, type Fiber } from '@deepseek-ai/cordis'
@@ -751,6 +751,140 @@ test('the resumed Remote startup keeps input accepted while its hydration read i
     releaseRead()
     releaseHistoryRead()
     FileHistorySearchSource.prototype.readSessionRecall = realHistoryRead
+  }
+})
+
+test('a resumed Remote Session recalls cross-cwd history through the real PiTui runner editor', async (t) => {
+  const life = testLifecycle(t)
+  const mainId = 'm3-4-r11-cross-cwd-pitui'
+  const presetId = 'm3-4-r11-cross-cwd-preset'
+  const host = await mountRemotePresentationHost(life, presetId)
+  await host.harness.create(SessionId(mainId), undefined, { cwd: host.anchorDir })
+  const currentFile = historyFilePath(host.workRoot, host.anchorDir)
+  mkdirSync(dirname(currentFile), { recursive: true })
+  appendHistoryRecord(currentFile, { v: 2, content: 'current cwd row', cwd: host.anchorDir, ts: 10, sessionId: mainId }, undefined)
+  const otherFile = historyFilePath(host.workRoot, '/client-other-cwd')
+  mkdirSync(dirname(otherFile), { recursive: true })
+  appendHistoryRecord(otherFile, { v: 2, content: 'other cwd newest', cwd: '/client-other-cwd', ts: 20, sessionId: mainId }, undefined)
+  appendHistoryRecord(otherFile, { v: 2, content: 'foreign session row', cwd: '/client-other-cwd', ts: 30, sessionId: 'session-foreign' }, undefined)
+  const fixture = await mountRemoteRunner(life, { presetId, resumeSessionId: mainId, host })
+  const editor = fixture.runnerApp() as unknown as {
+    setDraft(text: string): void
+    getDraft(): string
+    getInputHistory(): readonly string[]
+  }
+  try {
+    await waitFor('the cross-cwd cold seed reaches the real runner recall', () =>
+      [...editor.getInputHistory()].includes('other cwd newest'), 10_000)
+    assert.ok(!editor.getInputHistory().includes('foreign session row'),
+      'another Session never leaks into the resumed recall')
+    editor.setDraft('')
+    fixture.vt.sendInput('\x1b[A')
+    await waitFor('the first ↑ recalls the other cwd row', () => editor.getDraft() === 'other cwd newest', 5_000)
+    fixture.vt.sendInput('\x1b[A')
+    await waitFor('the second ↑ recalls the current cwd row', () => editor.getDraft() === 'current cwd row', 5_000)
+  } finally {
+    await fixture.dispose()
+  }
+})
+
+test('a resumed Remote Session recalls cross-cwd history through the real TSP runner composer', async (t) => {
+  const life = testLifecycle(t)
+  const mainId = 'm3-4-r11-cross-cwd-tsp'
+  const presetId = 'm3-4-r11-cross-cwd-tsp-preset'
+  const host = await mountRemotePresentationHost(life, presetId)
+  await host.harness.create(SessionId(mainId), undefined, { cwd: host.anchorDir })
+  const currentFile = historyFilePath(host.workRoot, host.anchorDir)
+  mkdirSync(dirname(currentFile), { recursive: true })
+  appendHistoryRecord(currentFile, { v: 2, content: 'current cwd row', cwd: host.anchorDir, ts: 10, sessionId: mainId }, undefined)
+  const otherFile = historyFilePath(host.workRoot, '/client-other-cwd')
+  mkdirSync(dirname(otherFile), { recursive: true })
+  appendHistoryRecord(otherFile, { v: 2, content: 'other cwd newest', cwd: '/client-other-cwd', ts: 20, sessionId: mainId }, undefined)
+  let recallDone = false
+  const realHistoryRead = FileHistorySearchSource.prototype.readSessionRecall
+  FileHistorySearchSource.prototype.readSessionRecall = async function (
+    this: FileHistorySearchSource, sessionId: string, signal?: AbortSignal,
+  ) {
+    const seed = await realHistoryRead.call(this, sessionId, signal)
+    recallDone = true
+    return seed
+  }
+  life.defer(() => { FileHistorySearchSource.prototype.readSessionRecall = realHistoryRead })
+  const fixture = await mountRemoteRunner(life, { presetId, resumeSessionId: mainId, host, renderer: 'tsp' })
+  const pane = fixture.pane
+  assert.ok(pane, 'the Remote TSP pane must be mounted')
+  const composerText = (): string => {
+    const node = wireNodes({ frames: () => pane.frames() }).find(candidate => candidate.id === 'dock.composer')
+    return typeof node?.p.text === 'string' ? node.p.text : ''
+  }
+  try {
+    await waitFor('the TSP cold seed read settles', () => recallDone, 10_000)
+    pane.input.type('\x1b[A')
+    await waitFor('the first TSP ↑ recalls the other cwd row', () => composerText() === 'other cwd newest', 5_000)
+    pane.input.type('\x1b[A')
+    await waitFor('the second TSP ↑ recalls the current cwd row', () => composerText() === 'current cwd row', 5_000)
+  } finally {
+    FileHistorySearchSource.prototype.readSessionRecall = realHistoryRead
+    await fixture.dispose()
+  }
+})
+
+test('a Remote transport rollover during a held cross-cwd recall read refuses the stale seed', async (t) => {
+  const life = testLifecycle(t)
+  const mainId = 'm3-4-r10-transport-rollover'
+  const presetId = 'm3-4-r10-rollover-preset'
+  const host = await mountRemotePresentationHost(life, presetId)
+  await host.harness.create(SessionId(mainId), undefined, { cwd: host.anchorDir })
+  const otherFile = historyFilePath(host.workRoot, '/rolled-client-cwd')
+  mkdirSync(dirname(otherFile), { recursive: true })
+  appendHistoryRecord(otherFile, {
+    v: 2, content: 'stale cross-cwd seed', cwd: '/rolled-client-cwd', ts: Date.now() + 1000, sessionId: mainId,
+  }, undefined)
+  let readEntered = false
+  let readReturned = false
+  let releaseRead!: () => void
+  const gate = new Promise<void>(resolve => { releaseRead = resolve })
+  let gated = false
+  const realHistoryRead = FileHistorySearchSource.prototype.readSessionRecall
+  FileHistorySearchSource.prototype.readSessionRecall = async function (
+    this: FileHistorySearchSource, sessionId: string, signal?: AbortSignal,
+  ) {
+    if (gated) return realHistoryRead.call(this, sessionId, signal)
+    gated = true
+    const captured = await realHistoryRead.call(this, sessionId, signal)
+    readEntered = true
+    await gate
+    readReturned = true
+    return captured
+  }
+  life.defer(() => { FileHistorySearchSource.prototype.readSessionRecall = realHistoryRead })
+  const fixture = await mountRemoteRunner(life, { presetId, resumeSessionId: mainId, host })
+  const editor = fixture.runnerApp() as unknown as {
+    getInputHistory(): readonly string[]
+    resetInputHistory(entries: readonly string[], owner?: string, writeIds?: readonly (string | undefined)[]): void
+  }
+  const resets: Array<readonly string[]> = []
+  const originalReset = editor.resetInputHistory.bind(editor)
+  editor.resetInputHistory = ((entries, owner, writeIds) => {
+    resets.push([...entries])
+    originalReset(entries, owner, writeIds)
+  }) as typeof editor.resetInputHistory
+  try {
+    await waitFor('the held cross-cwd recall read is entered', () => readEntered, 10_000)
+    const connection = fixture.aggregate.wire.client.connection as unknown as { reconnect(): void }
+    connection.reconnect()
+    releaseRead()
+    await waitFor('the held read returned', () => readReturned, 10_000)
+    // Flush the read→helper→commit/discard continuation before asserting.
+    await new Promise<void>(resolve => setImmediate(resolve))
+    assert.equal(resets.some(entries => entries.includes('stale cross-cwd seed')), false,
+      'the stale seed read under the previous transport generation never reaches the recall commit')
+    assert.equal(editor.getInputHistory().includes('stale cross-cwd seed'), false,
+      'the stale seed is absent from the live recall projection')
+  } finally {
+    releaseRead()
+    FileHistorySearchSource.prototype.readSessionRecall = realHistoryRead
+    await fixture.dispose()
   }
 })
 

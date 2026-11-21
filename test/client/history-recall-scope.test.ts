@@ -301,7 +301,7 @@ test('the snapshot is a defensive copy: a caller cannot mutate the projection', 
 // writer's true append order — never a `ts` guess.
 // ---------------------------------------------------------------------------
 
-test('R05: the cold seed prefix follows the real write order even when stored ts is reversed', () => {
+test('the cold seed prefix follows the real write order when stored ts is reversed', () => {
   const scope = createHistoryRecallScope()
   scope.reset(['anchor'], 'A')
   scope.begin('B')
@@ -316,7 +316,7 @@ test('R05: the cold seed prefix follows the real write order even when stored ts
     'the open scope appends (a last) lead the recall; each row appears exactly once')
 })
 
-test('R06: skip, tokenless write and a later same-text write interleave at their real append positions', () => {
+test('skip, tokenless write and a later same-text write interleave at their real append positions', () => {
   const scope = createHistoryRecallScope()
   scope.reset(['anchor'], 'A')
   scope.begin('B')
@@ -332,7 +332,7 @@ test('R06: skip, tokenless write and a later same-text write interleave at their
     'p stays newest, the written a precedes z, and the skipped a keeps its settlement rank')
 })
 
-test('R07: 150 window writes keep the newest 100 real appends; an evicted early SKIP keeps its boundary', () => {
+test('150 window writes keep the newest 100 real appends with an evicted early skip boundary', () => {
   const scope = createHistoryRecallScope()
   scope.reset(['anchor'], 'A')
   scope.begin('B')
@@ -351,7 +351,7 @@ test('R07: 150 window writes keep the newest 100 real appends; an evicted early 
     'a skip older than the whole 100-write window is outside the recall projection')
 })
 
-test('R13: a forged/reused writeId with different text never cancels the real current append', () => {
+test('a forged or reused writeId with different text never cancels the real current append', () => {
   const scope = createHistoryRecallScope()
   scope.reset(['anchor'], 'A')
   scope.begin('B')

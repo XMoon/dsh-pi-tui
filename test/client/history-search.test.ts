@@ -897,7 +897,7 @@ test('session scope abort resolves an empty page without partial results', async
 // search window, all cwd files, newest 100 by stored ts.
 // ---------------------------------------------------------------------------
 
-test('R01: readSessionRecall returns this Session\'s rows from every cwd, newest first, without dedupe', async (t) => {
+test('the cold session reader returns this Session\'s rows from every cwd, newest first, without dedupe', async (t) => {
   const life = testLifecycle(t)
   const home = tempHome(life)
   writeV2(home, '/ws/a', [
@@ -918,7 +918,7 @@ test('R01: readSessionRecall returns this Session\'s rows from every cwd, newest
   assert.deepEqual(seed.writeIds, ['w-c1', 'w-b1', 'w-a2', 'w-a1'])
 })
 
-test('R02: readSessionRecall keeps non-consecutive repeats and adjacent repeats — it never content-dedupes', async (t) => {
+test('the cold session reader keeps non-consecutive and adjacent repeats — it never content-dedupes', async (t) => {
   const life = testLifecycle(t)
   const home = tempHome(life)
   writeV2(home, '/ws/a', [
@@ -932,7 +932,7 @@ test('R02: readSessionRecall keeps non-consecutive repeats and adjacent repeats 
     'newest first: the cross-file a, then b, then the adjacent a run')
 })
 
-test('R03: readSessionRecall tie-breaks equal ts by file then offset, and puts unknown ts last', async (t) => {
+test('the cold session reader tie-breaks equal ts by file then offset, and puts unknown ts last', async (t) => {
   const life = testLifecycle(t)
   const home = tempHome(life)
   writeV2(home, '/ws/a', [
@@ -949,7 +949,7 @@ test('R03: readSessionRecall tie-breaks equal ts by file then offset, and puts u
   assert.equal(seed.entries.at(-1), 'a unknown', 'the unknown ts sorts after every timed row')
 })
 
-test('R04: readSessionRecall keeps ONLY the globally newest 100 session rows', async (t) => {
+test('the cold session reader keeps only the globally newest 100 session rows', async (t) => {
   const life = testLifecycle(t)
   const home = tempHome(life)
   // 120 rows spread across three cwds; ts is global across them.
@@ -967,7 +967,7 @@ test('R04: readSessionRecall keeps ONLY the globally newest 100 session rows', a
   assert.ok(!seed.entries.includes('row-19'), 'older rows are outside the recall window')
 })
 
-test('R08: readSessionRecall reads old v2 without writeId and new v2 with it; v1/sessionless excluded', async (t) => {
+test('the cold session reader reads old v2 without writeId and new v2 with it; v1/sessionless excluded', async (t) => {
   const life = testLifecycle(t)
   const home = tempHome(life)
   writeV2(home, '/ws/a', [
@@ -980,14 +980,14 @@ test('R08: readSessionRecall reads old v2 without writeId and new v2 with it; v1
   assert.deepEqual(seed.writeIds, ['w-new', undefined], 'old v2 rows legitimately have no writeId')
 })
 
-test('R12a: readSessionRecall treats a missing history directory as empty', async (t) => {
+test('the cold session reader treats a missing history directory as empty', async (t) => {
   const life = testLifecycle(t)
   const home = tempHome(life)
   const seed = await new FileHistorySearchSource({ dshHome: home }).readSessionRecall('ses_a')
   assert.deepEqual(seed, { entries: [], writeIds: [] })
 })
 
-test('R12b: readSessionRecall reports a global enumeration failure instead of pretending empty', async (t) => {
+test('the cold session reader reports a global enumeration failure instead of pretending empty', async (t) => {
   const life = testLifecycle(t)
   const home = tempHome(life)
   // `user-history` is a REGULAR FILE: readdir fails with ENOTDIR, not ENOENT.
@@ -1002,7 +1002,7 @@ test('R12b: readSessionRecall reports a global enumeration failure instead of pr
   assert.equal(diagnostics[0]?.kind, 'session-recall-global-failure')
 })
 
-test('R12c: a per-file read failure is isolated and recorded; other files still seed', async (t) => {
+test('a per-file cold-read failure is isolated and recorded; other files still seed', async (t) => {
   const life = testLifecycle(t)
   const home = tempHome(life)
   writeV2(home, '/ws/a', [{ content: 'good row', ts: 1, sessionId: 'ses_a' }])
@@ -1028,7 +1028,7 @@ test('readSessionRecall honours an abort signal with an AbortError', async (t) =
   )
 })
 
-test('R03b: a legal negative ts still sorts before an unknown ts (both comparators)', async (t) => {
+test('a legal negative ts sorts before an unknown ts in both comparators', async (t) => {
   const life = testLifecycle(t)
   const home = tempHome(life)
   writeV2(home, '/ws/a', [

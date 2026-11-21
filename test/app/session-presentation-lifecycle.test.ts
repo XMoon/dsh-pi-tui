@@ -884,7 +884,7 @@ async function flushDetached(): Promise<void> {
   await new Promise(resolve => setImmediate(resolve))
 }
 
-test('RFL-001 Direct: an owner publication between the read settlement and the commit drops the seed', async () => {
+test('an owner publication between the read settlement and the commit drops the Direct seed', async () => {
   const h = historyFenceHarness('direct')
   const hydrated = h.init('session-a')
   await flushDetached()
@@ -899,7 +899,7 @@ test('RFL-001 Direct: an owner publication between the read settlement and the c
     'the final synchronous fence re-check rejects a seed whose owner changed before the commit')
 })
 
-test('RFL-001 Remote: a transport rollover between the read settlement and the commit drops the seed', async () => {
+test('a transport rollover between the read settlement and the commit drops the Remote seed', async () => {
   const h = historyFenceHarness('remote')
   const hydrated = h.init('s')
   await flushDetached()
@@ -912,7 +912,7 @@ test('RFL-001 Remote: a transport rollover between the read settlement and the c
     'the final transport fence rejects the stale seed')
 })
 
-test('RFL-002: a session replacement aborts the in-flight cold history scan', async () => {
+test('a session replacement aborts the in-flight cold history scan', async () => {
   const h = historyFenceHarness('direct')
   const hydrated = h.init('session-a')
   await flushDetached()
@@ -923,7 +923,7 @@ test('RFL-002: a session replacement aborts the in-flight cold history scan', as
   await flushDetached()
 })
 
-test('R09: a stale Direct cold recall read never overwrites a newer same-id generation', async () => {
+test('a stale Direct cold recall read never overwrites a newer same-id generation', async () => {
   const h = historyFenceHarness('direct')
   const first = h.init('session-a')
   await flushDetached()
@@ -952,7 +952,7 @@ test('R09: a stale Direct cold recall read never overwrites a newer same-id gene
     'the old generation seed never reaches the newer same-id Session')
 })
 
-test('R10: a Remote transport rollover during the cold recall read drops the stale seed, and a later hydrate recovers', async () => {
+test('a Remote transport rollover during the cold recall read drops the stale seed and a later hydrate recovers', async () => {
   const h = historyFenceHarness('remote')
   const first = h.init('s')
   await flushDetached()
@@ -974,7 +974,7 @@ test('R10: a Remote transport rollover during the cold recall read drops the sta
     'a subsequent current hydrate recovers the recall')
 })
 
-test('R12 app: a global cold-read failure warns and falls back to the current cwd session rows', async () => {
+test('a global cold-read failure warns and falls back to the current cwd session rows', async () => {
   const h = historyFenceHarness('direct')
   h.setFallbackRecords([
     { content: 'fallback older', cwd: '/c', ts: 1, sessionId: 'session-a', version: 2 },
