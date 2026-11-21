@@ -63,6 +63,10 @@ import {
   createLocalAcpStatusHandler,
 } from './local-acp-status.ts'
 import {
+  LOCAL_WEB_CONTROL_ROUTE,
+  createLocalWebControlHandler,
+} from './local-web-control-route.ts'
+import {
   assertRecordedHostKernelIdentityCurrent,
   buildHostInstanceRecord,
   cleanupOwnedFiles,
@@ -1043,11 +1047,18 @@ interface HostWebServerService {
   getOrigin(): string
 }
 
+/** The narrow existing Web authority the CLI adapter borrows (never re-owned). */
+interface HostWebAccessService {
+  getStatus(): Promise<PiTuiWebAccessStatus>
+  setEnabled(enabled: boolean): Promise<PiTuiWebAccessStatus>
+  getAuthenticatedUrl(): Promise<{ readonly url: string }>
+}
+
 interface PublishedLocalHost {
   readonly identity: LocalInstanceRecord
   /** Release ALL entry-owned exact routes (identity echo, the read-only
-   *  workspace-object observation and the read-only ACP status observation)
-   *  before the official shutdown runs. */
+   *  workspace-object observation, the read-only ACP status observation and
+   *  the headless Web CLI adapter) before the official shutdown runs. */
   unregisterRoutes(): Promise<void>
 }
 
@@ -1070,6 +1081,13 @@ async function publishLocalHost(
   const webServer = context.get('webServer') as unknown as HostWebServerService | undefined
   if (webServer === undefined || webServer.host !== '127.0.0.1' || webServer.port < 1) {
     throw new Error('local host entry: the official webserver is not a bound loopback listener')
+  }
+  // The SAME Host Web authority the TUI `/web` control uses. A missing service
+  // is a real composition error before Ready; the CLI adapter never creates a
+  // second Web service or falls back to a Direct path.
+  const webAccess = context.get(PI_TUI_WEB_ACCESS_NAMESPACE) as unknown as HostWebAccessService | undefined
+  if (webAccess === undefined) {
+    throw new Error('local host entry: the private piTuiWebAccess Host service is not live')
   }
   const origin = webServer.getOrigin()
   const loopbackPrefix = 'http://127.0.0.1:'
@@ -1111,6 +1129,7 @@ async function publishLocalHost(
   let unregisterIdentity: (() => Promise<void>) | undefined
   let unregisterWorkspaceObject: (() => Promise<void>) | undefined
   let unregisterAcpStatus: (() => Promise<void>) | undefined
+  let unregisterWebControl: (() => Promise<void>) | undefined
   try {
     unregisterIdentity = connection.fetch.register({
       path: '/api/pi-tui.local-host',
@@ -1141,9 +1160,19 @@ async function publishLocalHost(
       requestBody: 'buffered',
       fetch: createLocalAcpStatusHandler(instanceId, acpController),
     })
+    // The headless Web CLI adapter joins the SAME official Owner-only admission
+    // and the SAME publication lifetime. It borrows the existing Web service
+    // and never holds status, tokens or a mutation queue of its own.
+    unregisterWebControl = connection.fetch.register({
+      path: LOCAL_WEB_CONTROL_ROUTE,
+      methods: ['GET', 'POST'],
+      requestBody: 'buffered',
+      fetch: createLocalWebControlHandler(instanceId, webAccess),
+    })
     // Admission runs before the exact routes; this proves every route sits
     // behind the official Connection owner rather than a bare webserver
-    // handler.
+    // handler. The POST probe uses the read-only `url` operation so a broken
+    // fence cannot toggle Web during publication.
     await waitForRefusal(`${origin}/api/pi-tui.local-host`)
     await waitForRefusal(`${origin}${LOCAL_WORKSPACE_OBJECT_ROUTE}`, 10_000, {
       method: 'POST',
@@ -1151,6 +1180,12 @@ async function publishLocalHost(
       body: JSON.stringify({ instanceId, path: scope.profileRealpath }),
     })
     await waitForRefusal(`${origin}${LOCAL_ACP_STATUS_ROUTE}`)
+    await waitForRefusal(`${origin}${LOCAL_WEB_CONTROL_ROUTE}`)
+    await waitForRefusal(`${origin}${LOCAL_WEB_CONTROL_ROUTE}`, 10_000, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ schema: 1, instanceId, op: 'url' }),
+    })
     // The READY commit re-proves BOTH authorities immediately before the
     // registry becomes discoverable: the kernel process identity is still the
     // one this Host captured, and the singleton seat is still held. A replaced
@@ -1166,6 +1201,11 @@ async function publishLocalHost(
       await waitForQualificationBarrier(barrier)
     }
   } catch (error) {
+    try {
+      await unregisterWebControl?.()
+    } catch {
+      // The registry was never committed; cleanup continues below.
+    }
     try {
       await unregisterAcpStatus?.()
     } catch {
@@ -1187,6 +1227,7 @@ async function publishLocalHost(
   return {
     identity,
     async unregisterRoutes(): Promise<void> {
+      await unregisterWebControl?.()
       await unregisterAcpStatus?.()
       await unregisterWorkspaceObject?.()
       await unregisterIdentity?.()
