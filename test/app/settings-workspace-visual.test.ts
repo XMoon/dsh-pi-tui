@@ -10148,6 +10148,8 @@ test('the FR5-B numeric pages stay complete and Exit/Save-reachable across the f
   }
 })
 
+// L5: production-panel VirtualTerminal SGR coverage. The packed Direct smoke
+// P4-08 supplies the separate L6 real-PTY injected-pointer witness.
 test('AltScreen pointer journey edits and resets a persisted extension setting (PR-4)', async () => {
   const registry = new SettingsRegistry(() => {})
   const ownerEntryIds = new Map<string, string>()
@@ -10177,7 +10179,11 @@ test('AltScreen pointer journey edits and resets a persisted extension setting (
       const user = structuredClone(value.user)
       const op = ops[0]!
       if (op.op === 'set') user[op.path[0]!] = op.value
-      else delete user[op.path[0]!]
+      else {
+        const inherited = (value.inherited as Record<string, unknown>)[op.path[0]!]
+        if (inherited === undefined) delete user[op.path[0]!]
+        else user[op.path[0]!] = structuredClone(inherited)
+      }
       value.user = user
       value.effective = { ...value.inherited, ...user }
       value.revision += 1

@@ -779,6 +779,9 @@ test('the SAME Detail paints Host installed/selected and CURRENT Client status s
     plugins: [],
     clientExtensions: () => source,
   })
+  // The real 120-column Settings layout paints a 42-column List pane; the
+  // source-labelled Client signal must be reachable BEFORE opening Detail.
+  assert.match(harness.view(), /Client:act/u, 'the real wide List pane carries the compact Client status')
   harness.vt.sendInput('\r')
   await harness.waitForFrame()
   assert.match(harness.view(), /Host package\s+Installed/u)
@@ -791,5 +794,6 @@ test('the SAME Detail paints Host installed/selected and CURRENT Client status s
   await harness.waitForFrame()
   assert.match(harness.view(), /This Client \.\/tui\s+Error/u)
   assert.match(harness.view(), /Client reason\s+apply failed/u)
+  assert.match(harness.view(), /Client:err/u, 'the real List pane follows the same observation revision')
   assert.match(harness.view(), /Host profile\s+Selected/u, 'a Client error never rewrites the Host selection')
 })

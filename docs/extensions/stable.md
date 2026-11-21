@@ -100,8 +100,12 @@ runtime fact, never the Host value. The Settings UI resolves the package
 through the current Client's exact Fiber → Loader entry → ACTIVE observation,
 reads `effective`/`inherited`/the USER leaf from the official per-package
 Config authority, and writes one revision/generation-checked mutation per
-explicit Confirm. A package-name field in the contribution is deliberately
-absent: the plugin does not choose its own Host namespace.
+explicit Confirm. A `set` choice is verified by the authoritative effective
+value; an `unset`/Reset choice is verified by the effective value returning to
+the inherited value, while a USER leaf kept alive by a sibling override is
+reported truthfully and is not itself a failure. A package-name field in the
+contribution is deliberately absent: the plugin does not choose its own Host
+namespace.
 
 **Stable widget layout.** `input.widget.above` /
 `input.widget.below` contributions are passive, display-only rows. The SAME

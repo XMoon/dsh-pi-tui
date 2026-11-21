@@ -46,6 +46,9 @@ class FakeConfig implements ExtensionConfigsConfig {
   user: unknown = {}
   revision = 4
   generation: object = { host: 1 }
+  /** Simulate a Host/Connection replacement between mutation settle and the
+   *  consumer's final readback. */
+  generationAfterMutation: object | undefined
   readonly mutations: { packageName: string; ops: readonly ExtensionConfigDataOp[]; revision: number }[] = []
   mutation: 'accepted' | 'conflict' | 'rejected' | 'outcome-unconfirmed' = 'accepted'
   readKind: 'ready' | 'stale' | 'unavailable' | 'unreadable' = 'ready'
@@ -76,10 +79,19 @@ class FakeConfig implements ExtensionConfigsConfig {
     }
     const user = structuredClone(this.user) as Record<string, unknown>
     const op = ops[0]!
-    if (op.op === 'set') user[op.path[0]!] = op.value
-    else delete user[op.path[0]!]
+    if (op.op === 'set') {
+      user[op.path[0]!] = op.value
+    } else {
+      // Official ConfigEditor: unset restores the inherited effective value;
+      // a sibling USER override keeps the leaf present, otherwise it deletes.
+      const inherited = (this.inherited as Record<string, unknown>)[op.path[0]!]
+      if (inherited === undefined) delete user[op.path[0]!]
+      else user[op.path[0]!] = structuredClone(inherited)
+    }
     this.user = user
+    this.effective = { ...(this.inherited as Record<string, unknown>), ...user }
     this.revision += 1
+    if (this.generationAfterMutation !== undefined) this.generation = this.generationAfterMutation
     return { kind: 'accepted' }
   }
 }
@@ -163,6 +175,19 @@ test('persisted commit sends exactly ONE CAS mutation and verifies the authorita
   const reset = await commitPersistedSetting(recordValue, owner, 'inherit', config, config.revision, config.generation)
   assert.deepEqual(reset, { outcome: 'verified' })
   assert.deepEqual(config.mutations[1]?.ops, [{ op: 'unset', path: ['label'] }])
+})
+
+test('persisted commit never verifies a second readback from a replaced Host generation', async () => {
+  const config = new FakeConfig()
+  config.generationAfterMutation = { host: 2 }
+  const owner = { packageName: '@r8-pr1-fixture/a', entryId: 'pi-tui-client-a', registrationToken: 3 }
+  assert.deepEqual(
+    await commitPersistedSetting(record(), owner, 'omega', config, 4, config.generation),
+    { outcome: 'indeterminate', reason: 'the Host authority changed before verification; refresh before trying again' },
+  )
+  // The PORT already performed its own generation-checked mutation; this
+  // consumer never retries or attributes the value to the old Host.
+  assert.equal(config.mutations.length, 1)
 })
 
 test('persisted commit refuses stale registration/revision and never retries unconfirmed writes', async () => {

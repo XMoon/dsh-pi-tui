@@ -95,7 +95,9 @@ registration, and an `unset` choice carries no value. `values` and `onChange`
 cannot be combined with `persisted`. The Settings → Extensions row shows the
 Host profile's effective/inherited/USER facts and this Client's runtime value
 separately; saving is one official revision-checked Host mutation and is
-never written to the TUI settings document. The plugin must not put secrets,
+never written to the TUI settings document. `unset` is Reset: it restores the
+inherited effective value, and the USER leaf may remain present when a sibling
+override keeps that USER config alive. The plugin must not put secrets,
 tokens or credentials in that Config `data`.
 
 ## Client-local `./tui` entry

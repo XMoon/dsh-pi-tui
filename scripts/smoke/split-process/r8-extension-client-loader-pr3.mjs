@@ -152,8 +152,12 @@ export async function runClientExtensionLoaderPr3(context) {
       const bProbe = readProbe('b-result.json')
       assert(aProbe.writeA === 'accepted' && aProbe.aAfter?.effective?.label === 'omega',
         `Client A must persist label=omega through its own Remote ConfigPort: ${JSON.stringify(aProbe)}`)
-      assert(bProbe.stale === 'conflict',
-        `Client B must see a stale revision conflict for the same field: ${JSON.stringify(bProbe)}`)
+      // The product Remote Port may classify the same stale fence as a
+      // conflict (revision) or a rejected authority read (generation); both are
+      // a real refusal, never a write. The UI path below must paint the
+      // refusal; the direct probe records which authority fence fired.
+      assert(bProbe.stale === 'conflict' || bProbe.stale === 'rejected',
+        `Client B must refuse the stale same-field write, never accept it: ${JSON.stringify(bProbe)}`)
       assert(bProbe.bWrite === 'accepted' && bProbe.bAfter?.effective?.limit === 11,
         `Client B must refresh and persist its own limit=11: ${JSON.stringify(bProbe)}`)
       assert(aProbe.observations?.[sourceNames.a] === 'active' && aProbe.observations?.[sourceNames.b] === 'active'
@@ -165,8 +169,120 @@ export async function runClientExtensionLoaderPr3(context) {
       assert(rows.find(row => row?.id === extensionConfigRowId(sourceNames.a))?.config?.data?.label === 'omega'
         && rows.find(row => row?.id === extensionConfigRowId(sourceNames.b))?.config?.data?.limit === 11,
       `the official USER patch must hold both independent fields: ${JSON.stringify(patch)}`)
-      await scene.assertHostIdentityKept(host, hostIdentity, 'R8-E PR4 two-Client Config journey')
-      trace('p4.11', { status: 'PASS', a: aProbe, b: bProbe })
+      // P4-11 also requires the actual Settings source→owner→painted
+      // candidate/Confirm path in two real Clients, not only the direct Port
+      // probe above. Start from A=omega/B=11: B stages alpha on A, A commits
+      // alpha, B's still-open alpha Confirm is the visible stale refusal, then
+      // B refreshes and edits its own limit back to 7.
+      const readPatchData = () => {
+        const parsed = parseYaml(readFileSync(profilePatchPath, 'utf8'))
+        const rows = Array.isArray(parsed) ? parsed : []
+        return {
+          a: rows.find(row => row?.id === extensionConfigRowId(sourceNames.a))?.config?.data,
+          b: rows.find(row => row?.id === extensionConfigRowId(sourceNames.b))?.config?.data,
+        }
+      }
+      const waitPatch = async (predicate, label) => {
+        const deadline = Date.now() + 60_000
+        let last
+        while (Date.now() < deadline) {
+          last = readPatchData()
+          if (predicate(last)) return last
+          await new Promise(resolve => setTimeout(resolve, 100))
+        }
+        throw new SplitSmokeAssertionError(`${label}: official USER patch never reached target; last=${JSON.stringify(last)}`)
+      }
+      const openExtensions = async (client, label) => {
+        client.send('/settings\r')
+        await client.waitForScreen('Settings · Categories', `${label} Settings home`, 60_000)
+        client.send('\x1b[F') // End -> Extensions category
+        await client.waitForScreen('> Extensions', `${label} Extensions category`, 30_000)
+        client.send('\r')
+        await client.waitForScreen('R8 A label', `${label} Extensions Rows`, 30_000)
+        // The on-open Config refresh may still be settling; let its repaint
+        // replace the preview before the first painted Choice is opened.
+        await new Promise(resolve => setTimeout(resolve, 2_000))
+      }
+      // B opens A's field first and stages alpha (the current effective is omega).
+      await openExtensions(clientB, 'R8-E PR4 UI Client B')
+      clientB.send('\r') // Detail + native Choice
+      await clientB.waitForScreen('Choose value', 'R8-E PR4 UI Client B choice', 30_000)
+      clientB.send('\x1b[A') // omega -> alpha
+      await clientB.waitForScreen('> alpha', 'R8-E PR4 UI Client B alpha', 30_000)
+      // A opens the same field and commits alpha.
+      await openExtensions(clientA, 'R8-E PR4 UI Client A')
+      clientA.send('\r')
+      await clientA.waitForScreen('Choose value', 'R8-E PR4 UI Client A choice', 30_000)
+      clientA.send('\x1b[A')
+      await clientA.waitForScreen('> alpha', 'R8-E PR4 UI Client A alpha', 30_000)
+      clientA.send('\r')
+      // Setting alpha equal to the inherited label may collapse the whole A
+      // USER row (ConfigEditor deletes a config equal to its inherited object).
+      await waitPatch(patch => patch.a === undefined || patch.a.label === 'alpha',
+        'R8-E PR4 UI Client A persisted alpha')
+      // B's stale Confirm must be visibly refused. Capture the SAME painted
+      // frame that carries the refusal word and its explanation before any
+      // later refresh can legitimately clear it. A first Enter can be consumed
+      // to reveal a scrolled-away candidate on a fresh option paint; if the
+      // Choice is still painted, the second Enter is the real Confirm.
+      clientB.send('\r')
+      await new Promise(resolve => setTimeout(resolve, 300))
+      const afterFirstConfirm = (await clientB.viewport()).join('\n')
+      if (afterFirstConfirm.includes('Choose value') && !afterFirstConfirm.includes('Not saved')) clientB.send('\r')
+      const waitForStaleFrame = async () => {
+        const deadline = Date.now() + 60_000
+        let last = ''
+        while (Date.now() < deadline) {
+          last = (await clientB.viewport()).join('\n')
+          if (last.includes('Not saved')
+            && (last.includes('Host Config changed')
+              || last.includes('Host authority changed')
+              || last.includes('Host Config is not current'))) return last
+          await new Promise(resolve => setTimeout(resolve, 50))
+        }
+        throw new SplitSmokeAssertionError(`B's stale Settings Confirm must paint Not saved + its Host authority reason; last=${JSON.stringify(last)}`)
+      }
+      const staleFrame = await waitForStaleFrame()
+      assert(staleFrame.includes('Not saved'), 'B stale refusal frame lost its word')
+      // B refreshes (Escape to Rows, Tab group switch) and edits its own limit to 7.
+      clientB.send('\x1b')
+      await clientB.waitForScreen('Settings · Extensions [1/2]', 'R8-E PR4 UI Client B Rows', 30_000)
+      // The refusal left B on the last-known stale snapshot; explicit refresh
+      // is the required recovery before B can edit its own field.
+      clientB.send('r')
+      await clientB.waitForScreen('Config Ready', 'R8-E PR4 UI Client B refreshed config', 60_000)
+      clientB.send('\t')
+      await clientB.waitForScreen('R8 B limit', 'R8-E PR4 UI Client B group', 30_000)
+      clientB.send('\r')
+      await clientB.waitForScreen('Choose value', 'R8-E PR4 UI Client B B choice', 30_000)
+      clientB.send('\x1b[A') // eleven -> seven
+      // The persisted numeric options paint as plain 7/11; the Choice heading
+      // already proved the option list is live. One repaint tick is enough.
+      await new Promise(resolve => setTimeout(resolve, 300))
+      clientB.send('\r')
+      // Setting the inherited numeric default (7) may collapse B's entire USER
+      // row, exactly as the direct reset path does; absent means inherited.
+      await waitPatch(patch => patch.b === undefined || patch.b.limit === 7,
+        'R8-E PR4 UI Client B persisted seven')
+      const uiPatch = readPatchData()
+      assert((uiPatch.a === undefined || uiPatch.a.label === 'alpha')
+        && (uiPatch.b === undefined || uiPatch.b.limit === 7),
+      `A/B USER fields must be independent after the two-Client Settings journey: ${JSON.stringify(uiPatch)}`)
+      await scene.assertHostIdentityKept(host, hostIdentity, 'R8-E PR4 two-Client Settings journey')
+      // Return both real Clients to their chat surfaces before the later Footer
+      // assertions read the main screens.
+      const closeSettings = async (client, label) => {
+        for (let attempt = 0; attempt < 10; attempt += 1) {
+          const frame = (await client.viewport()).join('\n')
+          if (!frame.includes('Settings ·')) return
+          client.send('\x1b')
+          await new Promise(resolve => setTimeout(resolve, 200))
+        }
+        throw new SplitSmokeAssertionError(`${label}: Settings stayed open`)
+      }
+      await closeSettings(clientA, 'R8-E PR4 UI Client A close')
+      await closeSettings(clientB, 'R8-E PR4 UI Client B close')
+      trace('p4.11', { status: 'PASS', probe: { a: aProbe, b: bProbe }, ui: uiPatch })
     }
 
     // P3-05/P3-06: the official Plugin Manager disables package A's trusted

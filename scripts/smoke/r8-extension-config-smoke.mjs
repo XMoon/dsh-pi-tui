@@ -586,7 +586,97 @@ async function runDirectTuiQualification({ env, runRoot, stampDir, sentinel }) {
           }
           throw new Error(`${label}: the official USER patch never reached the target value; last=${JSON.stringify(last)}`)
         }
-        send('-l', '/settings')
+        // P4-08: the SAME real PTY gets an SGR pointer-only journey, not just
+        // keyboard navigation. tmux writes the exact SGR press/release bytes
+        // into the production AltScreen; geometry comes from the painted frame.
+        try {
+          const captureLines = () => (tmux(['capture-pane', '-t', session, '-p']).stdout ?? '').split('\n')
+          const clickText = async (text, label, pick = line => line.includes(text)) => {
+            const lines = captureLines()
+            const row = lines.findIndex(pick)
+            if (row < 0) throw new Error(`${label}: no painted row for ${JSON.stringify(text)}; frame=${JSON.stringify(lines.map((line, index) => `${index}:${line}`))}`)
+            const col = Math.max(0, lines[row].indexOf(text))
+            tmux(['send-keys', '-t', session, '-l', `\x1b[<0;${col + 1};${row + 1}M`])
+            await new Promise(resolve => setTimeout(resolve, 80))
+            tmux(['send-keys', '-t', session, '-l', `\x1b[<0;${col + 1};${row + 1}m`])
+            await new Promise(resolve => setTimeout(resolve, 200))
+          }
+          const waitForSettled = async label => {
+            const deadline = Date.now() + 30_000
+            let last = ''
+            while (Date.now() < deadline) {
+              last = (tmux(['capture-pane', '-t', session, '-p']).stdout ?? '')
+              if (last.includes('Change…') && !last.includes('Saving…') && !last.includes('Choose value')) return
+              await new Promise(resolve => setTimeout(resolve, 100))
+            }
+            throw new Error(`${label}: the pointer settlement never returned to browse; last=${JSON.stringify(last.slice(-800))}`)
+          }
+          // Enter Settings from the composer, then use ONLY real SGR pointer
+          // events inside the production AltScreen for category/group/row/action.
+          send('-l', '/settings')
+          await waitForText(['/settings'], 20_000)
+          send('Enter')
+          await waitForText(['Settings · Categories'], 30_000)
+          await clickText('Extensions', 'P4-08 Extensions category', line => line.includes('Extensions') && !line.includes('Settings ·'))
+          await waitForText(['R8 A label'])
+          await clickText('R8 A label', 'P4-08 A row')
+          await clickText('Change…', 'P4-08 Change')
+          await waitForText(['Choose value', 'R8 A label'])
+          // Pointer Reset -> inherited effective value.
+          await clickText('inherit', 'P4-08 inherit', line => line.includes('inherit (Use inherited)'))
+          await clickText('Confirm', 'P4-08 reset Confirm')
+          await waitForPatch(patch => patch.a === undefined || patch.a.label === 'alpha', 'P4-08 reset inherited value')
+          await waitForSettled('P4-08 reset settle')
+          // Pointer set -> omega.
+          await clickText('Change…', 'P4-08 Change again')
+          await waitForText(['Choose value', 'R8 A label'])
+          await clickText('omega', 'P4-08 omega', line => line.includes('omega (Omega)'))
+          await clickText('Confirm', 'P4-08 set Confirm')
+          await waitForPatch(patch => patch.a?.label === 'omega', 'P4-08 set value')
+          await waitForSettled('P4-08 set settle')
+          // Negative: press Confirm for a Reset, resize the real terminal before
+          // release; the stale hit map must not dispatch or change the patch.
+          await clickText('Change…', 'P4-08 Change before stale')
+          await waitForText(['Choose value', 'R8 A label'])
+          await clickText('inherit', 'P4-08 stale inherit', line => line.includes('inherit (Use inherited)'))
+          const staleLines = captureLines()
+          const confirmRow = staleLines.findIndex(line => line.includes('Confirm'))
+          if (confirmRow < 0) throw new Error('P4-08 stale: no painted Confirm')
+          const confirmCol = staleLines[confirmRow].indexOf('Confirm')
+          tmux(['send-keys', '-t', session, '-l', `\x1b[<0;${confirmCol + 1};${confirmRow + 1}M`])
+          await new Promise(resolve => setTimeout(resolve, 100))
+          tmux(['resize-window', '-t', session, '-x', '100', '-y', '30'])
+          await new Promise(resolve => setTimeout(resolve, 100))
+          tmux(['send-keys', '-t', session, '-l', `\x1b[<0;${confirmCol + 1};${confirmRow + 1}m`])
+          await new Promise(resolve => setTimeout(resolve, 500))
+          const afterStale = readUserPatch()
+          if (afterStale.a?.label !== 'omega') throw new Error(`P4-08 stale resize dispatched a write: ${JSON.stringify(afterStale)}`)
+          tmux(['resize-window', '-t', session, '-x', '140', '-y', '42'])
+          await new Promise(resolve => setTimeout(resolve, 300))
+          send('Escape') // cancel the stale gesture's Choice
+          await waitForSettled('P4-08 stale cancel settle')
+          // Finish with a successful pointer Reset so the keyboard P4-10 path
+          // starts from alpha again.
+          await clickText('Change…', 'P4-08 final Change')
+          await waitForText(['Choose value', 'R8 A label'])
+          await clickText('inherit', 'P4-08 final inherit', line => line.includes('inherit (Use inherited)'))
+          await clickText('Confirm', 'P4-08 final Confirm')
+          await waitForPatch(patch => patch.a === undefined || patch.a.label === 'alpha', 'P4-08 final reset')
+          await waitForSettled('P4-08 final settle')
+          // Pointer exit through the painted Back affordance, then close any
+          // remaining Settings levels with Esc (inert on the composer).
+          if (captureLines().some(line => line.includes('Back [Esc]'))) {
+            await clickText('Back [Esc]', 'P4-08 pointer Back')
+          }
+          for (let attempt = 0; attempt < 10; attempt += 1) {
+            const frame = (tmux(['capture-pane', '-t', session, '-p']).stdout ?? '')
+            if (!frame.includes('Settings ·')) break
+            tmux(['send-keys', '-t', session, 'Escape'])
+            await new Promise(resolve => setTimeout(resolve, 200))
+          }
+          check('P4-08', true, 'real PTY SGR pointer journey enters Settings, selects A, confirms Reset/set and refuses a stale resize gesture',
+            JSON.stringify({ reset: 'alpha', set: 'omega', finalReset: 'alpha', stalePatch: afterStale.a }))
+          send('-l', '/settings')
         await waitForText(['/settings'], 20_000)
         send('Enter')
         await waitForText(['Settings · Categories'], 30_000)
@@ -596,7 +686,11 @@ async function runDirectTuiQualification({ env, runRoot, stampDir, sentinel }) {
         await waitForText(['R8 A label'])
         send('Enter') // Detail + native Choice
         await waitForText(['Choose value', 'R8 A label'])
-        send('Down') // alpha -> omega
+        // The pointer journey may have left A reset to the inherited candidate;
+        // navigate from whichever candidate the real frame paints.
+        const choiceFrame = tmux(['capture-pane', '-t', session, '-p']).stdout ?? ''
+        if (choiceFrame.includes('> alpha')) send('Down') // alpha -> omega
+        else if (choiceFrame.includes('> inherit')) send('Up') // inherit -> omega
         await waitForText(['> omega']) // the candidate repaint is a real frame
         send('Enter')
         await waitForPatch(patch => patch.a?.label === 'omega', 'A persisted label')
@@ -621,6 +715,11 @@ async function runDirectTuiQualification({ env, runRoot, stampDir, sentinel }) {
           && bRead?.user?.data?.limit === 11 && bRead?.value?.data?.limit === 11,
         'real Direct TUI edits A and B persisted settings through Settings → Extensions and survives a restart',
         JSON.stringify({ userPatchOk, aUser: aRead?.user, aValue: aRead?.value, bUser: bRead?.user, bValue: bRead?.value }))
+
+      } catch (error) {
+          gate('P4-08', 'FAIL', 'real PTY SGR pointer journey enters Settings, selects A, confirms Reset/set and refuses a stale resize gesture',
+            error instanceof Error ? error.message : String(error))
+        }
       } catch (error) {
         gate('P4-10', 'FAIL', 'real Direct TUI edits A and B persisted settings through Settings → Extensions and survives a restart',
           error instanceof Error ? error.message : String(error))

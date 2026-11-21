@@ -100,6 +100,17 @@ function sameScalar(left: unknown, right: TuiPersistedScalar): boolean {
   return typeof left === typeof right && left === right
 }
 
+/** Equality of two leaf reads, including "both absent". */
+function sameLeafValue(left: FieldRead, right: FieldRead): boolean {
+  if (left.present !== right.present) return false
+  if (!left.present) return true
+  try {
+    return JSON.stringify(left.value) === JSON.stringify(right.value)
+  } catch {
+    return false
+  }
+}
+
 /** Whether the effective leaf differs from the inherited leaf. */
 function differsFromInherited(effective: unknown, inherited: unknown): 'Yes' | 'No' {
   if (effective === undefined && inherited === undefined) return 'No'
@@ -157,9 +168,20 @@ export function readPersistedSetting(
   const effective = readOwnField(read.effective, path)
   const inherited = readOwnField(read.inherited, path)
   const user = readOwnField(read.user, path)
-  const candidateId = user.present
-    ? record.persisted.choices.find(choice => choice.op === 'set' && sameScalar(user.value, choice.value))?.id
-    : record.persisted.choices.find(choice => choice.op === 'unset')?.id
+  const overridden = differsFromInherited(
+    effective.present ? effective.value : undefined,
+    inherited.present ? inherited.value : undefined,
+  )
+  // The official Host `unset` restores the inherited EFFECTIVE value; when a
+  // sibling USER override remains, the USER leaf itself may stay present. The
+  // candidate therefore follows the authoritative effective fact first.
+  const unsetChoice = record.persisted.choices.find(choice => choice.op === 'unset')
+  const candidateId = overridden === 'No' && unsetChoice !== undefined
+    ? unsetChoice.id
+    : record.persisted.choices.find(choice => choice.op === 'set' && sameScalar(effective.value, choice.value))?.id
+      ?? (user.present
+        ? record.persisted.choices.find(choice => choice.op === 'set' && sameScalar(user.value, choice.value))?.id
+        : unsetChoice?.id)
   return {
     mode: 'ready',
     effective: effective.present ? effective.value : undefined,
@@ -169,10 +191,7 @@ export function readPersistedSetting(
     revision: read.revision,
     generation: read.generation,
     ...candidateId === undefined ? {} : { candidateId },
-    overriddenDisplay: differsFromInherited(
-      effective.present ? effective.value : undefined,
-      inherited.present ? inherited.value : undefined,
-    ),
+    overriddenDisplay: overridden,
     runtimeValue: record.currentValue,
   }
 }
@@ -225,14 +244,30 @@ export async function commitPersistedSetting(
   if (readback.kind !== 'ready') {
     return { outcome: 'unverified', reason: readback.reason }
   }
-  const user = readOwnField(readback.user, record.persisted.path)
+  // The Port fences generation through its own mutation and internal readback;
+  // this consumer's FINAL read is a second authority read and must prove the
+  // same Host generation before any leaf can be attributed to this request.
+  if (!Object.is(readback.generation, capturedGeneration)) {
+    return {
+      outcome: 'indeterminate',
+      reason: 'the Host authority changed before verification; refresh before trying again',
+    }
+  }
+  const effective = readOwnField(readback.effective, record.persisted.path)
+  const inherited = readOwnField(readback.inherited, record.persisted.path)
+  // Official ConfigEditor semantics: `unset` restores the inherited EFFECTIVE
+  // value and may keep (or collapse) the USER leaf depending on sibling
+  // overrides. `set` makes the effective leaf the target. USER presence is a
+  // truthful displayed fact, not the success predicate.
   const matches = choice.op === 'unset'
-    ? !user.present
-    : user.present && sameScalar(user.value, choice.value)
+    ? sameLeafValue(effective, inherited)
+    : effective.present && sameScalar(effective.value, choice.value)
   if (!matches) {
     return {
       outcome: 'not-saved',
-      reason: 'the authoritative USER field does not carry the requested value',
+      reason: choice.op === 'unset'
+        ? 'the authoritative effective value does not match the inherited value'
+        : 'the authoritative effective value does not carry the requested value',
     }
   }
   return { outcome: 'verified' }

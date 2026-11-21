@@ -81,6 +81,12 @@ function merge(base: unknown, user: unknown): unknown {
   return merged
 }
 
+function valueAt(root: unknown, path: readonly string[]): unknown {
+  let node: unknown = root
+  for (const key of path) node = plainRecord(node)?.[key]
+  return node
+}
+
 function applyOps(descriptor: Descriptor, ops: readonly { op: 'set' | 'unset'; path: readonly string[]; value?: unknown }[]): void {
   const user = clone(plainRecord(descriptor.user) ?? {}) as Record<string, unknown>
   const base = plainRecord(descriptor.base) ?? {}
@@ -88,9 +94,13 @@ function applyOps(descriptor: Descriptor, ops: readonly { op: 'set' | 'unset'; p
     if (op.op === 'set') {
       setPath(user, op.path, op.value)
     } else {
-      // An official unset removes the USER leaf; the inherited base value
-      // remains visible through `value = merge(base, user)`.
-      deletePath(user, op.path)
+      // Official SettingsForms: an object-leaf unset whose inherited value
+      // exists writes that inherited value; only an absent inherited leaf is
+      // deleted. ConfigEditor then keeps the USER config while any sibling
+      // override remains.
+      const inherited = valueAt(base, op.path)
+      if (inherited === undefined) deletePath(user, op.path)
+      else setPath(user, op.path, inherited)
     }
   }
   descriptor.user = isDeepStrictEqual(user, base) ? {} : user
@@ -320,14 +330,21 @@ test('persisted-setting adapter writes and resets ONE package USER field through
   if (afterB.mode !== 'ready') return
   assert.equal(afterB.effective, 7)
   assert.equal(afterB.userFieldPresent, false)
-  // Reset unsets exactly A's leaf and exposes the inherited value again.
+  // Reset restores the inherited EFFECTIVE value. The official SettingsForms /
+  // ConfigEditor path may keep A's USER leaf (label:'alpha') because the USER
+  // config still differs from base in another field; the reset is verified by
+  // effective == inherited, not by USER absence.
   const reset = await commitPersistedSetting(recordA, ownerA, 'inherit', host.config, afterA.revision, afterA.generation)
   assert.deepEqual(reset, { outcome: 'verified' })
   const afterReset = readPersistedSetting(recordA, A, host.config)
   assert.equal(afterReset.mode, 'ready')
   if (afterReset.mode !== 'ready') return
-  assert.equal(afterReset.userFieldPresent, false)
+  assert.equal(afterReset.userFieldPresent, true)
+  assert.equal(afterReset.user, 'alpha')
   assert.equal(afterReset.effective, 'alpha')
+  assert.equal(afterReset.inherited, 'alpha')
+  assert.equal(afterReset.overriddenDisplay, 'No')
+  assert.equal(afterReset.candidateId, 'inherit')
   // The stale pre-save revision is a definite conflict, never an overwrite.
   const stale = await commitPersistedSetting(recordA, ownerA, 'omega', host.config, openedA.revision, openedA.generation)
   assert.equal(stale.outcome, 'not-saved')

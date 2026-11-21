@@ -166,7 +166,11 @@ async function setupEnvironment(): Promise<Harness> {
       const user = structuredClone(value.user)
       const op = ops[0]!
       if (op.op === 'set') user[op.path[0]!] = op.value
-      else delete user[op.path[0]!]
+      else {
+        const inherited = (value.inherited as Record<string, unknown>)[op.path[0]!]
+        if (inherited === undefined) delete user[op.path[0]!]
+        else user[op.path[0]!] = structuredClone(inherited)
+      }
       value.user = user
       value.effective = { ...value.inherited, ...user }
       value.revision += 1
@@ -927,8 +931,9 @@ test('a persisted extension setting reads Host facts and commits through ONE CAS
     assert.match(h.view(), /Differs from inherited: No/u)
     assert.match(h.view(), /Runtime in this Client: alpha/u)
     await h.key('\u001b[5~')
-    // alpha is the current candidate: one Down selects omega, then ONE Confirm.
-    await h.key('\u001b[B')
+    // The authoritative effective value equals inherited, so the candidate
+    // starts on Reset; one Up selects omega, then ONE Confirm.
+    await h.key('\u001b[A')
     await h.key('\r')
     await h.drain()
     assert.equal(h.extensionConfig.mutations.length, 1, 'exactly ONE Host CAS mutation')

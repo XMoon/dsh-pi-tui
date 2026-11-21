@@ -1070,11 +1070,15 @@ plugin declares a JSON-scalar `path` and a closed choice list; the Settings
 workspace resolves the writable package only through the CURRENT Client's
 exact registration owner → live Loader entry → ACTIVE package observation. An
 author-supplied package name, a prefix guess or a Host-only registration is
-never accepted. A saved choice is ONE CAS mutation plus a fresh USER-leaf
-readback (`set` reads the target scalar; `unset` reads the leaf absent), and
-the independent Client apply step is triggered through the existing mount
-owner reconcile. Runtime-only settings keep their in-process registry writer
-and never touch this sub-domain.
+never accepted. A saved choice is ONE CAS mutation plus a fresh
+same-generation readback: `set` requires the authoritative EFFECTIVE leaf to
+carry the target, and `unset` requires it to equal the inherited leaf. The
+official SettingsForms/ConfigEditor `unset` restores the inherited effective
+value; when a sibling USER override remains, the USER leaf may remain present
+and is displayed truthfully rather than treated as failure. The independent
+Client apply step is triggered through the existing mount owner reconcile.
+Runtime-only settings keep their in-process registry writer and never touch
+this sub-domain.
 
 ### Client-local external `./tui` loading
 

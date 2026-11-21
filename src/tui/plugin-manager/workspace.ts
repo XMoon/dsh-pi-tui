@@ -49,6 +49,7 @@ import {
   formatTuiExtensionCapabilities,
   formatTuiExtensionRegistryCounts,
   serializeTuiExtensionDiagnostics,
+  type CurrentClientPluginStatus,
   type TuiContributionDiagnostic,
   type TuiExtensionDiagnostics,
 } from '../../app/plugin-manager/extension-inventory.ts'
@@ -90,6 +91,19 @@ const FILTER_LABELS: Record<PluginListFilter, string> = {
   installed: 'Installed',
   available: 'Available',
 }
+
+/** Compact source-labelled Client status for the real 30-42-column List pane.
+ *  The full words live in the Detail; the List keeps the host chip and adds
+ *  this second labelled fact only when the actual painted width is safe. */
+const CLIENT_LIST_LABELS: Readonly<Record<CurrentClientPluginStatus, string>> = Object.freeze({
+  ACTIVE: 'act',
+  PENDING: 'pend',
+  ERROR: 'err',
+  RELOAD_REQUIRED: 'reload',
+  UNAVAILABLE: 'unavail',
+  NOT_OPTED_IN: 'not opted',
+  NOT_SELECTED: 'not selected',
+})
 
 /** Surface-local keys (the handler the Action Bar names). */
 const WORKSPACE_KEYS = {
@@ -2915,7 +2929,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     // R8-E PR-4: the second, independently labelled Client signal only when the
     // pane is wide enough; a narrow pane drops this secondary chip (the Detail
     // still carries both facts verbatim).
-    if (card.target === 'bundle' && width >= 96) {
+    if (card.target === 'bundle' && width >= 38) {
       const source = this.clientExtensions()
       if (source !== undefined) {
         const client = classifyCurrentClientPluginStatus(
@@ -2924,7 +2938,8 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
           card.enabled,
           source.observation(),
         )
-        chipText = chipText === '' ? `[Client: ${client.label}]` : `${chipText} · Client: ${client.label}`
+        const compact = CLIENT_LIST_LABELS[client.status]
+        chipText = chipText === '' ? `[Client:${compact}]` : `${chipText} · Client:${compact}`
       }
     }
     let chipWidth = visibleWidth(chipText)
