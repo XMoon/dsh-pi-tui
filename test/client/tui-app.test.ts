@@ -31,7 +31,7 @@ import { createExitIntentFacts } from '../../src/app/bootstrap/exit-facts.ts'
 import { createExitIntentCoordinator } from '../../src/app/bootstrap/exit-intent.ts'
 import { pituiExitChoiceSeam } from '../../src/app/surface/exit-choice-pitui.ts'
 import type { LiveSessionScope, SessionScope } from '../../src/app/session/scope.ts'
-import { Text, stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
+import { Text, getKeybindings, stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
 import { ExtensionLedger } from '../../src/extension/internal/ledger.ts'
 import { SurfaceHost } from '../../src/extension/internal/surface-host.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
@@ -3068,6 +3068,34 @@ test('a PiTui edit after a recall in the same turn never leaves a restore bookma
   await vt.waitForRender()
   assert.equal(app.getDraft(), 'dabc', 'the cold seed never restores a stale browse bookmark over it')
   app.stop()
+})
+
+test('a no-op history-next gesture never creates a PiTui browse bookmark', async () => {
+  const keybindings = getKeybindings()
+  const previousBindings = keybindings.getUserBindings()
+  keybindings.setUserBindings({ ...previousBindings, 'tui.editor.historyNext': 'ctrl+n' })
+  const { vt, app } = startApp()
+  try {
+    app.resetInputHistory(['old row'])
+    app.setDraft('my draft')
+    await vt.waitForRender()
+    const editor = (app as unknown as { editor: { getCursor(): { line: number; col: number } } }).editor
+    vt.sendInput('\x1b[H') // caret at the start
+    await vt.waitForRender()
+    vt.sendInput('\x0e') // configured history-next at the bottom: a real no-op
+    await vt.waitForRender()
+    vt.sendInput('\x1b[C') // move the caret without editing the text
+    await vt.waitForRender()
+    const beforeReseed = { text: app.getDraft(), cursor: editor.getCursor() }
+    assert.notDeepEqual(beforeReseed.cursor, { line: 0, col: 0 }, 'the caret really moved after the no-op browse gesture')
+    app.resetInputHistory(['new row'])
+    await vt.waitForRender()
+    assert.equal(app.getDraft(), beforeReseed.text, 'the no-op gesture never replaces the current draft')
+    assert.deepEqual(editor.getCursor(), beforeReseed.cursor, 'the no-op gesture never restores a stale caret')
+  } finally {
+    app.stop()
+    keybindings.setUserBindings(previousBindings)
+  }
 })
 
 test('the recall scope reconciles written, skipped and pending occurrences in the append order', async () => {

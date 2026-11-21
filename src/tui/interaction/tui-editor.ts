@@ -236,6 +236,15 @@ export class TuiEditor extends Editor {
    *  time window: the next real edit in the same stdin chunk/JS turn must see
    *  zero and invalidate the host bookmark. */
   private historyRecallChangesRemaining = 0
+  /** A candidate captured by the vendored save hook. The fork calls the hook
+   *  even when `historyNext` has no next row (newIndex -2) and never enters
+   *  browse; only a successful `onRecall` below promotes this to the active
+   *  bookmark. A no-op leaves it pending and a reseed must ignore it. */
+  private pendingHistoryBrowseDraft: {
+    readonly text: string
+    readonly cursor: { readonly line: number; readonly col: number }
+    readonly mode: EditorInputMode
+  } | undefined
 
   constructor(tui: TUI, theme: EditorTheme, options: TuiEditorOptions = {}) {
     // paddingX: 2 reserves the left two cells for the mode prompt painted
@@ -260,6 +269,12 @@ export class TuiEditor extends Editor {
     // draft save/restore pair keeps the mode across ↑/↓ browsing (a draft
     // recalled as `!!pwd` must never come back as `❯ pwd`).
     this.onRecall = (entry) => {
+      // A real recall callback is the only proof that a save hook actually
+      // entered history browsing; promote its candidate before decoding.
+      if (this.pendingHistoryBrowseDraft !== undefined) {
+        this.historyBrowseDraft = this.pendingHistoryBrowseDraft
+        this.pendingHistoryBrowseDraft = undefined
+      }
       const { mode, text } = editorModeFromHistoryEntry(entry)
       // The mode change (when it changes) and the row setText each fire ONE
       // synchronous onChange. Count exactly those, then the next change is a
@@ -270,7 +285,9 @@ export class TuiEditor extends Editor {
       return text
     }
     this.onHistoryDraftSave = () => {
-      this.historyBrowseDraft = {
+      // Pending candidate, not an active bookmark: `historyNext` at the
+      // bottom of the history calls this then returns with newIndex === -2.
+      this.pendingHistoryBrowseDraft = {
         text: this.getText(),
         cursor: this.getCursor(),
         mode: this.inputMode,
@@ -279,6 +296,7 @@ export class TuiEditor extends Editor {
     }
     this.onHistoryDraftRestore = (state) => {
       this.historyBrowseDraft = undefined
+      this.pendingHistoryBrowseDraft = undefined
       this.historyRecallChangesRemaining = 0
       if (state === 'prompt' || state === 'shell-context' || state === 'shell-local') {
         this.setInputMode(state)
@@ -316,6 +334,7 @@ export class TuiEditor extends Editor {
   } | undefined {
     const draft = this.historyBrowseDraft
     this.historyBrowseDraft = undefined
+    this.pendingHistoryBrowseDraft = undefined
     this.historyRecallChangesRemaining = 0
     return draft
   }
@@ -324,6 +343,7 @@ export class TuiEditor extends Editor {
    *  bookmark so a later cold seed can never restore a stale draft. */
   clearHistoryBrowseDraft(): void {
     this.historyBrowseDraft = undefined
+    this.pendingHistoryBrowseDraft = undefined
   }
 
   /**
