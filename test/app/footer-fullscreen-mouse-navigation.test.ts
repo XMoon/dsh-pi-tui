@@ -138,6 +138,8 @@ async function startHarness(options: {
   withCommandRegistration?: boolean
   rows?: number
   draft?: string
+  /** Count the production exit callback for pointer/key interaction probes. */
+  onExit?: () => void
   /** An Unstable raw capture that CONSUMES the given chunks (Esc / wheel)
    * before the Host key ladder sees them. */
   rawCapture?: 'esc' | 'wheel'
@@ -269,7 +271,7 @@ async function startHarness(options: {
     } as never)
   }
   surface.start({
-    events: { onSubmit: () => {}, onExit: () => {} },
+    events: { onSubmit: () => {}, onExit: options.onExit ?? (() => {}) },
     workspaceRoot: '/tmp',
     iconStyle: 'emoji',
     displayState: { preset: 'full' },
@@ -736,6 +738,56 @@ test('an armed exit hint leaves earlier Footer Model and Tasks targets clickable
     assert.equal(browserOpened, 1, 'the tasks hit opens the Full Task Center while the hint is armed')
     assert.ok(screen(h.vt).includes('build the project'), 'the real Task Browser painted its row')
     assert.equal(h.app.taskQuickFocusedForTest(), false, 'the click never enters Task Quick')
+  } finally {
+    h.dispose()
+  }
+})
+
+test('a footer press disarms an armed exit confirmation before a second Ctrl+D can confirm', async () => {
+  // A mouse report is fresh input and must keep the old exit-window
+  // semantics: pressing a live Footer target disarms the confirmation, so a
+  // following Ctrl+D within the old 1.5s window can only re-arm — never
+  // confirm from a different input channel.
+  let exits = 0
+  const h = await startHarness({ onExit: () => { exits += 1 } })
+  try {
+    const model = cellOf(h.vt, '[deepseek/deepseek-v4-flash]')
+    assert.ok(model, `the model placement must be painted:\n${screen(h.vt)}`)
+    h.vt.sendInput('\x04')
+    await h.vt.waitForRender()
+    assert.ok(screen(h.vt).includes('Press Ctrl+D again to exit'), 'the exit hint must be armed')
+    press(h.vt, model.x, model.row) // press only; the release comes after the key probe
+    await h.vt.waitForRender()
+    h.vt.sendInput('\x04')
+    await h.vt.waitForRender()
+    assert.equal(exits, 0, 'a mouse press must disarm the old confirmation; Ctrl+D only re-arms')
+    assert.ok(screen(h.vt).includes('Press Ctrl+D again to exit'), 'the second Ctrl+D arms a fresh window')
+    release(h.vt, model.x, model.row)
+    await h.vt.waitForRender()
+    assert.equal(h.loads().length, 0, 'the press retired by the key never opens the picker')
+  } finally {
+    h.dispose()
+  }
+})
+
+test('an armed exit hint never rebases a stale footer press onto a changed composition', async () => {
+  // The exit-clear successor is accepted ONLY for the exact same hit at the
+  // same cells. Replacing the native Footer with a command surface between
+  // paint and press has no model/tasks hits in the successor, so the stale
+  // press stays inert.
+  const h = await startHarness()
+  try {
+    const model = cellOf(h.vt, '[deepseek/deepseek-v4-flash]')
+    assert.ok(model, `the model placement must be painted:\n${screen(h.vt)}`)
+    h.vt.sendInput('\x04')
+    await h.vt.waitForRender()
+    assert.ok(screen(h.vt).includes('Press Ctrl+D again to exit'), 'the exit hint must be armed')
+    h.app.setFooterCommandRows(['command surface'])
+    press(h.vt, model.x, model.row)
+    release(h.vt, model.x, model.row)
+    await h.vt.waitForRender()
+    await h.vt.waitForRender()
+    assert.equal(h.loads().length, 0, 'a stale hit absent from the successor projection never acts')
   } finally {
     h.dispose()
   }

@@ -7153,16 +7153,17 @@ export class TuiApp {
     // did when it was registered first. (Unstable raw captures already ran
     // BEFORE this point and still see every chunk.)
     if (MOUSE_SEQUENCE.test(data) || (data.length === 6 && data.startsWith('\x1b[M'))) {
-      // A pointer request that belongs to a painted Footer navigation target
-      // must reach that target even while the exit confirmation is armed:
-      // clearing the confirmation here synchronously recomposes the Footer
-      // and advances the pending revision, which would consume the otherwise
-      // valid press before `beginFooterPress` can map it. Covered instruction
-      // rows publish no hit, so clicking them still clears and acts on
-      // nothing.
+      // A mouse report is fresh input and always disarms the exit
+      // confirmation (that authority is unchanged). When this press targets
+      // a live Footer hit, the disarm recomposes the Footer synchronously —
+      // rebase the pointer frame only if the SAME fully visible placement
+      // still occupies the SAME cell, so the click resolves against what the
+      // user actually pressed without weakening any stale-frame fence.
       const mouse = mouseChunkKind(data)
-      if (mouse === undefined || !this.pointerBelongsToPaintedFooterNavigation(mouse)) {
-        this.clearExitConfirmation()
+      const wasExitArmed = this.exitConfirmTrigger !== undefined || this.exitConfirmAt !== undefined
+      this.clearExitConfirmation()
+      if (wasExitArmed && mouse !== undefined && !mouse.release && mouse.button === 0) {
+        this.rebasePointerFrameAfterExitClear(mouse)
       }
       return undefined
     }
@@ -15684,31 +15685,39 @@ export class TuiApp {
     }
   }
 
-  /** Whether a mouse report belongs to a live Footer navigation target.
-   * Pressing a painted Model/Tasks hit (or releasing the gesture that began
-   * on one) is a real navigation interaction, not a stray click that should
-   * discard the exit confirmation before the pointer route can resolve it.
-   * The instruction row itself publishes no hit, so a click there still
-   * takes the ordinary fresh-input path. */
-  private pointerBelongsToPaintedFooterNavigation(chunk: {
-    readonly button: number
-    readonly release: boolean
+  /** Rebase the committed Footer pointer frame after a mouse press cleared
+   * the exit confirmation and synchronously recomposed the Footer. The
+   * screen has not repainted yet; a press may therefore resolve against the
+   * successor projection ONLY when the exact same fully visible placement
+   * occupies the exact same cells and the physical height is unchanged.
+   * Every other pending-revision case keeps the ordinary fail-closed fence. */
+  private rebasePointerFrameAfterExitClear(chunk: {
     readonly x: number
     readonly y: number
-  }): boolean {
+  }): void {
     const painted = this.footerPaintedProjection
-    if (painted === undefined) return false
-    if (this.fullscreen !== painted.screen || this.activeScreen !== painted.screen) return false
-    if (this.terminal.columns !== painted.columns || this.terminal.rows !== painted.termRows) return false
-    if (chunk.release) {
-      const pressed = this.footerPressGesture
-      return pressed !== undefined
-        && chunk.y === pressed.row
-        && chunk.x >= pressed.startCol && chunk.x < pressed.endCol
+    const pending = this.footerPendingProjection
+    if (painted === undefined || pending === undefined) return
+    if (pending.revision === painted.revision) return
+    if (pending.subjectKind !== painted.subjectKind) return
+    const successorHeight = pending.projection.text === '' ? 0 : pending.projection.text.split('\n').length
+    if (successorHeight !== painted.height) return
+    const pressed = painted.hits.find(candidate => candidate.row === chunk.y
+      && chunk.x >= candidate.startCol && chunk.x < candidate.endCol)
+    if (pressed === undefined) return
+    const successor = pending.projection.hits.find(candidate =>
+      candidate.id === pressed.id
+      && candidate.placement === pressed.placement
+      && painted.top + candidate.row === pressed.row
+      && candidate.startCol === pressed.startCol
+      && candidate.endCol === pressed.endCol)
+    if (successor === undefined) return
+    this.footerPaintedProjection = {
+      ...painted,
+      revision: pending.revision,
+      subjectKind: pending.subjectKind,
+      hits: pending.projection.hits.map(hit => ({ ...hit, row: painted.top + hit.row })),
     }
-    if (chunk.button !== 0) return false
-    return painted.hits.some(hit => hit.row === chunk.y
-      && chunk.x >= hit.startCol && chunk.x < hit.endCol)
   }
 
   /** PR3: the root Footer box half of a fullscreen press. Returns true when
