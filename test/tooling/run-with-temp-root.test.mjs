@@ -170,6 +170,24 @@ test('the runner preserves a caller anchor for its child and never leaks its own
   assert.equal(clean.stdout, '', 'the runner must not leak its own test fixture anchor into the child')
 })
 
+test('a tool anchor preparation failure exits before starting the child', { skip: process.platform !== 'darwin' ? 'the tool anchor fixture is Darwin-only' : false }, (t) => {
+  const life = testLifecycle(t)
+  const isolatedTmp = life.tempDir('dsh-runner-anchor-fail-')
+  const marker = join(isolatedTmp, 'child-started.txt')
+  const env = {
+    ...process.env,
+    TMPDIR: isolatedTmp,
+    TMP: isolatedTmp,
+    TEMP: isolatedTmp,
+    PROBE_MARKER: marker,
+    DSH_KOFFI_TOOL_ANCHOR_TEST_FAIL: '1',
+  }
+  delete env.SPLIT_PROCESS_DSH_ANCHOR
+  const result = run(['node', '-e', "require('node:fs').writeFileSync(process.env.PROBE_MARKER, 'started')"], { env })
+  assert.notEqual(result.status, 0, 'a preparation failure must fail the wrapper')
+  assert.equal(existsSync(marker), false, 'the child must not start when the tool anchor cannot be prepared')
+})
+
 test('checkout-local TMPDIR and its symlink do not contaminate the command runner', (t) => {
   const life = testLifecycle(t)
   const checkout = realpathSync(fileURLToPath(new URL('../../', import.meta.url)))

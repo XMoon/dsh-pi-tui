@@ -47,7 +47,7 @@ import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { groupStillAlive, stopOwnedGroup } from './lib/owned-process-group.mjs'
 import { createTestTempRoot } from './lib/test-temp-root.mjs'
-import { installDarwinKoffiTestAnchor } from './lib/darwin-koffi-test-anchor.mjs'
+import { activateDarwinKoffiTestAnchor, prepareDarwinKoffiTestAnchor } from './lib/darwin-koffi-test-anchor.mjs'
 
 const ROOT = realpathSync(fileURLToPath(new URL('../', import.meta.url)))
 const usage = 'usage: node scripts/run-with-temp-root.mjs <command> [args...]'
@@ -120,6 +120,7 @@ function main() {
 
   // Keep the runner's temp root outside the checkout, even when its ambient
   // TMPDIR is checkout-local. The chosen path is canonical on macOS too.
+  prepareDarwinKoffiTestAnchor()
   const root = createTestTempRoot(ROOT)
   const keep = process.env.DSH_TEST_KEEP_TMP === '1'
   // POSIX only: the direct child leads its own process group, which is what a
@@ -134,10 +135,10 @@ function main() {
     detached: ownsGroup,
     env: { ...process.env, TMPDIR: root, TMP: root, TEMP: root },
   })
-  // Install the tool-only anchor only AFTER the child inherited its environment:
+  // Activate the tool-only anchor only AFTER the child inherited its environment:
   // a real DSH Direct child must keep its own argv identity and never receive
   // the wrapper's test fixture anchor.
-  installDarwinKoffiTestAnchor()
+  activateDarwinKoffiTestAnchor()
 
   let childResult
   let resolveClosed

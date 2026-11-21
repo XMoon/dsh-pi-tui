@@ -23,17 +23,20 @@ import { fileURLToPath } from 'node:url'
 import { createTestTempRoot } from './test-temp-root.mjs'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
-let installed = false
+let preparedAnchor
 
-/** Install the fixture once per process, only on Darwin and only when the
- * process did not already receive a trusted anchor. */
-export function installDarwinKoffiTestAnchor() {
-  if (installed || process.platform !== 'darwin') return
-  if (process.env.SPLIT_PROCESS_DSH_ANCHOR !== undefined && process.env.SPLIT_PROCESS_DSH_ANCHOR !== '') {
-    installed = true
-    return
+/** Prepare the fixture before the wrapper starts a child: this can fail
+ * (missing devDependency Koffi, unwritable temp store) and must do so before
+ * any detached child exists. The fixture is not activated here; the caller
+ * activates it after the child inherited the caller's real environment. */
+export function prepareDarwinKoffiTestAnchor() {
+  if (preparedAnchor !== undefined || process.platform !== 'darwin') return
+  if (process.env.SPLIT_PROCESS_DSH_ANCHOR !== undefined && process.env.SPLIT_PROCESS_DSH_ANCHOR !== '') return
+  if (process.env.DSH_KOFFI_TOOL_ANCHOR_TEST_FAIL === '1') {
+    throw new Error('test-only koffi tool-anchor preparation failure')
   }
   const root = createTestTempRoot(ROOT)
+  process.once('exit', () => rmSync(root, { recursive: true, force: true }))
   const dshDir = join(root, 'node_modules', '@deepseek-ai', 'dsh')
   const subprocessDir = join(root, 'node_modules', '@deepseek-ai', 'dsh-subprocess-local')
   mkdirSync(dshDir, { recursive: true })
@@ -53,7 +56,11 @@ export function installDarwinKoffiTestAnchor() {
   const platformName = `@koromix/koffi-darwin-${process.arch}`
   const platformRoot = dirname(realpathSync(createRequire(koffiEntry).resolve(`${platformName}/package.json`)))
   cpSync(platformRoot, join(root, 'node_modules', '@koromix', `koffi-darwin-${process.arch}`), { recursive: true, dereference: true })
-  process.env.SPLIT_PROCESS_DSH_ANCHOR = join(dshDir, 'package.json')
-  process.once('exit', () => rmSync(root, { recursive: true, force: true }))
-  installed = true
+  preparedAnchor = join(dshDir, 'package.json')
+}
+
+/** Activate the prepared fixture for the wrapper's OWN process only. The
+ * caller must have spawned its child already and must not pass this value on. */
+export function activateDarwinKoffiTestAnchor() {
+  if (preparedAnchor !== undefined) process.env.SPLIT_PROCESS_DSH_ANCHOR = preparedAnchor
 }
