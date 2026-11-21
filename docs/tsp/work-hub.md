@@ -115,9 +115,9 @@ roster: `Show N past jobs` when active Jobs are visible, `Show N jobs` when none
 are, and `Hide N past jobs` after expansion.
 
 The status subtitle keeps the FULL-roster truth while folded (for example
-`2 running · 1 failed · 2 retained Jobs hidden`). The native Picker exposes its
-subtitle as the header's `pk-title` tooltip rather than a separate painted body
-line; the native `Show N past jobs` label itself states the hidden count. A
+`2 running · 1 failed · 2 retained Jobs hidden`). The Picker subtitle is
+client-presented: its visibility is client-owned and may be tooltip-only,
+while the native `Show N past jobs` label itself states the hidden count. A
 folded failure is still a status fact, never an acknowledgement or an
 "unreviewed" claim. Opening the
 disclosure selects the first real retained Job, and closing it never leaves a

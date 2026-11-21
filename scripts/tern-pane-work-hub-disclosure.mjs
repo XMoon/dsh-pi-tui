@@ -233,6 +233,13 @@ export default async function (h) {
   h.check('clearing the query restores the folded manual state', cleared !== undefined,
     paintedBar(h, cleared ?? h.snapshot()))
 
+  // Ensure a readable row is selected before the wide-pane action assertion:
+  // clearing a query may legitimately leave no selection, and the read action
+  // follows the REAL current selection.
+  if (button(h, h.snapshot(), 'View details') === undefined) {
+    await h.key('ArrowDown')
+    await waitForButton(h, 'View details')
+  }
   // The wide pane keeps the same native action bar.
   await h.resize(1280, 800)
   await h.sleep(400)
