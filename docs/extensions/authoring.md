@@ -100,10 +100,14 @@ CURRENT Client loads it through that Client's EXISTING official Loader:
   fiber; no duplicate registration survives the old one.
 - Code identity is taken from the exact ESM module file the official Loader
   imports, not from a `require` condition, and the process remembers the
-  identity it actually imported across same-PID surface revisions. Changed
-  `./tui` bytes are never hot-imported in the same process: the old code
-  keeps running and the package reports `reload-required`; a Split Client uses
-  `/reload-client`, while Direct requires an explicit application restart.
+  identity it actually imported across same-PID surface revisions, including a
+  failed first apply after a successful import. The official package version
+  is also a currentness input: a version bump makes the old `./tui` code
+  `reload-required` even when a thin entry file is unchanged. Changed `./tui`
+  bytes are never hot-imported in the same process: the old code keeps running
+  and the package reports `reload-required`; a Split Client sees an actionable
+  `/reload-client` notice, while Direct requires an explicit application
+  restart.
 
 A malformed opt-in, missing `./tui` export, missing/wrong Config row, or a
 failed import/apply only costs that package's PiTui Client status. It never

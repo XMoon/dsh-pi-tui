@@ -94,6 +94,8 @@ export interface ClientExtensionMountOwnerOptions {
   readonly parentURL: string
   readonly signal?: AbortSignal
   readonly diag?: Diag
+  /** One actionable user notice when a package first becomes reload-required. */
+  readonly notifyReloadRequired?: (packageName: string, reason: string) => void
 }
 
 /** The narrow lifecycle surface every Direct/Split caller uses. */
@@ -113,6 +115,7 @@ interface MountedEntry {
   readonly configRevision: number
   readonly configValue: unknown
   readonly codeIdentity: string | undefined
+  readonly packageVersion: string | undefined
 }
 
 /** One bounded activation wait over the REAL fiber lifecycle. */
@@ -196,6 +199,25 @@ function processKnownCodeIdentities(loader: Loader): Map<string, string | undefi
   return known
 }
 
+/**
+ * Process-lifetime official package-version memory per Loader. Version is the
+ * authoritative Host package-update fact; an unchanged thin `./tui` entry can
+ * re-export a changed implementation, so entry-file bytes alone are not an
+ * update identity. The map is conservative: a version that cannot be compared
+ * never becomes a false ACTIVE claim.
+ */
+const PROCESS_KNOWN_PACKAGE_VERSIONS = new WeakMap<object, Map<string, string | undefined>>()
+
+function processKnownPackageVersions(loader: Loader): Map<string, string | undefined> {
+  const key = (loader as unknown as Record<symbol, object | undefined>)[symbols.original] ?? loader
+  let known = PROCESS_KNOWN_PACKAGE_VERSIONS.get(key)
+  if (known === undefined) {
+    known = new Map()
+    PROCESS_KNOWN_PACKAGE_VERSIONS.set(key, known)
+  }
+  return known
+}
+
 /** Create the ONE Client-local mount owner. */
 export function createClientExtensionMountOwner(
   options: ClientExtensionMountOwnerOptions,
@@ -208,6 +230,7 @@ export function createClientExtensionMountOwner(
    * so a later re-enable must not claim newer file bytes it cannot load.
    */
   const knownCodeIdentity = processKnownCodeIdentities(loader)
+  const knownPackageVersion = processKnownPackageVersions(loader)
   const observations = new Map<string, ClientExtensionObservation>()
   let reconcileTail: Promise<void> = Promise.resolve()
   let disposed = false
@@ -221,7 +244,11 @@ export function createClientExtensionMountOwner(
   const isCurrent = (epoch: number): boolean => !disposed && epoch === reconciliation && options.signal?.aborted !== true
 
   const setObservation = (observation: ClientExtensionObservation): void => {
+    const previous = observations.get(observation.packageName)
     observations.set(observation.packageName, Object.freeze(observation))
+    if (observation.phase === 'reload-required' && previous?.phase !== 'reload-required') {
+      options.notifyReloadRequired?.(observation.packageName, observation.reason ?? 'reload required')
+    }
   }
 
   /** Capture the live fiber and remove the entry, then await terminal cleanup. */
@@ -339,7 +366,7 @@ export function createClientExtensionMountOwner(
     for (const candidate of outcomes) {
       if (candidate.kind !== 'candidate') continue
       if (!isCurrent(epoch)) return
-      const { packageName, tuiSpecifier, configRowId } = candidate
+      const { packageName, tuiSpecifier, configRowId, packageVersion } = candidate
       const read = config.read(packageName)
       if (read.kind !== 'ready') {
         // A previously ACTIVE entry must not keep rendering/running while the
@@ -369,6 +396,16 @@ export function createClientExtensionMountOwner(
         // A changed file cannot be reloaded in the same PID: Node's ESM cache
         // still serves the old module. Keep the verified old entry and expose
         // the actionable state instead of faking a new version.
+        if (previous.packageVersion !== packageVersion) {
+          setObservation({
+            packageName,
+            phase: 'reload-required',
+            entryId: previous.entryId,
+            ...(previous.codeIdentity === undefined ? {} : { codeIdentity: previous.codeIdentity }),
+            reason: 'the installed package version changed; restart this Client to load the new ./tui code',
+          })
+          continue
+        }
         if (identity === undefined) {
           // A non-file or conditional-export package cannot be byte-verified.
           // Never guess "same": the old entry stays live and the user gets the
@@ -440,6 +477,17 @@ export function createClientExtensionMountOwner(
           continue
         }
       }
+      if (knownPackageVersion.has(packageName)) {
+        const knownVersion = knownPackageVersion.get(packageName)
+        if (knownVersion !== packageVersion) {
+          setObservation({
+            packageName,
+            phase: 'reload-required',
+            reason: 'the installed package version changed; restart this Client to load the new ./tui code',
+          })
+          continue
+        }
+      }
 
       const entryId = clientExtensionEntryId(configRowId)
       if (Object.hasOwn(loader.store, entryId)) {
@@ -452,6 +500,11 @@ export function createClientExtensionMountOwner(
         continue
       }
 
+      // Record the import attempt BEFORE create: Node caches a successfully
+      // imported module even when its Cordis apply later throws, so a later
+      // retry must not claim new disk bytes as ACTIVE.
+      knownCodeIdentity.set(packageName, identity)
+      knownPackageVersion.set(packageName, packageVersion)
       try {
         await (loader.create as (entry: {
           readonly id: string
@@ -481,13 +534,13 @@ export function createClientExtensionMountOwner(
           })
           continue
         }
-        knownCodeIdentity.set(packageName, identity)
         mounted.set(packageName, {
           packageName,
           entryId,
           configRevision: verified.revision,
           configValue: verified.effective,
           codeIdentity: identity,
+          packageVersion,
         })
         setObservation({
           packageName,

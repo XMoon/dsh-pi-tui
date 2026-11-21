@@ -248,6 +248,25 @@ export async function runClientExtensionLoaderPr3(context) {
     }
     await scene.exitC1Client(changedHmrClient.client, 'R8-E client-loader changed-bytes HMR Client')
 
+    // RFL-006: a real connected surface must receive an actionable notice
+    // when changed bytes make the package reload-required. The probe runs
+    // after the physical surface is ready, so the REAL notification seam is
+    // live rather than asserting only the internal observation Map.
+    const noticeClient = await scene.startC1Client('R8-E client-loader reload notice Client', {
+      [SENTINEL_ENV]: sentinel,
+      SPLIT_PROCESS_CLIENT_EXTENSION_LOADER_NOTICE_PROBE: '1',
+      SPLIT_PROCESS_CLIENT_EXTENSION_LOADER_PACKAGES: JSON.stringify({ a: sourceNames.a, b: sourceNames.b }),
+    })
+    const noticeRecord = await noticeClient.client.waitFor(
+      record => record.op === 'client-extension-reload-notice-probe',
+      'client-extension reload notice probe',
+      120_000,
+    )
+    assert(noticeRecord.phaseA === 'reload-required' && noticeRecord.phaseB === 'active',
+      `reload notice probe must observe A reload-required and B active: ${JSON.stringify(noticeRecord)}`)
+    await noticeClient.client.waitForScreen('Client reload required: /reload-client', 'real reload-required notice', 120_000)
+    await scene.exitC1Client(noticeClient.client, 'R8-E client-loader reload notice Client')
+
     // P3-13: one REAL Host accepted Turn is held by the scripted Host model;
     // Client A exits while that Turn is in flight and Client B must observe
     // its normal settlement afterwards. This is Host work, not a Client ACK.

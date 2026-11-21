@@ -3926,6 +3926,11 @@ export function applyRunnerWithRuntime(
           // Node's lookup order already anchors on the profile package table —
           // never a guessed profile path or a second resolver.
           parentURL: import.meta.url,
+          notifyReloadRequired: packageName => {
+            ;(extensionService as unknown as {
+              _advancedUiNotify?: (message: string, options?: { readonly type?: 'info' | 'error' }) => void
+            })._advancedUiNotify?.(`Client reload required: restart this Client to load ${packageName}`, { type: 'error' })
+          },
           signal: lifecycleController.signal,
           diag,
         })

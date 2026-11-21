@@ -148,10 +148,11 @@ function fixtureLookup(packages: readonly FixturePackage[], calls: Array<{ speci
   }
 }
 
-function snapshotOf(packages: readonly FixturePackage[], disabled: ReadonlySet<string> = new Set()): PluginManagerSnapshot {
+function snapshotOf(packages: readonly FixturePackage[], disabled: ReadonlySet<string> = new Set(), versions: ReadonlyMap<string, string> = new Map()): PluginManagerSnapshot {
   return {
     bundles: packages.map(pkg => ({
       name: pkg.name,
+      ...(versions.get(pkg.name) === undefined ? {} : { version: versions.get(pkg.name) }),
       official: false,
       availability: 'profile',
       enabled: !disabled.has(pkg.name),
@@ -188,7 +189,7 @@ interface MountHarness {
 async function mountHarness(
   t: TestContext,
   packages: readonly FixturePackage[],
-  options: { readonly configs?: ReadonlyMap<string, unknown>; readonly baseUrl?: string; readonly root?: string; readonly life?: TestLifecycle } = {},
+  options: { readonly configs?: ReadonlyMap<string, unknown>; readonly baseUrl?: string; readonly root?: string; readonly life?: TestLifecycle; readonly notifyReloadRequired?: (packageName: string, reason: string) => void } = {},
 ): Promise<MountHarness> {
   const life = options.life ?? testLifecycle(t)
   const root = options.root ?? life.tempDir('dsh-r8-pr3-mount-')
@@ -224,6 +225,7 @@ async function mountHarness(
     pluginPackages: fixtureLookup(packages),
     config,
     parentURL: baseUrl,
+    ...(options.notifyReloadRequired === undefined ? {} : { notifyReloadRequired: options.notifyReloadRequired }),
   })
   life.defer(() => owner.dispose().catch(() => {}))
   return {
@@ -536,4 +538,85 @@ test('a previously active package loses its Fiber when its Config becomes unavai
   assert.ok(reEntry !== undefined)
   assert.notEqual(fiberOf(harness.loader, reEntry).uid, aFiberUid)
   assert.ok(harness.serviceLedgerIds('chrome.footer.status').includes('a-footer'))
+})
+
+function failingThenContributingTui(label: string): string {
+  return `import { appendFileSync, readFileSync } from 'node:fs'
+
+const sentinel = process.env.${SENTINEL_ENV}
+const faultFile = process.env.R8_EXTENSION_CLIENT_FAULT_FILE
+
+function record(event, extra = {}) {
+  if (sentinel === undefined || sentinel === '') return
+  appendFileSync(sentinel, JSON.stringify({ event, package: '${label}', pid: process.pid, ...extra }) + '\\n')
+}
+
+record('import')
+export const name = '${label}-tui'
+export const inject = ['piTuiExtensions']
+export function apply(ctx) {
+  if (faultFile !== undefined && readFileSync(faultFile, 'utf8') === 'fail') throw new Error('v1 apply fault')
+  record('apply')
+  ctx.piTuiExtensions.register('chrome.footer.status', {
+    id: '${label}-footer',
+    order: 0,
+    description: '${label} footer',
+  }, { spans: [{ text: '${label.toUpperCase()}-LIVE', tone: 'success' }] })
+}
+`
+}
+
+test('a stable thin ./tui entry with a changed implementation and package version becomes reload-required', async (t) => {
+  const { life, root } = await packagePair(t)
+  const stable = writePackage(root, `${FIXTURE_ROOT}/stable-entry`, `export { name, inject, apply } from './implementation.mjs'\n`)
+  writeFileSync(join(stable.dir, 'dist', 'implementation.mjs'), contributingTui('a'))
+  const harness = await mountHarness(t, [stable], { life, root, baseUrl: pathToFileURL(join(root, 'package.json')).href })
+  await harness.owner.reconcile(snapshotOf([stable]))
+  assert.equal(harness.owner.observation().find(entry => entry.packageName === stable.name)?.phase, 'active')
+  writeFileSync(join(stable.dir, 'dist', 'implementation.mjs'), `${contributingTui('a')}\n// implementation v2\n`)
+  await harness.owner.reconcile(snapshotOf([stable], new Set(), new Map([[stable.name, '1.0.1']])))
+  assert.equal(harness.owner.observation().find(entry => entry.packageName === stable.name)?.phase, 'reload-required')
+})
+
+test('a failed first apply leaves a conservative import-attempt identity for a changed entry retry', async (t) => {
+  const { life, root } = await packagePair(t)
+  const failed = writePackage(root, `${FIXTURE_ROOT}/failed-apply`, failingThenContributingTui('a'))
+  const faultFile = join(root, 'fault.txt')
+  writeFileSync(faultFile, 'fail')
+  process.env.R8_EXTENSION_CLIENT_FAULT_FILE = faultFile
+  try {
+    const harness = await mountHarness(t, [failed], { life, root, baseUrl: pathToFileURL(join(root, 'package.json')).href })
+    await harness.owner.reconcile(snapshotOf([failed]))
+    const firstObservation = harness.owner.observation().find(entry => entry.packageName === failed.name)
+    assert.equal(firstObservation?.phase, 'error', JSON.stringify(firstObservation))
+    writeFileSync(faultFile, 'ok')
+    writeFileSync(join(failed.dir, 'dist', 'tui.mjs'), `${failingThenContributingTui('a')}\n// entry v2\n`)
+    await harness.owner.reconcile(snapshotOf([failed]))
+    assert.equal(harness.owner.observation().find(entry => entry.packageName === failed.name)?.phase, 'reload-required')
+  } finally {
+    delete process.env.R8_EXTENSION_CLIENT_FAULT_FILE
+  }
+})
+
+
+test('a reload-required transition emits ONE actionable notice', async (t) => {
+  const { life, root, a } = await packagePair(t)
+  const notices: Array<{ packageName: string; reason: string }> = []
+  const harness = await mountHarness(t, [a], {
+    life,
+    root,
+    baseUrl: pathToFileURL(join(root, 'package.json')).href,
+    notifyReloadRequired: (packageName, reason) => { notices.push({ packageName, reason }) },
+  })
+  await harness.owner.reconcile(snapshotOf([a]))
+  assert.equal(notices.length, 0)
+  writeFileSync(join(a.dir, 'dist', 'tui.mjs'), `${contributingTui('a')}
+// notice v2
+`)
+  await harness.owner.reconcile(snapshotOf([a]))
+  assert.equal(notices.length, 1)
+  assert.equal(notices[0]?.packageName, a.name)
+  assert.match(notices[0]?.reason ?? '', /differ|restart/u)
+  await harness.owner.reconcile(snapshotOf([a]))
+  assert.equal(notices.length, 1)
 })

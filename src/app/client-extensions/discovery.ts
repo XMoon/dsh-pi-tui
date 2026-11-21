@@ -50,6 +50,8 @@ export type CurrentClientExtension =
     readonly packageDir: string
     readonly configRowId: string
     readonly tuiSpecifier: string
+    /** Installed/package version when the Host snapshot exposes it. */
+    readonly packageVersion?: string
   }
   /** The package is selected and installed but has no PiTui opt-in. */
   | { readonly kind: 'not-opted-in'; readonly bundleName: string; readonly packageName: string }
@@ -118,6 +120,11 @@ export function discoverCurrentClientExtensions(
         packageDir: pkg.dir,
         configRowId: discovery.configRowId,
         tuiSpecifier: discovery.tuiSpecifier,
+        ...(bundle.version !== undefined
+          ? { packageVersion: bundle.version }
+          : typeof pkg.manifest.version === 'string'
+            ? { packageVersion: pkg.manifest.version }
+            : {}),
       })
     } else if (discovery.kind === 'invalid-opt-in') {
       outcomes.push({ kind: 'invalid-opt-in', bundleName: bundle.name, packageName: pkg.name, reason: discovery.reason })

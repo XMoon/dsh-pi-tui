@@ -123,3 +123,31 @@ export async function runClientExtensionLoaderProbe(input: {
     bytesKept: process.env.SPLIT_PROCESS_CLIENT_EXTENSION_LOADER_KEEP_BYTES === '1',
   }
 }
+
+/** One qualification-only changed-bytes notification probe, run after the
+ * physical surface is ready so the REAL notification seam is live. */
+export async function runClientExtensionReloadNoticeProbe(input: {
+  readonly pluginManager: PluginManagerPort
+  readonly ui: ClientExtensionProbeUi
+  readonly pluginPackages?: CurrentClientPackageLookup
+  readonly parentURL?: string
+}): Promise<Record<string, unknown>> {
+  const packages = probePackages()
+  if (input.pluginPackages === undefined || input.parentURL === undefined) {
+    throw new Error('client extension notice probe: package lookup was not supplied')
+  }
+  const file = tuiFile(packages.a, input.pluginPackages, input.parentURL)
+  const original = readFileSync(file, 'utf8')
+  if (!original.includes('R8-A-LIVE')) throw new Error('client extension notice probe: fixture A footer marker is missing')
+  writeFileSync(file, original.replace('R8-A-LIVE', 'R8-A-NEW'))
+  try {
+    await input.ui.reconcileClientExtensions(await input.pluginManager.snapshot())
+    return {
+      op: 'client-extension-reload-notice-probe',
+      phaseA: phaseOf(input.ui.clientExtensionObservation(), packages.a),
+      phaseB: phaseOf(input.ui.clientExtensionObservation(), packages.b),
+    }
+  } finally {
+    writeFileSync(file, original)
+  }
+}

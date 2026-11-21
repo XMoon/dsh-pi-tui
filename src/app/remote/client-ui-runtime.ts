@@ -178,6 +178,11 @@ export async function createRemoteClientUiRuntime(
           pluginPackages: options.clientExtensions.pluginPackages,
           config: deps.config.extensionConfigs,
           parentURL: options.clientExtensions.parentURL,
+          notifyReloadRequired: packageName => {
+            ;(extensionService as unknown as {
+              _advancedUiNotify?: (message: string, options?: { readonly type?: 'info' | 'error' }) => void
+            })._advancedUiNotify?.(`Client reload required: /reload-client to load ${packageName}`, { type: 'error' })
+          },
           ...(options.clientExtensions.signal === undefined ? {} : { signal: options.clientExtensions.signal }),
           ...(options.clientExtensions.diag === undefined ? {} : { diag: options.clientExtensions.diag }),
         })

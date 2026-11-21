@@ -973,6 +973,18 @@ async function startSurfaceLocalClient(
     } finally {
       abortReady.cancel()
     }
+    // Qualification-only: drive the REAL notification seam after the surface
+    // is physically ready. Production never sets this env.
+    if (process.env.SPLIT_PROCESS_CLIENT_EXTENSION_LOADER_NOTICE_PROBE === '1'
+      && composition.clientExtensions !== undefined) {
+      const { runClientExtensionReloadNoticeProbe } = await import('./client-extension-loader-probe.ts')
+      composition.onQualification?.(await runClientExtensionReloadNoticeProbe({
+        pluginManager: revision.application.selected.backend.pluginManager,
+        ui: revision.ui,
+        pluginPackages: composition.clientExtensions.pluginPackages,
+        parentURL: composition.clientExtensions.parentURL,
+      }))
+    }
     composition.onQualification?.({ op: 'startup-stage', stage: 'surface-ready', revision: revision.id })
     revision.surfaceMounted = true
     subscribeRevisionStatus(revision)

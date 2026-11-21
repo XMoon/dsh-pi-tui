@@ -252,6 +252,7 @@ test('an enabled opt-in bundle becomes a candidate through its live carrier row'
     packageDir: `/profile/node_modules/${name}`,
     configRowId: extensionConfigRowId(name),
     tuiSpecifier: `${name}/tui`,
+    packageVersion: '1.0.0',
   }])
   assert.deepEqual(calls, [{
     specifier: name,

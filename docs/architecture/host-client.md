@@ -1087,9 +1087,16 @@ through that Client's EXISTING official Cordis Loader. The semantic owner is
   the entry's real Fiber must exist, settle and be ACTIVE.
 - Code identity is the SHA-256 of the exact module file the official Loader's
   ESM resolver will import — never a `require`-condition path or a second
-  resolver. Identity memory is process-lifetime per Loader, so a same-PID
-  surface revision inherits the identity of the module v1 that Node's ESM
-  cache actually holds.
+  resolver. The official package version is a second currentness input: a
+  changed version, or a failed first apply after a successful import, is
+  remembered as an import-attempt identity so a same-PID retry cannot report
+  new disk bytes as ACTIVE. Identity memory is process-lifetime per Loader,
+  so a same-PID surface revision inherits the identity of the module v1 that
+  Node's ESM cache actually holds.
+- A transition to `reload-required` emits one actionable user notice through
+  the existing PiTui notification seam: Split says `/reload-client`; Direct
+  says to restart the Client. This is an advisory, not a Plugin Manager page
+  or a second management surface.
 - Unload captures the real Fiber, removes the entry from the Loader tree
   first, then awaits that Fiber's terminal disposal before the id may be
   reused. A same-PID byte change is never re-imported; the old entry keeps
