@@ -29,7 +29,7 @@ export interface ActionEditorOptions {
   readonly maxRows?: () => number
 }
 
-type ActionEditorMode = 'edit' | 'choose-binding'
+type ActionEditorMode = 'edit' | 'choose-binding' | 'conflict-details'
 
 /** One whole Action Bar wording and, when its LAST segment is the real
  *  `Verb [Esc]` affordance, the UNPAINTED geometry of exactly that segment. */
@@ -210,6 +210,7 @@ export class ActionEditorPanel implements Component {
   private readonly maxRows: () => number
   private mode: ActionEditorMode = 'edit'
   private selectedIndex = 0
+  private conflictScroll = 0
   private recorder: KeyRecorder | undefined
   private pending = false
   /** A settlement whose result has NOT been painted yet. The page keeps the
@@ -289,6 +290,7 @@ export class ActionEditorPanel implements Component {
       return lines
     }
     if (this.mode === 'choose-binding') return this.renderBindingChoice(safeWidth)
+    if (this.mode === 'conflict-details') return this.renderConflictDetails(safeWidth)
 
     const lines: string[] = [
       color.textStrong(this.row.label),
@@ -306,16 +308,6 @@ export class ActionEditorPanel implements Component {
     }
     if (this.row.reserved) lines.push(color.warning('This action is reserved and has no runtime implementation.'))
     if (this.row.fixed) lines.push(color.textDim('This action is fixed by the application and cannot be edited.'))
-    const diagnosticStart = lines.length
-    if (this.row.diagnostics.length > 0) {
-      // A conflict diagnostic names BOTH same-key participants. It is pinned
-      // above the scroll window so a short grant can still read the
-      // counterpart instead of hiding it below the selected shortcut.
-      for (const diagnostic of this.row.diagnostics.slice(0, 2)) {
-        for (const line of wrapTextWithAnsi(diagnostic, safeWidth)) lines.push(color.warning(line))
-      }
-    }
-    const diagnosticCount = lines.length - diagnosticStart
     lines.push('')
 
     const configured = this.row.customized ? this.row.configured : []
@@ -387,7 +379,9 @@ export class ActionEditorPanel implements Component {
         lines.push(color.textDim(truncateToWidth(`Key ${formatKeyId(record.key)}: ${runtimeRecordText(record)}`, safeWidth)))
       }
     }
+    const messageStart = lines.length
     if (this.message !== undefined) lines.push(color.error(truncateToWidth(this.message, safeWidth)))
+    const messageCount = lines.length - messageStart
     if (this.pending) lines.push(color.accent('Saving…'))
     lines.push('')
     const viewport = actionViewport(
@@ -395,7 +389,7 @@ export class ActionEditorPanel implements Component {
       selectableLineIndices[this.selectedIndex],
       this.maxRows(),
       selectableLineIndices,
-      diagnosticCount > 0 ? { start: diagnosticStart, count: diagnosticCount } : undefined,
+      messageCount > 0 ? { start: messageStart, count: messageCount } : undefined,
     )
     this.lastRenderWidth = safeWidth
     this.hasPainted = true
@@ -421,11 +415,13 @@ export class ActionEditorPanel implements Component {
   private actionBar(editableLength: number, width: number): BarWording {
     // A write in flight freezes input: facts only, no Esc affordance.
     if (this.pending) return plainWording('Saving… · one write at a time')
-    // The bar-only and read-only states keep only the real Esc: Back returns to
-    // the bindings list, so the affordance names that exact effect.
+    const conflicts = this.row.diagnostics.length > 0 ? 'c details' : undefined
+    // The bar-only and read-only states keep only the real Esc (plus the
+    // read-only conflict-details entry when present): Back returns to the
+    // bindings list, so the affordance names that exact effect.
     if (this.paintedBodyRows === 0) return escapeWording('', 'Back')
-    if (this.row.fixed || this.row.reserved || this.row.safeMode) return escapeWording('', 'Back')
-    if (!this.row.configurable) return escapeWording('', 'Back')
+    if (this.row.fixed || this.row.reserved || this.row.safeMode) return escapeWording(conflicts ?? '', 'Back')
+    if (!this.row.configurable) return escapeWording(conflicts ?? '', 'Back')
     const selectedBinding = this.selectedIndex < editableLength
     const enter = selectedBinding
       ? this.paintedSelection ? 'Enter edit' : undefined
@@ -439,12 +435,13 @@ export class ActionEditorPanel implements Component {
     const variant = (parts: Array<string | undefined>): BarWording =>
       escapeWording(parts.filter((part): part is string => part !== undefined).join(' · '), 'Back')
     return pickWording([
-      variant([primary, add, remove, 'r reset', 'd disable']),
-      variant([primary, add, 'r reset', 'd disable']),
-      variant([primary, add, 'r reset']),
-      variant([primary, add]),
+      variant([primary, conflicts, add, remove, 'r reset', 'd disable']),
+      variant([primary, conflicts, add, 'r reset', 'd disable']),
+      variant([primary, conflicts, add, 'r reset']),
+      variant([primary, conflicts, add]),
+      variant([primary, conflicts]),
       variant([primary]),
-      escapeWording('r reset · d disable', 'Back'),
+      escapeWording(conflicts ?? 'r reset · d disable', 'Back'),
       escapeWording('', 'Back'),
     ], width, 'Esc back')
   }
@@ -488,6 +485,16 @@ export class ActionEditorPanel implements Component {
     // cleared the message or changed the sub-view would make that frame skip the
     // result entirely. Both windows end at the frame that composes the outcome.
     if (this.pending || this.settlementAwaitingPaint) return
+    if (this.mode === 'conflict-details') {
+      this.handleConflictDetailsInput(data)
+      return
+    }
+    if (commandKey(data, 'c') && this.row.diagnostics.length > 0) {
+      this.mode = 'conflict-details'
+      this.conflictScroll = 0
+      this.requestRender()
+      return
+    }
     if (this.row.safeMode) {
       if (matchesKey(data, 'escape')) {
         this.dispose()
@@ -585,6 +592,13 @@ export class ActionEditorPanel implements Component {
     // surface is frozen (mirror the keyboard guard) — wheel/press/click must not
     // move the selection, start a recorder or leave before the result paints.
     if (this.pending || this.settlementAwaitingPaint) return undefined
+    if (this.mode === 'conflict-details') {
+      if (event.type === 'wheel' && event.wheelDelta) {
+        this.scrollConflictDetails(event.wheelDelta < 0 ? -1 : 1)
+        return { handled: true, render: true }
+      }
+      return undefined
+    }
     const hit = this.hitMap[event.y]
     if (!hit || hit.kind === 'inert') return undefined
 
@@ -651,6 +665,79 @@ export class ActionEditorPanel implements Component {
       this.startRecorder(editable[this.selectedIndex]!.kind, editable[this.selectedIndex])
     }
     return { handled: true }
+  }
+
+  /** The read-only diagnostic reader: every wrapped conflict line is
+   *  reachable with Up/Down/PgUp/PgDn and the only bar action is Back. */
+  private renderConflictDetails(width: number): string[] {
+    const lines: string[] = [
+      color.textStrong(`Conflict details · ${this.row.label}`),
+      '',
+    ]
+    for (const diagnostic of this.row.diagnostics) {
+      for (const line of wrapTextWithAnsi(diagnostic, width)) lines.push(color.warning(line))
+    }
+    const bar = escapeWording('', 'Back')
+    const limit = Math.max(1, this.maxRows())
+    if (limit === 1) {
+      this.hitMap = []
+      this.hasPainted = true
+      this.paintedBodyRows = 0
+      this.paintedSelection = false
+      this.paintedAdd = false
+      this.paintedChoice = false
+      this.selectableKeys = []
+      this.lastRenderWidth = Math.max(1, width)
+      this.paintedEscapeSpanValue = bar.escape
+      return [paintBarWording(bar)]
+    }
+    const bodyLimit = limit - 1
+    const maxStart = Math.max(0, lines.length - bodyLimit)
+    this.conflictScroll = Math.min(Math.max(0, this.conflictScroll), maxStart)
+    const body = lines.slice(this.conflictScroll, this.conflictScroll + bodyLimit)
+    const rendered = [...body, paintBarWording(bar)]
+    this.hitMap = rendered.map(() => ({ kind: 'inert' as const }))
+    this.hasPainted = true
+    this.paintedBodyRows = body.length
+    this.paintedSelection = false
+    this.paintedAdd = false
+    this.paintedChoice = false
+    this.selectableKeys = []
+    this.lastRenderWidth = Math.max(1, width)
+    this.paintedEscapeSpanValue = bar.escape
+    return rendered.map(line => truncateToWidth(line, Math.max(1, width)))
+  }
+
+  private handleConflictDetailsInput(data: string): void {
+    if (matchesKey(data, 'escape')) {
+      this.mode = 'edit'
+      this.conflictScroll = 0
+      this.requestRender()
+      return
+    }
+    if (matchesKey(data, 'up')) {
+      this.scrollConflictDetails(-1)
+      return
+    }
+    if (matchesKey(data, 'down')) {
+      this.scrollConflictDetails(1)
+      return
+    }
+    if (matchesKey(data, 'pageUp')) {
+      this.scrollConflictDetails(-Math.max(1, this.maxRows() - 1))
+      return
+    }
+    if (matchesKey(data, 'pageDown')) {
+      this.scrollConflictDetails(Math.max(1, this.maxRows() - 1))
+    }
+  }
+
+  private scrollConflictDetails(delta: number): void {
+    const lines = 2 + this.row.diagnostics.reduce((total, diagnostic) => total + wrapTextWithAnsi(diagnostic, this.lastRenderWidth || 1).length, 0)
+    const bodyLimit = Math.max(1, this.maxRows() - 1)
+    const maxStart = Math.max(0, lines - bodyLimit)
+    this.conflictScroll = Math.min(maxStart, Math.max(0, this.conflictScroll + delta))
+    this.requestRender()
   }
 
   private renderBindingChoice(width: number): string[] {

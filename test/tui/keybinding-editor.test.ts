@@ -2194,7 +2194,7 @@ test('keybinding editor: a short-grant readonly record detail keeps every field 
   }
 })
 
-test('action editor: a short conflict detail pins both real participants', () => {
+test('action editor: a short conflict detail reaches both real participants through c details', () => {
   const manager = new HostKeybindingManager()
   const parsed = parseUserKeybindings({
     'app.input.submit': 'ctrl+shift+h',
@@ -2212,11 +2212,78 @@ test('action editor: a short conflict detail pins both real participants', () =>
     maxRows: () => 6,
   })
   try {
+    const editFrame = plain(editor.render(60).join('\n'))
+    assert.match(editFrame, /c details/u, 'the short detail bar advertises the read-only conflict reader')
+    editor.handleInput('c')
     const frame = plain(editor.render(60).join('\n'))
     assert.match(frame, /keybinding conflict on Ctrl\+Shift\+H/u)
     assert.match(frame, /app\.input\.submit@user:ctrl\+shift\+h \(editor, user\)/u)
     assert.match(frame, /app\.todo\.toggle@user:ctrl\+shift\+h \(global, user\)/u,
       'the counterpart is readable at a short grant, not hidden below the shortcut row')
+  } finally {
+    editor.dispose()
+    manager.dispose()
+  }
+})
+
+test('action editor: a long conflict diagnostic is scrollable in the read-only reader', () => {
+  const manager = new HostKeybindingManager()
+  const parsed = parseUserKeybindings({
+    'app.input.submit': 'ctrl+shift+h',
+    'app.todo.toggle': 'ctrl+shift+h',
+  })
+  manager.setUserConfiguration(parsed)
+  const model = buildKeybindingEditorModel(manager, parsed)
+  const row = model.rows.find(candidate => candidate.id === 'app.input.submit')!
+  const editor = new ActionEditorPanel({
+    model,
+    action: row,
+    runMutation: () => {},
+    onModelChange: () => {},
+    onBack: () => {},
+    maxRows: () => 4,
+  })
+  try {
+    editor.render(36)
+    editor.handleInput('c')
+    const frames: string[] = []
+    for (let step = 0; step < 12; step += 1) {
+      frames.push(plain(editor.render(36).join('\n')))
+      editor.handleInput('\x1b[6~')
+    }
+    const bodies = frames.map(frame => frame.split('\n').slice(0, -1).join('')).join('\n')
+    assert.match(bodies, /app\.input\.submit@user:ctrl\+shift\+h\s*\(editor, user\)/u)
+    assert.match(bodies, /app\.todo\.toggle@user:ctrl\+shift\+h\s*\(global, user\)/u)
+    for (const frame of frames) assert.match(frame.split('\n').at(-1)!, /Back \[Esc\]/u)
+  } finally {
+    editor.dispose()
+    manager.dispose()
+  }
+})
+
+test('action editor: a failed write result stays painted on a short conflict detail', () => {
+  const manager = new HostKeybindingManager()
+  const parsed = parseUserKeybindings({
+    'app.input.submit': 'ctrl+shift+h',
+    'app.todo.toggle': 'ctrl+shift+h',
+  })
+  manager.setUserConfiguration(parsed)
+  const model = buildKeybindingEditorModel(manager, parsed)
+  const row = model.rows.find(candidate => candidate.id === 'app.input.submit')!
+  const editor = new ActionEditorPanel({
+    model,
+    action: row,
+    runMutation: (_mutation, _onResult, onError) => onError(new Error('save failed')),
+    onModelChange: () => {},
+    onBack: () => {},
+    maxRows: () => 5,
+  })
+  try {
+    editor.render(60)
+    editor.handleInput('r')
+    const frame = plain(editor.render(60).join('\n'))
+    assert.match(frame, /save failed/u, 'the failed result is visible even below a short grant')
+    assert.match(frame, /Back \[Esc\]/u)
   } finally {
     editor.dispose()
     manager.dispose()

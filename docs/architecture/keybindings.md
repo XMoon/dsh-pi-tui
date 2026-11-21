@@ -695,6 +695,11 @@ Repeats and releases do not count, and there is no single-letter Escape
 shortcut. Physical Escape is never available to ordinary actions.
 Context-gated composition affordances are labeled separately from ordinary
 configured bindings (for example, `Down (conditional)` for the task browser).
+A conflicted Action's detail advertises `c details`: it opens a same-page
+read-only reader that wraps and scrolls the full conflict diagnostic (both
+participants, scopes and sources), so a short grant can still read the whole
+record without giving the read-only text an edit route. Write results stay
+pinned in the detail frame until they have actually painted.
 
 `/settings` contains one `Keyboard shortcuts` launcher whose submenu uses the
 same controller and editor component. The ordinary launcher and bare

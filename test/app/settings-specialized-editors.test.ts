@@ -733,8 +733,6 @@ test('/keybindings conflicts enters the SAME lease in its Conflicts view and rep
   const callsBefore = fixture.calls.length
   await press(h.vt, '\r') // Submit draft detail (the first affected action)
   assert.match(h.view(), /Action ID: app\.input\.submit/u)
-  assert.match(h.view(), /app\.todo\.toggle/u,
-    'the detail keeps the other runtime conflict participant readable')
   await press(h.vt, 'r') // reset this action's shortcut
   await flushOwnedTurns()
   await frames(h.vt, 2)
