@@ -129,8 +129,9 @@ export function directPromptAnswerVisible(pane) {
 
 /**
  * Read the CURRENT composer text and the Slash-completion popup painted below
- * it. The popup is the editor's own SelectList (`→ /name` rows, or
- * `No matching commands`), not a SettingsList overlay.
+ * it. The popup is the editor's own SelectList; its LABEL is the bare command
+ * name (`→ new  …`, never `→ /new …`), or `No matching commands`. It is not a
+ * SettingsList overlay.
  */
 export function slashCompletionSnapshot(pane) {
   const text = stripTerminalControl(pane)
@@ -167,8 +168,11 @@ export function slashCompletionSnapshot(pane) {
   let noMatches = false
   for (let index = start; index < lines.length; index += 1) {
     const line = lines[index]
-    // The dropdown rows are prefixed by `→ ` (selected) or two spaces.
-    const candidate = /^\s*(?:→|›|>)?\s*(\/[A-Za-z][A-Za-z0-9_-]*)(?=\s|$)/u.exec(line)
+    // The vendored SelectList renders the selected row as `→ <label>` and an
+    // unselected row as `  <label>`; the label is the bare command name.
+    const selected = /^\s*→\s+([A-Za-z][A-Za-z0-9_-]*)(?=\s|$)/u.exec(line)
+    const unselected = /^\s{2,}([A-Za-z][A-Za-z0-9_-]*)(?=\s{2,}|$)/u.exec(line)
+    const candidate = selected ?? unselected
     if (candidate !== null) {
       candidates.push(candidate[1])
       popupVisible = true
@@ -871,7 +875,7 @@ export async function smokeOfficialPresetMounts(
         await waitUntil(`official preset ${presetId} /new completion`, TIMEOUTS.command, () => {
           if (!tmux.hasSession()) return false
           const snapshot = slashCompletionSnapshot(tmux.capturePane())
-          return snapshot.composerInput === '/new' && snapshot.candidates.includes('/new')
+          return snapshot.composerInput === '/new' && snapshot.candidates.includes('new')
         }, 'COMPAT_BOOT_FAILURE')
       } catch (error) {
         if (!(error instanceof CompatFailure)) throw error
@@ -893,7 +897,7 @@ export async function smokeOfficialPresetMounts(
         if (shouldHaveGoal) {
           await waitUntil(`official preset ${presetId} /goal completion`, TIMEOUTS.command, () => {
             if (!tmux.hasSession()) return false
-            return slashCompletionSnapshot(tmux.capturePane()).candidates.includes('/goal')
+            return slashCompletionSnapshot(tmux.capturePane()).candidates.includes('goal')
           }, 'COMPAT_BOOT_FAILURE')
         } else {
           // A bounded observation is enough ONLY because the SAME session's
@@ -909,7 +913,7 @@ export async function smokeOfficialPresetMounts(
       if (goalSnapshot.composerInput !== '/goal') {
         fail('COMPAT_BOOT_FAILURE', `official preset ${presetId} lost the current /goal draft\n${officialPresetCatalogDiagnostic(presetId, tuiLog, tmux)}`)
       }
-      if (goalSnapshot.candidates.includes('/goal') !== shouldHaveGoal) {
+      if (goalSnapshot.candidates.includes('goal') !== shouldHaveGoal) {
         fail('COMPAT_BOOT_FAILURE', `official preset ${presetId} /goal completion mismatch (expected ${String(shouldHaveGoal)}): ${JSON.stringify(goalSnapshot)}`)
       }
       if (!shouldHaveGoal && goalSnapshot.popupVisible && !goalSnapshot.noMatches && goalSnapshot.candidates.length > 0) {

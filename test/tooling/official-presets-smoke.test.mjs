@@ -4,6 +4,7 @@ import test from 'node:test'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
+import { SelectList } from '@xmoon76/pi-tui'
 import { CompatFailure, writeHeaderProbePackage } from '../../scripts/lib/dsh-smoke-harness.mjs'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
 import {
@@ -213,13 +214,13 @@ test('official preset slash completion snapshots read the live composer popup ra
     '────────',
     '❯ /goal',
     '────────',
-    '  → /goal  Set the session goal',
-    '    /goalx something else',
+    '  → goal  Set the session goal',
+    '    goalx  something else',
   ].join('\n')
   assert.deepEqual(slashCompletionSnapshot(goalPane), {
     composerInput: '/goal',
     popupVisible: true,
-    candidates: ['/goal', '/goalx'],
+    candidates: ['goal', 'goalx'],
     noMatches: false,
   })
 
@@ -259,6 +260,29 @@ test('official preset slash completion snapshots read the live composer popup ra
     composerInput: undefined,
     popupVisible: false,
     candidates: [],
+    noMatches: false,
+  })
+
+  // The fixture above is not hand-painted: the REAL vendored SelectList is the
+  // component that paints the popup. Its label is the bare command name.
+  const identity = (text) => text
+  const list = new SelectList([
+    { value: 'new', label: 'new', description: 'Start a new session' },
+    { value: 'goal', label: 'goal', description: 'Set the session goal' },
+  ], 5, {
+    selectedPrefix: identity,
+    selectedText: identity,
+    description: identity,
+    scrollInfo: identity,
+    noMatch: identity,
+  })
+  const realRows = list.render(80)
+  assert.equal(realRows[0]?.includes('→ new'), true, `the selected row is the real paint (${JSON.stringify(realRows)})`)
+  const realPane = ['────────', '❯ /goal', '────────', ...realRows].join('\n')
+  assert.deepEqual(slashCompletionSnapshot(realPane), {
+    composerInput: '/goal',
+    popupVisible: true,
+    candidates: ['new', 'goal'],
     noMatches: false,
   })
 })
@@ -558,11 +582,11 @@ test('a successful mocked preset matrix creates no failure artifact', async (t) 
     let statusText
     const popupRows = () => {
       if (!line.startsWith('/')) return []
-      if (line === '/new') return ['  → /new  Start a new session']
+      if (line === '/new') return ['  → new  Start a new session']
       if (line === '/goal') {
         return presetId === 'minimal'
           ? ['    No matching commands']
-          : ['  → /goal  Set the session goal']
+          : ['  → goal  Set the session goal']
       }
       return ['    No matching commands']
     }
