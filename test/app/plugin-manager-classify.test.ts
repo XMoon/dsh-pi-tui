@@ -1139,6 +1139,45 @@ test('the Host default-listing decision is preserved as a explained fact', () =>
   assert.equal(cardByName(model, 'hidden-by-default')!.listedByDefault, false)
 })
 
+test('one bundle Detail states Host installed/selected AND the CURRENT Client status independently (PR-4)', () => {
+  const model = buildPluginManagerModel(snapshot([bundle({ name: '@r8/a', enabled: true, installed: true })], []), new Map())
+  const card = cardByName(model, '@r8/a')!
+  const active = buildPluginDetailView(card, [], [{ packageName: '@r8/a', phase: 'active', entryId: 'client-a', configRevision: 2 }])
+  const activeFacts = active.groups.flatMap(group => group.facts)
+  assert.equal(activeFacts.find(entry => entry.label === 'Host package')?.value, 'Installed')
+  assert.equal(activeFacts.find(entry => entry.label === 'Host profile')?.value, 'Selected')
+  assert.equal(activeFacts.find(entry => entry.label === 'This Client ./tui')?.value, 'Active')
+
+  const error = buildPluginDetailView(card, [], [{ packageName: '@r8/a', phase: 'error', entryId: 'client-a', reason: 'apply failed' }])
+  const errorFacts = error.groups.flatMap(group => group.facts)
+  assert.equal(errorFacts.find(entry => entry.label === 'This Client ./tui')?.value, 'Error')
+  assert.equal(errorFacts.find(entry => entry.label === 'Client reason')?.value, 'apply failed')
+  assert.equal(errorFacts.find(entry => entry.label === 'Host profile')?.value, 'Selected', 'a Client error never rewrites the Host selection')
+
+  const plain = buildPluginManagerModel(snapshot([bundle({ name: '@r8/plain', enabled: true, installed: true })], []), new Map())
+  const plainCard = cardByName(plain, '@r8/plain')!
+  // A successful discovery's explicit not-opted-in phase is the ONLY source of
+  // the negative "Not opted in" statement.
+  const notOptedIn = buildPluginDetailView(plainCard, [], [{ packageName: '@r8/plain', phase: 'not-opted-in' }])
+  const notOptedInFacts = notOptedIn.groups.flatMap(group => group.facts)
+  assert.equal(notOptedInFacts.find(entry => entry.label === 'This Client ./tui')?.value, 'Not opted in')
+  assert.equal(notOptedInFacts.some(entry => entry.label === 'Client reason'), false)
+  // No observation is a missing Client authority fact, not a negative opt-in.
+  // This is the real initial-inventory-read-failed shape: Host selected, Client
+  // source present and empty.
+  const unobserved = buildPluginDetailView(plainCard, [], [])
+  const unobservedFacts = unobserved.groups.flatMap(group => group.facts)
+  assert.equal(unobservedFacts.find(entry => entry.label === 'This Client ./tui')?.value, 'Unavailable')
+  assert.equal(unobservedFacts.find(entry => entry.label === 'Client reason')?.value,
+    'the CURRENT Client has not observed this package yet')
+  assert.equal(unobservedFacts.find(entry => entry.label === 'Host profile')?.value, 'Selected')
+
+  // Without a Client observation source the same Detail paints no invented
+  // Client facts at all.
+  const noSource = buildPluginDetailView(card)
+  assert.equal(noSource.groups.flatMap(group => group.facts).some(entry => entry.label === 'This Client ./tui'), false)
+})
+
 test('the Status group names the profile selection for a bundle and effective enablement for an entry', () => {
   // The SAME Host `enabled` boolean means "profile selection" for a bundle…
   const bundleModel = buildPluginManagerModel(snapshot([bundle({ name: 'selected', enabled: true })], []), new Map())

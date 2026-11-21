@@ -44,13 +44,16 @@ import type {
   PluginVersionListFact,
 } from '../../runtime/plugin-manager-port.ts'
 import {
+  classifyCurrentClientPluginStatus,
   formatTuiContributionDiagnostic,
   formatTuiExtensionCapabilities,
   formatTuiExtensionRegistryCounts,
   serializeTuiExtensionDiagnostics,
+  type CurrentClientPluginStatus,
   type TuiContributionDiagnostic,
   type TuiExtensionDiagnostics,
 } from '../../app/plugin-manager/extension-inventory.ts'
+import type { ClientExtensionObservationSource } from '../../app/client-extensions/mount-owner.ts'
 import {
   AUTO_REVIEW_BUNDLE,
   AUTO_REVIEW_DISABLE_WARNING,
@@ -88,6 +91,19 @@ const FILTER_LABELS: Record<PluginListFilter, string> = {
   installed: 'Installed',
   available: 'Available',
 }
+
+/** Compact source-labelled Client status for the real 30-42-column List pane.
+ *  The full words live in the Detail; the List keeps the host chip and adds
+ *  this second labelled fact only when the actual painted width is safe. */
+const CLIENT_LIST_LABELS: Readonly<Record<CurrentClientPluginStatus, string>> = Object.freeze({
+  ACTIVE: 'act',
+  PENDING: 'pend',
+  ERROR: 'err',
+  RELOAD_REQUIRED: 'reload',
+  UNAVAILABLE: 'unavail',
+  NOT_OPTED_IN: 'not opted',
+  NOT_SELECTED: 'not selected',
+})
 
 /** Surface-local keys (the handler the Action Bar names). */
 const WORKSPACE_KEYS = {
@@ -431,6 +447,8 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
   private lastFilter: PluginListFilter | undefined
   private lastQuery: string | undefined
   private readonly onDispose: (() => void) | undefined
+  private readonly clientExtensions: () => ClientExtensionObservationSource | undefined
+  private disposeClientObservation: (() => void) | undefined
   private disposeNotified = false
 
   constructor(
@@ -441,6 +459,19 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     this.controller = controller
     this.intents = intents
     this.onDispose = options.onDispose
+    this.clientExtensions = intents.clientExtensions ?? (() => undefined)
+    // ONE observation lease per page: a real Client activation change repaints
+    // this same page (never re-runs the Host inventory read) and is released
+    // with the panel/surface lease.
+    const source = this.clientExtensions()
+    if (source !== undefined) {
+      this.disposeClientObservation = source.subscribe(() => {
+        if (this.disposed) return
+        this.bumpRevision()
+        this.bumpSemantic()
+        this.intents.requestRender()
+      })
+    }
     // Every page starts on the Plugin List. A previous attempt (running or
     // terminal) is NOT auto-opened: the Controller keeps its request id/log and
     // the explicit `i` reopens the SAME attempt from the list.
@@ -535,6 +566,8 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
   dispose(): void {
     if (this.disposed) return
     this.disposed = true
+    this.disposeClientObservation?.()
+    this.disposeClientObservation = undefined
     this.paintedEscapeSpanValue = undefined
     this.searchInput.focused = false
     this.specInput.focused = false
@@ -1426,6 +1459,15 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     ]
     for (const entry of view.entries) facts.push(this.diagnosticsEntryFact(entry, 'associated'))
     for (const entry of view.unmappedEntries) facts.push(this.diagnosticsEntryFact(entry, 'unassociated'))
+    // R8-E PR-4: a SEPARATE read-only group. It is deliberately appended after
+    // the extension ledger facts and never merged into Host install logs.
+    for (const client of view.clientExtensions ?? []) {
+      facts.push({
+        id: `diagnostics:client:${client.packageName}`,
+        label: 'Client extension status (this Client)',
+        copy: `${client.packageName} · ${client.status}${client.reason === undefined ? '' : ` · ${client.reason}`}`,
+      })
+    }
     return facts
   }
 
@@ -2103,9 +2145,15 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     return this.controller.card(this.selectedValue)
   }
 
-  /** The pure Detail projection with the profile's current exemptions. */
+  /** The pure Detail projection with the profile's current exemptions AND the
+   *  CURRENT Client's live Loader observations (read late-bound at paint time;
+   *  never written back into the Host model). */
   private detailView(card: PluginCardView): PluginDetailView {
-    return buildPluginDetailView(card, this.controller.model().exemptions)
+    return buildPluginDetailView(
+      card,
+      this.controller.model().exemptions,
+      this.clientExtensions()?.observation(),
+    )
   }
 
   private static matchesQuery(card: PluginCardView, query: string): boolean {
@@ -2878,6 +2926,22 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       || card.rows.some(row => busyValue === rowToggleValue(row.entryId))
     const chip = busy ? 'busy' : cardStatusChip(card)
     let chipText = chip === undefined ? '' : `[${chip}]`
+    // R8-E PR-4: the second, independently labelled Client signal only when the
+    // pane is wide enough; a narrow pane drops this secondary chip (the Detail
+    // still carries both facts verbatim).
+    if (card.target === 'bundle' && width >= 38) {
+      const source = this.clientExtensions()
+      if (source !== undefined) {
+        const client = classifyCurrentClientPluginStatus(
+          card.name,
+          card.installed,
+          card.enabled,
+          source.observation(),
+        )
+        const compact = CLIENT_LIST_LABELS[client.status]
+        chipText = chipText === '' ? `[Client:${compact}]` : `${chipText} · Client:${compact}`
+      }
+    }
     let chipWidth = visibleWidth(chipText)
     // The floor guarantee: at an absurdly narrow width the chip yields WHOLE
     // rather than being cut by the line fit.
@@ -3980,7 +4044,14 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
    *  releases that must be refused — and any fact that could change a pixel or
    *  an action changes the key as well. */
   private modelStateKey(): string {
-    return JSON.stringify([this.controller.readGeneration(), this.controller.model()])
+    return JSON.stringify([
+      this.controller.readGeneration(),
+      this.controller.model(),
+      // R8-E PR-4: the CURRENT Client's observation revision is part of the
+      // painted fact set. A Loader activation change invalidates the old hit
+      // map even though the Host inventory did not re-read.
+      this.clientExtensions()?.revision() ?? 0,
+    ])
   }
 
   /** True only while the live semantic facts AND the LOCAL viewport grant still
@@ -4079,6 +4150,14 @@ export interface PluginManagerWorkspacePanelIntents {
    *  page. Undefined = the switch was scheduled; a string = the exact reason
    *  it cannot happen right now (the page explains it and stays put). */
   readonly openComputerUseSettings?: () => string | undefined
+  /**
+   * R8-E PR-4: the CURRENT Client's real per-package Loader observation
+   * source. Read late-bound on every paint; the page subscribes only for a
+   * repaint notification and releases the lease on dispose. Undefined means
+   * this composition has no Client mount owner (the Detail then reports the
+   * Client facts as unavailable rather than inventing them).
+   */
+  readonly clientExtensions?: () => ClientExtensionObservationSource | undefined
 }
 
 /**

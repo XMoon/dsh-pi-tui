@@ -17,13 +17,91 @@
  * @module @xmoon76/dsh-pi-tui/extension/internal/settings-registry
  */
 
-import type { TuiSettingContribution, TuiSettingHandle, TuiSettingsRegistrySnapshot } from '../public-types.ts'
+import type {
+  TuiPersistedChoice,
+  TuiSettingContribution,
+  TuiSettingHandle,
+  TuiSettingsRegistrySnapshot,
+} from '../public-types.ts'
 
 /** The detailed outcome of one settings apply. 'stale' and 'gone' are
  * NOT plugin rejections (a newer apply superseded this one, or the row
  * was disposed mid-apply) — the host must stay silent on them. */
 export type SettingApplyOutcome = 'accepted' | 'rejected' | 'stale' | 'gone'
 
+/** The frozen author-declared descriptor of one persisted row. */
+export interface PersistedSettingDescriptor {
+  readonly path: readonly string[]
+  readonly choices: readonly TuiPersistedChoice[]
+}
+
+/** Whether one value is a JSON scalar a persisted choice may write. */
+function isPersistedScalar(value: unknown): boolean {
+  return value === null
+    || typeof value === 'string'
+    || typeof value === 'boolean'
+    || (typeof value === 'number' && Number.isFinite(value))
+}
+
+/** Validate and freeze one author-declared persisted descriptor. Every error
+ *  is a registration-time failure; the registry never repairs a declaration. */
+function persistedDescriptorOf(
+  contribution: Extract<TuiSettingContribution, { persisted: unknown }>,
+): PersistedSettingDescriptor {
+  const descriptor = contribution.persisted as
+    | { readonly path?: unknown; readonly choices?: unknown }
+    | undefined
+  if (descriptor === null || typeof descriptor !== 'object') {
+    throw new Error('persisted settings row requires a persisted descriptor')
+  }
+  if (contribution.values !== undefined || contribution.onChange !== undefined) {
+    throw new Error('a persisted settings row cannot declare runtime values or onChange')
+  }
+  const path = descriptor.path
+  if (!Array.isArray(path) || path.length === 0) {
+    throw new Error('persisted settings path must be a non-empty array')
+  }
+  for (const segment of path) {
+    if (typeof segment !== 'string' || segment === '') {
+      throw new Error('persisted settings path segments must be non-empty strings')
+    }
+  }
+  const choices = descriptor.choices
+  if (!Array.isArray(choices) || choices.length === 0) {
+    throw new Error('persisted settings choices must be a non-empty array')
+  }
+  const ids = new Set<string>()
+  const frozenChoices: TuiPersistedChoice[] = []
+  for (const choice of choices as readonly TuiPersistedChoice[]) {
+    if (choice === null || typeof choice !== 'object') {
+      throw new Error('persisted settings choices must be objects')
+    }
+    if (typeof choice.id !== 'string' || choice.id === '') {
+      throw new Error('persisted settings choice ids must be non-empty strings')
+    }
+    if (ids.has(choice.id)) {
+      throw new Error(`duplicate persisted settings choice id "${choice.id}"`)
+    }
+    ids.add(choice.id)
+    if (choice.label !== undefined && typeof choice.label !== 'string') {
+      throw new Error(`persisted settings choice "${choice.id}" label must be a string`)
+    }
+    if (choice.op === 'set') {
+      if (!isPersistedScalar(choice.value)) {
+        throw new Error(`persisted settings choice "${choice.id}" value must be a JSON scalar`)
+      }
+      frozenChoices.push(Object.freeze({ ...choice }))
+    } else if (choice.op === 'unset') {
+      if (Object.hasOwn(choice, 'value')) {
+        throw new Error(`persisted settings choice "${choice.id}" is unset and must not carry a value`)
+      }
+      frozenChoices.push(Object.freeze({ ...choice }))
+    } else {
+      throw new Error('persisted settings choice has an unsupported op')
+    }
+  }
+  return Object.freeze({ path: Object.freeze([...path]), choices: Object.freeze(frozenChoices) })
+}
 
 /** Internal registration record. */
 interface SettingRecord {
@@ -33,6 +111,11 @@ interface SettingRecord {
   readonly values: readonly string[]
   readonly order: number
   readonly owner: string
+  /** R8-E PR-4: runtime-only rows keep the legacy contract; persisted rows are
+   *  an explicit opt-in whose only writer is the Host ConfigPort adapter. */
+  readonly mode: 'runtime' | 'persisted'
+  /** The immutable author declaration of a persisted row. */
+  readonly persisted: PersistedSettingDescriptor | undefined
   /** C2-R6: the REGISTRATION identity of this record within this registry
    *  instance. Every `register()` allocates a new one, so a same-id
    *  re-registration (or a same-owner HMR reload) is a DIFFERENT setting.
@@ -75,18 +158,21 @@ export class SettingsRegistry {
       throw new Error(`duplicate settings row id "${contribution.id}"`)
     }
     if (contribution.label === '') throw new Error('settings row label must not be empty')
+    const persisted = contribution.persisted === undefined ? undefined : persistedDescriptorOf(contribution)
     this.nextRegistrationToken += 1
     const record: SettingRecord = {
       id: contribution.id,
       label: contribution.label,
       description: contribution.description,
-      values: contribution.values ?? [],
+      values: persisted === undefined ? contribution.values ?? [] : persisted.choices.map(choice => choice.id),
       order: contribution.order ?? 0,
       owner,
+      mode: persisted === undefined ? 'runtime' : 'persisted',
+      persisted,
       registrationToken: this.nextRegistrationToken,
       currentValue: contribution.currentValue,
       applyEpoch: 0,
-      onChange: contribution.onChange,
+      onChange: persisted === undefined ? contribution.onChange : undefined,
       disposed: false,
     }
     this.records.set(contribution.id, record)
@@ -184,6 +270,10 @@ export class SettingsRegistry {
   private async applyInternal(id: string, value: string): Promise<SettingApplyOutcome> {
     const record = this.records.get(id)
     if (record === undefined || record.disposed) return 'gone'
+    // R8-E PR-4: a persisted row's only writer is the Host ConfigPort adapter.
+    // The legacy runtime apply path must never stand in for it (and must never
+    // synthesize persistence by running an `onChange`, which cannot exist).
+    if (record.mode === 'persisted') return 'rejected'
     const epoch = record.applyEpoch + 1
     record.applyEpoch = epoch
     const onChange = record.onChange
@@ -224,7 +314,9 @@ export class SettingsRegistry {
     return false
   }
 
-  /** An immutable snapshot (Plugin Manager diagnostics). */
+  /** An immutable snapshot (Plugin Manager diagnostics). Runtime-only rows
+   *  keep their original seven facts; a persisted row adds its frozen mode
+   *  and author descriptor. */
   snapshot(): TuiSettingsRegistrySnapshot {
     const rows = this.rows().map(record => ({
       id: record.id,
@@ -234,6 +326,7 @@ export class SettingsRegistry {
       values: record.values,
       order: record.order,
       owner: record.owner,
+      ...record.mode === 'persisted' ? { mode: 'persisted' as const, persisted: record.persisted } : {},
     }))
     return { rows, revision: this.revision }
   }

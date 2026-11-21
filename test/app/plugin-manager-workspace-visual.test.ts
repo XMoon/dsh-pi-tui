@@ -757,3 +757,61 @@ test('a short confirmation frame withholds the dangerous primary until the whole
   assert.ok(flatTall.includes('Plugins may stop during the update.'), 'the standard consequence is explicit')
   assert.ok(flatTall.includes('a restart may be required.'), 'the whole warning is visible')
 })
+
+test('the SAME Detail paints Host installed/selected and CURRENT Client status separately (PR-4)', async () => {
+  let observations: import('../../src/app/client-extensions/mount-owner.ts').ClientExtensionObservation[] = [
+    { packageName: '@r8/a', phase: 'active', entryId: 'client-a', configRevision: 3 },
+  ]
+  let revision = 1
+  const listeners = new Set<() => void>()
+  const source: import('../../src/app/client-extensions/mount-owner.ts').ClientExtensionObservationSource = {
+    observation: () => observations,
+    revision: () => revision,
+    subscribe: listener => {
+      listeners.add(listener)
+      return () => { listeners.delete(listener) }
+    },
+  }
+  const harness = await open({
+    columns: 120,
+    rows: 40,
+    bundles: [bundle({ name: '@r8/a', enabled: true, installed: true })],
+    plugins: [],
+    clientExtensions: () => source,
+  })
+  // The real 120-column Settings layout paints a 42-column List pane; the
+  // source-labelled Client signal must be reachable BEFORE opening Detail.
+  assert.match(harness.view(), /Client:act/u, 'the real wide List pane carries the compact Client status')
+  harness.vt.sendInput('\r')
+  await harness.waitForFrame()
+  assert.match(harness.view(), /Host package\s+Installed/u)
+  assert.match(harness.view(), /Host profile\s+Selected/u)
+  assert.match(harness.view(), /This Client \.\/tui\s+Active/u)
+
+  observations = [{ packageName: '@r8/a', phase: 'error', entryId: 'client-a', reason: 'apply failed' }]
+  revision += 1
+  for (const listener of [...listeners]) listener()
+  await harness.waitForFrame()
+  assert.match(harness.view(), /This Client \.\/tui\s+Error/u)
+  assert.match(harness.view(), /Client reason\s+apply failed/u)
+  assert.match(harness.view(), /Client:err/u, 'the real List pane follows the same observation revision')
+  assert.match(harness.view(), /Host profile\s+Selected/u, 'a Client error never rewrites the Host selection')
+
+  // A present but EMPTY observation source is the initial inventory-read-failed
+  // shape, not a proven negative opt-in.
+  observations = []
+  revision += 1
+  for (const listener of [...listeners]) listener()
+  await harness.waitForFrame()
+  assert.match(harness.view(), /This Client \.\/tui\s+Unavailable/u)
+  assert.match(harness.view(), /Client reason[\s]+the CURRENT Client has not observed[\s]+this package yet/u)
+  assert.match(harness.view(), /Host profile\s+Selected/u)
+
+  // Only a successful discovery outcome may paint the negative opt-in fact.
+  observations = [{ packageName: '@r8/a', phase: 'not-opted-in' }]
+  revision += 1
+  for (const listener of [...listeners]) listener()
+  await harness.waitForFrame()
+  assert.match(harness.view(), /This Client \.\/tui\s+Not opted in/u)
+  assert.doesNotMatch(harness.view(), /Client reason\s+the CURRENT Client has not observed/u)
+})

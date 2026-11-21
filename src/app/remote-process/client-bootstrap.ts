@@ -903,6 +903,16 @@ async function startSurfaceLocalClient(
       const { runExtensionConfigProbe } = await import('./extension-config-probe.ts')
       composition.onQualification?.(await runExtensionConfigProbe(revision.application.selected.backend.config))
     }
+    // Qualification-only: exercise the persisted extension-setting writer on
+    // THIS revision's production ConfigPort with a second real Client. Production
+    // never sets the env.
+    if (process.env.SPLIT_PROCESS_CLIENT_PERSISTED_SETTING_PROBE === '1') {
+      const { runPersistedSettingProbe } = await import('./persisted-setting-probe.ts')
+      composition.onQualification?.(await runPersistedSettingProbe(
+        revision.application.selected.backend.config,
+        () => revision.ui?.clientExtensionObservation() ?? [],
+      ))
+    }
     signal?.throwIfAborted()
     // T59 qualification input: force the NEW revision's UI mount to fail after
     // the old revision was already retired. Production never sets this.
@@ -930,6 +940,9 @@ async function startSurfaceLocalClient(
               if (currentRevision !== revision) return
               await revision.ui?.reconcileClientExtensions(snapshot)
             },
+            clientExtensionObservationSource: () => currentRevision === revision
+              ? revision.ui?.clientExtensionObservationSource()
+              : undefined,
           }),
       // The SAME root delivery owner the revision's Remote interaction adapter
       // attaches its two providers to. The runner binds the application's ONE

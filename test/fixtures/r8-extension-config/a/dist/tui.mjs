@@ -46,4 +46,20 @@ export function apply(ctx, config) {
       return { kind: 'success', text: 'r8-a' }
     },
   })
+  // R8-E PR-4: one author-declared persisted setting over package A's official
+  // Config data. The Host Profile is the only persistence authority.
+  service.registerSetting({
+    id: 'r8-a-label',
+    label: 'R8 A label',
+    description: 'Fixture A persisted label',
+    currentValue: 'alpha',
+    persisted: {
+      path: ['label'],
+      choices: [
+        { id: 'alpha', op: 'set', value: 'alpha' },
+        { id: 'omega', label: 'Omega', op: 'set', value: 'omega' },
+        { id: 'inherit', label: 'Use inherited', op: 'unset' },
+      ],
+    },
+  })
 }

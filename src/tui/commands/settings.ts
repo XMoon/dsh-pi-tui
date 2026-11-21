@@ -51,6 +51,7 @@ import { SubagentSettingsPage } from '../panels/subagent-settings-page.ts'
 import { HostNumericSettingsController, type HostNumericSettingsPort } from '../../app/command/host-numeric-settings.ts'
 import { HostNumericSettingsPage } from '../panels/host-numeric-settings-page.ts'
 import { resolveThemeSelection, themePickerRows } from '../../app/surface/theme-selection.ts'
+import { commitPersistedSetting, readPersistedSetting, resolvePersistedSettingOwner, type PersistedSettingCommitOutcome, type PersistedSettingRecord } from '../../app/client-extensions/persisted-setting.ts'
 import { normalizePersistedTheme } from '../../domain/display/theme-selection.ts'
 import { serializeTuiSettingsMutation, type ConfigPort, type TuiSettingsDoc, type VisualToolsState, type WebProviderSettings, type WebStartupPreferenceState, type BackendStartupPreferenceState, type PublicBackendValue, type AcpStartupPreferenceState, type SectionRead, type SectionMutationOutcome, type SessionLogUpload, type AgentLoopSettings, type ShellExecutionSettings } from '../../runtime/config-port.ts'
 import type { AcpAccessStatus } from '../../runtime/acp-access-port.ts'
@@ -208,6 +209,20 @@ const FOOTER_MODE_CANDIDATES = ['default', 'compact', 'custom'] as const
  *  refuse an unknown identity BEFORE it mutates anything. */
 function isCandidateOf<T extends string>(value: string, candidates: readonly T[]): value is T {
   return (candidates as readonly string[]).includes(value)
+}
+
+/** Render one detached JSON value for a persisted-setting fact. `undefined`
+ *  is the honest "not set" (never `{}`); a scalar keeps its literal identity. */
+function persistedValueText(value: unknown): string {
+  if (value === undefined) return 'not set'
+  if (typeof value === 'string') return value === '' ? '(empty string)' : value
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value)
+  if (value === null) return 'null'
+  try {
+    return JSON.stringify(value) ?? 'not set'
+  } catch {
+    return 'unreadable value'
+  }
 }
 
 export interface SettingsCommandDeps {
@@ -1386,6 +1401,19 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     // second persistence authority — it is the navigation action the stored
     // preference already implies, released with the workspace.
     let verifiedFullscreenIntent: 'on' | 'off' | undefined
+    // R8-E PR-4: ONE per-open extension Config refresh, started only after the
+    // workspace lease exists and re-entered on the explicit Refresh key. A late
+    // settlement from a closed/superseded open never repaints a newer page.
+    const hasPersistedExtensionSettings = (): boolean =>
+      runner.extensions?.settings.rows().some(record => record.mode === 'persisted') === true
+    const startExtensionConfigRefresh = (): void => {
+      if (!hasPersistedExtensionSettings()) return
+      detach('extension config refresh', async () => {
+        await runner.config.extensionConfigs.refresh()
+        if (activeSettingsWorkspace?.token !== token) return
+        app.refreshSettingsWorkspaceRuntimeFacts()
+      }, { notify: false })
+    }
     handle = app.openSettingsWorkspace(
       {
         readSnapshot: () => readSettingsWorkspaceSnapshot(pinnedApprovalScope()),
@@ -1400,6 +1428,9 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
           startWebSettingsRead()
           startAcpRuntimeRead()
           startPolicyRead(true)
+          // R8-E PR-4: an explicit refresh re-reads the Host per-package Config
+          // mirror for the persisted extension rows of THIS open.
+          startExtensionConfigRefresh()
           // FR4: the open MCP page re-reads its roster + configuration on an
           // explicit refresh (never a background poll).
           activeMcpController?.refresh()
@@ -1698,6 +1729,9 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
       },
     )
     activeSettingsWorkspace = { token, refreshWebRow: () => handle?.refreshRow(WEB_LAUNCHER_ROW_ID, webWorkspaceRowFacts()), refreshAcpRuntimeRow: () => handle?.refreshRow('acp-runtime', { summary: acpRuntimeSummaryOf(), freshness: acpRuntimeFreshnessOf(), description: ACP_RUNTIME_DESCRIPTION }), invalidateAcpChoice: () => handle?.invalidateChoice('acp-runtime') }
+    // R8-E PR-4: the FIRST authoritative per-package Config read for the
+    // persisted extension rows of this open (never a background poll).
+    startExtensionConfigRefresh()
     // The observation's committed reads re-read THIS open workspace's rows
     // through the existing runtime-facts seam: a Host read that settles after
     // the first frame replaces `Checking…` without a key press.
@@ -2838,7 +2872,15 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
       // Host profile section or the shared document serialization queue. The
       // prefix check runs FIRST so the exhaustive static switch below stays a
       // closed literal union.
-      if (request.field.startsWith('ext-setting:')) return commitExtensionSetting(request)
+      if (request.field.startsWith('ext-setting:')) {
+        // R8-E PR-4: the REGISTRATION MODE selects the writer. A persisted
+        // record's only writer is the official Host per-package Config CAS;
+        // the legacy runtime-only branch below is untouched.
+        const id = request.field.slice('ext-setting:'.length)
+        const record = runner.extensions?.settings.rows().find(candidate => candidate.id === id)
+        if (record?.mode === 'persisted') return commitPersistedExtensionSetting(request, record)
+        return commitExtensionSetting(request)
+      }
       const field = request.field as Exclude<SettingsWorkspaceWritableField, `ext-setting:${string}`>
       switch (field) {
         case 'visual-tools': return commitVisualTools(request.value, request.revision)
@@ -2957,6 +2999,62 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     }
     clearExtensionError?.(healthRef)
     return { outcome: 'verified' }
+  }
+
+  /**
+   * R8-E PR-4: commit ONE persisted extension setting through the official
+   * Host per-package Config CAS. The admission is re-proven immediately before
+   * dispatch (live registration token, exact owner->Loader entry->ACTIVE
+   * package, Host revision/generation fence). A verified Host save then asks
+   * the CURRENT Client's existing mount-owner reconcile for a precise Config
+   * re-read; that Client apply step is independent — its failure never
+   * downgrades the Host-verified save.
+   */
+  const commitPersistedExtensionSetting = async (
+    request: SettingsWorkspaceCommitRequest,
+    record: PersistedSettingRecord,
+  ): Promise<SettingsWorkspaceCommitOutcome> => {
+    const token = request.registrationToken
+    if (token === undefined || !Number.isInteger(token) || record.registrationToken !== token) {
+      return { outcome: 'not-saved', reason: 'The extension setting was unloaded or replaced' }
+    }
+    if (record.persisted === undefined) {
+      return { outcome: 'not-saved', reason: 'not a persisted extension setting' }
+    }
+    if (request.revision === undefined || request.generation === undefined) {
+      return { outcome: 'not-saved', reason: 'the Host Config fence is missing; refresh and review' }
+    }
+    const resolution = resolvePersistedSettingOwner(
+      record,
+      runner.extensions?.ownerEntryIds?.() ?? new Map(),
+      runner.extensions?.clientObservations?.() ?? [],
+    )
+    if (resolution.kind === 'unavailable') {
+      return { outcome: 'not-saved', reason: resolution.reason }
+    }
+    const outcome: PersistedSettingCommitOutcome = await commitPersistedSetting(
+      record,
+      {
+        packageName: resolution.packageName,
+        entryId: resolution.entryId,
+        registrationToken: resolution.registrationToken,
+      },
+      request.value,
+      runner.config.extensionConfigs,
+      request.revision,
+      request.generation,
+    )
+    if (outcome.outcome === 'verified') {
+      try {
+        runner.extensions?.refreshClientExtensions?.()
+      } catch (error) {
+        runner.diag.warn('persisted setting: Client apply refresh failed', {
+          packageName: resolution.packageName,
+          error: safeErrorMessage(error),
+        })
+      }
+    }
+    return outcome
   }
 
   /**
@@ -3796,6 +3894,69 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     const extensionSettings = runner.extensions?.settings
     const extensionRecords = extensionSettings?.rows() ?? []
     const extensionRevision = extensionSettings?.snapshot().revision ?? 0
+    // R8-E PR-4: the CURRENT Client's ownership facts are read once per
+    // snapshot from the same live registry/service the rows came from. The
+    // persisted row projection never accepts an author-supplied package name.
+    const extensionConfigs = runner.config.extensionConfigs
+    const extensionOwnerEntryIds = runner.extensions?.ownerEntryIds?.() ?? new Map<string, string>()
+    const extensionClientObservations = runner.extensions?.clientObservations?.() ?? []
+    const persistedExtensionRowOf = (record: (typeof extensionRecords)[number]): SettingsWorkspaceRow => {
+      const id = `ext-setting:${record.id}` as const
+      const resolution = resolvePersistedSettingOwner(record, extensionOwnerEntryIds, extensionClientObservations)
+      const read = resolution.kind === 'ready'
+        ? readPersistedSetting(record, resolution.packageName, extensionConfigs)
+        : undefined
+      const ready = read?.mode === 'ready' ? read : undefined
+      const reason = resolution.kind === 'unavailable'
+        ? resolution.reason
+        : read !== undefined && read.mode !== 'ready' ? read.reason : undefined
+      const facts: string[] = ready !== undefined
+        ? [
+            `Host profile · effective: ${persistedValueText(ready.effective)}`,
+            `Inherited: ${persistedValueText(ready.inherited)}`,
+            `USER field: ${ready.userFieldPresent ? `set ${persistedValueText(ready.user)}` : 'not set'}`,
+            `Differs from inherited: ${ready.overriddenDisplay}`,
+            `Runtime in this Client: ${ready.runtimeValue}`,
+          ]
+        : [`Unavailable · ${reason ?? 'Host Config is not current; refresh before editing'}`]
+      const choices = record.persisted?.choices ?? []
+      const options: SettingsWorkspaceEditOption[] = ready === undefined ? [] : choices.map(choice => ({
+        value: choice.id,
+        label: choice.label ?? (choice.op === 'unset' ? 'Use inherited' : persistedValueText(choice.value)),
+        available: true,
+        current: choice.id === ready.candidateId,
+      }))
+      const freshness: SettingsWorkspaceFreshness = ready !== undefined
+        ? 'ready'
+        : read?.mode === 'stale' ? 'last-known' : read?.mode === 'unreadable' ? 'read-error' : 'unavailable'
+      return {
+        id,
+        category: 'extensions',
+        label: record.label,
+        summary: ready !== undefined
+          ? `Host profile · effective: ${persistedValueText(ready.effective)}`
+          : `Unavailable · ${reason ?? 'Host Config is not current; refresh before editing'}`,
+        scope: resolution.kind === 'ready'
+          ? `DSH Host profile · package ${resolution.packageName}`
+          : 'DSH Host profile · this Client cannot address the package',
+        freshness,
+        description: `Registered at runtime by ${record.owner} (id ${record.id}) with an author-declared persisted path /${(record.persisted?.path ?? []).join('/')}. `
+          + 'The Host profile Config is the only persistence authority; the runtime value this Client reports is a separate fact. '
+          + 'Saving writes one USER Config field; Reset sends the official unset so the inherited value applies.',
+        extensionOwner: record.owner,
+        extensionRegistrationToken: record.registrationToken,
+        edit: {
+          field: id,
+          primary: 'persisted' as const,
+          options,
+          runtime: record.currentValue,
+          persisted: facts[0] ?? '',
+          persistedFacts: facts,
+          ...ready === undefined ? {} : { revision: ready.revision, generation: ready.generation },
+          retryable: false,
+        },
+      }
+    }
     const settings = runner.tuiSettings
     let doc: TuiSettingsDoc | undefined
     let readIssue: string | undefined
@@ -4613,6 +4774,10 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
         // Without a live row there is no Extensions category at all (the panel
         // derives it from `extensionCount`), so no empty page can be painted.
         ...extensionRecords.map(record => {
+          // R8-E PR-4: mode decides the writer, never a row-id prefix or a
+          // user-supplied string. A persisted record reuses the exact same
+          // `ext-setting:<id>` row identity and the existing Choice/Confirm.
+          if (record.mode === 'persisted') return persistedExtensionRowOf(record)
           const id = `ext-setting:${record.id}` as const
           const choices = record.values
           return {

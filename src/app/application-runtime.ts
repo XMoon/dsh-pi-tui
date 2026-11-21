@@ -373,6 +373,12 @@ export interface RemoteApplicationOverride {
    * owner; it is never a Gateway/RPC or a cross-process callback.
    */
   readonly reconcilePluginInventory?: (snapshot: import('../runtime/plugin-manager-port.ts').PluginManagerSnapshot) => void | Promise<void>
+  /**
+   * Split-Client only: the CURRENT surface revision's read-only Client Loader
+   * observation source (read + revision + subscribe). Process-local; never
+   * serialized across the Host wire and never another Client's state.
+   */
+  readonly clientExtensionObservationSource?: () => import('./client-extensions/mount-owner.ts').ClientExtensionObservationSource | undefined
   /** Split-Client only: the mounted private session-view presence capability
    *  (M6 PR-C C3). Direct leaves it absent — the local fold needs no wire ACK. */
   readonly promptPresence?: RemotePromptPresenceCapability

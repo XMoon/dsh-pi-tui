@@ -38,6 +38,8 @@ import {
   type PluginPresentationSection,
 } from './classify.ts'
 import type { TuiExtensionFacts } from './classify.ts'
+import { classifyCurrentClientPluginStatus, type CurrentClientPluginFact } from './extension-inventory.ts'
+import type { ClientExtensionObservation } from '../client-extensions/mount-owner.ts'
 
 /** One declared/live plugin row of a package card. */
 export interface PluginRowView {
@@ -391,8 +393,47 @@ export function cardStatusTone(card: PluginCardView): 'muted' | 'warning' | 'err
   return 'muted'
 }
 
-function cardStatusFacts(card: PluginCardView): PluginDetailFact[] {
+/** The independent Host vs CURRENT Client status facts of one bundle. The Host
+ *  facts here are the same official snapshot the rest of the Detail renders;
+ *  the Client fact comes from THIS Client's live Loader observations only. */
+function clientStatusFacts(
+  card: PluginCardView,
+  observations: readonly ClientExtensionObservation[] | undefined,
+): PluginDetailFact[] {
+  // No CURRENT Client observation source in this composition: do not invent a
+  // Client section by treating "not readable" as "not opted in".
+  if (card.target !== 'bundle' || observations === undefined) return []
+  const client: CurrentClientPluginFact = classifyCurrentClientPluginStatus(
+    card.name,
+    card.installed,
+    card.enabled,
+    observations,
+  )
+  const tone = client.status === 'ACTIVE'
+    ? 'success' as const
+    : client.status === 'ERROR'
+      ? 'error' as const
+      : client.status === 'PENDING' || client.status === 'RELOAD_REQUIRED' || client.status === 'UNAVAILABLE'
+        ? 'warning' as const
+        : 'dim' as const
   const facts: PluginDetailFact[] = [
+    {
+      label: 'Host package',
+      value: card.installed ? 'Installed' : 'Not installed',
+      tone: card.installed ? 'normal' : 'dim',
+    },
+    {
+      label: 'Host profile',
+      value: card.enabled ? 'Selected' : 'Not selected',
+      tone: card.enabled ? 'normal' : 'dim',
+    },
+    { label: 'This Client ./tui', value: client.label, tone },
+  ]
+  if (client.reason !== undefined) facts.push({ label: 'Client reason', value: client.reason, tone: 'dim' })
+  return facts
+}
+
+function cardStatusFacts(card: PluginCardView): PluginDetailFact[] {  const facts: PluginDetailFact[] = [
     { label: 'Installed', value: card.installed ? 'Yes' : 'No', tone: card.installed ? 'normal' : 'dim' },
     // The SAME Host `enabled` boolean means different things per target: a
     // bundle's flag is the profile SELECTION (never proof that the layer
@@ -801,9 +842,18 @@ function cardActions(card: PluginCardView): PluginDetailAction[] {
 export function buildPluginDetailView(
   card: PluginCardView,
   exemptions: readonly PluginExemptionFact[] = [],
+  liveClientObservations?: readonly ClientExtensionObservation[],
 ): PluginDetailView {
+  const clientFacts = clientStatusFacts(card, liveClientObservations)
+  // With a Client observation source the bundle Status group carries the
+  // explicit Host package/profile facts; the older short `Installed` /
+  // `Selected in profile` rows would state the same Host truth twice, so they
+  // are replaced only on that path. A standalone entry keeps the original rows.
+  const hostFacts = clientFacts.length === 0
+    ? cardStatusFacts(card)
+    : cardStatusFacts(card).filter(fact => fact.label !== 'Installed' && fact.label !== 'Selected in profile')
   const groups: PluginDetailGroup[] = [
-    { title: 'Status', facts: cardStatusFacts(card) },
+    { title: 'Status', facts: [...hostFacts, ...clientFacts] },
     { title: 'Source', facts: cardSourceFacts(card) },
   ]
   if (card.description !== undefined && card.description !== '') {

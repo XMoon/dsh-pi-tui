@@ -19,6 +19,7 @@ import type {
   TuiExtensionDiagnostics,
   TuiExtensionObservation,
 } from '../../src/app/plugin-manager/extension-inventory.ts'
+import type { ClientExtensionObservationSource } from '../../src/app/client-extensions/mount-owner.ts'
 import type {
   PluginBundleFact,
   PluginChangeFact,
@@ -106,6 +107,8 @@ export interface WorkspaceHarnessOptions {
    *  keyboard on the Categories rail, so the Plugins category is only SELECTED
    *  and the plugin page is not mounted until the content takes the focus. */
   readonly startOn?: 'plugins' | 'rail'
+  /** R8-E PR-4: the CURRENT Client Loader observation source the page reads. */
+  readonly clientExtensions?: () => ClientExtensionObservationSource | undefined
 }
 
 export interface WorkspaceHarness {
@@ -312,6 +315,7 @@ export async function openWorkspace(options: WorkspaceHarnessOptions = {}): Prom
           requestRender: () => app.requestRender(),
           onCopy: (text) => { copied.push(text) },
           ...(options.diagnostics === undefined ? {} : { diagnostics: options.diagnostics }),
+          ...(options.clientExtensions === undefined ? {} : { clientExtensions: options.clientExtensions }),
           onYieldNavigation,
         }, { onDispose: () => {} })
         // PRODUCTION SEMANTICS: `PluginManagerRuntime.page()` opens the

@@ -59,7 +59,11 @@ specialist-page contract below).
   pending state keeps the root region-key semantics, and a single group paints
   its name and `[1/1]` but keeps the root Tab. The header states
   `Extensions [i/N]` BEFORE the display label, so a narrow frame truncates the
-  name and never the position; the Rows pane header degrades
+  name and never the position. Owner-group switching is intentionally
+  keyboard-only: the existing `Tab`/`Shift+Tab` contract is the documented
+  pointer-coverage exception, and pointer coverage is scoped to the currently
+  painted owner group's rows, Detail and actions; no pointer target is added
+  for switching owners. The Rows pane header degrades
   `Rows (m) · <label>` → `Rows (m) · i/N` → `Rows (m)` inside its own width.
   When the selected row disappears the SAME owner group keeps the page and
   selects its first surviving row; when the whole group unloads the first live
@@ -80,8 +84,26 @@ specialist-page contract below).
   their registry semantics: a rejection records health only for the INVOKING
   owner and paints `Not saved`, while a superseded or unloaded registration is
   reported without a fabricated plugin refusal or rollback. Extension settings
-  are runtime-only: nothing here is written to the TUI settings document or a
-  Host profile.
+  have two explicit modes. The original runtime-only mode stays entirely
+  in-process: nothing is written to the TUI settings document or a Host
+  profile. A persisted row is an author-declared opt-in over that package's
+  official per-package Config carrier: the Detail states `Host profile ·
+  effective`, `Inherited`, `USER field`, `Differs from inherited` and
+  `Runtime in this Client` as separate facts; an unavailable or stale Host
+  authority is read-only with its reason; and one Confirm dispatches ONE Host
+  Config CAS write relative to `data`. A conflict paints
+  `Not saved · Host Config changed; refresh and review`; an unconfirmed
+  dispatch paints an unknown outcome and is never retried automatically. A
+  verified Host save is independent from this Client applying the new Config.
+  The Choice `[current]` candidate is derived from the authoritative EFFECTIVE
+  value only: a declared `set` matching it, or the `unset` choice when
+  EFFECTIVE equals INHERITED. A matching USER value alone never marks
+  `[current]`; an out-of-choices external effective value keeps every option
+  unselected and shows the existing out-of-choices warning. Reset stages the
+  official field `unset`: the authoritative EFFECTIVE value must return to the
+  inherited value. The USER own field may remain present when another sibling
+  override keeps the USER config alive; the Detail shows that literal USER
+  state rather than claiming the field vanished.
 
 - Every category shares ONE root row plan: header, optional metadata, at most
   one top rule, optional app notice, optional pane header, body, and the single

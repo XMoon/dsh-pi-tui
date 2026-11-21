@@ -184,6 +184,11 @@ export interface SettingsWorkspaceEdit {
    *  `unknown — …` when there was no document to read. The panel never guesses
    *  which of those it is. */
   readonly persisted: string
+  /** R8-E PR-4: the complete Host-profile fact block of a persisted extension
+   *  setting, one exact line each (effective / inherited / USER field /
+   *  difference / this Client's runtime). Rendered verbatim below the primary
+   *  fact so Host persistence and Client runtime never merge into one claim. */
+  readonly persistedFacts?: readonly string[]
   /** A SECOND live effect fact that is NOT the primary `Value`, painted as its
    *  own `Runtime` line. Only the session approval row needs it today: its
    *  `Value` already is a runtime fact (the captured session's override), while
@@ -3584,8 +3589,11 @@ export class SettingsWorkspacePanel implements Component {
       field('Value', row.summary, color.text, true)
       if (edit !== undefined) {
         if (edit.runtimeEffect !== undefined) field('Runtime', edit.runtimeEffect, color.textDim, true)
-        if (edit.primary === 'persisted') field('Runtime', edit.runtime, color.textDim, true)
-        else field('Persisted', edit.persisted, color.textDim, true)
+        if (edit.primary === 'persisted') {
+          if (edit.persistedFacts === undefined) field('Runtime', edit.runtime, color.textDim, true)
+          // The first fact is the row's primary Value; never paint it twice.
+          else for (const fact of edit.persistedFacts.slice(1)) field('', fact, color.textDim, true)
+        } else field('Persisted', edit.persisted, color.textDim, true)
       }
       lines.push(...fullFacts)
     } else {
@@ -3606,8 +3614,11 @@ export class SettingsWorkspacePanel implements Component {
     if (edit !== undefined) {
       if (!inlineChoice) {
         if (edit.runtimeEffect !== undefined) field('Runtime', edit.runtimeEffect)
-        if (edit.primary === 'persisted') field('Runtime', edit.runtime)
-        else field('Persisted', edit.persisted)
+        if (edit.primary === 'persisted') {
+          if (edit.persistedFacts === undefined) field('Runtime', edit.runtime)
+          // The first fact is the row's primary Value; never paint it twice.
+          else for (const fact of edit.persistedFacts.slice(1)) field('', fact)
+        } else field('Persisted', edit.persisted)
       }
       const status = this.editStatus(row, edit.field)
       if (status !== undefined) {

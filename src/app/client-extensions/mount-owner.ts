@@ -57,8 +57,11 @@ const FIBER_ACTIVE = 2
  */
 const ACTIVATION_TIMEOUT_MS = 15_000
 
-/** The PiTui-only runtime state of one package in THIS Client. */
+/** The PiTui-only runtime state of one package in THIS Client. `pending` is a
+ *  REAL Loader activation transient (entry created / fiber settling), never a
+ *  guess from the Host's `enabled` flag. */
 export type ClientExtensionMountPhase =
+  | 'pending'
   | 'active'
   | 'reload-required'
   | 'error'
@@ -99,13 +102,25 @@ export interface ClientExtensionMountOwnerOptions {
 }
 
 /** The narrow lifecycle surface every Direct/Split caller uses. */
-export interface ClientExtensionMountOwner {
+export interface ClientExtensionMountOwner extends ClientExtensionObservationSource {
   /** Reconcile the CURRENT Client's entries against ONE committed Host snapshot. */
   reconcile(snapshot: PluginManagerSnapshot): Promise<void>
   /** Unload every owned entry (reverse order, each awaited), idempotent. */
   dispose(): Promise<void>
-  /** Read-only ephemeral facts for tests and the future manager projection. */
+}
+
+/**
+ * The ONE read-only observation port over this Client's real Loader entries.
+ * Direct and Split consume the SAME object; it stores no second cache, never
+ * crosses the Host wire and never reads another Client's state.
+ */
+export interface ClientExtensionObservationSource {
   observation(): readonly ClientExtensionObservation[]
+  /** Monotonic semantic revision; bumped only when an observation changes. */
+  revision(): number
+  /** Observe semantic changes. The returned unsubscribe is idempotent and is
+   *  released by the consumer's own panel/surface lease. */
+  subscribe(listener: () => void): () => void
 }
 
 /** One live entry this owner created and still owns. */
@@ -147,6 +162,16 @@ async function awaitActiveFiber(
 /** Whether two detached JSON Config values are equivalent. */
 function sameJsonValue(left: unknown, right: unknown): boolean {
   return JSON.stringify(left) === JSON.stringify(right)
+}
+
+/** Whether two observations carry the same externally visible fact. */
+function sameObservation(left: ClientExtensionObservation, right: ClientExtensionObservation): boolean {
+  return left.packageName === right.packageName
+    && left.phase === right.phase
+    && left.entryId === right.entryId
+    && left.configRevision === right.configRevision
+    && left.codeIdentity === right.codeIdentity
+    && left.reason === right.reason
 }
 
 /**
@@ -232,6 +257,8 @@ export function createClientExtensionMountOwner(
   const knownCodeIdentity = processKnownCodeIdentities(loader)
   const knownPackageVersion = processKnownPackageVersions(loader)
   const observations = new Map<string, ClientExtensionObservation>()
+  const observationListeners = new Set<() => void>()
+  let observationRevision = 0
   let reconcileTail: Promise<void> = Promise.resolve()
   let disposed = false
   /** Reconcile epoch: a superseded reconcile may never publish. */
@@ -245,10 +272,22 @@ export function createClientExtensionMountOwner(
 
   const setObservation = (observation: ClientExtensionObservation): void => {
     const previous = observations.get(observation.packageName)
+    if (previous !== undefined && sameObservation(previous, observation)) return
     observations.set(observation.packageName, Object.freeze(observation))
+    observationRevision += 1
     if (observation.phase === 'reload-required' && previous?.phase !== 'reload-required') {
       options.notifyReloadRequired?.(observation.packageName, observation.reason ?? 'reload required')
     }
+    // Publish AFTER the committed map/revision so a listener always reads the
+    // new fact; iterate a copy so an unsubscribe during dispatch is safe.
+    for (const listener of [...observationListeners]) listener()
+  }
+
+  /** Remove one package's observation as a semantic change. */
+  const deleteObservation = (packageName: string): void => {
+    if (!observations.delete(packageName)) return
+    observationRevision += 1
+    for (const listener of [...observationListeners]) listener()
   }
 
   /** Capture the live fiber and remove the entry, then await terminal cleanup. */
@@ -320,7 +359,7 @@ export function createClientExtensionMountOwner(
       try {
         await unloadEntry(entry)
         mounted.delete(packageName)
-        observations.delete(packageName)
+        deleteObservation(packageName)
       } catch (error) {
         setObservation({ packageName, phase: 'error', entryId: entry.entryId, reason: 'cleanup failed' })
         warn('client extension: cleanup failed while unloading an ineligible package', {
@@ -338,7 +377,7 @@ export function createClientExtensionMountOwner(
     const current = new Set(outcomes.map(outcome =>
       outcome.kind === 'unresolved' ? outcome.bundleName : outcome.packageName))
     for (const packageName of [...observations.keys()]) {
-      if (!current.has(packageName) && !mounted.has(packageName)) observations.delete(packageName)
+      if (!current.has(packageName) && !mounted.has(packageName)) deleteObservation(packageName)
     }
 
     // 3. Record the PiTui-only outcome of every enabled non-candidate.
@@ -500,6 +539,10 @@ export function createClientExtensionMountOwner(
         continue
       }
 
+      // A REAL activation transient: the Loader entry is being created and its
+      // Fiber is settling. It is published from this exact attempt, never
+      // inferred from the Host's `enabled` fact.
+      setObservation({ packageName, phase: 'pending', reason: 'activating ./tui' })
       // Record the import attempt BEFORE create: Node caches a successfully
       // imported module even when its Cordis apply later throws, so a later
       // retry must not claim new disk bytes as ACTIVE.
@@ -577,13 +620,16 @@ export function createClientExtensionMountOwner(
       if (disposed) return
       disposed = true
       reconciliation += 1
+      // Stop publishing before any deletion: a disposed owner can never wake a
+      // new revision through an old callback.
+      observationListeners.clear()
       await reconcileTail.catch(() => undefined)
       const errors: unknown[] = []
       for (const [packageName, entry] of [...mounted].reverse()) {
         try {
           await unloadEntry(entry)
           mounted.delete(packageName)
-          observations.delete(packageName)
+          deleteObservation(packageName)
         } catch (error) {
           errors.push(error)
           setObservation({ packageName, phase: 'error', entryId: entry.entryId, reason: 'cleanup failed' })
@@ -594,6 +640,19 @@ export function createClientExtensionMountOwner(
     },
     observation(): readonly ClientExtensionObservation[] {
       return Object.freeze([...observations.values()])
+    },
+    revision(): number {
+      return observationRevision
+    },
+    subscribe(listener: () => void): () => void {
+      if (disposed) return () => {}
+      observationListeners.add(listener)
+      let active = true
+      return () => {
+        if (!active) return
+        active = false
+        observationListeners.delete(listener)
+      }
     },
   }
 }
