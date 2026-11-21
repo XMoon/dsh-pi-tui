@@ -1254,29 +1254,21 @@ test('stale catalog (M3-6 PR2): refresh A → Connection replacement → the old
   const life = testLifecycle(t)
   const sessionA = 'm3-4-pr4-catalog-stale-a'
   let bHostRuns = 0
-  let bClientCalls = 0
   let staleClientRuns = 0
   const fixture = await mountRunner(life, {
     resumeSessionId: sessionA,
-    // Two CLIENT-CONTEXT twins make the INSTALLED catalog the discriminator
-    // of every post-reconnect routing assertion:
-    // - `b-fresh-cmd` (claimed by the B Host catalog): with the B claim
-    //   installed the Host-origin term wins the classification and the real
-    //   Host handler runs once while this twin never executes; without the
-    //   installed claim the bare-line Client definition claims the line and
-    //   the twin runs instead — either sink goes red on a no-op install.
-    // - `stale-cmd` (retired from the B Host catalog): once B replaces the
-    //   Host truth there is NO Host-origin claim, so the bare-line Client
-    //   definition owns the line and this twin runs EXACTLY ONCE through the
-    //   Client registry; a stale-retained A claim would keep the line on the
-    //   Host route (whose registration is disposed, no command/run) and the
-    //   twin would never run — the retirement discriminator.
+    // The RETIREMENT discriminator: `stale-cmd` is retired from the B Host
+    // catalog, so once B replaces the Host truth there is NO Host-origin
+    // claim for it — the bare-line Client twin owns the line and runs EXACTLY
+    // ONCE through the Client registry. A stale-retained A claim would route
+    // the line to the disposed Host command instead (no command/run either)
+    // and the twin would never run.
+    //
+    // `b-fresh-cmd` stays HOST-ONLY: its installed display row is the real
+    // Remote display witness below, and its mounted submission running the
+    // real Host handler exactly once is the claim-install sink (a no-op B
+    // install would leave it an ordinary prompt and run ZERO Host handlers).
     extensionCommands: [{
-      id: 'pr2-b-fresh-twin',
-      name: 'b-fresh-cmd',
-      sessionless: true,
-      handler: () => { bClientCalls += 1; return { kind: 'success', text: 'client twin ran' } },
-    }, {
       id: 'pr2-stale-twin',
       name: 'stale-cmd',
       sessionless: true,
@@ -1287,8 +1279,9 @@ test('stale catalog (M3-6 PR2): refresh A → Connection replacement → the old
   // The Host command whose name only the STALE snapshot carries, plus a
   // SURVIVOR command that stays registered — the post-release positive
   // control must see the survivor and never the retired name. The B-side
-  // Host command (the collision's Host side) registers here too, BEFORE any
-  // reconnect: only the generation-B catalog can ever claim its name.
+  // Host command (`b-fresh-cmd`) registers here too, BEFORE any reconnect:
+  // only the generation-B catalog can ever claim it, and its installed
+  // display row is the real Remote reconnect display witness.
   const commands = fixture.host.ctx.commands as {
     register(def: { name: string; description: string; handler: () => { kind: 'success' } }): () => void
   }
@@ -1398,11 +1391,10 @@ test('stale catalog (M3-6 PR2): refresh A → Connection replacement → the old
   // ── M3-6 PR2 DECISIVE PATH: the automatic reconnect refresh. NO /reload
   // is submitted after the reconnect; the CommandSurface's own generation
   // subscription must have read the B catalog against the CURRENT session
-  // id and installed it. The mounted-visible proof rides the CLAIM layer:
-  // on Remote the completion DISPLAY list is deliberately Client-only
-  // (PR4 §D3 — the Host catalog arrives as claims, never as display rows),
-  // so the user-visible surface of the installed B catalog is which lines
-  // the mounted submission still routes to the REAL Host executor.
+  // id and installed it. The mounted-visible proof rides BOTH the installed
+  // completion DISPLAY (Host-first on Remote: the B descriptor row appears
+  // and the retired A Host descriptor never does) and the CLAIM layer (which
+  // lines the mounted submission still routes to the REAL Host executor).
   let liveRead: { sessionId: string; names: readonly string[] | undefined } | undefined
   try {
     await waitFor('the AUTOMATIC reconnect refresh settled a DEFINED post-retirement B read', () => {
@@ -1428,10 +1420,9 @@ test('stale catalog (M3-6 PR2): refresh A → Connection replacement → the old
   // wire.connection.generation → RemoteCommandSource subscription →
   // CommandSurface reconnect decision → CatalogRefreshCoordinator → real
   // Host command catalog B → Host-origin classifier → mounted submission →
-  // official executor). The same-named CLIENT-CONTEXT twin never executes:
-  // the INSTALLED B claim owns the line (the §D3 collision, and the
-  // discriminator that makes a no-op install of the automatic B refresh
-  // fail this whole block instead of passing vacuously).
+  // official executor). A no-op install of the automatic B refresh would
+  // leave the line an ordinary prompt and run ZERO Host handlers, so this
+  // block fails instead of passing vacuously.
   const commandRunsBefore = fixture.hostCommandRuns(sessionA)
   // Readiness is the APPLY, not the read: the automatic refresh's authoritative
   // read settles a few milliseconds before the coordinator installs it
@@ -1451,14 +1442,23 @@ test('stale catalog (M3-6 PR2): refresh A → Connection replacement → the old
       return false
     }
   }, 15_000)
+  // The REAL installed display after the reconnect: B's Host metadata is
+  // present, the surviving Host row keeps its metadata, and the stale A Host
+  // descriptor never paints. (`stale-cmd` may remain as its Client twin row;
+  // routing below proves that it is not a retained Host claim.)
+  const displayed = new Map(fixture.app().commandCompletionsForTest().map(command => [command.name, command]))
+  assert.equal(displayed.get('b-fresh-cmd')?.description, 'the B generation command',
+    'the automatic B install carries the B Host descriptor into the live display')
+  assert.equal(displayed.get('live-cmd')?.description, 'the surviving catalog entry',
+    'the surviving Host row keeps its Host metadata')
+  assert.notEqual(displayed.get('stale-cmd')?.description, 'the stale catalog entry',
+    'the held generation-A Host descriptor never installs into the display')
   submit(fixture, '/b-fresh-cmd')
   await waitFor('the B Host command entered its real handler', () => bHostRuns === 1, 15_000)
   await settle()
   assert.equal(bHostRuns, 1, 'exactly one B Host handler entry (no auto-retry, no double dispatch)')
   assert.equal(fixture.hostCommandRuns(sessionA) - commandRunsBefore, 1,
     'exactly ONE new official command/run row for the B Host command')
-  assert.equal(bClientCalls, 0,
-    'the same-named Client twin never executed — the installed B Host claim owns the line')
 
   // NEGATIVE control on the same claim layer — the RETIREMENT discriminator.
   // Once B replaces the Host truth there is no Host-origin claim for the

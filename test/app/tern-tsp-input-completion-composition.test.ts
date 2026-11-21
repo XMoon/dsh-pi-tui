@@ -1253,15 +1253,12 @@ test('a Remote-shaped Host catalog installs official Host rows in the TSP popup,
   assert.match(settingsRow.full, /Host settings descriptor/u, 'the Host descriptor wins the display row')
   assert.doesNotMatch(settingsRow.full, /Open the TUI settings workspace/u, 'the Client built-in copy never paints for the Host name')
 
-  // Accepting a candidate only edits the composer.
+  // Catalog A -> B through the SAME production commit point while the A popup
+  // is STILL OPEN and has NOT been accepted. The old frame's row identity is
+  // withdrawn by the new catalog revision; clicking that stale row writes
+  // nothing. (The Client /settings row legitimately returns under B, but it
+  // must be a NEW row identity.)
   const staleRow = settingsRow
-  await h.press(ENTER)
-  await waitUntil('the accepted Host row reached the composer', () => h.editor().text === '/settings ')
-  assert.equal(h.submits.length, 0, 'accepting a Host row never submits or executes it')
-
-  // Catalog A -> B through the SAME production commit point: the old popup
-  // row identity is withdrawn even though a Client /settings row legitimately
-  // returns under B's catalog; clicking the stale row writes nothing.
   h.commands.installSnapshot(Object.freeze({
     commands: Object.freeze([
       Object.freeze({ name: 'compact', description: 'Compact the conversation', input: Object.freeze({ hint: '[instructions]' }) }),
@@ -1275,9 +1272,19 @@ test('a Remote-shaped Host catalog installs official Host rows in the TSP popup,
   await waitUntil('the A popup row identity was withdrawn', () =>
     h.rows().every(row => row.id !== staleRow.id))
   await h.clickRow(staleRow)
-  assert.deepEqual(h.editor(), { text: '/settings ', cursor: 10 },
+  assert.deepEqual(h.editor(), { text: '/set', cursor: 4 },
     'the withdrawn A row cannot write into the B draft')
   assert.equal(h.submits.length, 0, 'the stale click submitted nothing')
+
+  // The accept-only positive control runs on the NEW catalog: accepting a
+  // Host row edits the composer and never submits.
+  await h.setDraft('')
+  await waitUntil('the composer is clear for the B accept control', () => h.editor().text === '')
+  await typeKeys(h, '/comp')
+  await waitUntil('the B compact row painted', () => h.values().includes('compact'))
+  await h.press(ENTER)
+  await waitUntil('the accepted B Host row reached the composer', () => h.editor().text === '/compact ')
+  assert.equal(h.submits.length, 0, 'accepting a Host row never submits or executes it')
 })
 
 /**
