@@ -239,6 +239,35 @@ an unavailable log source, `5` busy/timeout/transition-uncertain. Errors print
 argv, absolute private paths, Cookies, tokens and Host URLs never reach
 stdout/stderr.
 
+### Headless Web CLI
+
+`dsh --profile pi-tui web status|enable|disable|url|open` is the ONE headless
+Web control grammar. It is nested under the same command, needs no interactive
+TTY, publishes one typed `web-control` intent to the same launcher row, and
+never resolves a Client artifact, opens a Direct/Remote TUI, creates a
+Session/Agent/Writer, replaces a Host or starts a Host. `web` and `web --help`
+are pure help and publish no service. The verbs are supported on Linux and
+macOS; `--session`, `--continue` and `--preset` are refused before any Host
+probe, in either argument position.
+
+Every verb operates on the official `profileContext` Profile and the current
+same-scope authenticated Host only: the read-only scope facts, official
+`/connect` Cookie, identity echo and fresh kernel identity are the same local
+authority `daemon status` uses. A missing/dead/unverifiable Host exits `3`
+with `HOST_NOT_RUNNING` / `HOST_IDENTITY_REFUSED` / `HOST_AUTH_FAILED`; none of
+the five verbs starts a Host. `status` prints one `web=<state>` line for any
+legal Host state and exits `0`; `enable`/`disable` print the Host-reached state
+(`0` only when it matches the request, `4` for a settled `unavailable`, `5`
+with `WEB_OUTCOME_UNCONFIRMED` for a still-changing or mismatched state), and a
+write whose response is lost is reported as unknown without any automatic
+retry. `url` prints exactly one official authenticated URL on stdout and
+nothing else; `open` asks the local OS opener on the CLI machine and reports
+only `browser=requested`, never that a Browser page loaded. The URL contains
+the Host's official launch token: it must be treated as a credential, is never
+logged or embedded in diagnostics, and the product offers no automatic expiry
+or revocation. The Host's own `PiTuiWebAccess` service remains the only Web
+state authority and the only mutation writer.
+
 - **Status is a pure read.** The management command performs no Host
   control-plane mutation: it does not create the profile run directory or a
   service definition, does not reload/start/stop the manager, starts no Host, Session, Agent

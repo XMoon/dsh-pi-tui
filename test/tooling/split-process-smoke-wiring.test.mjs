@@ -472,6 +472,11 @@ test('every registry entry declares a conservative platform list and the ten sha
     // snapshot) with a real packed-candidate Darwin run; it uses no
     // platform-specific primitive beyond that shared seam.
     'host-settings.r8-extension-client-loader-pr3',
+    // The headless Web CLI case drives the public installed `dsh` commands,
+    // the same per-platform local Host/scope/identity APIs and the shared
+    // loopback HTTP contract; its opener seam selects `open`/`xdg-open` by the
+    // real platform, with no Linux-only process primitive.
+    'web.headless-cli',
   ]
   const cases = listSelectableCases()
   for (const entry of cases) {

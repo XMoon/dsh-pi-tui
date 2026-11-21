@@ -441,3 +441,115 @@ test('a mounted management launcher suppresses the cold-ready error', (t) => {
   assert.deepEqual(exitCodes, [])
   assert.equal(text, '')
 })
+
+// ── headless Web CLI grammar (M6 Web CLI) ─────────────────────────────────
+
+function webControl(ctx: Context): { kind: string; control?: { verb: string }; markCoordinatorMounted?: () => void } | undefined {
+  return ctx.get(TUI_DAEMON_STARTUP_SERVICE) as { kind: string; control?: { verb: string }; markCoordinatorMounted?: () => void } | undefined
+}
+
+for (const verb of ['status', 'enable', 'disable', 'url', 'open']) {
+  test(`web ${verb} publishes one web-control intent and opens no TUI`, (t) => {
+    withEnv('direct', () => {
+      const { ctx } = mount(t, ['web', verb])
+      const startup = webControl(ctx)
+      assert.equal(startup?.kind, 'web-control')
+      assert.equal(startup?.control?.verb, verb)
+      assert.equal(ctx.get(TUI_STARTUP_SERVICE), undefined, 'a web command never publishes the Direct TUI')
+    })
+  })
+}
+
+for (const backend of ['daemon', 'wire-local', '']) {
+  test(`web status ignores ENV ${JSON.stringify(backend)} and keeps the same web-control intent`, (t) => {
+    withEnv(backend, () => {
+      const { ctx, exitCodes } = mount(t, ['web', 'status'])
+      assert.equal(webControl(ctx)?.control?.verb, 'status')
+      assert.deepEqual(exitCodes, [], 'an invalid backend value must not block a web command')
+    })
+  })
+}
+
+test('web without a verb exits 2 and publishes no service', (t) => {
+  const { ctx, exitCodes } = mount(t, ['web'])
+  assert.equal(webControl(ctx), undefined)
+  assert.deepEqual(exitCodes, [2])
+})
+
+test('an unknown web verb exits 2 and publishes no service', (t) => {
+  const { ctx, exitCodes } = mount(t, ['web', 'destroy'])
+  assert.equal(webControl(ctx), undefined)
+  assert.deepEqual(exitCodes, [2])
+})
+
+test('an extra positional on a web verb exits 2 and publishes no service', (t) => {
+  const { ctx, exitCodes } = mount(t, ['web', 'status', 'extra'])
+  assert.equal(webControl(ctx), undefined)
+  assert.deepEqual(exitCodes, [2])
+})
+
+test('a session flag before a web verb exits 2 and publishes no service', (t) => {
+  const { ctx, exitCodes } = mount(t, ['--session', 'mysql', 'web', 'status'])
+  assert.equal(webControl(ctx), undefined)
+  assert.deepEqual(exitCodes, [2])
+})
+
+test('a session flag after a web verb exits 2 and publishes no service', (t) => {
+  const { ctx, exitCodes } = mount(t, ['web', 'status', '--session', 'mysql'])
+  assert.equal(webControl(ctx), undefined)
+  assert.deepEqual(exitCodes, [2])
+})
+
+test('web help and web status help exit 0 and publish no service', (t) => {
+  for (const args of [['web', '--help'], ['web', 'status', '--help'], ['web', 'url', '--help']]) {
+    const { ctx, exitCodes } = mount(t, args)
+    assert.equal(webControl(ctx), undefined, `${args.join(' ')} must not publish a web-control intent`)
+    assert.deepEqual(exitCodes, [0])
+  }
+})
+
+test('a Host-only process rejects the web route without publishing a service', (t) => {
+  const hostEntry = join(testLifecycle(t).tempDir('m6web-host-only-'), 'local-host.mjs')
+  writeFileSync(hostEntry, '')
+  const previousArgv = process.argv[1]
+  const previousRole = process.env.DSH_PI_TUI_ROLE
+  const previousEntry = process.env.DSH_PI_TUI_HOST_ENTRY
+  process.argv[1] = hostEntry
+  process.env.DSH_PI_TUI_ROLE = 'host'
+  process.env.DSH_PI_TUI_HOST_ENTRY = hostEntry
+  try {
+    const { ctx, exitCodes } = mount(t, ['web', 'status'])
+    assert.equal(webControl(ctx), undefined, 'a Host-only process must not acquire a web-control intent')
+    assert.deepEqual(exitCodes, [2])
+  } finally {
+    process.argv[1] = previousArgv
+    if (previousRole === undefined) delete process.env.DSH_PI_TUI_ROLE
+    else process.env.DSH_PI_TUI_ROLE = previousRole
+    if (previousEntry === undefined) delete process.env.DSH_PI_TUI_HOST_ENTRY
+    else process.env.DSH_PI_TUI_HOST_ENTRY = previousEntry
+  }
+})
+
+test('a web command works without an interactive TTY', (t) => {
+  const { ctx, exitCodes } = mount(t, ['web', 'url'])
+  assert.equal(webControl(ctx)?.control?.verb, 'url')
+  assert.deepEqual(exitCodes, [])
+})
+
+test('a web cold-ready commit without the launcher row exits nonzero with the web CLI message', (t) => {
+  const { ctx, fireReady, exitCodes } = mount(t, ['web', 'status'])
+  assert.ok(webControl(ctx) !== undefined)
+  const { text } = captureStderr(() => { fireReady() })
+  assert.deepEqual(exitCodes, [1])
+  assert.match(text, /web CLI command/u)
+  assert.match(text, /daemon launcher row did not mount/u)
+  assert.doesNotMatch(text, /daemon TUI/u)
+})
+
+test('a mounted web launcher suppresses the cold-ready error', (t) => {
+  const { ctx, fireReady, exitCodes } = mount(t, ['web', 'status'])
+  webControl(ctx)?.markCoordinatorMounted?.()
+  const { text } = captureStderr(() => { fireReady() })
+  assert.deepEqual(exitCodes, [])
+  assert.equal(text, '')
+})

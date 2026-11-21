@@ -899,6 +899,13 @@ export function assertSelectedVerdict(caseId, result) {
     `selected ${caseId}: the Browser subset ended as ${String(result?.browserSubset ?? 'missing')}/${String(result?.status ?? 'missing')}`)
     return
   }
+  if (caseId === 'web.headless-cli') {
+    assert(result?.status === 'PASS' && result?.headlessCli === 'PASS'
+      && result?.hostPidUnchanged === true && result?.tokenExchanged === true
+      && result?.anonymousPostRefused === true && result?.crossSitePostRefused === true,
+    `selected ${caseId}: the headless CLI verdict ended as ${String(result?.headlessCli ?? 'missing')}/${String(result?.status ?? 'missing')}`)
+    return
+  }
   if (caseId.startsWith('web.')) {
     assert(result?.status === 'PASS' && result?.browser === 'PASS',
       `selected ${caseId}: the Browser/Web verdict ended as ${String(result?.browser ?? 'missing')}/${String(result?.status ?? 'missing')}`)

@@ -27,7 +27,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { installedPackageRootFromEntry, readInstalledDshVersion } from './local-scope.ts'
 import type { Diag } from '../../runtime/process/diagnostics.ts'
 import { createEntryDiag } from './entry-control.ts'
-import type { TuiDaemonClientStartup, TuiDaemonControlStartup, TuiDaemonStartupValues } from '../../startup.ts'
+import type { TuiDaemonClientStartup, TuiDaemonControlStartup, TuiDaemonStartupValues, TuiWebControlStartup } from '../../startup.ts'
 
 /** Stable Loader row id / Cordis plugin name. */
 export const name = 'pi-tui-daemon-launcher'
@@ -340,6 +340,9 @@ export class DaemonControlRunner {
   private readonly writeStderr: (text: string) => void
   private readonly reportFatal: (line: string) => void
   private readonly shutdownBudgetMs: number
+  /** The fixed result for an unexpected local throw; the daemon manager text
+   *  stays the default so its behavior is unchanged. */
+  private readonly fallback: DaemonManagementResult
   private started = false
   private disposed = false
   private settled = false
@@ -354,6 +357,7 @@ export class DaemonControlRunner {
     writeStderr?: (text: string) => void
     reportFatal?: (line: string) => void
     shutdownBudgetMs?: number
+    fallback?: DaemonManagementResult
   }) {
     this.run = options.run
     this.appExit = options.appExit
@@ -361,6 +365,11 @@ export class DaemonControlRunner {
     this.writeStderr = options.writeStderr ?? (text => { process.stderr.write(text) })
     this.reportFatal = options.reportFatal ?? (() => {})
     this.shutdownBudgetMs = options.shutdownBudgetMs ?? 4000
+    this.fallback = options.fallback ?? {
+      code: 4,
+      stdout: '',
+      stderr: 'dsh-pi-tui daemon: MANAGER_OR_OS_FAILURE: an unexpected local management failure occurred\n',
+    }
   }
 
   /** Start exactly one management operation. A no-op after a prior start/dispose. */
@@ -376,11 +385,7 @@ export class DaemonControlRunner {
         // The control module maps every known failure itself; this arm exists
         // only so a hostile unexpected throw cannot escape as an unhandled
         // rejection or look successful.
-        result = {
-          code: 4,
-          stdout: '',
-          stderr: 'dsh-pi-tui daemon: MANAGER_OR_OS_FAILURE: an unexpected local management failure occurred\n',
-        }
+        result = this.fallback
       }
       if (this.disposed || this.settled) return
       this.settled = true
@@ -490,6 +495,10 @@ export function apply(ctx: Context): void {
     applyManagement(ctx, startup, profileContext, appExit)
     return
   }
+  if (startup.kind === 'web-control') {
+    applyWebControl(ctx, startup, profileContext, appExit)
+    return
+  }
 
   const packageRoot = resolveProfilePackageRoot(profileContext.dir)
   const entry = resolveClientEntry(packageRoot)
@@ -547,34 +556,37 @@ export function apply(ctx: Context): void {
   ctx.effect(() => () => coordinator.dispose(), 'pi-tui-daemon-launcher child lifecycle')
 }
 
-/** Assemble ONE management operation for this official Profile. No Client
- *  artifact is resolved, no Client is spawned and no TUI/Direct row is opened. */
-function applyManagement(
-  ctx: Context,
-  startup: TuiDaemonControlStartup,
-  profileContext: ProfileContextLike,
-  appExit: (code: number) => void,
-): void {
-  const packageRoot = resolveProfilePackageRoot(profileContext.dir)
-  const profile = {
+/** The official Profile facts the one-shot management runners need. */
+function managementProfile(profileContext: ProfileContextLike): {
+  readonly name: string
+  readonly dir: string
+  readonly home: string
+  readonly installAnchor: string
+  readonly packageRoot: string
+  readonly dshVersion: string
+} {
+  return {
     name: profileContext.name,
     dir: profileContext.dir,
     home: profileContext.home,
     installAnchor: profileContext.installAnchor,
-    packageRoot,
+    packageRoot: resolveProfilePackageRoot(profileContext.dir),
     dshVersion: readInstalledDshVersion(profileContext.installAnchor),
   }
-  const controller = new AbortController()
-  const runner = new DaemonControlRunner({
-    run: async () => {
-      const { runDaemonControl } = await import('./local-daemon-control.ts')
-      return await runDaemonControl(startup.control, profile, { signal: controller.signal })
-    },
-    appExit,
-  })
+}
+
+/** Mount the ONE one-shot management lifecycle: mark the launcher mounted, start
+ *  only on the real cold-ready commit, and dispose through the row fiber. */
+function mountManagementRunner(
+  ctx: Context,
+  startup: TuiDaemonControlStartup | TuiWebControlStartup,
+  runner: DaemonControlRunner,
+  controller: AbortController,
+): void {
   // The row mounted: the startup handshake must not report a missing launcher.
   startup.markCoordinatorMounted?.()
   const ready = ctx.get('appReady') as { onReady(listener: () => void): () => void } | undefined
+  const lifecycleName = startup.kind === 'web-control' ? 'pi-tui-web-control' : 'pi-tui-daemon-control'
   if (ready === undefined) {
     runner.start()
   } else {
@@ -584,10 +596,58 @@ function applyManagement(
       runner.start()
     })
     registrationReturned = true
-    ctx.effect(() => () => { cancel() }, 'pi-tui-daemon-control readiness')
+    ctx.effect(() => () => { cancel() }, `${lifecycleName} readiness`)
   }
   ctx.effect(() => () => {
     controller.abort()
     return runner.dispose()
-  }, 'pi-tui-daemon-control lifecycle')
+  }, `${lifecycleName} lifecycle`)
+}
+
+/** Assemble ONE daemon management operation for this official Profile. No
+ *  Client artifact is resolved, no Client is spawned and no TUI/Direct row is
+ *  opened. */
+function applyManagement(
+  ctx: Context,
+  startup: TuiDaemonControlStartup,
+  profileContext: ProfileContextLike,
+  appExit: (code: number) => void,
+): void {
+  const profile = managementProfile(profileContext)
+  const controller = new AbortController()
+  const runner = new DaemonControlRunner({
+    run: async () => {
+      const { runDaemonControl } = await import('./local-daemon-control.ts')
+      return await runDaemonControl(startup.control, profile, { signal: controller.signal })
+    },
+    appExit,
+  })
+  mountManagementRunner(ctx, startup, runner, controller)
+}
+
+/** Assemble ONE headless Web CLI operation for this official Profile. It never
+ *  resolves a Client artifact, never spawns a Client and never opens the TUI. */
+function applyWebControl(
+  ctx: Context,
+  startup: TuiWebControlStartup,
+  profileContext: ProfileContextLike,
+  appExit: (code: number) => void,
+): void {
+  const profile = managementProfile(profileContext)
+  const controller = new AbortController()
+  const runner = new DaemonControlRunner({
+    run: async () => {
+      const { runLocalWebControl } = await import('./local-web-control.ts')
+      return await runLocalWebControl(startup.control, profile, { signal: controller.signal })
+    },
+    appExit,
+    // An unexpected Web CLI failure must never be reported as a daemon manager
+    // failure: the fixed prefix names the web command and carries no secret.
+    fallback: {
+      code: 4,
+      stdout: '',
+      stderr: 'dsh-pi-tui web: WEB_CLI_UNAVAILABLE: an unexpected local web CLI failure occurred\n',
+    },
+  })
+  mountManagementRunner(ctx, startup, runner, controller)
 }

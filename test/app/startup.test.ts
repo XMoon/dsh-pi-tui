@@ -16,7 +16,7 @@ import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'no
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
-import { apply as applyStartup, TUI_STARTUP_SERVICE, HARNESS_COMPAT, bundleVersionLabel, harnessCompatEntryFor, incompatibleHarnessMessage } from '../../src/startup.ts'
+import { apply as applyStartup, TUI_STARTUP_SERVICE, TUI_DAEMON_STARTUP_SERVICE, HARNESS_COMPAT, bundleVersionLabel, harnessCompatEntryFor, incompatibleHarnessMessage } from '../../src/startup.ts'
 import type { TestContext } from 'node:test'
 import { testLifecycle, type TestLifecycle } from '../support/temp-lifecycle.ts'
 
@@ -310,6 +310,14 @@ test('--help never runs the action, on any harness', (t) => {
     stderr.restore()
     launcher.restore()
   }
+})
+
+test('web help and web commands never mount the Direct TUI', (t) => {
+  const helpCtx = mountStartup(t, ['web', '--help'])
+  assert.equal(helpCtx.get(TUI_STARTUP_SERVICE), undefined, 'web --help must not provide the TUI startup service')
+  const commandCtx = mountStartup(t, ['web', 'status'])
+  assert.equal(commandCtx.get(TUI_STARTUP_SERVICE), undefined, 'web status must not provide the TUI startup service')
+  assert.equal((commandCtx.get(TUI_DAEMON_STARTUP_SERVICE) as { kind?: string } | undefined)?.kind, 'web-control')
 })
 
 test('the CLI Session launch grammar maps the launcher argv to ONE intent', (t) => {

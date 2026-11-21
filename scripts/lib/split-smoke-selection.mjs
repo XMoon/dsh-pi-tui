@@ -61,6 +61,7 @@ import { runHostNumericSettingsFr5B } from '../smoke/split-process/host-numeric-
 import { runExtensionConfigPr2 } from '../smoke/split-process/r8-extension-config-pr2.mjs'
 import { runClientExtensionLoaderPr3 } from '../smoke/split-process/r8-extension-client-loader-pr3.mjs'
 import { runWebStartupPreference } from '../smoke/split-process/web-startup-preference.mjs'
+import { runWebCliM6 } from '../smoke/split-process/web-cli-m6.mjs'
 import { runProfilePreferencesQualification } from '../smoke/split-process/profile-preferences.mjs'
 import { runF2AccountComposition } from '../smoke/split-process/account-composition.mjs'
 import { runF7AProviderAuthorization } from '../smoke/split-process/provider-authorization-f7a.mjs'
@@ -411,6 +412,13 @@ const CASE_REGISTRY = Object.freeze([
     id: 'web.startup-preference',
     title: 'the profile-owned Web startup preference applies on the next cold Host through the real settings wire',
     run: runWebStartupPreference,
+  }),
+  Object.freeze({
+    suite: 'web',
+    id: 'web.headless-cli',
+    title: 'the real installed dsh web CLI reads and toggles one Host Web frontend, exchanges the printed URL into the official Web shell, and refuses unauthenticated/cross-site control',
+    platforms: LINUX_DARWIN,
+    run: runWebCliM6,
   }),
   Object.freeze({
     suite: 'web',
