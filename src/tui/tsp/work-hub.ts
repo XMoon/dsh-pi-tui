@@ -103,10 +103,11 @@ interface WorkHubPanel {
   historyExpanded: boolean
   refresh: WorkHubRefresh
   refreshError: string | undefined
-  /** The one focused native action of the `actions` zone (local cursor only). */
-  actionFocus: WorkHubAction
-  /** Whether the user explicitly moved the action focus (vs the default). */
-  actionFocusTouched: boolean
+  /**
+   * The user's explicit native action focus, or `undefined` while the current
+   * default applies (details when readable, else history, else close).
+   */
+  actionFocus: WorkHubAction | undefined
   readonly onSelect: (value: string) => 'close' | 'keep-open'
   readonly onClose: () => void
   readonly options: TaskBrowserPresentationOpen
@@ -444,7 +445,9 @@ function hubLayer(panel: WorkHubPanel, wide: boolean, admission: WorkHubDetailsA
   // `details`/`history` preference falls back to the actions that really exist.
   const focused: WorkHubAction | undefined = panel.zone !== 'actions'
     ? undefined
-    : normalizeActionFocus(panel.actionFocus, history, detailsAvailable)
+    : panel.actionFocus === undefined
+      ? defaultActionFocus(history, detailsAvailable)
+      : normalizeActionFocus(panel.actionFocus, history, detailsAvailable)
   const actions: PickerAction[] = [{
     id: CLOSE_ACTION_ID,
     label: focused === 'close' ? 'Close [Enter]' : 'Close',
@@ -603,16 +606,15 @@ export class TspWorkHub {
       historyExpanded: false,
       refresh: options.loading ? 'loading' : 'ready',
       refreshError: undefined,
-      actionFocus: 'close',
-      actionFocusTouched: false,
+      actionFocus: undefined,
       onSelect,
       onClose,
       options,
     }
     panel.selected = chooseInitial(visibleRows(panel))
-    // The initial action-zone focus is a DEFAULT, not a user choice: a
-    // loading -> ready commit may adopt it once the real rows arrive.
-    panel.actionFocus = defaultActionFocus(historyJobs(panel).length > 0, this.detailsAvailable(panel))
+    // The action-zone focus starts as the CURRENT default (undefined is the
+    // default sentinel, not a user choice): a loading -> ready commit may adopt
+    // the real rows' default once they arrive.
     this.panel = panel
     this.change(panel)
     return {
@@ -665,9 +667,7 @@ export class TspWorkHub {
     // resurrects an action the user did not re-choose.
     const history = historyAvailable(panel)
     const details = this.detailsAvailable(panel)
-    panel.actionFocus = panel.actionFocusTouched
-      ? normalizeActionFocus(panel.actionFocus, history, details)
-      : defaultActionFocus(history, details)
+    if (panel.actionFocus !== undefined) panel.actionFocus = normalizeActionFocus(panel.actionFocus, history, details)
     panel.revision += 1
     this.render()
   }
@@ -875,7 +875,6 @@ export class TspWorkHub {
         if (ring.length <= 1) return
         const current = ring.indexOf(this.focusedAction(panel))
         panel.actionFocus = ring[(current + intent.delta + ring.length) % ring.length]!
-        panel.actionFocusTouched = true
         this.change(panel)
         return
       }
@@ -910,7 +909,11 @@ export class TspWorkHub {
 
   /** The action the action zone's Enter would run, normalized to what exists. */
   private focusedAction(panel: WorkHubPanel): WorkHubAction {
-    return normalizeActionFocus(panel.actionFocus, historyAvailable(panel), this.detailsAvailable(panel))
+    const history = historyAvailable(panel)
+    const details = this.detailsAvailable(panel)
+    return panel.actionFocus === undefined
+      ? defaultActionFocus(history, details)
+      : normalizeActionFocus(panel.actionFocus, history, details)
   }
 
   /**
