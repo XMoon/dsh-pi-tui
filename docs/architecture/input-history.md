@@ -134,7 +134,15 @@ below.
   (it does not accept); the explicit `Use Selected [Enter]` / `Copy All [Alt+C]`
   cells act,
   the wheel scrolls the list or the Preview under the pointer only, and a
-  Preview drag copies the exact original source substring. The regular main
+  Preview drag copies the exact original source substring. Every COMPLETE
+  painted Header scope label is also a direct target for that scope — the
+  click selects the requested scope instead of simulating a Tab cycle; the
+  active scope is a strict no-op, a sessionless seat has no Session label, the
+  query survives, and the same last-painted frame, generation and captured
+  tenant currentness fences govern the gesture. Header title/blank/F2 and any
+  clipped label are inert, and the Header follows the same pointer-capability
+  guard as the rest of the seat. The Footer `Scope [Tab]` action and the
+  keyboard `Tab` keep their original cycle semantics. The regular main
   screen has NO application mouse: it is fully keyboard-driven and the
   terminal's native selection/scrollback is untouched.
 - **Storage**: v2 rows carry `cwd` + `ts` + `sessionId`; v1 rows inherit
