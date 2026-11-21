@@ -280,7 +280,7 @@ export async function runWebCliM6({ installation, dshHome, trace }) {
     }
     const logs = runCli(installation, ['daemon', 'logs', '--lines', '200'])
     assert(!`${logs.stdout}${logs.stderr}`.includes(token), 'the Web URL token leaked into daemon logs')
-    trace('m6-web-cli-disabled', { state: 'disabled', hostPid, instance: instanceId.slice(0, 8), spa: 404, connect: 303, tokenLeaked: false })
+    trace('m6-web-cli-disabled', { state: 'disabled', hostPid, instance: instanceId.slice(0, 8), spa: afterDisableRoot.status, connect: connect.status, tokenLeaked: false })
 
     // ── G. Stop the Host, then the same clean refusal returns ────────────
     const stopped = runCli(installation, ['daemon', 'stop'])
