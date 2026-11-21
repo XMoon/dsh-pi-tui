@@ -215,11 +215,15 @@ export async function runHostCommandFileReceipt(context) {
     const completionRegion = await waitForCommandCompletion(
       clientA,
       '/fil',
-      ['/files', 'C1 command FILE receipt proof'],
+      ['files', 'C1 command FILE receipt proof'],
       'CFR live Host /files completion',
     )
-    assert(completionRegion.includes('/files') && completionRegion.includes('C1 command FILE receipt proof'),
-      `CFR the Host /files descriptor is not in the live completion region: ${JSON.stringify(completionRegion)}`)
+    // The PiTui SelectList paints the candidate NAME without the slash; the
+    // submitted token keeps its slash. Require the actual painted row shape,
+    // not a bare substring anywhere below the composer.
+    assert(/(?:^|\n)\s*→\s+files\b/u.test(completionRegion)
+      && completionRegion.includes('C1 command FILE receipt proof'),
+    `CFR the Host /files descriptor is not in the live completion region: ${JSON.stringify(completionRegion)}`)
     // Escape closes only the completion list; backspace clears the typed query.
     clientA.send('\x1b')
     await sleep(120)
@@ -233,7 +237,7 @@ export async function runHostCommandFileReceipt(context) {
     'CFR typing/clearing a completion never invoked the Host handler')
     trace('cfr-live-host-command-completion', {
       sessionId: sessionA,
-      rows: ['/files', 'C1 command FILE receipt proof'],
+      rows: ['files', 'C1 command FILE receipt proof'],
       executed: false,
       commandRuns: 0,
     })
