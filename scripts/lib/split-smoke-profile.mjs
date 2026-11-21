@@ -196,7 +196,7 @@ export function createSplitSmokeProfile({ tarball, targetDshVersion, workDir, cl
     anchor,
     base,
     surfaceLlm,
-    clientPeers,
+    clientPeers: clientPlatformProvisioning === 'legacy-preseed' ? clientPeers : [],
     clientPlatformProvisioning,
     dshInvocation: dsh,
   }

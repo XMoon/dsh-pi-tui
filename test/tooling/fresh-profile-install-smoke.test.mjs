@@ -19,6 +19,7 @@ import test from 'node:test'
 import {
   assertBundledClientChunk,
   assertIsolatedWorkRoot,
+  assertSingleHost,
   parseFreshProfileArgs,
   resolveFreshCandidate,
 } from '../../scripts/fresh-profile-install-smoke.mjs'
@@ -69,6 +70,15 @@ test('the isolated work root refuses the checkout and an ancestor node_modules',
   const nested = join(polluted, 'work')
   mkdirSync(nested)
   assert.throws(() => assertIsolatedWorkRoot(nested, checkout), /ancestor node_modules/u)
+})
+
+test('the Daemon proof requires exactly one stable Host identity', () => {
+  const identity = () => 'start-time'
+  assert.throws(() => assertSingleHost({ host: [] }, undefined, 'empty', identity), /exactly one Daemon Host/u)
+  assert.throws(() => assertSingleHost({ host: [{ pid: 1 }, { pid: 2 }] }, undefined, 'two', identity), /exactly one Daemon Host/u)
+  const first = assertSingleHost({ host: [{ pid: 1 }] }, undefined, 'first', identity)
+  assert.deepEqual(first, { pid: 1, start: 'start-time' })
+  assert.throws(() => assertSingleHost({ host: [{ pid: 2 }] }, first, 'replaced', identity), /was replaced/u)
 })
 
 test('the bundled Client chunk must contain the Store and no external Store closure', (t) => {

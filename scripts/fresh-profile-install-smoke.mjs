@@ -49,7 +49,7 @@ import {
 } from './lib/dsh-smoke-harness.mjs'
 import { assertInstalledDshFamily, PACKAGE_ROOT } from './lib/dsh-distribution.mjs'
 import { createSplitSmokeProfile } from './lib/split-smoke-profile.mjs'
-import { createSplitProcessScope } from './lib/split-smoke-processes.mjs'
+import { createSplitProcessScope, readStartIdentity } from './lib/split-smoke-processes.mjs'
 import { selectCandidate } from './qualify-tarball.mjs'
 
 const EXPECTED_NAME = '@xmoon76/dsh-pi-tui'
@@ -58,6 +58,7 @@ const SUPPORTED_DSH_TARGETS = new Set(['0.2.2-rc.3', '0.2.2-rc.4', '0.2.2-rc.5']
 const STORE_PACKAGES = ['@deepseek-ai/dsh-client-store', 'zustand', 'immer']
 const KEEP = process.env.FRESH_PROFILE_KEEP === '1'
 const REPORT_PATH = process.env.FRESH_PROFILE_REPORT
+const FAILPOINT = process.env.FRESH_PROFILE_FAILPOINT ?? ''
 
 export class FreshProfileGateError extends Error {
   constructor(code, message, details = {}) {
@@ -74,6 +75,10 @@ function fail(code, message, details = {}) {
 
 function assert(condition, message, code = 'ASSERTION_FAILED') {
   if (!condition) fail(code, message)
+}
+
+function failpoint(name) {
+  if (FAILPOINT === name) fail('TEST_FAILPOINT', `fresh-profile test failpoint: ${name}`)
 }
 
 function sleep(ms) {
@@ -427,6 +432,50 @@ async function internalDomainEvidence({ workDir, profileDir, harnessDir, profile
   }
 }
 
+function processStartIdentity(pid) {
+  const linux = readStartIdentity(pid)
+  if (linux !== undefined) return linux
+  const ps = spawnSync('ps', ['-o', 'lstart=', '-p', String(pid)], { encoding: 'utf8' })
+  if (ps.status !== 0) return undefined
+  const text = ps.stdout.trim()
+  return text === '' ? undefined : text
+}
+
+export function assertSingleHost(facts, expectedIdentity, label, identityOf = processStartIdentity) {
+  assert(facts.host.length === 1, `${label}: expected exactly one Daemon Host, saw ${facts.host.length}`, 'DAEMON_HOST_IDENTITY_FAILURE')
+  const current = { pid: facts.host[0].pid, start: identityOf(facts.host[0].pid) }
+  assert(Number.isInteger(current.pid) && current.start !== undefined, `${label}: the Daemon Host has no stable start identity`, 'DAEMON_HOST_IDENTITY_FAILURE')
+  if (expectedIdentity !== undefined) {
+    assert(current.pid === expectedIdentity.pid && current.start === expectedIdentity.start,
+      `${label}: the Daemon Host was replaced (${JSON.stringify(expectedIdentity)} -> ${JSON.stringify(current)})`, 'DAEMON_HOST_IDENTITY_FAILURE')
+  }
+  return current
+}
+
+async function quiesceDaemon({ dsh, profile, daemon }) {
+  try { daemon?.tmux.stop() } catch { /* already gone */ }
+  try {
+    runDsh(dsh, ['--profile', 'pi-tui', 'daemon', 'stop'], profile.profileDir, profile.env, 30_000)
+  } catch { /* the explicit process cleanup below is the backstop */ }
+  const gone = async () => {
+    const facts = processFacts(profile.profileDir, profile.dshHome)
+    return facts.host.length === 0 && facts.client.length === 0
+  }
+  try {
+    await waitFor(gone, 'fresh-profile Daemon cleanup', 30_000)
+    return
+  } catch { /* SIGTERM the owned processes below */ }
+  let facts = processFacts(profile.profileDir, profile.dshHome)
+  for (const entry of [...facts.host, ...facts.client]) {
+    try { process.kill(entry.pid, 'SIGTERM') } catch { /* already gone */ }
+  }
+  await sleep(1_000)
+  facts = processFacts(profile.profileDir, profile.dshHome)
+  for (const entry of [...facts.host, ...facts.client]) {
+    try { process.kill(entry.pid, 'SIGKILL') } catch { /* already gone */ }
+  }
+}
+
 function daemonStatus(dsh, profileDir, env) {
   const result = runDsh(dsh, ['--profile', 'pi-tui', 'daemon', 'status'], profileDir, env, 120_000)
   const fields = {}
@@ -448,48 +497,64 @@ async function runLiveEvidence({ profile, profileRoot, bundled, workDir }) {
   })
   const directExit = await finishPaintedSurface({ ...direct, label: 'direct' })
 
-  const daemon = await runPaintedSurface({
-    workDir,
-    profileDir: profile.profileDir,
-    harnessDir: profile.harnessDir,
-    env: profile.env,
-    label: 'daemon',
-    extraEnv: { DSH_PI_TUI_BACKEND: 'daemon' },
-  })
-  await waitFor(() => processFacts(profile.profileDir, profile.dshHome).client.length >= 1, 'public Daemon Client process', 180_000)
-  const status = daemonStatus(dsh, profile.profileDir, profile.env)
-  assert(status.status === 0 && status.fields.host === 'ready', `daemon status did not report an authenticated Host: ${JSON.stringify(status.fields)}`, 'DAEMON_HOST_FAILURE')
-  const beforeExit = processFacts(profile.profileDir, profile.dshHome)
-  assert(beforeExit.host.length >= 1, 'no Daemon Host process is visible', 'DAEMON_HOST_FAILURE')
-  assert(beforeExit.client.length === 1, `expected one Daemon Client process, saw ${beforeExit.client.length}`, 'DAEMON_CLIENT_FAILURE')
-  await finishPaintedSurface({ ...daemon, label: 'daemon' })
-  await waitFor(() => processFacts(profile.profileDir, profile.dshHome).client.length === 0, 'public Daemon Client exit', 90_000)
-  assert(processFacts(profile.profileDir, profile.dshHome).host.length >= 1, 'the Daemon Host did not survive the Client exit', 'DAEMON_HOST_REAPED')
+  let daemon
+  try {
+    daemon = await runPaintedSurface({
+      workDir,
+      profileDir: profile.profileDir,
+      harnessDir: profile.harnessDir,
+      env: profile.env,
+      label: 'daemon',
+      extraEnv: { DSH_PI_TUI_BACKEND: 'daemon' },
+    })
+  } catch (error) {
+    await quiesceDaemon({ dsh, profile })
+    throw error
+  }
+  let normalCompletion = false
+  try {
+    await waitFor(() => processFacts(profile.profileDir, profile.dshHome).client.length === 1, 'public Daemon Client process', 180_000)
+    const status = daemonStatus(dsh, profile.profileDir, profile.env)
+    assert(status.status === 0 && status.fields.host === 'ready', `daemon status did not report an authenticated Host: ${JSON.stringify(status.fields)}`, 'DAEMON_HOST_FAILURE')
+    const beforeExit = processFacts(profile.profileDir, profile.dshHome)
+    const hostIdentity = assertSingleHost(beforeExit, undefined, 'before Client exit')
+    assert(beforeExit.client.length === 1, `expected one Daemon Client process, saw ${beforeExit.client.length}`, 'DAEMON_CLIENT_FAILURE')
+    failpoint('after-daemon-start')
+    await finishPaintedSurface({ ...daemon, label: 'daemon' })
+    await waitFor(() => processFacts(profile.profileDir, profile.dshHome).client.length === 0, 'public Daemon Client exit', 90_000)
+    assertSingleHost(processFacts(profile.profileDir, profile.dshHome), hostIdentity, 'after Client exit')
+    failpoint('after-client-exit')
 
-  const domains = await internalDomainEvidence({
-    workDir,
-    profileDir: profile.profileDir,
-    harnessDir: profile.harnessDir,
-    profilePackage: profile.profilePackage,
-    env: profile.env,
-  })
+    const domains = await internalDomainEvidence({
+      workDir,
+      profileDir: profile.profileDir,
+      harnessDir: profile.harnessDir,
+      profilePackage: profile.profilePackage,
+      env: profile.env,
+    })
+    assertSingleHost(processFacts(profile.profileDir, profile.dshHome), hostIdentity, 'after domain evidence')
 
-  const stop = runDsh(dsh, ['--profile', 'pi-tui', 'daemon', 'stop'], profile.profileDir, profile.env, 120_000)
-  await waitFor(() => processFacts(profile.profileDir, profile.dshHome).host.length === 0, 'Daemon Host stop', 90_000)
-  return {
-    profileRoot,
-    bundled,
-    direct: { painted: true, exitCode: directExit },
-    daemon: {
-      painted: true,
-      hostReady: status.fields.host === 'ready',
-      oneClient: beforeExit.client.length === 1,
-      clientExited: true,
-      hostPreserved: true,
-      hostStopped: true,
-      stopCommandStatus: stop.status,
-      ...domains,
-    },
+    const stop = runDsh(dsh, ['--profile', 'pi-tui', 'daemon', 'stop'], profile.profileDir, profile.env, 120_000)
+    await waitFor(() => processFacts(profile.profileDir, profile.dshHome).host.length === 0, 'Daemon Host stop', 90_000)
+    normalCompletion = true
+    return {
+      profileRoot,
+      bundled,
+      direct: { painted: true, exitCode: directExit },
+      daemon: {
+        painted: true,
+        hostReady: status.fields.host === 'ready',
+        oneClient: beforeExit.client.length === 1,
+        hostIdentity,
+        clientExited: true,
+        hostPreserved: true,
+        hostStopped: true,
+        stopCommandStatus: stop.status,
+        ...domains,
+      },
+    }
+  } finally {
+    if (!normalCompletion) await quiesceDaemon({ dsh, profile, daemon })
   }
 }
 

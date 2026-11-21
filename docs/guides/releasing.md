@@ -285,9 +285,10 @@ product-test shards joined by a coverage proof, and a lifecycle-free
 `pnpm pack:artifact` candidate whose bytes are qualified by the eight
 public-package smokes (`pnpm smoke:release`) plus the source-leak gate and
 the startup handshake. The `fresh-profile` job installs the same candidate
-ONCE into a brand-new isolated Profile: Linux runs `0.2.2-rc.3`/`rc.4`/`rc.5`
-and native macOS runs `rc.5`; each row proves the single-package Direct and
-Daemon surfaces and re-proves the candidate SHA after the gate. There is no
+ONCE into a brand-new isolated Profile across the qualified DSH/platform
+matrix owned by the workflow and runner; each row proves the single-package
+Direct and Daemon surfaces and re-proves the candidate SHA after the gate.
+There is no
 second pack route and no content-equivalence proof: the candidate's identity
 is its SHA-256, re-proved at every consumer. `scripts/ci-verdict.mjs` is the
 final gate: every required job must be exactly `success`, the mode-dependent
@@ -402,8 +403,8 @@ The push has no local hook; creating a release tag starts
    lifecycle, then qualified by the eight public-package smokes, the
    source-leak gate and the startup handshake;
 4. the `fresh-profile` job installs the same candidate ONCE into a brand-new
-   isolated Profile on Linux `rc.3`/`rc.4`/`rc.5` and native macOS `rc.5`,
-   proving the single-package Direct/Daemon surfaces and re-proving the SHA;
+   isolated Profile across the qualified DSH/platform matrix, proving the
+   single-package Direct/Daemon surfaces and re-proving the SHA;
 5. `qualified` joins every required job — with the mode-dependent jobs checked
    for their exact status (including `fresh-profile`), and the
    release-tag-only split-process proof required to be `success` in npm mode —

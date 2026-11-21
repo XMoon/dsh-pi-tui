@@ -1015,7 +1015,7 @@ jobs:
             echo "the downloaded tarball is $(basename "${TARBALLS[0]}")" >&2
             exit 1
           fi
-          echo "CANDIDATE=${TARBALLS[0]}" >> "$GITHUB_ENV"
+          echo "CANDIDATE=$GITHUB_WORKSPACE/${TARBALLS[0]}" >> "$GITHUB_ENV"
           echo "the fresh-profile candidate is the produced CI artifact ($ACTUAL)"
 
       - name: Run the Fresh Profile installation gate

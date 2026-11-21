@@ -650,6 +650,8 @@ test('the fresh-profile job is the npm-mode dual-platform DSH matrix gate', () =
   const prove = job.steps.find(step => typeof step.name === 'string' && step.name.startsWith('Resolve and prove the candidate'))
   assert.match(prove.run, /needs\.candidate\.outputs\.sha256/u)
   assert.match(prove.run, /needs\.candidate\.outputs\.tarball/u)
+  assert.match(prove.run, /echo "CANDIDATE=\$GITHUB_WORKSPACE\/\$\{TARBALLS\[0\]\}"/u,
+    'the Fresh gate receives an absolute candidate path, never a cwd-relative artifact path')
   const reprove = job.steps.find(step => typeof step.name === 'string' && step.name.startsWith('Re-prove the candidate'))
   assert.match(reprove.run, /createHash\('sha256'\)/u, 'the candidate bytes must be re-proved after the gate')
   const failureUpload = job.steps.find(step => step.uses === 'actions/upload-artifact@v7')
