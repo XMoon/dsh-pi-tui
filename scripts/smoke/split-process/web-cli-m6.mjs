@@ -252,7 +252,13 @@ export async function runWebCliM6({ installation, dshHome, trace }) {
     token = new URL(urlLine.trim()).searchParams.get('token')
     assert(typeof token === 'string' && token !== '', 'web url carried no token')
     assertWebUrl(urlLine.trim(), record)
-    const exchange = await fetchStatus(urlLine.trim())
+    let exchange
+    try {
+      exchange = await fetchStatus(urlLine.trim())
+    } catch (error) {
+      const status = statusFields(runCli(installation, ['daemon', 'status']))
+      throw new SplitSmokeAssertionError(`${error instanceof Error ? error.message : 'Web token exchange failed'}; host=${status.host ?? 'unknown'} pid=${status.pid ?? 'none'}`)
+    }
     assert(exchange.status === 303, `the official Web token exchange returned HTTP ${exchange.status}`)
     assert(/\bno-store\b/iu.test(exchange.headers.get('cache-control') ?? ''), 'the Web token exchange is not no-store')
     const browserCookie = setCookiePair(exchange)
