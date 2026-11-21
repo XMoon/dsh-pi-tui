@@ -255,7 +255,7 @@ test('real Fullscreen job history: Show → history Job → Job Workspace → ba
   const jobFrame = vt.getViewport().join('\n')
   assert.ok(jobFrame.includes('Job · job-3 · bash'), `clicking the history row opens the existing Job Workspace:\n${jobFrame}`)
   assert.deepEqual(observation.opens, ['job-3'])
-  vt.sendInput('\x1b')
+  await clickText(vt, 'Back [Esc]') // the Job Action Bar's own complete Esc span
   await vt.waitForRender()
   const back = vt.getViewport().join('\n')
   assert.ok(back.includes('Hide 2 past jobs [J]'), `Esc returns to the SAME expanded browser:\n${back}`)
@@ -298,6 +298,20 @@ test('real Fullscreen failure attention stays pending until the expanded Job row
   assert.ok(painted.includes('bash · failed'), 'the expanded row is painted')
   assert.ok(!painted.includes('!1 unreviewed'), 'the physically painted row is acknowledged exactly once')
   assert.ok(!painted.includes('! 1 failed'), 'the footer summary drops only after the row is really visible')
+
+  // Collapsing and re-opening the acknowledged history never re-arms the
+  // failure attention; an asynchronous roster update keeps the SAME id
+  // acknowledged too.
+  vt.sendInput('j')
+  await vt.waitForRender()
+  vt.sendInput('j')
+  await vt.waitForRender()
+  assert.ok(vt.getViewport().join('\n').includes('bash · failed'), 'the history re-opens')
+  assert.ok(!vt.getViewport().join('\n').includes('! 1 failed'), 'an acknowledged row is not a new attention event')
+  for (const listener of roster.listeners) listener({ type: 'changed' })
+  await flush(8)
+  await vt.waitForRender()
+  assert.ok(!vt.getViewport().join('\n').includes('! 1 failed'), 'a same-roster update never re-arms an acknowledged failure')
 
   // Session replacement must not leak the old failure id into the new session.
   tasks.resetTasks()

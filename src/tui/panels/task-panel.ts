@@ -1635,13 +1635,7 @@ export class TaskBrowserPanel implements Component, Focusable {
       // activate the row merely because it shares the y.
       if (hit.listWidth !== undefined && event.x >= hit.listWidth) return undefined
       if (event.type === 'wheel' && event.wheelDelta) {
-        if (this.filtered.length === 0) return undefined
-        const delta = event.wheelDelta < 0 ? -1 : 1
-        this.pendingStopValue = undefined
-        this.selectionTouched = true
-        this.selected = Math.max(0, Math.min(this.filtered.length - 1, this.selected + delta))
-        this.ensureVisible()
-        return { handled: true, render: true }
+        return this.wheelTaskList(event.wheelDelta)
       }
       if (event.button !== 'left' || (event.type !== 'press' && event.type !== 'click')) return undefined
       if (event.type === 'press') {
@@ -1727,15 +1721,31 @@ export class TaskBrowserPanel implements Component, Focusable {
     return false
   }
 
+  /** The ONE list-wheel owner: selection movement without commit. Shared by
+   *  item rows and the history chrome row so a wheel over the control never
+   *  toggles the disclosure but still scrolls the visible task list. */
+  private wheelTaskList(wheelDelta: number): TuiMouseEventResult | undefined {
+    if (this.filtered.length === 0) return undefined
+    const delta = wheelDelta < 0 ? -1 : 1
+    this.pendingStopValue = undefined
+    this.selectionTouched = true
+    this.selected = Math.max(0, Math.min(this.filtered.length - 1, this.selected + delta))
+    this.ensureVisible()
+    return { handled: true, render: true }
+  }
+
   /** One Work history disclosure gesture: press only locks the last-painted
    *  identity; the matching release runs the SAME `toggleJobHistory()` as the
-   *  keyboard. Wheel stays inert on this chrome row. */
+   *  keyboard. Wheel stays on the shared list-scroll owner and never toggles. */
   private handleJobHistoryMouse(
     event: TuiMouseEvent,
     hit: Extract<TaskMouseHit, { kind: 'job-history' }>,
     pressed: Fr2Gesture | undefined,
   ): TuiMouseEventResult | undefined {
-    if (event.type === 'wheel') return undefined
+    if (event.type === 'wheel') {
+      if (!event.wheelDelta) return undefined
+      return this.wheelTaskList(event.wheelDelta)
+    }
     if (event.button !== 'left' || (event.type !== 'press' && event.type !== 'click')) return undefined
     if (event.x < hit.startCol || event.x >= hit.endCol) return undefined
     if (!this.jobHistoryControlCurrent(hit)) return undefined

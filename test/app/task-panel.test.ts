@@ -2646,12 +2646,15 @@ test('job-history mouse: complete label only, press→repaint→release toggles 
   panel.render(100)
   assert.ok(panel.handleMouse(mouse('click', controlCol, controlRow, 100, 24))?.handled)
   assert.deepEqual(panel.visibleItems().map(item => item.value), ['job:live', 'job:old'])
-  // Wheel on the control row never toggles.
+  // Wheel on the control row never toggles the disclosure; it stays on the
+  // SAME list-scroll owner and moves the selection.
   const expandedFrame = panel.render(100).map(strip)
   const hideRow = expandedFrame.findIndex(line => line.includes('Hide 1 past jobs [J]'))
   const hideCol = expandedFrame[hideRow]!.indexOf('Hide')
+  assert.equal(panel.getViewState().selectedId, 'job:old')
   panel.handleMouse(mouse('wheel', hideCol, hideRow, 100, 24, -1, 'none'))
   assert.deepEqual(panel.visibleItems().map(item => item.value), ['job:live', 'job:old'])
+  assert.equal(panel.getViewState().selectedId, 'job:live', 'the control-row wheel scrolls/selects through the existing list owner')
   // Clicking the history Job row goes through the ONE existing select sink.
   const rowIndex = expandedFrame.findIndex(line => line.includes('bash · old'))
   const rowCol = expandedFrame[rowIndex]!.indexOf('bash · old')
@@ -2723,6 +2726,29 @@ test('stale job-history gestures never toggle after content/state/owner changes'
     panel.render(100)
     panel.handleMouse(mouse('click', x, row, 100, 24))
     assert.ok(!panel.visibleItems().some(item => item.value === 'job:old'))
+    panel.dispose()
+  }
+  // dispose() revokes the armed frame and a disposed panel never toggles.
+  {
+    const panel = make()
+    const { x, row } = control(panel)
+    assert.ok(panel.handleMouse(mouse('press', x, row, 100, 24))?.handled)
+    panel.dispose()
+    assert.equal(panel.handleMouse(mouse('click', x, row, 100, 24)), undefined)
+  }
+  // A fresh press after a rejected gesture can still succeed.
+  {
+    const panel = make()
+    const { x, row } = control(panel)
+    assert.ok(panel.handleMouse(mouse('press', x, row, 100, 24))?.handled)
+    panel.invalidate()
+    panel.render(100)
+    panel.handleMouse(mouse('click', x, row, 100, 24))
+    assert.ok(!panel.visibleItems().some(item => item.value === 'job:old'))
+    const fresh = control(panel)
+    assert.ok(panel.handleMouse(mouse('press', fresh.x, fresh.row, 100, 24))?.handled)
+    assert.ok(panel.handleMouse(mouse('click', fresh.x, fresh.row, 100, 24))?.handled)
+    assert.ok(panel.visibleItems().some(item => item.value === 'job:old'), 'a fresh gesture after a rejected stale press still works')
     panel.dispose()
   }
   // A stale owner fence or non-fullscreen surface never arms a press.
