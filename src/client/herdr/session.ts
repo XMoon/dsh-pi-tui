@@ -2,15 +2,19 @@
  * The Client-local Herdr Session projection (H2).
  *
  * ONE pure mapping from the already-committed main Session owner and the
- * actual running profile to the facts Herdr may persist:
+ * authoritative resume target to the facts Herdr may persist:
  * - a reportable Session is a canonical FULL main-Session id (the existing
  *   `canonicalFullSessionId` classifier); a bare UUID, a fuzzy prefix, a child
  *   id or a display subject never produces a resume target;
  * - a Direct process may add the public cold-open argv
  *   `dsh --profile <actual> --session <canonical>`;
- * - the internal Split Remote Client reports the id only: the frozen product
- *   has no public CLI that could re-attach an existing Host, and a Direct
- *   `--session` command there would create a NEW Host.
+ * - a public daemon/Split Client adds the public daemon argv
+ *   `env DSH_PI_TUI_BACKEND=daemon dsh --profile <actual> --session <canonical>`.
+ *   The pinned backend keeps recovery on the daemon route even if the Profile
+ *   is later saved back to Direct; it does NOT prove that the original Host
+ *   process still exists. The official local discovery/authentication reuses a
+ *   live Host, and an absent Host is whatever the public daemon CLI starts for
+ *   that Profile.
  *
  * The resume argv is validated as a WHOLE against the Herdr CLI contract
  * (1-64 arguments, at most 8192 UTF-8 bytes, no apostrophe or control
@@ -29,6 +33,14 @@ export interface HerdrSessionProjection {
   readonly sessionId: string
   readonly resumeArgv?: readonly string[]
 }
+
+/**
+ * The authoritative resume target of this Client process. `profile` is the
+ * official entry Profile, never a default or a later Settings mirror.
+ */
+export type HerdrResumeTarget =
+  | { readonly kind: 'direct'; readonly profile: string }
+  | { readonly kind: 'daemon'; readonly profile: string }
 
 /** Herdr's hard argv bounds for one reported resume command. */
 const HERDR_RESUME_MAX_ARGS = 64
@@ -54,15 +66,17 @@ function legalResumeArgv(argv: readonly string[]): boolean {
 /**
  * Project one committed main Session onto the Herdr reporting contract.
  * @param sessionId - the current main-owner Session id (undefined when there is none).
- * @param directProfile - the actual Direct running profile; undefined on Remote.
+ * @param target - the authoritative resume target; undefined when unknown.
  * @returns the reportable projection, or undefined when the id is not canonical.
  */
 export function herdrSessionProjection(
   sessionId: string | undefined,
-  directProfile: string | undefined,
+  target: HerdrResumeTarget | undefined,
 ): HerdrSessionProjection | undefined {
   if (sessionId === undefined || !canonicalFullSessionId(sessionId)) return undefined
-  if (directProfile === undefined) return { sessionId }
-  const resumeArgv = ['dsh', '--profile', directProfile, '--session', sessionId]
+  if (target === undefined) return { sessionId }
+  const resumeArgv = target.kind === 'direct'
+    ? ['dsh', '--profile', target.profile, '--session', sessionId]
+    : ['env', 'DSH_PI_TUI_BACKEND=daemon', 'dsh', '--profile', target.profile, '--session', sessionId]
   return legalResumeArgv(resumeArgv) ? { sessionId, resumeArgv } : { sessionId }
 }

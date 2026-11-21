@@ -1228,6 +1228,18 @@ it belongs to `docs/architecture/concurrency.md`: there the adapter owns the
 Agent lifecycle, so its navigation stops the replaced owner before creating
 the next Session.)
 
+Herdr Session-restore reporting is Client-local. The Client process owns the
+one Herdr reporter; the Host never creates one. A Split/daemon Client builds
+the reported resume command from the entry's officially verified Profile and
+pins `DSH_PI_TUI_BACKEND=daemon` with `env`, because the Profile may later be
+saved back to Direct while the Hosted Session still lives. The reported command
+names a persisted Session, not the old Client process: Herdr restarting a Pane
+does not preserve that Client's OS PID/TTY or a running Turn, and publishing
+the command does not prove the original Host instance. A live Host is reused
+only through the official local discovery/authentication; an absent Host is
+whatever the public daemon CLI starts for that Profile. The Host remains the
+sole Session owner throughout.
+
 The Host Gateway's pending forwarded events are the ONE recovery channel for a
 Question or Approval that was waiting when the Client left. A Client surface
 teardown must not settle a Host-owned forwarded request: it drops its local

@@ -11,13 +11,16 @@
  * The case proves:
  * 1. a sessionless Remote Client reports NO `report-agent-session`; after a
  *    real `openC1Session()` the Client reports the full canonical id on the
- *    SAME queue AFTER its H1 `report-agent`, and never a resume argv;
- * 2. a real `/new` owner change reports the NEW id B; a late A never follows B;
+ *    SAME queue AFTER its H1 `report-agent`, with the exact seven-argument
+ *    daemon resume argv (pinned `DSH_PI_TUI_BACKEND=daemon`, actual Profile
+ *    `pi-tui`, the committed canonical Session id);
+ * 2. a real `/new` owner change reports the NEW id B with the same daemon
+ *    resume target; a late A never follows B;
  * 3. the real H1 RH-02 transport rollover (`SIGUSR1`, with the Host frozen by
  *    `SIGSTOP` so the loss window is deterministic) withdraws the Pane with an
  *    ordered `release-agent`, and only a NEW legal Host progress snapshot may
- *    re-register the CURRENT id B; the held Host Turns are never cancelled and
- *    the Host identity is unchanged;
+ *    re-register the CURRENT id B with its daemon resume argv; the held Host
+ *    Turns are never cancelled and the Host identity is unchanged;
  * 4. the Host process, given its own complete Herdr environment, still creates
  *    no reporter and writes nothing to its fake CLI log;
  * 5. every source / agent / Pane id / seq fact comes from the real spawned CLI
@@ -111,6 +114,21 @@ function argAfter(argv, flag) {
   return argv[index + 1]
 }
 
+/** The exact daemon resume argv for one reported Session of `profile`. */
+function daemonResumeArgv(profile, sessionId) {
+  return ['env', 'DSH_PI_TUI_BACKEND=daemon', 'dsh', '--profile', profile, '--session', sessionId]
+}
+
+/** Every Session report must carry the exact seven-argument daemon target. */
+function assertDaemonResumeFacts(logPath, profile, label) {
+  for (const fact of sessionFacts(logPath)) {
+    const expected = daemonResumeArgv(profile, fact.sessionId)
+    assert(fact.resumeArgv !== undefined && fact.resumeArgv.length === expected.length
+      && fact.resumeArgv.every((arg, index) => arg === expected[index]),
+    `${label}: Session ${fact.sessionId} did not carry the exact daemon resume argv; got ${JSON.stringify(fact.resumeArgv)}`)
+  }
+}
+
 /** Every invocation belongs to the declared Pane/source/agent and carries seq. */
 function assertPaneOwnership(logPath, paneId) {
   for (const { argv } of readInvocations(logPath)) {
@@ -199,8 +217,7 @@ export async function runHerdrH2(context) {
     )
     await waitForLog(clientLog, () => sessionFacts(clientLog).some(fact => fact.sessionId === sessionA),
       'H2 the first canonical Session A')
-    assert(sessionFacts(clientLog).every(fact => fact.resumeArgv === undefined),
-      'H2 a Remote Client must never report a resume argv')
+    assertDaemonResumeFacts(clientLog, 'pi-tui', 'H2 Session A')
     // The registration order is a fact of the log: the first H1 state command
     // must precede the first Session command (Herdr rejects a Session report
     // before the Pane is held).
@@ -229,8 +246,7 @@ export async function runHerdrH2(context) {
     const bIndex = afterB.findIndex(fact => fact.sessionId === sessionB)
     assert(bIndex >= 0 && afterB.slice(bIndex).every(fact => fact.sessionId === sessionB),
       `H2 Session A must never arrive after B; the Session log is ${JSON.stringify(afterB.map(f => f.sessionId))}`)
-    assert(afterB.every(fact => fact.resumeArgv === undefined),
-      'H2 the Remote Split Client must never publish a resume command')
+    assertDaemonResumeFacts(clientLog, 'pi-tui', 'H2 Session B')
 
     // ── A REAL held Turn on the CURRENT Session B (the turn kept across loss) ─
     client.send(`herdr h2 b ${unique}\r`)
@@ -315,6 +331,7 @@ export async function runHerdrH2(context) {
     const afterRecovery = sessionFacts(clientLog)
     assert(afterRecovery.slice(sessionsBeforeLoss).every(fact => fact.sessionId === sessionB),
       `H2 only the CURRENT Session B may follow the release; the log is ${JSON.stringify(afterRecovery.map(f => f.sessionId))}`)
+    assertDaemonResumeFacts(clientLog, 'pi-tui', 'H2 requalified Session B')
 
     // ── Release the held Turns and prove the Host never stopped them ────────
     writeFileSync(holdBarrier, 'release\n', { mode: 0o600 })
@@ -329,8 +346,7 @@ export async function runHerdrH2(context) {
     await waitForLog(clientLog,
       () => states(clientLog).filter(state => state === 'release').length === releasesBeforeExit + 1,
       'H2 the exit release', 60_000)
-    assert(sessionFacts(clientLog).every(fact => fact.resumeArgv === undefined),
-      'H2 a Remote Client may never save a resume command')
+    assertDaemonResumeFacts(clientLog, 'pi-tui', 'H2 after exit')
     assert(alive(hostReady.pid), 'H2 the Host died when the Client exited')
     await stopC1Host(host)
 
@@ -627,8 +643,7 @@ export async function runHerdrH3(context) {
     const dStatus = lastSurfaceStatus(clientD)
     assert(dStatus?.transport === 'connected' && typeof dStatus?.generationId === 'number',
       `H3 D ${unique} reported without an authenticated generation: ${JSON.stringify(dStatus)}`)
-    assert(sessionFacts(logD).every(fact => fact.resumeArgv === undefined),
-      'H3 the re-entry Split Client must never publish a resume argv')
+    assertDaemonResumeFacts(logD, 'pi-tui', `H3 D ${unique}`)
     writeFileSync(s2bHold, 'release\n', { mode: 0o600 })
     await waitForHostSessionEvent(dshHome, sessionD, event => event.type === 'turn/end', `H3 D ${unique} turn/end`)
     await waitForLog(logD, () => states(logD).at(-1) === 'idle', `H3 D ${unique} idle after the held Turn`)
