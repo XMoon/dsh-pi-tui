@@ -154,6 +154,7 @@ test('rejects an illegal backendSource value or source', () => {
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
+  handoffStartupFailureLine,
   reportSurfaceClientFatal,
   surfaceStartupFailureLine,
   sanitizeSurfaceText,
@@ -222,10 +223,26 @@ test('a missing-module line without a safe specifier says unknown and never gues
 })
 
 test('sanitizeSurfaceText bounds length and replaces path/url/known credentials', () => {
-  const out = sanitizeSurfaceText('a '.repeat(300) + '/a/b/c http://x/y token=secret Authorization: Bearer secret-token')
+  const out = sanitizeSurfaceText('token="quoted-secret" token=secret Authorization: Bearer secret-token /a/b/c http://x/y ' + 'a '.repeat(300))
   assert.ok(out.length <= 200)
   assert.ok(!out.includes('/a/b/c') && !out.includes('http://x/y'))
-  assert.ok(!out.includes('token=secret') && !out.includes('secret-token'))
+  assert.ok(!out.includes('token=secret') && !out.includes('secret-token') && !out.includes('quoted-secret'))
+})
+
+test('a handoff self-authored reason never leaks an envelope secret or private path', () => {
+  const line = handoffStartupFailureLine(new Error('local client entry: unexpected launch envelope key "token=\\"example-secret\\"" at /very/private/path'))
+  assert.match(line, /unexpected launch envelope key/u)
+  assert.ok(!line.includes('example-secret'), 'quoted token value leaked')
+  assert.ok(!line.includes('/very/private/path'), 'private path leaked')
+})
+
+test('terminal failure summaries survive a hostile thrown proxy', () => {
+  const hostile = new Proxy({}, {
+    get() { throw new Error('get trap') },
+    getPrototypeOf() { throw new Error('getPrototypeOf trap') },
+  })
+  assert.doesNotThrow(() => surfaceStartupFailureLine(hostile, 'pi-tui'))
+  assert.doesNotThrow(() => handoffStartupFailureLine(hostile))
 })
 
 test('reportSurfaceClientFatal writes the private file and appends its safe locator', t => {

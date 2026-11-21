@@ -25,6 +25,7 @@ import { attachEntryControl, createControlDispatcher } from '../../src/app/remot
 import {
   assertHandoffRestored,
   assertHandoffSignalExclusivity,
+  clientFatalPrimaryWithCleanup,
   ClientReexecRefusal,
   createClientReexecChildEnvironment,
   createClientReexecRequestHandler,
@@ -41,6 +42,7 @@ import {
   type ReexecChildHandle,
 } from '../../src/app/remote-process/local-client-entry.ts'
 import { LOCAL_PROTOCOL, LocalScopeError } from '../../src/app/remote-process/local-scope.ts'
+import { clientFatalErrorDetails } from '../../src/app/remote-process/client-fatal-diagnostics.ts'
 import { collectHostEntryStatus } from '../../src/app/remote-process/host-bootstrap.ts'
 import { drainHmrTransactions, finishHostFailureCleanup, HOST_ONLY_PATCH } from '../../src/app/remote-process/local-host-entry.ts'
 import {
@@ -288,6 +290,15 @@ test('a successful Client dispose keeps the requested code and reports no failur
   const exitCode = await stopLocalClient({ dispose: async () => {} }, 0, record => { records.push(record) })
   assert.equal(exitCode, 0)
   assert.deepEqual(records, [])
+})
+
+test('the stop coordinator primary carries cleanup causes into the incident serializer', () => {
+  const failure = new Error('primary stop failure')
+  const cleanup = new Error('cleanup exploded')
+  const primary = clientFatalPrimaryWithCleanup(failure, [cleanup])
+  const preview = clientFatalErrorDetails(primary, 'client-runtime')
+  assert.match(preview.text, /error\.message: primary stop failure/u)
+  assert.match(preview.text, /cause\[1\]\.message: cleanup exploded/u)
 })
 
 test('the real Client handle turns a rejecting root disposer into cleanup-failure + code 1', async () => {

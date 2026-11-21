@@ -80,7 +80,7 @@ class DiagnosticWriteRefusal extends Error {
 }
 
 /** Read one error-like field without letting a hostile getter or proxy escape. */
-function readField(value: unknown, field: 'name' | 'message' | 'stack' | 'code' | 'cause'): unknown {
+function readField(value: unknown, field: 'name' | 'message' | 'stack' | 'code' | 'cause' | 'errors'): unknown {
   try {
     return (value as Record<string, unknown>)[field]
   } catch {
@@ -137,8 +137,10 @@ function redactPrivateText(text: string): string {
     .replace(/\b(Authorization|Cookie|Set-Cookie)\s*:\s*[^\r\n]*/giu, '$1: <redacted>')
     // A private incident file is not a place for any live Host/launch URL.
     .replace(/\b[a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^\s'"]+/gu, '<url>')
-    .replace(/([?&](?:token|access_token|cookie)=)[^&#\s'"]+/giu, '$1<redacted>')
-    .replace(/\b(token|access_token|password)\s*=\s*[^\s&;,'"]+/giu, '$1=<redacted>')
+    .replace(/([?&](?:token|access_token|cookie)=)[^&#\s]+/giu, '$1<redacted>')
+    // Quoted values are common in self-authored diagnostics; consume the whole
+    // quoted literal so its closing quote cannot leave the secret visible.
+    .replace(/\b(token|access_token|password)\s*=\s*(?:"[^"]*"|'[^']*'|[^\s&;,]+)/giu, '$1=<redacted>')
 }
 
 /** Truncate a string to at most `maxBytes` UTF-8 bytes without splitting a code point. */
@@ -155,11 +157,44 @@ function singleLine(text: string, maxBytes: number): string {
   return truncateUtf8(redactPrivateText(text).replace(/[\r\n]+/gu, ' '), maxBytes)
 }
 
+/** Observe Error/AggregateError identity without a hostile trap escaping. */
+function isErrorLike(value: unknown): boolean {
+  try {
+    return value instanceof Error
+  } catch {
+    return false
+  }
+}
+
+function isAggregateErrorLike(value: unknown): boolean {
+  try {
+    return value instanceof AggregateError
+  } catch {
+    return false
+  }
+}
+
+/** The direct cause children of one layer: `.cause` plus `AggregateError.errors`. */
+function causeChildren(value: unknown): unknown[] {
+  const children: unknown[] = []
+  const cause = readField(value, 'cause')
+  if (cause !== undefined) children.push(cause)
+  if (isAggregateErrorLike(value)) {
+    const errors = readField(value, 'errors')
+    try {
+      if (Array.isArray(errors)) children.push(...errors)
+    } catch {
+      // A hostile errors accessor is not a serializable cause.
+    }
+  }
+  return children
+}
+
 /** Append one primary/cause layer to the fixed field list. */
 function appendErrorFields(lines: string[], error: unknown, depth: number): void {
   const prefix = depth === 0 ? 'error' : `cause[${depth}]`
   const name = readField(error, 'name')
-  const fallbackName = error instanceof Error ? 'Error' : 'NonError'
+  const fallbackName = isErrorLike(error) ? 'Error' : 'NonError'
   lines.push(`${prefix}.name: ${typeof name === 'string' && name !== '' ? singleLine(name, MAX_NAME_BYTES) : fallbackName}`)
   const code = legalErrorCode(error)
   if (code !== undefined) lines.push(`${prefix}.code: ${code}`)
@@ -168,6 +203,34 @@ function appendErrorFields(lines: string[], error: unknown, depth: number): void
   if (typeof stack === 'string' && stack !== '') {
     lines.push(`${prefix}.stack: ${truncateUtf8(redactPrivateText(stack), MAX_STACK_BYTES)}`)
   }
+}
+
+/**
+ * Append up to MAX_CAUSE_DEPTH cause layers. `AggregateError.errors` is part
+ * of the visible chain because the cleanup merge (`mergeCause`) creates one
+ * when a primary already carries a cause; ignoring it would hide both.
+ */
+function appendCauseChain(lines: string[], root: unknown): void {
+  const seen = new Set<unknown>()
+  let remaining = MAX_CAUSE_DEPTH
+  let index = 0
+  const visit = (value: unknown): void => {
+    if (remaining <= 0 || value === undefined) return
+    if (seen.has(value)) {
+      lines.push(`cause[${index + 1}].name: <circular cause>`)
+      return
+    }
+    seen.add(value)
+    remaining -= 1
+    index += 1
+    appendErrorFields(lines, value, index)
+    if (remaining <= 0) return
+    for (const child of causeChildren(value)) {
+      if (remaining <= 0) break
+      visit(child)
+    }
+  }
+  for (const child of causeChildren(root)) visit(child)
 }
 
 /** Bound the whole document to the frozen 32 KiB contract. */
@@ -190,17 +253,8 @@ export function clientFatalErrorDetails(error: unknown, phase: ClientFatalPhase)
     `phase: ${phase}`,
     `kind: ${kind}`,
   ]
-  const seen = new Set<unknown>()
-  let current: unknown = error
-  for (let depth = 0; current !== undefined && depth <= MAX_CAUSE_DEPTH; depth += 1) {
-    if (seen.has(current)) {
-      lines.push(`${depth === 0 ? 'error' : `cause[${depth}]`}.name: <circular cause>`)
-      break
-    }
-    seen.add(current)
-    appendErrorFields(lines, current, depth)
-    current = readField(current, 'cause')
-  }
+  appendErrorFields(lines, error, 0)
+  appendCauseChain(lines, error)
   return { kind, text: boundFileText(`${lines.join('\n')}\n`) }
 }
 
@@ -271,6 +325,21 @@ function prepareDiagnosticDirectory(env: NodeJS.ProcessEnv): string {
 }
 
 /**
+ * Write the whole UTF-8 buffer. `writeSync` may legally return a short count
+ * for a regular file (for example a full disk); a short/zero write is an IO
+ * failure, never a successful `written` result.
+ */
+export function writeAllBytes(fd: number, text: string, write: typeof writeSync = writeSync): void {
+  const buffer = Buffer.from(text, 'utf8')
+  let offset = 0
+  while (offset < buffer.length) {
+    const written = write(fd, buffer, offset, buffer.length - offset)
+    if (written <= 0) throw new DiagnosticWriteRefusal('EIO')
+    offset += written
+  }
+}
+
+/**
  * Write ONE Client fatal artifact. Returns the terminal-safe locator facts; a
  * disabled or failed write is reported explicitly and never throws into the
  * application startup root.
@@ -306,7 +375,7 @@ export function writeClientFatalDiagnostic(
     if (!info.isFile() || (info.mode & 0o777) !== 0o600 || (uid !== undefined && info.uid !== uid)) {
       throw new DiagnosticWriteRefusal('EPERM')
     }
-    writeSync(fd, clientFatalErrorDetails(error, phase).text)
+    writeAllBytes(fd, clientFatalErrorDetails(error, phase).text)
     closeSync(fd)
     fd = undefined
     return { kind: 'written', fileName }

@@ -395,6 +395,35 @@ function failureMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
+/** Observe Error identity without a hostile Proxy `getPrototypeOf` trap escaping. */
+function isErrorValue(value: unknown): value is Error {
+  try {
+    return value instanceof Error
+  } catch {
+    return false
+  }
+}
+
+/** Observe LocalScopeError identity through the same safe boundary. */
+function isLocalScopeErrorValue(value: unknown): value is LocalScopeError {
+  try {
+    return value instanceof LocalScopeError
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Merge the stop coordinator's cleanup errors into the ONE primary error that
+ * the incident file records. The terminal classification keeps the original
+ * failure; only the artifact needs the cleanup cause chain.
+ */
+export function clientFatalPrimaryWithCleanup(failure: unknown, cleanupErrors: readonly unknown[]): Error {
+  let primary = isErrorValue(failure) ? failure : new Error(String(failure))
+  for (const cleanupError of cleanupErrors) primary = mergeCause(primary, cleanupError)
+  return primary
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
 }
@@ -1417,7 +1446,11 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
         const phase: ClientFatalPhase = handle !== undefined
           ? 'client-runtime'
           : context === undefined ? 'pre-context' : 'client-assembly'
-        process.stderr.write(`${reportSurfaceClientFatal(failure, options.profile, phase, expectedHostInstanceId !== undefined, process.env)}\n`)
+        // The incident file records the real primary with every cleanup cause
+        // collected by this ONE coordinator; the terminal classification stays
+        // on the original failure so a typed scope code is never lost.
+        const primary = clientFatalPrimaryWithCleanup(failure, errors)
+        process.stderr.write(`${reportSurfaceClientFatal(failure, options.profile, phase, expectedHostInstanceId !== undefined, process.env, primary)}\n`)
       }
       process.stdin.pause()
       resolveStopped?.()
@@ -2668,7 +2701,7 @@ function shellProfileArg(profile: string): string {
  */
 export function surfaceStartupFailureLine(error: unknown, profile: string, phase: ClientFatalPhase = 'client-assembly'): string {
   const daemon = (verb: string): string => `dsh --profile ${shellProfileArg(profile)} daemon ${verb}`
-  if (error instanceof LocalScopeError) {
+  if (isLocalScopeErrorValue(error)) {
     if (error.code === 'HOST_PROTOCOL_INCOMPATIBLE') {
       return `HOST_PROTOCOL_INCOMPATIBLE: Another live local Host for this profile uses a different local protocol or DSH runtime. The Host has not been stopped or replaced. Inspect it with: ${daemon('status')}; read its logs with: ${daemon('logs')}. If you decide this Profile service is yours to recover, run: ${daemon('restart')}. Recovery is not guaranteed; Automatic upgrade and migration of in-memory work are not supported.`
     }
@@ -2696,7 +2729,7 @@ function controlledSurfaceReason(error: unknown, phase: ClientFatalPhase): strin
   const entryPrefix = 'local client entry: '
   let raw: string
   try {
-    raw = error instanceof Error ? error.message : String(error)
+    raw = isErrorValue(error) ? error.message : String(error)
   } catch {
     raw = ''
   }
@@ -2731,8 +2764,10 @@ export function reportSurfaceClientFatal(
 export function sanitizeSurfaceText(text: string): string {
   let out = text
     .replace(/\b(Authorization|Cookie|Set-Cookie)\s*:\s*[^\r\n]*/giu, '$1: <redacted>')
-    .replace(/([?&](?:token|access_token|cookie)=)[^&#\s'"]+/giu, '$1<redacted>')
-    .replace(/\b(token|access_token|password)\s*=\s*[^\s&;,'"]+/giu, '$1=<redacted>')
+    .replace(/([?&](?:token|access_token|cookie)=)[^&#\s]+/giu, '$1<redacted>')
+    // Quoted values must consume the whole literal; otherwise the closing
+    // quote would leave the secret visible in the terminal line.
+    .replace(/\b(token|access_token|password)\s*=\s*(?:"[^"]*"|'[^']*'|[^\s&;,]+)/giu, '$1=<redacted>')
   out = out.replace(/[\u0000-\u001f\u007f]/gu, ' ')
   out = out.replace(/[a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^\s'"]+/gu, '<url>')
   out = out.replace(/(?:\/[\w.@+-]+){2,}\/?/gu, '<path>')
@@ -2752,14 +2787,16 @@ export function sanitizeSurfaceText(text: string): string {
  */
 export function handoffStartupFailureLine(error: unknown): string {
   let reason: string
-  if (error instanceof LocalScopeError) {
+  if (isLocalScopeErrorValue(error)) {
     if (error.code === 'HOST_HANDOFF_UNAVAILABLE') reason = 'the expected Host is no longer available'
     else if (error.code === 'HOST_IDENTITY_MISMATCH') reason = 'the live local Host is not the expected instance'
     else if (error.code === 'HOST_PROTOCOL_INCOMPATIBLE') reason = 'the expected Host uses a different local protocol or DSH runtime'
     else reason = 'the expected Host could not be authenticated'
-  } else if (error instanceof Error
+  } else if (isErrorValue(error)
     && (error.message.startsWith('local client entry: ') || error.message.startsWith('local client reexec: '))) {
-    reason = error.message.slice(error.message.indexOf(': ') + 2)
+    // A self-authored message can embed an externally supplied Envelope key;
+    // keep only the existing bounded/sanitized reason vocabulary.
+    reason = sanitizeSurfaceText(error.message.slice(error.message.indexOf(': ') + 2))
   } else {
     reason = 'the replacement Client could not restore the expected Host and Session'
   }

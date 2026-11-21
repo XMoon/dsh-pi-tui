@@ -24,6 +24,7 @@ import {
   clientFatalErrorDetails,
   clientFatalKind,
   clientModuleSpecifier,
+  writeAllBytes,
   writeClientFatalDiagnostic,
 } from '../../src/app/remote-process/client-fatal-diagnostics.ts'
 import { testLifecycle, type TestLifecycle } from '../support/temp-lifecycle.ts'
@@ -152,6 +153,31 @@ test('bounded causes, circular causes and hostile getters never throw or exceed 
   assert.doesNotThrow(() => clientFatalErrorDetails(hostile, 'client-assembly'))
 })
 
+test('AggregateError cleanup branches stay visible as bounded cause layers', () => {
+  const primary = new Error('primary')
+  const first = new Error('first cleanup cause')
+  const second = new Error('second cleanup cause')
+  primary.cause = new AggregateError([first, second], 'cleanup aggregate')
+  const preview = clientFatalErrorDetails(primary, 'client-runtime')
+  assert.match(preview.text, /error\.message: primary/u)
+  assert.match(preview.text, /cause\[1\]\.message: cleanup aggregate/u)
+  assert.match(preview.text, /cause\[2\]\.message: first cleanup cause/u)
+  assert.match(preview.text, /cause\[3\]\.message: second cleanup cause/u)
+})
+
+test('a short write is retried to completion and a zero write is an IO failure', () => {
+  const chunks: string[] = []
+  const shortWrite = ((_fd: number, buffer: NodeJS.ArrayBufferView, offset = 0, length = buffer.byteLength) => {
+    const size = Math.min(3, length)
+    chunks.push(Buffer.from(buffer.buffer, buffer.byteOffset + offset, size).toString('utf8'))
+    return size
+  }) as unknown as typeof import('node:fs').writeSync
+  writeAllBytes(1, 'abcdefgh', shortWrite)
+  assert.equal(chunks.join(''), 'abcdefgh')
+  const zeroWrite = (() => 0) as unknown as typeof import('node:fs').writeSync
+  assert.throws(() => writeAllBytes(1, 'abc', zeroWrite), /EIO/u)
+})
+
 test('known credential carriers are redacted in the file and the locator has no private path', t => {
   const { home, env } = fixture(t)
   const error = new Error([
@@ -160,9 +186,10 @@ test('known credential carriers are redacted in the file and the locator has no 
     'Set-Cookie: session=secret-set-cookie',
     'visit https://127.0.0.1:9/connect?token=secret-connect',
     'token=secret-token password=secret-pass access_token=secret-access',
+    'token="secret-quoted" password=\'secret-single\'',
   ].join('\n'))
   const preview = clientFatalErrorDetails(error, 'client-assembly')
-  for (const secret of ['secret-auth', 'secret-cookie', 'secret-set-cookie', 'secret-connect', 'secret-token', 'secret-pass', 'secret-access']) {
+  for (const secret of ['secret-auth', 'secret-cookie', 'secret-set-cookie', 'secret-connect', 'secret-token', 'secret-pass', 'secret-access', 'secret-quoted', 'secret-single']) {
     assert.ok(!preview.text.includes(secret), `secret leaked: ${secret}`)
   }
   assert.match(preview.text, /<redacted>/u)
