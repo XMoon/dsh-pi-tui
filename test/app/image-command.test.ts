@@ -40,6 +40,8 @@ import { TSP_B2A_RESULT_NOTICE_COMMANDS, tspBuiltinAvailability } from '../../sr
 import { classifyCommandLine } from '../../src/domain/command/policy.ts'
 import { prepareUserMessage } from '../../src/app/submission/direct-message-preparation.ts'
 import { unconfiguredPolicyObservation, unconfiguredSessionPolicyPort } from '../support/session-policy-fake.ts'
+import { HostKeybindingManager } from '../../src/tui/keybindings/manager.ts'
+import { parseUserKeybindings } from '../../src/tui/keybindings/config.ts'
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp started in this file is
  * stopped after each test — the process's single-live-TUI slot (the
@@ -74,7 +76,7 @@ function fakeCommands(): { commands: { register: (def: { name: string; handler?:
   return { commands, defs }
 }
 
-function setup(options: { cwd?: string; sessionCwd?: string; signal?: AbortSignal; transitionPending?: () => boolean } = {}): {
+function setup(options: { cwd?: string; sessionCwd?: string; signal?: AbortSignal; transitionPending?: () => boolean; tuiSettings?: unknown } = {}): {
   app: TuiApp
   runner: TuiCommandRunner
   imageStore: DraftImageStore
@@ -113,7 +115,7 @@ function setup(options: { cwd?: string; sessionCwd?: string; signal?: AbortSigna
     setDefaultIntent: () => {},
     defaultIntentRecord: undefined,
     settleIntent: () => {},
-    tuiSettings: undefined,
+    tuiSettings: options.tuiSettings as TuiCommandRunner['tuiSettings'],
     applyFooterSettings: () => {},
     agents: {} as never,
     sessionReader: {
@@ -513,6 +515,12 @@ function mountedHarness(options: {
   composer?: ReturnType<typeof mountedComposer>
   /** Simulate a session transition already in progress at intake time. */
   transitionPending?: boolean
+  /** A mounted PiTui app stand-in for command handlers that need the surface. */
+  app?: unknown
+  /** The settings facade the command handler reads (defaults to unavailable). */
+  tuiSettings?: unknown
+  /** Whether this mount is a PiTui presentation (no TSP builtin gate). */
+  supportsTuiBuiltinUi?: boolean
 }): MountedHarness {
   const ctx = new Context()
   const services = fakeCommands()
@@ -536,7 +544,7 @@ function mountedHarness(options: {
     deliveredFilesSnapshot: () => undefined,
     ctx,
     // The TSP renderer mounts no TuiApp: every PiTui-only member is absent.
-    app: undefined,
+    app: options.app as TuiApp | undefined,
     diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
     ...scopeFacts,
     sessionPolicy: unconfiguredSessionPolicyPort(),
@@ -556,7 +564,7 @@ function mountedHarness(options: {
     setDefaultIntent: () => {},
     defaultIntentRecord: undefined,
     settleIntent: () => {},
-    tuiSettings: undefined,
+    tuiSettings: options.tuiSettings as TuiCommandRunner['tuiSettings'],
     applyFooterSettings: () => {},
     agents: {} as never,
     sessionReader: {
@@ -939,6 +947,10 @@ function cardlessController(options: {
   readonly isSkillInvocation?: (parsed: { name: string; rawInput?: string } | undefined, text: string) => boolean
   /** Whether this card-less mount is a PiTui presentation (no TSP builtin gate). */
   readonly supportsTuiBuiltinUi?: boolean
+  /** Model a genuinely sessionless surface (no live Agent). */
+  readonly sessionless?: boolean
+  /** The submission controller's busy-Enter settings facade. */
+  readonly tuiSettings?: unknown
 }) {
   const notices: { text: string; kind: 'info' | 'error' | undefined }[] = []
   const modelPrompts: string[] = []
@@ -1005,7 +1017,7 @@ function cardlessController(options: {
     signal: new AbortController().signal,
     isCleanedUp: () => cleanedUp,
     logError: () => {},
-    liveAgent: () => agent,
+    liveAgent: () => options.sessionless === true ? undefined : agent,
     ownership: {
       generation: () => core.generation(),
       captureSubject: () => core.subject(),
@@ -1064,7 +1076,7 @@ function cardlessController(options: {
     retainsStaleDraftRestore: false,
     model: { selected: { get current() { return undefined } } },
     image: { attachments: () => undefined as never, llm: () => undefined as never },
-    tuiSettings: undefined,
+    tuiSettings: options.tuiSettings as never,
     captureMatches: (subject) => core.isSubjectCurrent(subject as never),
     ownerWasReplaced: () => false,
     direct: { withPromptAdmission: async (_agent, _hasImages, task) => task() },
@@ -1133,6 +1145,130 @@ test('a card-less Remote /attach with no argument publishes exactly one Usage er
   assert.equal(h.composer.getDraft(), '/attach', 'the refused line returns to the editor, never a token')
   assert.deepEqual(notices, [], 'no second (submission-level) notice duplicates the refusal')
   assert.deepEqual(modelPrompts, [])
+})
+
+test('a card-less Remote /keybindings conflicts failure publishes its runtime records exactly once', async (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('dsh-cardless-keybindings-')
+  const manager = new HostKeybindingManager()
+  manager.setUserConfiguration(parseUserKeybindings({
+    'app.input.submit': 'ctrl+shift+h',
+    'app.todo.toggle': 'ctrl+shift+h',
+  }))
+  const handlerNotices: Array<{ text: string; kind: 'info' | 'error' | undefined }> = []
+  const app = new Proxy({
+    keybindingsManager: () => manager,
+    notify: (text: string, kind?: 'info' | 'error') => { handlerNotices.push({ text, kind }) },
+  }, {
+    // The command registration touches unrelated PiTui seams; this test only
+    // owns the two members the /keybindings handler can reach.
+    get: (target, property) => property in target ? target[property as keyof typeof target] : () => {},
+  })
+  const h = mountedHarness({ cwd: dir, app, supportsTuiBuiltinUi: true })
+  const { controller, notices } = cardlessController({
+    composer: h.composer,
+    clientCommands: h.clientCommands,
+    images: h.imageStore,
+    files: h.fileStore,
+    supportsTuiBuiltinUi: true,
+  })
+  try {
+    controller.submit('/keybindings conflicts', 'enter')
+    await waitFor(() => h.composer.notices.length === 1)
+    const [notice] = h.composer.notices
+    assert.equal(h.composer.notices.length, 1, 'the card-less attempt publishes exactly one visible error')
+    assert.equal(notice!.kind, 'error')
+    assert.match(notice!.text, /Could not open Keyboard shortcuts: the settings service is unavailable\./u)
+    assert.match(notice!.text, /Runtime keybinding conflict records: 1\./u)
+    assert.match(notice!.text, /app\.input\.submit \(editor, user\)/u)
+    assert.deepEqual(handlerNotices, [], 'the command handler never notifies on its own')
+    assert.deepEqual(notices, [], 'no second submission-level notice duplicates it')
+  } finally {
+    manager.dispose()
+  }
+})
+
+test('a card-less Remote /keybindings conflicts settings-read failure reaches its own degraded report', async (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('dsh-cardless-keybindings-throwing-')
+  const manager = new HostKeybindingManager()
+  manager.setUserConfiguration(parseUserKeybindings({
+    'app.input.submit': 'ctrl+shift+h',
+    'app.todo.toggle': 'ctrl+shift+h',
+  }))
+  const throwingSettings = {
+    get: () => { throw new Error('settings read exploded') },
+    replace: async () => {},
+  }
+  const handlerNotices: Array<{ text: string; kind: 'info' | 'error' | undefined }> = []
+  const app = new Proxy({
+    keybindingsManager: () => manager,
+    notify: (text: string, kind?: 'info' | 'error') => { handlerNotices.push({ text, kind }) },
+  }, {
+    get: (target, property) => property in target ? target[property as keyof typeof target] : () => {},
+  })
+  const h = mountedHarness({ cwd: dir, app, supportsTuiBuiltinUi: true, tuiSettings: throwingSettings })
+  const { controller, notices } = cardlessController({
+    composer: h.composer,
+    clientCommands: h.clientCommands,
+    images: h.imageStore,
+    files: h.fileStore,
+    supportsTuiBuiltinUi: true,
+    tuiSettings: throwingSettings as never,
+  })
+  try {
+    controller.submit('/keybindings conflicts', 'enter')
+    await waitFor(() => h.composer.notices.length === 1)
+    const [notice] = h.composer.notices
+    assert.equal(h.composer.notices.length, 1)
+    assert.equal(notice!.kind, 'error')
+    assert.match(notice!.text, /Could not open Keyboard shortcuts: the settings document could not be read: settings read exploded\./u)
+    assert.match(notice!.text, /Runtime keybinding conflict records: 1\./u)
+    assert.match(notice!.text, /app\.input\.submit \(editor, user\)/u)
+    assert.deepEqual(handlerNotices, [], 'the handler never publishes a second notice')
+    assert.deepEqual(notices, [])
+  } finally {
+    manager.dispose()
+  }
+})
+
+test('a sessionless card-less Remote /keybindings conflicts failure publishes its runtime records once', async (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('dsh-cardless-keybindings-sessionless-')
+  const manager = new HostKeybindingManager()
+  manager.setUserConfiguration(parseUserKeybindings({
+    'app.input.submit': 'ctrl+shift+h',
+    'app.todo.toggle': 'ctrl+shift+h',
+  }))
+  const handlerNotices: Array<{ text: string; kind: 'info' | 'error' | undefined }> = []
+  const app = new Proxy({
+    keybindingsManager: () => manager,
+    notify: (text: string, kind?: 'info' | 'error') => { handlerNotices.push({ text, kind }) },
+  }, {
+    get: (target, property) => property in target ? target[property as keyof typeof target] : () => {},
+  })
+  const h = mountedHarness({ cwd: dir, app, supportsTuiBuiltinUi: true })
+  const { controller, notices } = cardlessController({
+    composer: h.composer,
+    clientCommands: h.clientCommands,
+    images: h.imageStore,
+    files: h.fileStore,
+    supportsTuiBuiltinUi: true,
+    sessionless: true,
+  })
+  try {
+    controller.submit('/keybindings conflicts', 'enter')
+    await waitFor(() => h.composer.notices.length === 1)
+    const [notice] = h.composer.notices
+    assert.equal(h.composer.notices.length, 1, 'the sessionless route publishes exactly one visible error')
+    assert.equal(notice!.kind, 'error')
+    assert.match(notice!.text, /Runtime keybinding conflict records: 1\./u)
+    assert.match(notice!.text, /app\.todo\.toggle \(global, user\)/u)
+    assert.deepEqual(handlerNotices, [], 'the command handler never notifies on its own')
+    assert.deepEqual(notices, [], 'no second submission-level notice duplicates it')
+  } finally {
+    manager.dispose()
+  }
 })
 
 test('a card-less Remote bare /skill publishes exactly one Usage error and starts no Skill write', async (t) => {

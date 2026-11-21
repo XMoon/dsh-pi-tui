@@ -85,14 +85,13 @@ function makeRunner(
   fixture: DirectSettingsFixture | undefined,
   rawUnavailable = false,
   backendKind: 'direct' | 'remote' = 'direct',
-  currentSessionId: string | undefined = undefined,
 ): TuiCommandRunner {
   const base: Record<string, unknown> = {
     ctx,
     app,
     diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
     ...sessionScopeFacts(() => undefined, () => 0),
-    currentSessionId,
+    currentSessionId: undefined,
     ensureSession: async () => {},
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
     get defaultIntentOutcome() { return undefined },
@@ -210,7 +209,6 @@ function setup(options: {
   readonly fixture?: DirectSettingsFixture
   readonly rawUnavailable?: boolean
   readonly backendKind?: 'direct' | 'remote'
-  readonly currentSessionId?: string
 }): Harness {
   const ctx = new Context()
   const vt = new VirtualTerminal(options.columns ?? 120, options.rows ?? 40)
@@ -250,7 +248,6 @@ function setup(options: {
     fixture,
     options.rawUnavailable === true,
     options.backendKind ?? 'direct',
-    options.currentSessionId,
   ))
   return {
     vt,
@@ -736,6 +733,8 @@ test('/keybindings conflicts enters the SAME lease in its Conflicts view and rep
   const callsBefore = fixture.calls.length
   await press(h.vt, '\r') // Submit draft detail (the first affected action)
   assert.match(h.view(), /Action ID: app\.input\.submit/u)
+  assert.match(h.view(), /app\.todo\.toggle/u,
+    'the detail keeps the other runtime conflict participant readable')
   await press(h.vt, 'r') // reset this action's shortcut
   await flushOwnedTurns()
   await frames(h.vt, 2)
@@ -756,6 +755,13 @@ test('/keybindings conflicts enters the SAME lease in its Conflicts view and rep
   await press(h.vt, '\x1b')
   assert.match(h.view(), /Settings · Input & Terminal · Rows/u)
   assert.equal((h.app as unknown as { workspaceLease?: object }).workspaceLease, lease)
+  // The transient Conflicts filter belongs to the typed deeplink's FIRST page
+  // mount only: re-entering the ordinary row in this lease starts at All.
+  await press(h.vt, '\r')
+  assert.match(h.view(), /View: \[All\] · Conflicts \(0 affected actions\)/u,
+    'ordinary row re-entry defaults to All')
+  assert.equal((h.app as unknown as { workspaceLease?: object }).workspaceLease, lease,
+    'the re-entry never replaces the Settings lease')
   h.app.dispose()
   startedApps.delete(h.app)
 })
@@ -819,33 +825,6 @@ test('/keybindings conflicts leaves the sessionless Remote returned error to the
     assert.match(result.text ?? '', /Runtime keybinding conflict records: 0\./u)
     assert.deepEqual(notifications, [],
       'the sessionless submission route owns the returned error notice, never the handler')
-  } finally {
-    h.app.notify = originalNotify
-    h.app.stop()
-  }
-})
-
-test('/keybindings conflicts publishes exactly one targeted error on the live-session card-less Remote route', async () => {
-  const h = setup({ settings: null, backendKind: 'remote', currentSessionId: 'session-remote' })
-  h.app.keybindingsManager().setUserConfiguration(parseUserKeybindings({
-    'app.input.submit': 'ctrl+shift+h',
-    'app.todo.toggle': 'ctrl+shift+h',
-  }))
-  const notifications: Array<{ text: string; kind: string | undefined }> = []
-  const originalNotify = h.app.notify
-  h.app.notify = ((message: string, kind?: 'info' | 'error') => {
-    notifications.push({ text: message, kind })
-    originalNotify.call(h.app, message, kind)
-  }) as TuiApp['notify']
-  try {
-    const result = await h.invoke('keybindings', 'conflicts') as { kind: string; text?: string }
-    assert.equal(result.kind, 'error')
-    assert.equal(notifications.length, 1, 'the card-less route gets ONE visible notice, never a duplicate')
-    assert.equal(notifications[0]!.kind, 'error')
-    assert.match(notifications[0]!.text, /Runtime keybinding conflict records: 1\./u)
-    assert.match(notifications[0]!.text, /app\.input\.submit \(editor, user\)/u)
-    await frames(h.vt)
-    assert.doesNotMatch(h.view(), /Settings · /u)
   } finally {
     h.app.notify = originalNotify
     h.app.stop()

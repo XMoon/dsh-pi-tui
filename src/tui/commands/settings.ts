@@ -1326,6 +1326,10 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
 
   const openSettingsWorkspaceWith = (spec: WorkspaceOpenSpec): import('../../tui-app.ts').SettingsWorkspaceHandle => {
     const { initialKeybindingsFilter, onKeybindingsPageFailure, ...workspaceSpec } = spec
+    // The typed conflicts deeplink owns ONLY the FIRST Keyboard page mount of
+    // this workspace. Re-entering the same row from Rows is the ordinary
+    // launcher and must default to All.
+    let keybindingsFilterPending = initialKeybindingsFilter
     // C2-R5: a typed deeplink NEVER guesses its row. Validate the exact pair
     // BEFORE the screen lease is taken, so a mismatched request fails as a real
     // command error and leaves no Settings/overlay behind.
@@ -1628,13 +1632,13 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
         // the EXISTING editor over its ONE authority; the root mounts it in this
         // workspace's body and never opens a second overlay.
         createFooterConfiguratorPage: (done, onAuthoritativeChange) => createFooterWorkspacePage(done, onAuthoritativeChange),
-        createKeybindingsPage: (done, onAuthoritativeChange) => createKeybindingsWorkspacePage(
-          done,
-          onAuthoritativeChange,
-          initialKeybindingsFilter ?? 'all',
-          initialKeybindingsFilter !== 'conflicts',
-          onKeybindingsPageFailure,
-        ),
+        createKeybindingsPage: (done, onAuthoritativeChange) => {
+          const filter = keybindingsFilterPending ?? 'all'
+          const notifyOnFailure = keybindingsFilterPending !== 'conflicts'
+          const onFailure = keybindingsFilterPending === 'conflicts' ? onKeybindingsPageFailure : undefined
+          keybindingsFilterPending = undefined
+          return createKeybindingsWorkspacePage(done, onAuthoritativeChange, filter, notifyOnFailure, onFailure)
+        },
         // FR3: the ONE per-open MCP servers page. The controller holds only
         // this open's transient state; it starts its ONE watch only after the
         // real Settings lease is live (here), and the page's dispose retires it.
@@ -5165,14 +5169,11 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
       }
     }
     const message = lines.join('\n')
-    // A REMOTE card-less command with a live Session has no command card:
-    // this branch is its ONE visible owner. The sessionless local-command
-    // route is already owned by the submission controller's returned-error
-    // notice, so it must NOT be notified here a second time. Direct keeps its
-    // command-result page as the visible owner.
-    if (runner.backendKind === 'remote' && runner.currentSessionId !== undefined) {
-      app.notify(message, 'error')
-    }
+    // The visible owner is the submission route itself: the sessionless local
+    // route publishes returned errors once, and the card-less Remote branch
+    // recognises this exact receipt prefix under its captured-scope fence.
+    // Notifying from the handler would bypass that currentness and duplicate
+    // the sessionless notice.
     return { kind: 'error', text: message }
   }
 

@@ -1653,7 +1653,13 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
                     && !deps.isCleanedUp()
                     && deps.scope.isCurrent(scope)
                     && parsedAtSubmit !== undefined
-                    && TSP_B2A_RESULT_NOTICE_COMMANDS.has(parsedAtSubmit.name)) {
+                    && (TSP_B2A_RESULT_NOTICE_COMMANDS.has(parsedAtSubmit.name)
+                      // UX PR2: the /keybindings conflicts degraded receipt is
+                      // path-specific (its reload/reset siblings own their own
+                      // notices), so it joins this sink by its exact receipt
+                      // prefix instead of the global name set.
+                      || (parsedAtSubmit.name === 'keybindings'
+                        && execution.result.text.startsWith('Could not open Keyboard shortcuts:')))) {
                     deps.app().notify(execution.result.text, 'error')
                   }
                   return execution === undefined
@@ -2675,9 +2681,17 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     // delivery), which never re-derives it from the persisted preference —
     // a one-shot gesture does not survive in settings. Commands that own
     // their own busy semantics (Host commands, client commands) ignore it.
+    // A TUI-local line never consults the busy-Enter preference (the
+    // resolver returns the local placeholder FIRST). Do not read the settings
+    // document for it: a document that throws must reach the command's OWN
+    // degraded result (e.g. /keybindings conflicts reports the live runtime
+    // records) instead of failing the submission before the handler runs.
+    const needsBusyEnter = parsed === undefined
+      || (parsed.name === 'skill' && (parsed.rawInput?.trim() ?? '') !== '')
+      || (!tuiLocalLine && !LOCAL_COMMANDS.has(parsed.name))
     const delivery: SubmitDelivery = request === 'explicit-queue'
       ? 'queue'
-      : resolveSubmitDelivery(parsed, deps.liveAgent()?.status === 'running', request, deps.tuiSettings?.get().busyEnter, tuiLocalLine)
+      : resolveSubmitDelivery(parsed, deps.liveAgent()?.status === 'running', request, needsBusyEnter ? deps.tuiSettings?.get().busyEnter : undefined, tuiLocalLine)
     // NAMESPACE ORDER (DSH client command contribution parity):
     //   1. host command claim (the closed host catalog always wins);
     //   2. client command contribution (client-owned behavior);

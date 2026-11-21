@@ -349,7 +349,11 @@ export class ActionEditorPanel implements Component {
       lines.push(color.textDim(`Effective now: ${formatEditorBindings(effectiveOrdinary)}`))
     }
     if (this.row.diagnostics.length > 0) {
-      for (const diagnostic of this.row.diagnostics.slice(0, 2)) lines.push(color.warning(truncateToWidth(diagnostic, safeWidth)))
+      // A conflict diagnostic names BOTH same-key participants. Wrap it at the
+      // pane width instead of truncating a counterpart away.
+      for (const diagnostic of this.row.diagnostics.slice(0, 2)) {
+        for (const line of wrapTextWithAnsi(diagnostic, safeWidth)) lines.push(color.warning(line))
+      }
     }
     // A runtime record that also names a non-builtin counterpart is stated
     // read-only here: the Action stays the only editable object, and the
