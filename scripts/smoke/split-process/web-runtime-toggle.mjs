@@ -148,13 +148,34 @@ export async function runWebRuntimeToggle(context) {
     const sse = await sseProbe(origin, '/plugins/events')
     const api = await fetchStatus(`${origin}/api`)
     const connect = await fetchStatus(`${origin}/connect`)
+    // The open-in-app route family is registered by an effect of its Web row;
+    // an authenticated launch or catalog read surviving disposal would be a
+    // lifecycle leak even when the SPA itself is gone.
+    const openInAppApps = await fetchStatus(`${origin}/open-in-app/apps`)
+    const openInAppOpen = await fetchStatus(`${origin}/open-in-app/open`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ app: '__dsh_smoke_nonexistent__', path: '/' }),
+    })
     assert(root.status === 404, `${label}: GET / must be 404 with Web off, got ${root.status}`)
     assert(plugin.status === 404, `${label}: a Web browser bundle must be 404 with Web off, got ${plugin.status}`)
     assert(!(sse.status === 200 && sse.contentType.startsWith('text/event-stream')),
       `${label}: the Web SSE channel is still live (${sse.status} ${sse.contentType})`)
     assert(api.status === 401, `${label}: unauthenticated /api must stay 401, got ${api.status}`)
     assert(connect.status === 401, `${label}: unfunded /connect must stay 401, got ${connect.status}`)
-    return { root: root.status, plugin: plugin.status, sse: sse.status, api: api.status, connect: connect.status }
+    assert(openInAppApps.status === 404,
+      `${label}: GET /open-in-app/apps must be 404 with Web off, got ${openInAppApps.status}`)
+    assert(openInAppOpen.status === 404,
+      `${label}: POST /open-in-app/open must be 404 with Web off, got ${openInAppOpen.status}`)
+    return {
+      root: root.status,
+      plugin: plugin.status,
+      sse: sse.status,
+      api: api.status,
+      connect: connect.status,
+      openInAppApps: openInAppApps.status,
+      openInAppOpen: openInAppOpen.status,
+    }
   }
   /** The authenticated Web index + module graph + SSE on a serving Host. */
   const assertWebServing = async (origin, launch, label) => {
