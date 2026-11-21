@@ -158,22 +158,60 @@ function installedDshAnchor(): string | undefined {
   return undefined
 }
 
-/** Every `node_modules` directory above a package directory, nearest first. */
-function moduleRoots(packageDir: string): string[] {
-  const roots: string[] = []
+/** The nearest `node_modules` directory above a package directory. */
+function nearestModuleRoot(packageDir: string): string | undefined {
   for (let dir = packageDir; ; dir = dirname(dir)) {
-    if (basename(dir) === 'node_modules') roots.push(dir)
-    if (dirname(dir) === dir) return roots
+    if (basename(dir) === 'node_modules') return dir
+    const parent = dirname(dir)
+    if (parent === dir) return undefined
+    dir = parent
   }
 }
 
-/** A dependency must live inside one of the module roots that contains its
- * owner. `createRequire` otherwise walks out of the installed DSH tree into an
- * unrelated ancestor `node_modules` (an accidental hoist or a source checkout). */
-function assertSharedModuleTree(ownerDir: string, dependencyDir: string, label: string): void {
-  if (!moduleRoots(ownerDir).some(root => dependencyDir.startsWith(`${root}${sep}`))) {
-    throw new Error(`native process identity: ${label} resolved outside the installed DSH module tree`)
+function isInside(path: string, root: string): boolean {
+  return path === root || path.startsWith(`${root}${sep}`)
+}
+
+/** Prove a resolved dependency belongs to its owner's installation closure.
+ *
+ * npm keeps sibling dependencies in the owner's nearest `node_modules`. pnpm
+ * keeps every package in a shared virtual store (`.mise` in the mise install
+ * and `.pnpm` in a project install), with each package in its own
+ * `<name>@<version>/node_modules` directory. Any other ancestor `node_modules`
+ * is an accidental hoist and must not supply a dependency. */
+function assertInstallClosure(ownerDir: string, dependencyDir: string, label: string): void {
+  const nearest = nearestModuleRoot(ownerDir)
+  if (nearest !== undefined && isInside(dependencyDir, nearest)) return
+  for (let dir = ownerDir; ; dir = dirname(dir)) {
+    if ((basename(dir) === '.mise' || basename(dir) === '.pnpm') && isInside(dependencyDir, dir)) return
+    const parent = dirname(dir)
+    if (parent === dir) break
+    dir = parent
   }
+  throw new Error(`native process identity: ${label} resolved outside the installed DSH module tree`)
+}
+
+/** Read one JSON package manifest as an object, or undefined when unreadable. */
+function readManifestObject(path: string): Record<string, unknown> | undefined {
+  try {
+    const manifest: unknown = JSON.parse(readFileSync(realpathSync(path), 'utf8'))
+    if (manifest === null || typeof manifest !== 'object' || Array.isArray(manifest)) return undefined
+    return manifest as Record<string, unknown>
+  } catch {
+    return undefined
+  }
+}
+
+/** Read one required dependency declaration from an owner manifest. */
+function declaredDependency(manifest: Record<string, unknown>, name: string, label: string): string {
+  const dependencies = manifest.dependencies
+  const declared = dependencies !== null && typeof dependencies === 'object' && !Array.isArray(dependencies)
+    ? (dependencies as Record<string, unknown>)[name]
+    : undefined
+  if (typeof declared !== 'string' || declared === '') {
+    throw new Error(`native process identity: ${label} does not declare ${name}`)
+  }
+  return declared
 }
 
 /**
@@ -188,12 +226,22 @@ export function resolveDshKoffi(anchor: string): string {
     throw new Error('native process identity: the DSH anchor is not an installed @deepseek-ai/dsh manifest')
   }
   const dshDir = dirname(manifest)
-  const subprocessDir = dirname(realpathSync(
+  const subprocessManifest = realpathSync(
     createRequire(manifest).resolve('@deepseek-ai/dsh-subprocess-local/package.json'),
-  ))
-  assertSharedModuleTree(dshDir, subprocessDir, '@deepseek-ai/dsh-subprocess-local')
-  const koffiEntry = realpathSync(createRequire(join(subprocessDir, 'package.json')).resolve('koffi'))
-  assertSharedModuleTree(subprocessDir, dirname(koffiEntry), 'koffi')
+  )
+  const subprocessDir = dirname(subprocessManifest)
+  assertInstallClosure(dshDir, subprocessDir, '@deepseek-ai/dsh-subprocess-local')
+  const subprocess = readManifestObject(subprocessManifest)
+  if (subprocess?.name !== '@deepseek-ai/dsh-subprocess-local') {
+    throw new Error('native process identity: the resolved subprocess manifest is not @deepseek-ai/dsh-subprocess-local')
+  }
+  const declaredKoffi = declaredDependency(subprocess, 'koffi', '@deepseek-ai/dsh-subprocess-local')
+  const koffiEntry = realpathSync(createRequire(subprocessManifest).resolve('koffi'))
+  assertInstallClosure(subprocessDir, dirname(koffiEntry), 'koffi')
+  const koffi = readManifestObject(join(dirname(koffiEntry), 'package.json'))
+  if (koffi?.name !== 'koffi' || typeof koffi.version !== 'string' || koffi.version !== declaredKoffi) {
+    throw new Error('native process identity: the resolved koffi does not match the owner declaration')
+  }
   return koffiEntry
 }
 

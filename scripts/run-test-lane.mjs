@@ -47,6 +47,7 @@ import { resolveLane } from './test-discovery.mjs'
 import { LANES } from './test-lanes.mjs'
 import { groupStillAlive, stopOwnedGroup } from './lib/owned-process-group.mjs'
 import { createTestTempRoot } from './lib/test-temp-root.mjs'
+import { installDarwinKoffiTestAnchor } from './lib/darwin-koffi-test-anchor.mjs'
 
 const ROOT = realpathSync(resolve(dirname(fileURLToPath(import.meta.url)), '..'))
 const TEST_ROOT = join(ROOT, 'test')
@@ -269,6 +270,7 @@ export function orderWeightedProductFiles(files, total) {
  * on a Windows CreateProcessW command line. Node still owns native sharding.
  */
 async function runLaneChild(laneName, args) {
+  installDarwinKoffiTestAnchor()
   const lane = LANES[laneName]
   const discovered = resolveLane(TEST_ROOT, lane.patterns, lane.suffixes, lane.exclude ?? [])
   const shard = parseShard(args)
@@ -321,6 +323,7 @@ async function runLaneChild(laneName, args) {
 }
 
 function main() {
+  installDarwinKoffiTestAnchor()
   const laneName = process.argv[2]
   const args = process.argv.slice(3)
   if (laneName === undefined) {

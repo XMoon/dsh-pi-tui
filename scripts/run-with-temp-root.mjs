@@ -47,6 +47,7 @@ import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { groupStillAlive, stopOwnedGroup } from './lib/owned-process-group.mjs'
 import { createTestTempRoot } from './lib/test-temp-root.mjs'
+import { installDarwinKoffiTestAnchor } from './lib/darwin-koffi-test-anchor.mjs'
 
 const ROOT = realpathSync(fileURLToPath(new URL('../', import.meta.url)))
 const usage = 'usage: node scripts/run-with-temp-root.mjs <command> [args...]'
@@ -111,6 +112,7 @@ export function buildSpawnPlan(argv, { platform = process.platform, comspec = pr
 const SCRIPT_PATH = fileURLToPath(import.meta.url)
 
 function main() {
+  installDarwinKoffiTestAnchor()
   const command = process.argv.slice(2)
   if (command.length === 0) {
     console.error(usage)

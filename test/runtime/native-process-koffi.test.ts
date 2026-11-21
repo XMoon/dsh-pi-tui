@@ -5,14 +5,16 @@
  * a fixture DSH installation owns `dsh-subprocess-local`, which owns Koffi;
  * a non-DSH anchor fails closed even when the repository's own node_modules
  * could satisfy `@deepseek-ai/dsh-subprocess-local`; and a child process with
- * a polluted NODE_PATH still reads through the fixture Koffi.
+ * a polluted NODE_PATH still reads through the fixture Koffi. The fixture
+ * Koffi wrapper records its own load so a resolver that silently loaded the
+ * repository's Koffi cannot pass.
  *
  * @module @xmoon76/dsh-pi-tui/native-process-koffi.test
  */
 
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, symlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import test, { type TestContext } from 'node:test'
@@ -26,30 +28,87 @@ const DARWIN_ONLY = process.platform !== 'darwin' ? 'the real Darwin bridge requ
 interface Fixture {
   readonly root: string
   readonly anchor: string
+  readonly marker?: string
 }
 
-function fixture(t: TestContext, options: { subprocess?: boolean; koffi?: boolean } = {}): Fixture {
-  const { subprocess = true, koffi = true } = options
-  const root = testLifecycle(t).tempDir('dsh-koffi-test-')
-  const dshDir = join(root, 'node_modules', '@deepseek-ai', 'dsh')
-  mkdirSync(dshDir, { recursive: true })
-  writeFileSync(join(dshDir, 'package.json'), `${JSON.stringify({
-    name: '@deepseek-ai/dsh',
+function writeManifest(directory: string, manifest: Record<string, unknown>): void {
+  mkdirSync(directory, { recursive: true })
+  writeFileSync(join(directory, 'package.json'), `${JSON.stringify(manifest, null, 2)}\n`)
+}
+
+function writeKoffiOwner(directory: string): void {
+  writeManifest(directory, {
+    name: '@deepseek-ai/dsh-subprocess-local',
     version: '0.2.2-rc.5',
-  }, null, 2)}\n`)
-  if (subprocess) {
-    const subprocessDir = join(root, 'node_modules', '@deepseek-ai', 'dsh-subprocess-local')
-    mkdirSync(subprocessDir, { recursive: true })
-    writeFileSync(join(subprocessDir, 'package.json'), `${JSON.stringify({
-      name: '@deepseek-ai/dsh-subprocess-local',
-      version: '0.2.2-rc.5',
-      dependencies: { koffi: '3.1.1' },
-    }, null, 2)}\n`)
+    dependencies: { koffi: '3.1.1' },
+  })
+}
+
+function writeDsh(directory: string): void {
+  writeManifest(directory, { name: '@deepseek-ai/dsh', version: '0.2.2-rc.5' })
+}
+
+/** Replace the fixture Koffi with a load-recording wrapper around the real
+ * pinned package. A wrong implementation that loads the repository's Koffi
+ * directly can therefore never produce the marker. */
+function wrapFixtureKoffi(nodeModules: string, marker: string): void {
+  const real = join(nodeModules, 'koffi-real')
+  renameSync(join(nodeModules, 'koffi'), real)
+  writeManifest(join(nodeModules, 'koffi'), { name: 'koffi', version: '3.1.1', main: 'index.cjs' })
+  writeFileSync(join(nodeModules, 'koffi', 'index.cjs'), [
+    "require('node:fs').writeFileSync(" + JSON.stringify(marker) + ", 'fixture-koffi-loaded\\n')",
+    'module.exports = require(' + JSON.stringify(join(real, 'index.cjs')) + ')',
+    '',
+  ].join('\n'))
+}
+
+function fixture(t: TestContext, options: { subprocess?: boolean; koffi?: boolean; wrapped?: boolean } = {}): Fixture {
+  const { subprocess = true, koffi = true, wrapped = false } = options
+  const root = testLifecycle(t).tempDir('dsh-koffi-test-')
+  const nodeModules = join(root, 'node_modules')
+  const dshDir = join(nodeModules, '@deepseek-ai', 'dsh')
+  writeDsh(dshDir)
+  if (subprocess) writeKoffiOwner(join(nodeModules, '@deepseek-ai', 'dsh-subprocess-local'))
+  if (subprocess && koffi) copyKoffiPackage(nodeModules)
+  let marker: string | undefined
+  if (wrapped) {
+    marker = join(root, 'koffi-loaded.txt')
+    wrapFixtureKoffi(nodeModules, marker)
   }
-  if (subprocess && koffi) {
-    mkdirSync(join(root, 'node_modules'), { recursive: true })
-    copyKoffiPackage(join(root, 'node_modules'))
+  return { root, anchor: join(dshDir, 'package.json'), ...(marker === undefined ? {} : { marker }) }
+}
+
+/** A DSH package nested below another module root, with its dependency either
+ * in the SAME nested node_modules or in a polluted outer node_modules. */
+function nestedFixture(t: TestContext, { pollutedAncestor = false } = {}): Fixture {
+  const root = testLifecycle(t).tempDir('dsh-koffi-nested-')
+  const outerModules = join(root, 'node_modules')
+  const nestedModules = join(outerModules, 'outer', 'node_modules')
+  const dshDir = join(nestedModules, '@deepseek-ai', 'dsh')
+  writeDsh(dshDir)
+  if (pollutedAncestor) {
+    writeKoffiOwner(join(outerModules, '@deepseek-ai', 'dsh-subprocess-local'))
+    copyKoffiPackage(outerModules)
+  } else {
+    writeKoffiOwner(join(nestedModules, '@deepseek-ai', 'dsh-subprocess-local'))
+    copyKoffiPackage(nestedModules)
   }
+  return { root, anchor: join(dshDir, 'package.json') }
+}
+
+/** A pnpm-style virtual store: packages sit in separate `<name>@<version>`
+ * directories under one `.mise` store, with a shared hoisted `node_modules`. */
+function pnpmFixture(t: TestContext): Fixture {
+  const root = testLifecycle(t).tempDir('dsh-koffi-pnpm-')
+  const store = join(root, 'node_modules', '.mise')
+  const dshDir = join(store, '@deepseek-ai+dsh@0.2.2-rc.5_a', 'node_modules', '@deepseek-ai', 'dsh')
+  const subprocessDir = join(store, '@deepseek-ai+dsh-subprocess-local@0.2.2-rc.5_a', 'node_modules', '@deepseek-ai', 'dsh-subprocess-local')
+  writeDsh(dshDir)
+  writeKoffiOwner(subprocessDir)
+  const hoistedModules = join(store, 'node_modules')
+  copyKoffiPackage(hoistedModules)
+  mkdirSync(join(hoistedModules, '@deepseek-ai'), { recursive: true })
+  symlinkSync(subprocessDir, join(hoistedModules, '@deepseek-ai', 'dsh-subprocess-local'), 'dir')
   return { root, anchor: join(dshDir, 'package.json') }
 }
 
@@ -92,11 +151,29 @@ test('a DSH installation without the subprocess-local owner or Koffi fails close
   assert.throws(() => resolveDshKoffi(withoutKoffi.anchor))
 })
 
+test('a nested DSH closure resolves its own dependency and rejects an outer hoist', t => {
+  const nested = nestedFixture(t)
+  assert.equal(koffiVersion(resolveDshKoffi(nested.anchor)), '3.1.1')
+  const polluted = nestedFixture(t, { pollutedAncestor: true })
+  assert.throws(() => resolveDshKoffi(polluted.anchor), /outside the installed DSH module tree|does not declare/u)
+})
+
+test('a pnpm virtual-store DSH closure resolves through its .mise store', t => {
+  const value = pnpmFixture(t)
+  const entry = resolveDshKoffi(value.anchor)
+  assert.equal(koffiVersion(entry), '3.1.1')
+  assert.ok(realpathSync(entry).includes(`${join('node_modules', '.mise')}`))
+})
+
 test('the real Darwin bridge reads through the fixture anchor, never a polluted NODE_PATH', { skip: DARWIN_ONLY, timeout: 60_000 }, t => {
-  const value = fixture(t)
+  const value = fixture(t, { wrapped: true })
   const clean = runNativeRead({ SPLIT_PROCESS_DSH_ANCHOR: value.anchor, NODE_PATH: '' })
   assert.equal(clean.status, 0, clean.stderr)
   assert.equal(JSON.parse(clean.stdout).kind, 'alive')
+  const cleanMarker = value.marker
+  assert.ok(cleanMarker !== undefined, 'the wrapped fixture must expose its load marker')
+  if (cleanMarker === undefined) return
+  assert.ok(existsSync(cleanMarker), 'the fixture Koffi wrapper must be the module that actually loaded')
 
   const badAnchor = runNativeRead({ SPLIT_PROCESS_DSH_ANCHOR: join(ROOT, 'package.json'), NODE_PATH: '' })
   assert.equal(badAnchor.status, 0, badAnchor.stderr)
@@ -116,6 +193,7 @@ test('the real Darwin bridge reads through the fixture anchor, never a polluted 
   })
   assert.equal(withPollution.status, 0, withPollution.stderr)
   assert.equal(JSON.parse(withPollution.stdout).kind, 'alive')
+  assert.ok(existsSync(cleanMarker), 'the fixture Koffi wrapper must still be the loaded module under pollution')
 })
 
 test('a Direct launcher entry supplies the DSH anchor through argv', { skip: DARWIN_ONLY, timeout: 60_000 }, t => {
