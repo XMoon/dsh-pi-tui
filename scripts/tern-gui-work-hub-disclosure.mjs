@@ -97,8 +97,10 @@ export default async function (h) {
     h.check('a control-injected click on Show reveals the retained history', clicked && expanded !== undefined,
       JSON.stringify(records(h).slice(-6)))
     const first = rowWithText(h, expanded ?? h.snapshot(), 'bash · old lint')
-    h.check('the first retained Job is visible in the real window', contained(expanded ?? h.snapshot(), first),
-      JSON.stringify(first === undefined ? { present: false } : visibleBox((expanded ?? h.snapshot()).chains, first)))
+    const firstClasses = String(first?.class ?? '').split(/\s+/)
+    h.check('the first retained Job is visibly selected in the real window (sel class + visible area)',
+      contained(expanded ?? h.snapshot(), first) && firstClasses.includes('sel'),
+      JSON.stringify(first === undefined ? { present: false } : { classes: firstClasses, box: visibleBox((expanded ?? h.snapshot()).chains, first) }))
     h.capture(`work-hub-gui-${CASE}-expanded`, 'the real window after Show')
   }
   const a11y = h.ctl('a11y')

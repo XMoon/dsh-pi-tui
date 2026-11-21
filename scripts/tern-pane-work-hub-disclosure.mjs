@@ -92,15 +92,6 @@ export default async function (h) {
   h.measure(`initial action bar (${CASE})`, paintedBar(h, snap))
   h.capture(`work-hub-${CASE}-initial-400x600`, 'the initial collapsed Work Hub')
 
-  if (CASE === 'baseline') {
-    h.check('the pre-PR visible shape paints every Job and only Close + View details', buttons(h, snap).length === 2
-      && button(h, snap, 'Close') !== undefined && button(h, snap, 'View details') !== undefined
-      && rowWithText(h, snap, 'bash · old lint') !== undefined && rowWithText(h, snap, 'bash · deploy') !== undefined,
-    paintedBar(h, snap))
-    h.capture('work-hub-baseline-400x600', 'the pre-PR visible shape for the before/after comparison')
-    return
-  }
-
   if (CASE === 'empty') {
     h.check('an empty roster paints only the native Close action', buttons(h, snap).length === 1
       && button(h, snap, 'Close') !== undefined, paintedBar(h, snap))
@@ -134,9 +125,10 @@ export default async function (h) {
       h.check('a real pointer click on Show reveals both retained Jobs once', clicked && expanded !== undefined
         && recordsOf(h, 'retired').length === 0, JSON.stringify(records(h).slice(-6)))
       const first = rowWithText(h, expanded ?? h.snapshot(), 'bash · old lint')
+      const firstClasses = String(first?.class ?? '').split(/\s+/)
       h.check('the first retained Job is visibly selected, not only a props value',
-        contained(expanded ?? h.snapshot(), first),
-        JSON.stringify(first === undefined ? { present: false } : visibleBox((expanded ?? h.snapshot()).chains, first)))
+        contained(expanded ?? h.snapshot(), first) && firstClasses.includes('sel'),
+        JSON.stringify(first === undefined ? { present: false } : { classes: firstClasses, box: visibleBox((expanded ?? h.snapshot()).chains, first) }))
       h.capture(`work-hub-${CASE}-expanded`, 'history-only after the Show click')
       const hide = button(h, expanded ?? h.snapshot(), 'Hide 2 past jobs')
       if (hide !== undefined) {
@@ -187,8 +179,10 @@ export default async function (h) {
     h.check('one real pointer click on Show repaints Hide and reveals both rows', clicked && expanded !== undefined,
       JSON.stringify(records(h).slice(-6)))
     const first = rowWithText(h, expanded ?? h.snapshot(), 'bash · old lint')
-    h.check('the first retained Job is visibly selected after Show', contained(expanded ?? h.snapshot(), first),
-      JSON.stringify(first === undefined ? { present: false } : visibleBox((expanded ?? h.snapshot()).chains, first)))
+    const firstClasses = String(first?.class ?? '').split(/\s+/)
+    h.check('the first retained Job is visibly selected after Show (sel class + visible area)',
+      contained(expanded ?? h.snapshot(), first) && firstClasses.includes('sel'),
+      JSON.stringify(first === undefined ? { present: false } : { classes: firstClasses, box: visibleBox((expanded ?? h.snapshot()).chains, first) }))
     h.check('the selected retained row shows its real terminal status',
       first !== undefined && h.descendantsText(first).includes('completed'),
       first === undefined ? 'row missing' : h.descendantsText(first))
@@ -206,10 +200,19 @@ export default async function (h) {
       await h.key('Escape')
       const back = await waitForButton(h, 'Hide 2 past jobs')
       h.check('Back returns to the SAME expanded history', back !== undefined, paintedBar(h, back ?? h.snapshot()))
+      // Collapse explicitly: the search claim below is about the FOLDED view.
+      if (back !== undefined) {
+        const hide = button(h, back, 'Hide 2 past jobs')
+        if (hide !== undefined) await h.click(back.chains, hide)
+      }
+      const collapsed = await waitForButton(h, 'Show 2 past jobs')
+      h.check('the history can be folded again by the native action', collapsed !== undefined,
+        paintedBar(h, collapsed ?? h.snapshot()))
     }
   }
 
-  // Plain typing is a query; the hidden failed Job is searchable.
+  // Plain typing is a query; the hidden failed Job is searchable from the
+  // COLLAPSED view.
   await typeText(h, 'failed')
   const searchSnap = await (async () => {
     const deadline = Date.now() + 8_000
@@ -226,7 +229,9 @@ export default async function (h) {
     && button(h, searchSnap, 'Hide') === undefined, searchSnap === undefined ? 'search frame absent' : paintedBar(h, searchSnap))
   if (searchSnap !== undefined) h.capture(`work-hub-${CASE}-search-failed`, 'the hidden failed Job found by search')
   for (let index = 0; index < 'failed'.length; index += 1) await h.key('Backspace', 120)
-  await waitForButton(h, 'Hide 2 past jobs')
+  const cleared = await waitForButton(h, 'Show 2 past jobs')
+  h.check('clearing the query restores the folded manual state', cleared !== undefined,
+    paintedBar(h, cleared ?? h.snapshot()))
 
   // The wide pane keeps the same native action bar.
   await h.resize(1280, 800)

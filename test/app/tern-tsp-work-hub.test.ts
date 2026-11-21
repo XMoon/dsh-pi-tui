@@ -502,6 +502,37 @@ test('the action zone ring follows the real action list across Close, history an
   assert.deepEqual(h.selects, [], 'an action-zone Enter is the local disclosure, never a business select')
 })
 
+test('a vanished action focus never resurrects when the action returns', async (t) => {
+  const h = await mount(t)
+  const handle = h.open([
+    row('job:j1', { label: 'build', status: 'running' }),
+    row('job:j2', { label: 'old lint', status: 'completed', active: false }),
+  ])
+  await waitUntil('the active Job is selected', () => hubProps(h.pane).selected === 'job:j1')
+  h.pane.key('\t')
+  await waitUntil('Tab focuses the readable primary action', () => JSON.stringify(hubProps(h.pane).actions).includes('View details [Enter]'))
+  h.pane.key('\u001b[D')
+  await waitUntil('left focuses the history action', () => JSON.stringify(hubProps(h.pane).actions).includes('Show 1 past jobs [Enter]'))
+  // The last retained candidate disappears: the history action and its focus
+  // both vanish; the focus must fall to a real remaining action, not linger.
+  handle.setItems([row('job:j1', { label: 'build', status: 'running' })])
+  await waitUntil('the history action disappears', () => !actionIds(h.pane).includes('jobs-history'))
+  await waitUntil('the remaining focus is persisted as a real action',
+    () => JSON.stringify(hubProps(h.pane).actions).includes('View details [Enter]'))
+  // A new candidate appears again: the old history focus must NOT revive, so
+  // Enter on the still-focused details action must not toggle the disclosure.
+  handle.setItems([
+    row('job:j1', { label: 'build', status: 'running' }),
+    row('job:j2', { label: 'old lint', status: 'completed', active: false }),
+  ])
+  await waitUntil('the returning history action is painted again', () => actionIds(h.pane).includes('jobs-history'))
+  assert.equal(hubItems(h.pane).length, 1, 'the disclosure stays collapsed until the user acts')
+  assert.ok(JSON.stringify(hubProps(h.pane).actions).includes('View details [Enter]'),
+    'the focus remains on the remaining action; history does not resurrect')
+  assert.ok(JSON.stringify(hubProps(h.pane).actions).includes('View details [Enter]'),
+    'the persisted focus stays on details after the history returns')
+})
+
 test('a stale or bare history action never toggles the current panel; the current revision does', async (t) => {
   const h = await mount(t)
   h.open([row('job:j1', { label: 'build', status: 'running' }), row('job:j2', { label: 'old lint', status: 'completed', active: false })])

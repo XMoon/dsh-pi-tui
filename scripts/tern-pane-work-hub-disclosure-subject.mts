@@ -16,10 +16,6 @@
  *   empty         a genuinely empty roster
  *   long          a long Subagent tree plus the same active/terminal Jobs
  *   scoped        a Workflow-style child subset with no Jobs at all
- *   baseline      the pre-PR visible shape (all rows, Close + View details only):
- *                 the terminal Jobs carry `active: true` in this FIXTURE ONLY so
- *                 the same production presenter paints the historical first
- *                 screen for the PR's before/after screenshot comparison
  *
  * The flow reads `events.jsonl` back as the subject's own positive control:
  * `select`, `stop`, `expose` and `refresh` must all stay zero for every local
@@ -94,9 +90,6 @@ const fixture = (): TaskPanelItem[] => {
   if (CASE === 'history-only') return jobs().filter(item => item.active !== true)
   if (CASE === 'long') return longTree()
   if (CASE === 'scoped') return subagents()
-  if (CASE === 'baseline') {
-    return [question(), ...subagents(), ...jobs().map(item => item.active === true ? item : { ...item, active: true })]
-  }
   return [question(), ...subagents(), ...jobs()]
 }
 

@@ -652,6 +652,10 @@ export class TspWorkHub {
 
   private change(panel: WorkHubPanel): void {
     if (this.panel !== panel || panel.retired) return
+    // A vanished action must not survive as a stored focus preference: the
+    // normalized value is committed with the frame, so a later reappearance
+    // never resurrects an action the user did not re-choose.
+    panel.actionFocus = normalizeActionFocus(panel.actionFocus, historyAvailable(panel), this.detailsAvailable(panel))
     panel.revision += 1
     this.render()
   }
