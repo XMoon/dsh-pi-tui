@@ -54,6 +54,9 @@ function recordPrompt(options) {
     .filter(message => message?.role === 'system')
     .map(message => message.content)]
     .map(textOf).join('\\n')
+  const allText = [options.system, ...(options.messages ?? [])
+    .map(message => message.content)]
+    .map(textOf).join('\\n')
   const markerCount = systemText.split(guidanceMarker).length - 1
   const toolNames = Array.isArray(options.tools)
     ? options.tools.map(tool => tool?.name).filter(name => typeof name === 'string').sort()
@@ -63,6 +66,11 @@ function recordPrompt(options) {
     presentInstruction: systemText.includes(presentInstruction),
     presentTool: toolNames.includes('present'),
     toolNames,
+    // The official session-reference additional context is appended as a
+    // user message, not system copy: record its stable heading and the
+    // canonical mention before Host normalization.
+    referencedSessions: allText.includes('## Referenced sessions'),
+    canonicalSessionUri: allText.includes('dsh-session:'),
     // M6 PR-C C4: the model-facing TUI prompt-section facts (the parity sink).
     focusSection: systemText.includes('# Focus mode'),
     progressSection: systemText.includes('# Progress updates:'),

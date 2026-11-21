@@ -469,10 +469,46 @@ function assertFrozenOrders(enable: readonly string[], disable: readonly string[
     'the presentation rows are released in reverse canonical order')
 }
 
-test('the rc.2 Web rows carry their official non-desktop inject/config facts', () => {
+/**
+ * The four rc.5 Web-only Host providers this composition restores. Each entry
+ * records the official package, the deployment config the official rc.5 patch
+ * requires, and the Browser consumer that must mount after it.
+ */
+const RC5_WEB_PROVIDERS: ReadonlyArray<{
+  readonly id: string
+  readonly name: string
+  readonly config: Readonly<Record<string, number>>
+  readonly before: string
+}> = [
+  { id: 'open-in-app', name: '@deepseek-ai/dsh-host-open-in-app',
+    config: { probeTimeoutMs: 10000, iconTimeoutMs: 10000, launchWatchMs: 1000 }, before: 'ui-open-in-app' },
+  { id: 'session-reference', name: '@deepseek-ai/dsh-session-reference', config: {}, before: 'ui-reference' },
+  { id: 'plugin-inventory', name: '@deepseek-ai/dsh-host-plugin-inventory', config: {}, before: 'ui-plugin-manager' },
+  { id: 'message-feedback', name: '@deepseek-ai/dsh-message-feedback', config: { maxNoteBytes: 8192 }, before: 'ui-message-feedback' },
+]
+
+/** Assert the rc.5 Host providers' package, required config and provider-first order. */
+function assertRc5WebProviderFacts(
+  rows: ReadonlyArray<{ readonly id: string; readonly name: string; readonly config?: Readonly<Record<string, unknown>> }>,
+): void {
+  const byId = new Map(rows.map(row => [row.id, row]))
+  const index = (id: string): number => rows.findIndex(row => row.id === id)
+  for (const provider of RC5_WEB_PROVIDERS) {
+    assert.equal(byId.get(provider.id)?.name, provider.name,
+      `the "${provider.id}" row must load its exact official package`)
+    if (Object.keys(provider.config).length > 0) {
+      assert.deepEqual(byId.get(provider.id)?.config, provider.config,
+        `the "${provider.id}" row must carry the official rc.5 deployment config`)
+    }
+    assert.ok(index(provider.id) >= 0 && index(provider.id) < index(provider.before),
+      `the "${provider.id}" provider must mount before its "${provider.before}" consumer`)
+  }
+}
+
+test('the Web rows carry their official non-desktop facts and rc.5 Host providers', () => {
   const byId = new Map(PI_TUI_WEB_ACCESS_ROWS.map(row => [row.id, row]))
-  // Official rc.2 row facts copied from the installed web-app patch, not
-  // derived from the production table under test.
+  // Official row facts copied from the installed web-app patch, not derived
+  // from the production table under test.
   assert.equal(byId.has('mcp-manager'), false,
     'the shared MCP manager belongs to the Host composition, never to the Web toggle roster')
   assert.deepEqual(byId.get('skill-office')?.config, { pythonEnvironment: 'user' },
@@ -492,6 +528,23 @@ test('the rc.2 Web rows carry their official non-desktop inject/config facts', (
     'the notification UI comes after the settings-account module it injects')
   assert.ok(index('ui-agent-team') >= 0 && index('ui-agent-team') > index('ui-skill'),
     'the Team client UI mounts after the always-active base team providers')
+  assertRc5WebProviderFacts(PI_TUI_WEB_ACCESS_ROWS)
+  // Negative controls: the SAME assertion rejects a wrong required config or a
+  // provider mounted after its consumer.
+  assert.throws(
+    () => assertRc5WebProviderFacts(PI_TUI_WEB_ACCESS_ROWS.map(row =>
+      row.id === 'message-feedback' ? { ...row, config: { maxNoteBytes: 1 } } : row)),
+    /official rc\.5 deployment config/u,
+    'a relaxed feedback note limit must fail the official config contract',
+  )
+  const movedProvider = PI_TUI_WEB_ACCESS_ROWS.filter(row => row.id !== 'session-reference')
+  const feedbackIndex = movedProvider.findIndex(row => row.id === 'ui-reference')
+  movedProvider.splice(feedbackIndex + 1, 0, PI_TUI_WEB_ACCESS_ROWS.find(row => row.id === 'session-reference')!)
+  assert.throws(
+    () => assertRc5WebProviderFacts(movedProvider),
+    /provider must mount before its "ui-reference" consumer/u,
+    'a resolver mounted after its Browser consumer must fail the order contract',
+  )
 })
 
 test('the enable and disable orders are the frozen production orders', () => {

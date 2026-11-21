@@ -26,6 +26,13 @@
     - id: cordis-client-runner
       name: '@deepseek-ai/dsh-cordis-client-runner'
       disabled: true
+    - id: open-in-app
+      name: '@deepseek-ai/dsh-host-open-in-app'
+      disabled: true
+      config:
+        probeTimeoutMs: 10000
+        iconTimeoutMs: 10000
+        launchWatchMs: 1000
     - id: ui-file-actions
       name: '@deepseek-ai/dsh-client-ui-file-actions'
       disabled: true
@@ -34,6 +41,9 @@
       disabled: true
     - id: ui-open-in-app
       name: '@deepseek-ai/dsh-client-ui-open-in-app'
+      disabled: true
+    - id: session-reference
+      name: '@deepseek-ai/dsh-session-reference'
       disabled: true
     - id: ui-settings-account
       name: '@deepseek-ai/dsh-client-ui-settings-account'
@@ -98,6 +108,9 @@
       disabled: true
     - id: ui-settings-models
       name: '@deepseek-ai/dsh-client-ui-settings-models'
+      disabled: true
+    - id: plugin-inventory
+      name: '@deepseek-ai/dsh-host-plugin-inventory'
       disabled: true
     - id: ui-plugin-manager
       name: '@deepseek-ai/dsh-client-ui-plugin-manager'
@@ -174,6 +187,11 @@
     - id: ui-goal
       name: '@deepseek-ai/dsh-client-ui-goal'
       disabled: true
+    - id: message-feedback
+      name: '@deepseek-ai/dsh-message-feedback'
+      disabled: true
+      config:
+        maxNoteBytes: 8192
     - id: ui-message-feedback
       name: '@deepseek-ai/dsh-client-ui-message-feedback'
       disabled: true

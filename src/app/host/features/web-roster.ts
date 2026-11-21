@@ -24,12 +24,14 @@
  * composition contract: every entry is the ONE owner of its published package.
  *
  * `inject` / `config` / `yaml` are the NARROW, row-local facts the official
- * rc.2 Web patch states for a row that cannot keep its own manifest defaults in
+ * rc.5 Web patch states for a row that cannot keep its own manifest defaults in
  * this Host-only profile:
  * - `inject` mirrors the official row's explicit dependency override;
  * - `config` carries a fixed official non-desktop value (`skill-office`
  *   `pythonEnvironment: user`: the Host-only profile mounts no
- *   `workspace-dependencies` runtime, so the user's Python stays the target);
+ *   `workspace-dependencies` runtime, so the user's Python stays the target),
+ *   plus the required deployment limits for `message-feedback` and
+ *   `open-in-app`;
  * - `yaml` carries the fixed official macro fragment for the ONE row whose
  *   value is produced by the official `!!js` scope (`office-kit` output under
  *   the Host's own DSH home). It is a literal fragment for this fixed row, not
@@ -50,6 +52,13 @@ export const PI_TUI_WEB_ACCESS_ROWS: ReadonlyArray<{
   { id: 'modules', name: '@deepseek-ai/dsh-client-modules' },
   { id: 'client-hmr', name: '@deepseek-ai/dsh-client-hmr' },
   { id: 'cordis-client-runner', name: '@deepseek-ai/dsh-cordis-client-runner' },
+  // Official Host application catalog/icon/launch routes. The Browser
+  // `ui-open-in-app` consumes them and must mount after this provider.
+  {
+    id: 'open-in-app',
+    name: '@deepseek-ai/dsh-host-open-in-app',
+    config: { probeTimeoutMs: 10000, iconTimeoutMs: 10000, launchWatchMs: 1000 },
+  },
   // The shared Host MCP manager is deliberately ABSENT: it is a Host-owned row
   // in the bundle's `cordis.patch.yml` (Direct and Host-only both mount it,
   // the daemon supervisor does not), so the Web toggle neither owns it nor
@@ -58,6 +67,9 @@ export const PI_TUI_WEB_ACCESS_ROWS: ReadonlyArray<{
   { id: 'ui-file-actions', name: '@deepseek-ai/dsh-client-ui-file-actions' },
   { id: 'ui-context-menu', name: '@deepseek-ai/dsh-client-ui-context-menu' },
   { id: 'ui-open-in-app', name: '@deepseek-ai/dsh-client-ui-open-in-app' },
+  // Cross-session reference resolver and its `agent/pre-step` hook: the
+  // Browser `ui-reference` consumer mounts after this Host provider.
+  { id: 'session-reference', name: '@deepseek-ai/dsh-session-reference' },
   { id: 'ui-settings-account', name: '@deepseek-ai/dsh-client-ui-settings-account' },
   // The official Account notification surface injects (and therefore loads
   // after) the settings-account UI it appears beside.
@@ -91,6 +103,9 @@ export const PI_TUI_WEB_ACCESS_ROWS: ReadonlyArray<{
   { id: 'ui-settings', name: '@deepseek-ai/dsh-client-ui-settings' },
   { id: 'ui-settings-general', name: '@deepseek-ai/dsh-client-ui-settings-general' },
   { id: 'ui-settings-models', name: '@deepseek-ai/dsh-client-ui-settings-models' },
+  // Live Loader snapshot Remote consumed by the plugin-manager and
+  // plugin-inventory settings UIs.
+  { id: 'plugin-inventory', name: '@deepseek-ai/dsh-host-plugin-inventory' },
   { id: 'ui-plugin-manager', name: '@deepseek-ai/dsh-client-ui-plugin-manager' },
   { id: 'ui-settings-plugin-inventory', name: '@deepseek-ai/dsh-client-ui-settings-plugin-inventory' },
   { id: 'ui-conversation', name: '@deepseek-ai/dsh-client-ui-conversation' },
@@ -120,6 +135,9 @@ export const PI_TUI_WEB_ACCESS_ROWS: ReadonlyArray<{
   { id: 'ui-jobs', name: '@deepseek-ai/dsh-client-ui-jobs' },
   { id: 'ui-schedule', name: '@deepseek-ai/dsh-client-ui-schedule' },
   { id: 'ui-goal', name: '@deepseek-ai/dsh-client-ui-goal' },
+  // Canonical Session-log feedback Remote; the Browser feedback UI mounts
+  // after this Host provider.
+  { id: 'message-feedback', name: '@deepseek-ai/dsh-message-feedback', config: { maxNoteBytes: 8192 } },
   { id: 'ui-message-feedback', name: '@deepseek-ai/dsh-client-ui-message-feedback' },
   { id: 'ui-model-selection', name: '@deepseek-ai/dsh-client-ui-model-selection' },
   { id: 'ui-permission', name: '@deepseek-ai/dsh-client-ui-permission-presets' },

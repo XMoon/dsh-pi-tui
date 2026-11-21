@@ -763,6 +763,16 @@ row at a time), so a PENDING consumer or a missing provider makes the compositio
 tolerated PENDING row: `enabled` always means the complete official Web surface,
 including the changed-files UI, is actually live.
 
+The optional Browser roster may include Host-owned providers whose lifetime
+follows Web enablement rather than the Host process. In particular, the official
+session-reference provider registers an Agent pre-step listener: while Web is
+enabled, canonical session references can affect the input of any Agent on that
+Host, including a TUI-owned session. Disabling Web disposes that listener; an
+already accepted Agent step must not be dropped or reassigned by the toggle.
+Process-global Cordis inspect providers, in contrast, are registered once with
+the Host registry and do not depend on Web serving state. Neither family creates
+another Session, Agent, Connection or model-input authority.
+
 The changed-files surface is ONE official chain, not a pi-tui feature: the
 Web-only `workspace-changes` Host row records each eligible top-level turn's
 working-tree changes (git snapshots plus whole-file captures around file-tool

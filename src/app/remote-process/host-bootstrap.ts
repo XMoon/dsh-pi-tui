@@ -160,6 +160,41 @@ function terminalProgressWatchCount(context: Context): number {
   return watches
 }
 
+/** One Host Cordis inspect provider directory row (the read-only official view). */
+interface CordisInspectProviderLike {
+  readonly platform: 'host' | 'client'
+  readonly id: string
+}
+
+interface CordisInspectRegistryLike {
+  list(): readonly CordisInspectProviderLike[]
+}
+
+/** The four first-party Host inspect providers the Split Host registers once. */
+const REQUIRED_HOST_INSPECT_PROVIDERS = ['Service', 'Event', 'Config', 'Tool'] as const
+
+/**
+ * Prove the process-global Cordis inspect registry holds the four Host
+ * providers exactly once. The Loader row being ACTIVE alone is not proof: the
+ * official plugin registers inside its Fiber, so an absent or duplicate
+ * provider must fail Host Ready before publication.
+ */
+function assertHostInspectProviders(context: Context): void {
+  const registry = context.reflect.get('cordisInspect') as CordisInspectRegistryLike | undefined
+  if (registry === undefined) {
+    throw new Error('local host entry: the official cordisInspect registry is not live')
+  }
+  const hostProviders = registry.list().filter(provider => provider.platform === 'host')
+  for (const id of REQUIRED_HOST_INSPECT_PROVIDERS) {
+    const matches = hostProviders.filter(provider => provider.id === id)
+    if (matches.length !== 1) {
+      throw new Error(
+        `local host entry: expected exactly one "${id}" Host Cordis inspect provider, found ${String(matches.length)}`,
+      )
+    }
+  }
+}
+
 /** The official Session-serving services whose Typert namespace must be real. */
 const OFFICIAL_TYPERT_BINDINGS = [
   { serviceKey: 'sessionController', namespace: 'session' },
@@ -295,6 +330,11 @@ export function collectHostEntryStatus(
     PI_TUI_CREDENTIAL_RECORDS_NAMESPACE,
     PI_TUI_SESSION_POLICY_NAMESPACE,
     PI_TUI_DEFAULT_MODEL_NAMESPACE,
+    // Web-only Host providers the Browser roster owns: their presence is a
+    // live readiness fact while Web is enabled and must disappear with it.
+    'messageFeedback',
+    'pluginInventory',
+    'sessionReferenceResolver',
     PI_TUI_HOST_READY_SERVICE,
     'piTuiPerformanceReady',
   ]) {
@@ -324,6 +364,9 @@ export function collectHostEntryStatus(
     deepseekAccount: activeIds('deepseek-account'),
     sessionLogExport: activeIds('split-host-session-log-download'),
     piTuiHostRuntime: activeIds('split-host-pi-tui-runtime'),
+    // The ONE process-global Cordis inspect provider registration. A missing,
+    // inactive or duplicated row is a Host composition failure.
+    cordisInspectProviders: activeIds('split-host-cordis-inspect-providers'),
     // The pre-existing bundle rows must remain the sole owners: Performance
     // publishes `piTuiPerformanceReady`, Visual Tools stays an independent row.
     performance: activeIds('pi-tui-performance-host'),
@@ -358,6 +401,9 @@ export function collectHostEntryStatus(
       )
     }
   }
+  // The node-level Loader row is only a carrier: the real registration lives in
+  // the official registry. Prove the four Host providers exist exactly once.
+  assertHostInspectProviders(context)
   for (const { serviceKey, namespace } of [...OFFICIAL_TYPERT_BINDINGS, ...PRIVATE_TYPERT_BINDINGS]) {
     assertTypertBinding(context, serviceKey, namespace)
   }

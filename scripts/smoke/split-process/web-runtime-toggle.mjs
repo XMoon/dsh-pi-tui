@@ -84,6 +84,7 @@ export async function runWebRuntimeToggle(context) {
     'connection', 'apiRemotes', 'typertGateway', 'workspaceRegistry', 'workspaceController',
     'directoryPicker',
     'sessionController', 'fileUpload', 'settingsController', 'deepseekAccount', 'jobController', 'piTuiHostRuntime',
+    'cordisInspectProviders',
   ]
   /** `id -> live Loader fiber UID` for EVERY row the Host status reports. */
   const rowUids = ready => Object.fromEntries((ready.entries ?? [])
@@ -106,6 +107,8 @@ export async function runWebRuntimeToggle(context) {
     assert(ready.services?.piTuiWebAccess === true,
       `${label}: the private Web access service is not part of the Host readiness record`)
   }
+  /** The Web-only Host services whose lifetime follows the toggle. */
+  const WEB_HOST_SERVICES = ['messageFeedback', 'pluginInventory', 'sessionReferenceResolver']
   /**
    * Every declared Web row is plainly OFF. `absent` is a row that never
    * mounted on this cold boot; `state-4` is the DISPOSED fiber a row keeps
@@ -118,6 +121,10 @@ export async function runWebRuntimeToggle(context) {
     assert(live.length === 0, `${label}: these Web rows are not plainly disabled: ${live.join(',')}`)
     assert((ready.entries ?? []).filter(entry => entry.name === PR_A_CLIENT_MODULES_PACKAGE && entry.state === 'active').length === 0,
       `${label}: an official Web module graph owner is active with Web off`)
+    for (const service of WEB_HOST_SERVICES) {
+      assert(ready.services?.[service] !== true,
+        `${label}: the Web-only Host service "${service}" is still published with Web off`)
+    }
   }
   /** EVERY declared Web row is ACTIVE: the toggle has no tolerated PENDING row. */
   const assertWebFullyOn = (ready, label) => {
@@ -128,6 +135,10 @@ export async function runWebRuntimeToggle(context) {
       .filter(([, state]) => state !== 'active')
       .map(([id, state]) => `${id}:${state}`)
     assert(notActive.length === 0, `${label}: these Web rows are not active: ${notActive.join(',')}`)
+    for (const service of WEB_HOST_SERVICES) {
+      assert(ready.services?.[service] === true,
+        `${label}: the Web-only Host service "${service}" is not published while Web is enabled`)
+    }
     return states
   }
   /** The Host's own HTTP surface in the OFF state. */
@@ -137,13 +148,34 @@ export async function runWebRuntimeToggle(context) {
     const sse = await sseProbe(origin, '/plugins/events')
     const api = await fetchStatus(`${origin}/api`)
     const connect = await fetchStatus(`${origin}/connect`)
+    // The open-in-app route family is registered by an effect of its Web row;
+    // an authenticated launch or catalog read surviving disposal would be a
+    // lifecycle leak even when the SPA itself is gone.
+    const openInAppApps = await fetchStatus(`${origin}/open-in-app/apps`)
+    const openInAppOpen = await fetchStatus(`${origin}/open-in-app/open`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ app: '__dsh_smoke_nonexistent__', path: '/' }),
+    })
     assert(root.status === 404, `${label}: GET / must be 404 with Web off, got ${root.status}`)
     assert(plugin.status === 404, `${label}: a Web browser bundle must be 404 with Web off, got ${plugin.status}`)
     assert(!(sse.status === 200 && sse.contentType.startsWith('text/event-stream')),
       `${label}: the Web SSE channel is still live (${sse.status} ${sse.contentType})`)
     assert(api.status === 401, `${label}: unauthenticated /api must stay 401, got ${api.status}`)
     assert(connect.status === 401, `${label}: unfunded /connect must stay 401, got ${connect.status}`)
-    return { root: root.status, plugin: plugin.status, sse: sse.status, api: api.status, connect: connect.status }
+    assert(openInAppApps.status === 404,
+      `${label}: GET /open-in-app/apps must be 404 with Web off, got ${openInAppApps.status}`)
+    assert(openInAppOpen.status === 404,
+      `${label}: POST /open-in-app/open must be 404 with Web off, got ${openInAppOpen.status}`)
+    return {
+      root: root.status,
+      plugin: plugin.status,
+      sse: sse.status,
+      api: api.status,
+      connect: connect.status,
+      openInAppApps: openInAppApps.status,
+      openInAppOpen: openInAppOpen.status,
+    }
   }
   /** The authenticated Web index + module graph + SSE on a serving Host. */
   const assertWebServing = async (origin, launch, label) => {
@@ -247,11 +279,10 @@ export async function runWebRuntimeToggle(context) {
   mkdirSync(workRoot, { recursive: true, mode: 0o700 })
   chmodSync(workRoot, 0o700)
   // The installed profile's own patch: the file a persisted toggle would
-  // have to write, and the one this lane proves byte-identical.
+  // have to write, and the one this lane proves byte-identical. Snapshot it
+  // AFTER the Host is ready: profile boot may legitimately migrate its own
+  // preferences row, but the live toggle must not touch it afterwards.
   const hostProfiles = { profilePath: join(dshHome, 'profiles', base.profile, 'cordis.patch.yml') }
-  const profilePatchBefore = existsSync(hostProfiles.profilePath)
-    ? readFileSync(hostProfiles.profilePath)
-    : undefined
   const promptEvidence = () => {
     const text = readFileSync(promptEvidencePath, 'utf8').trim()
     return text === '' ? [] : text.split('\n').map(line => JSON.parse(line))
@@ -277,6 +308,9 @@ export async function runWebRuntimeToggle(context) {
     })
     hosts.push(host)
     const ready = await host.waitFor(record => record.m4a0 === 'ready', 'PR-B default-off Host ready', 240_000)
+    const profilePatchBefore = existsSync(hostProfiles.profilePath)
+      ? readFileSync(hostProfiles.profilePath)
+      : undefined
     webScopeSuffix = ready.localHost.scopeId.slice(0, 40)
     const origin = ready.localHost.origin
     const launch = readJson(join(dshHome, 'run', 'dsh-pi-tui', ready.localHost.scopeId, 'launch.json'))
@@ -368,7 +402,7 @@ export async function runWebRuntimeToggle(context) {
     const enabledUids = rowUids(enabledStatus)
     for (const id of ['agent', 'session', 'job-controller', 'typert-gateway', 'split-host-connection',
       'split-host-api-remotes', 'split-host-session-controller', 'deepseek-account',
-      'split-host-pi-tui-runtime', 'directory-picker']) {
+      'split-host-cordis-inspect-providers', 'split-host-pi-tui-runtime', 'directory-picker']) {
       assert(enabledUids[id] === protectedUids[id], `PB-05 the "${id}" Host owner was re-mounted by the Web enable`)
     }
     const serving = await assertWebServing(origin, launch, 'PB-03')
@@ -414,7 +448,7 @@ export async function runWebRuntimeToggle(context) {
     const disabledUids = rowUids(disabledStatus)
     for (const id of ['agent', 'session', 'job-controller', 'typert-gateway', 'split-host-connection',
       'split-host-api-remotes', 'split-host-session-controller', 'deepseek-account',
-      'split-host-pi-tui-runtime', 'directory-picker']) {
+      'split-host-cordis-inspect-providers', 'split-host-pi-tui-runtime', 'directory-picker']) {
       assert(disabledUids[id] === protectedUids[id], `PB-05 the "${id}" Host owner changed identity across the disable`)
     }
     const offAfterDisable = await assertWebOffHttp(origin, 'PB-04')
@@ -492,7 +526,7 @@ export async function runWebRuntimeToggle(context) {
     const reenabledUids = rowUids(reenabledStatus)
     for (const id of ['agent', 'session', 'job-controller', 'typert-gateway', 'split-host-connection',
       'split-host-api-remotes', 'split-host-session-controller', 'deepseek-account',
-      'split-host-pi-tui-runtime', 'directory-picker']) {
+      'split-host-cordis-inspect-providers', 'split-host-pi-tui-runtime', 'directory-picker']) {
       assert(reenabledUids[id] === protectedUids[id], `PB-07 the "${id}" Host owner changed identity across the re-enable`)
     }
     const servingAgain = await assertWebServing(origin, launch, 'PB-07')
