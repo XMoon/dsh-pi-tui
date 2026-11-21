@@ -16,6 +16,7 @@ test('requestFresh rejects a partial response close instead of hanging', async (
     response.writeHead(200, { 'content-type': 'text/plain' })
     response.flushHeaders()
     response.write('partial body')
+    // bounded negative observation: the server must close after the partial body window
     setTimeout(() => { response.socket?.destroy() }, 10)
   })
   await new Promise((resolve, reject) => {
@@ -27,6 +28,7 @@ test('requestFresh rejects a partial response close instead of hanging', async (
   assert.ok(address !== null && typeof address !== 'string')
   let timeoutTimer
   const timeout = new Promise(resolve => {
+    // bounded negative deadline: a hanging request must fail this test, not block the lane
     timeoutTimer = setTimeout(() => resolve({ kind: 'timeout' }), 5_000)
   })
   const outcome = await Promise.race([
