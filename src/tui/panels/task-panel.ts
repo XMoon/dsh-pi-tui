@@ -333,6 +333,10 @@ export class TaskBrowserPanel implements Component, Focusable {
    * indicator + optional refresh-error line). */
   setMaxRows(rows: number): void {
     this.maxRows = Number.isFinite(rows) ? Math.max(1, Math.floor(rows)) : Number.POSITIVE_INFINITY
+    // Any live row-budget change is a resize boundary: a press captured
+    // against the old grant can never survive it, even if a later resize
+    // restores the same numbers before the release.
+    this.jobHistoryPressed = undefined
     this.recomputeVisibleBudget()
     this.ensureVisible()
     // Before the first paint the recorded viewport is the live grant (the
@@ -1744,6 +1748,10 @@ export class TaskBrowserPanel implements Component, Focusable {
   ): TuiMouseEventResult | undefined {
     if (event.type === 'wheel') {
       if (!event.wheelDelta) return undefined
+      // The hit map is last-painted geometry: a page/scope/search/Stop/owner
+      // change since that paint makes this control hit stale. Then the wheel
+      // must not touch the hidden Work list.
+      if (!this.jobHistoryControlCurrent(hit)) return undefined
       return this.wheelTaskList(event.wheelDelta)
     }
     if (event.button !== 'left' || (event.type !== 'press' && event.type !== 'click')) return undefined

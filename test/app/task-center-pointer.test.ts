@@ -282,16 +282,17 @@ test('real Fullscreen failure attention stays pending until the expanded Job row
   const { vt, app, tasks } = await startTasks([], source)
   assert.ok(!vt.getViewport().join('\n').includes('bash · failed'))
 
-  roster.rows.push({ id: 'job-2', kind: 'bash', label: 'bash · failed', status: 'failed', startedAt: 2, finishedAt: 3 })
+  // The SAME running Job transitions to failed in the live roster.
+  roster.rows[0] = { id: 'job-1', kind: 'bash', label: 'bash · failed', status: 'failed', startedAt: 2, finishedAt: 3 }
   for (const listener of roster.listeners) listener({ type: 'changed' })
   await flush(12)
   await vt.waitForRender()
   const pending = vt.getViewport().join('\n')
-  assert.ok(pending.includes('Show 1 past jobs [J]') && pending.includes('!1 unreviewed'),
+  assert.ok(pending.includes('Show 1 jobs [J]') && pending.includes('!1 unreviewed'),
     `the failure is summarised on the control:\n${pending}`)
   assert.ok(pending.includes('! 1 failed'), 'the footer failure summary is still armed before any row is painted')
 
-  await clickText(vt, 'Show 1 past jobs')
+  await clickText(vt, 'Show 1 jobs')
   await flush(4)
   await vt.waitForRender()
   const painted = vt.getViewport().join('\n')

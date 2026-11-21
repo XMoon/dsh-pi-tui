@@ -2449,6 +2449,18 @@ test('a running Job settling to terminal is hidden, cancels its pending Stop and
   assert.equal(panel.getViewState().selectedId, 'job:b', 'the first still-visible ACTIVE Job takes the cursor')
   assert.ok(!rendered().map(strip).join('\n').includes('Confirm stop'), 'a settled target must clear the pending confirmation')
   assert.deepEqual(panel.visibleItems().map(item => item.value), ['job:b'])
+
+  // An already-expanded history keeps a Job that settles while expanded
+  // visible instead of silently collapsing it.
+  panel.handleInput('j')
+  assert.ok(rendered().map(strip).join('\n').includes('Hide 1 past jobs [J]'))
+  panel.setItems([
+    jobItem({ value: 'job:a', label: 'bash · first', status: 'completed', active: false, canStop: false }),
+    jobItem({ value: 'job:b', label: 'bash · second', status: 'completed', active: false, canStop: false }),
+  ])
+  assert.deepEqual(panel.visibleItems().map(item => item.value), ['job:a', 'job:b'])
+  assert.ok(rendered().map(strip).join('\n').includes('Hide 2 past jobs [J]'),
+    'an active Job settling while history is expanded joins the visible history')
 })
 
 test('a terminal Job that disappears without an active Job falls back to the nearest visible row', () => {
@@ -2625,7 +2637,7 @@ test('job-history mouse: complete label only, press→repaint→release toggles 
   const panel = new TaskBrowserPanel(
     [
       jobItem({ value: 'job:live', label: 'bash · live', status: 'running' }),
-      jobItem({ value: 'job:old', label: 'bash · old', status: 'completed', active: false, canStop: false }),
+      jobItem({ value: 'job:old', label: 'bash · old', status: 'completed', active: false, canStop: false, attention: true }),
     ],
     10,
     { mode: 'full', header: 'tasks', mouseActionsEnabled: () => true, interactionCurrent: () => true },
@@ -2715,6 +2727,46 @@ test('stale job-history gestures never toggle after content/state/owner changes'
     assert.ok(panel.handleMouse(mouse('press', x, row, 100, 24))?.handled)
     panel.handleMouse(mouse('click', x, row, 120, 30))
     assert.ok(!panel.visibleItems().some(item => item.value === 'job:old'))
+    panel.dispose()
+  }
+  // A resize that comes back to the SAME grant before release still revokes
+  // the old press: the resize itself is the boundary.
+  {
+    const panel = make()
+    const { x, row } = control(panel)
+    assert.ok(panel.handleMouse(mouse('press', x, row, 100, 24))?.handled)
+    panel.setMaxRows(8)
+    panel.render(100)
+    panel.setMaxRows(10)
+    panel.render(100)
+    panel.handleMouse(mouse('click', x, row, 100, 24))
+    assert.ok(!panel.visibleItems().some(item => item.value === 'job:old'), 'a resize boundary permanently revokes the press')
+    panel.dispose()
+  }
+  // A stale Work control hit after switching to Team (before the next paint)
+  // must not wheel the hidden Work selection.
+  {
+    const panel = new TaskBrowserPanel(
+      [
+        jobItem({ value: 'job:live', label: 'bash · live', status: 'running' }),
+        jobItem({ value: 'job:old', label: 'bash · old', status: 'completed', active: false, canStop: false }),
+      ],
+      10,
+      {
+        mode: 'full', header: 'tasks', mouseActionsEnabled: () => true,
+        interactionCurrent: () => true, team: readyTeam([teamTask()]),
+      },
+      () => {}, () => {}, () => {},
+    )
+    panel.handleInput('j') // expanded history selects the terminal Job (index 1)
+    const expandedFrame = panel.render(100).map(strip)
+    const hideRow = expandedFrame.findIndex(line => line.includes('Hide 1 past jobs [J]'))
+    const hideCol = expandedFrame[hideRow]!.indexOf('Hide')
+    panel.handleInput('\t') // Team page, deliberately no repaint yet
+    panel.handleMouse(mouse('wheel', hideCol, hideRow, 100, 24, -1, 'none'))
+    panel.handleInput('\t') // back to Work
+    panel.render(100)
+    assert.equal(panel.getViewState().selectedId, 'job:old', 'a stale Team-page wheel never moves the hidden Work selection')
     panel.dispose()
   }
   // invalidate() revokes the armed frame.
