@@ -275,8 +275,37 @@ async function packagePair(t: TestContext): Promise<{
   return { life, root, a, b }
 }
 
-test('two real ./tui packages mount as independent active Fibers with their own contributions', async (t) => {
-  const { life, root, a, b } = await packagePair(t)
+test('observation source publishes a REAL pending -> active revision and stops after unsubscribe (PR-4)', async (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-r8-pr4-observation-')
+  const pkg = writePackage(root, `${FIXTURE_ROOT}/slow`, `export const name = 'slow-tui'
+export async function apply() {
+  await new Promise(resolve => setTimeout(resolve, 30))
+}
+`)
+  const h = await mountHarness(t, [pkg], { root, life })
+  const phases: string[] = []
+  const unsubscribe = h.owner.subscribe(() => {
+    phases.push(h.owner.observation().find(observation => observation.packageName === pkg.name)?.phase ?? 'gone')
+  })
+  const initialRevision = h.owner.revision()
+  const reconcile = h.owner.reconcile(snapshotOf([pkg]))
+  // The pending transient exists while the real Loader Fiber is settling.
+  await new Promise(resolve => setTimeout(resolve, 5))
+  await reconcile
+  assert.ok(phases.includes('pending'), `expected a real pending phase, saw ${phases.join(',')}`)
+  assert.ok(phases.includes('active'), `expected the active phase, saw ${phases.join(',')}`)
+  assert.ok(h.owner.revision() > initialRevision)
+  const afterActive = h.owner.revision()
+  const callbacks = phases.length
+  unsubscribe()
+  await h.owner.reconcile(snapshotOf([pkg], new Set([pkg.name])))
+  assert.equal(phases.length, callbacks, 'an unsubscribed listener receives no further notifications')
+  assert.ok(h.owner.revision() > afterActive, 'the owner still publishes its own revision after unsubscribe')
+  assert.equal(h.owner.observation().find(observation => observation.packageName === pkg.name), undefined)
+})
+
+test('two real ./tui packages mount as independent active Fibers with their own contributions', async (t) => {  const { life, root, a, b } = await packagePair(t)
   const harness = await mountHarness(t, [a, b], { life, root, baseUrl: pathToFileURL(join(root, 'package.json')).href })
   await harness.owner.reconcile(snapshotOf([a, b]))
 

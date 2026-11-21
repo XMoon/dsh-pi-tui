@@ -31,7 +31,7 @@ import type { ClientUiStartupFacts } from '../application-runtime.ts'
 import type { ConfigPort } from '../../runtime/config-port.ts'
 import type { PluginManagerPort, PluginManagerSnapshot } from '../../runtime/plugin-manager-port.ts'
 import type { Diag } from '../../runtime/process/diagnostics.ts'
-import { createClientExtensionMountOwner, type ClientExtensionMountOwner, type ClientExtensionObservation } from '../client-extensions/mount-owner.ts'
+import { createClientExtensionMountOwner, type ClientExtensionMountOwner, type ClientExtensionObservation, type ClientExtensionObservationSource } from '../client-extensions/mount-owner.ts'
 import type { CurrentClientPackageLookup } from '../client-extensions/discovery.ts'
 import { mergeCause } from './dispose-cause.ts'
 
@@ -57,6 +57,9 @@ export interface RemoteClientUiRuntime {
    * Never a second Host inventory and never a public package export.
    */
   clientExtensionObservation(): readonly ClientExtensionObservation[]
+  /** The SAME observations as a read/revision/subscribe source for the
+   *  Plugin Manager's `This Client` projection. Process-local only. */
+  clientExtensionObservationSource(): ClientExtensionObservationSource
   /** Dispose external entries first, then the three subtree fibers (reverse
    * order), idempotent. Never disposes the Client Context itself. */
   dispose(): Promise<void>
@@ -130,6 +133,8 @@ export async function createRemoteClientUiRuntime(
   let extensionHostFiber: Fiber | undefined
   let builtinsFiber: Fiber | undefined
   let extensionMountOwner: ClientExtensionMountOwner | undefined
+  let disposeOwnerObservation: (() => void) | undefined
+  const observationListeners = new Set<() => void>()
   let disposed = false
 
   /** Reverse-order unwind of the subtree fibers; per-step error isolation
@@ -187,6 +192,12 @@ export async function createRemoteClientUiRuntime(
           ...(options.clientExtensions.diag === undefined ? {} : { diag: options.clientExtensions.diag }),
         })
         extensionMountOwner = owner
+        // Forward the owner's semantic changes to every current source
+        // subscriber. The listener set is the ONLY relay: no observation copy
+        // and no second cache.
+        disposeOwnerObservation = owner.subscribe(() => {
+          for (const listener of [...observationListeners]) listener()
+        })
         try {
           const snapshot = await deps.pluginManager.snapshot()
           if (disposed) return
@@ -207,9 +218,28 @@ export async function createRemoteClientUiRuntime(
       clientExtensionObservation(): readonly ClientExtensionObservation[] {
         return extensionMountOwner?.observation() ?? []
       },
+      clientExtensionObservationSource(): ClientExtensionObservationSource {
+        return {
+          observation: () => extensionMountOwner?.observation() ?? [],
+          revision: () => extensionMountOwner?.revision() ?? 0,
+          subscribe: listener => {
+            if (disposed) return () => {}
+            observationListeners.add(listener)
+            let active = true
+            return () => {
+              if (!active) return
+              active = false
+              observationListeners.delete(listener)
+            }
+          },
+        }
+      },
       async dispose(): Promise<void> {
         if (disposed) return
         disposed = true
+        disposeOwnerObservation?.()
+        disposeOwnerObservation = undefined
+        observationListeners.clear()
         const errors = await unwind()
         if (errors.length > 0) {
           const failure = errors[0] instanceof Error ? errors[0] : new Error(String(errors[0]))
