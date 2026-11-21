@@ -286,6 +286,127 @@ function tabLabel(index: number, total: number): string {
   return index === total ? 'Review' : `Q${index + 1}`
 }
 
+/** One painted top-stage tab: the plain (uncoloured) text whose cells define
+ *  the hit span, the themed paint, and the stable target it navigates to
+ *  (`questions.length` is the Review stage). */
+interface QuestionTabSegment {
+  plain: string
+  painted: string
+  targetTab: number
+}
+
+/** One full-tab hit span in flow-content columns. */
+interface PaintedQuestionTabSpan {
+  targetTab: number
+  startCol: number
+  endCol: number
+}
+
+/**
+ * Lay out the single-painted-stage-row tab strip and derive its hit spans from
+ * the SAME plain segments. All tabs keep their established order and
+ * two-space separators while they fit. When they do not, a contiguous window
+ * around the current page is painted, the complete Review stage is kept when
+ * it fits, and every omitted side is replaced by an inert `…`. Hits exist only
+ * for fully painted tabs: no half label, clipped tail or rejected overflow is
+ * ever clickable.
+ */
+function layoutQuestionTabRow(
+  segments: readonly QuestionTabSegment[],
+  current: number,
+  width: number,
+): { text: string; spans: readonly PaintedQuestionTabSpan[] } {
+  const segmentWidth = (segment: QuestionTabSegment): number => visibleWidth(segment.plain)
+  const partsWidth = (parts: readonly (QuestionTabSegment | undefined)[]): number =>
+    parts.reduce((sum, part) => sum + (part === undefined ? 1 : segmentWidth(part)), 0)
+      + Math.max(0, parts.length - 1) * 2
+  const materialize = (parts: readonly (QuestionTabSegment | undefined)[]): {
+    text: string
+    spans: readonly PaintedQuestionTabSpan[]
+  } => {
+    const spans: PaintedQuestionTabSpan[] = []
+    let text = ''
+    let column = 0
+    parts.forEach((part, index) => {
+      if (index > 0) {
+        text += '  '
+        column += 2
+      }
+      if (part === undefined) {
+        text += color.textDim('…')
+        column += 1
+        return
+      }
+      text += part.painted
+      spans.push({ targetTab: part.targetTab, startCol: column, endCol: column + segmentWidth(part) })
+      column += segmentWidth(part)
+    })
+    return { text, spans }
+  }
+  const first = segments[0]
+  if (first === undefined) return { text: '', spans: [] }
+  const review = segments[segments.length - 1]!
+  // A flow with no question pages paints only the Review stage.
+  if (segments.length === 1) {
+    if (visibleWidth(review.plain) <= width) return materialize([review])
+    return { text: color.textDim(truncateToWidth(review.plain, width, '…')), spans: [] }
+  }
+  const lastQuestion = segments.length - 2
+  // All parts fit: the untouched established layout.
+  const buildParts = (lo: number, hi: number, withReview: boolean): (QuestionTabSegment | undefined)[] => {
+    const parts: (QuestionTabSegment | undefined)[] = []
+    if (lo > 0) parts.push(undefined)
+    for (let index = lo; index <= hi; index += 1) parts.push(segments[index])
+    if (withReview) {
+      // A middle ellipsis marks the question pages omitted before Review.
+      if (hi < lastQuestion) parts.push(undefined)
+      parts.push(review)
+    } else {
+      // The omitted tail includes every remaining question page and Review.
+      parts.push(undefined)
+    }
+    return parts
+  }
+  const full = buildParts(0, lastQuestion, true)
+  if (partsWidth(full) <= width) return materialize(full)
+  const isReview = current >= segments.length - 1
+  let lo = isReview ? lastQuestion : current
+  let hi = isReview ? lastQuestion : current
+  let withReview = isReview
+  if (!isReview) withReview = partsWidth(buildParts(lo, hi, true)) <= width
+  const currentAloneFits = (): boolean => partsWidth([segments[current]]) <= width
+  const fallbackCurrent = (): { text: string; spans: readonly PaintedQuestionTabSpan[] } => {
+    if (currentAloneFits()) return materialize([segments[current]])
+    return { text: color.textDim(truncateToWidth(segments[current]!.plain, width, '…')), spans: [] }
+  }
+  if (isReview) {
+    // Review expands backwards from the last question page.
+    while (lo > 0 && partsWidth(buildParts(lo - 1, hi, true)) <= width) lo -= 1
+  } else {
+    // Alternate one page up, then one page down, until neither side fits.
+    let side: 'prev' | 'next' = 'prev'
+    for (;;) {
+      let added = false
+      for (let attempt = 0; attempt < 2 && !added; attempt += 1) {
+        const direction = side
+        side = side === 'prev' ? 'next' : 'prev'
+        if (direction === 'prev' && lo > 0 && partsWidth(buildParts(lo - 1, hi, withReview)) <= width) {
+          lo -= 1
+          added = true
+        } else if (direction === 'next' && hi < lastQuestion
+          && partsWidth(buildParts(lo, hi + 1, withReview)) <= width) {
+          hi += 1
+          added = true
+        }
+      }
+      if (!added) break
+    }
+  }
+  const parts = buildParts(lo, hi, withReview)
+  if (partsWidth(parts) > width) return fallbackCurrent()
+  return materialize(parts)
+}
+
 /** Split a conventional recommendation suffix off the DISPLAY label (the
  * answer value keeps the full label — Web parseRecommendedLabel parity).
  * English-only: the TUI never writes or matches localized labels (repo
@@ -349,7 +470,7 @@ type PlanReviewStep = 'decision' | 'reading' | 'feedback' | 'fallback'
 
 type QuestionPointerAction = 'back' | 'progress' | 'edit' | 'leave-edit' | 'cancel' | 'submit'
 
-type QuestionMouseHitKind = 'action' | 'option' | 'other' | 'marker' | 'inert'
+type QuestionMouseHitKind = 'action' | 'tab' | 'option' | 'other' | 'marker' | 'inert'
 
 /** Owner Fullscreen dense Action Bar ink: primary verbs use `text`, secondary
  *  verbs `textDim`; keycaps are muted. No bold and no `primary` flood. */
@@ -358,6 +479,21 @@ type ActionInkRole = 'primary' | 'secondary'
 interface PaintedQuestionActionHit {
   row: number
   action: QuestionPointerAction
+  startCol: number
+  endCol: number
+  tab: number
+  questionId: string | undefined
+  editingOther: boolean
+  width: number
+}
+
+/** One painted top-stage tab span: the same render commits the painted strip
+ *  and this discardable target map. `tab` + `questionId` are the SOURCE page
+ *  the strip was painted for, so a press can never complete against a newer
+ *  page's identically located target. */
+interface PaintedQuestionTabHit {
+  row: number
+  targetTab: number
   startCol: number
   endCol: number
   tab: number
@@ -382,6 +518,9 @@ export interface QuestionMouseGesture {
   action?: QuestionPointerAction
   startCol?: number
   endCol?: number
+  /** The stable top-stage target for a `tab` gesture (questions.length is
+   *  the Review stage). */
+  targetTab?: number
   /** The plan-review local step at press time (only for a plan flow): a
    * release after a step transition may never be re-interpreted against the
    * newer step's painted state. */
@@ -468,6 +607,8 @@ export class QuestionFlow implements Component, Focusable {
   private mouseActionsEnabled = false
   /** Clickable spans committed by the last render's action row. */
   private paintedActionHits: PaintedQuestionActionHit[] = []
+  /** Clickable spans committed by the last render's top stage row. */
+  private paintedTabHits: PaintedQuestionTabHit[] = []
   /** Visible width of the free-text row's prefix (pointer + marker +
    * space) from the last render: a click while editing must translate to
    * the Input's local column. (Mouse parity.) */
@@ -494,6 +635,12 @@ export class QuestionFlow implements Component, Focusable {
   /** Content rows visible in the region from the last render (region minus
    * the marker row when overflowing). */
   private lastVisibleRows = 0
+  /** The unified body scrollport's content-row range in the last render's
+   * output (`[start, end)`), or -1 when this frame painted no ordinary
+   * question body (Review / plan-review / header-only frames). Wheel events
+   * are resolved against THIS record, never against a re-measured layout. */
+  private lastScrollportStart = -1
+  private lastScrollportEnd = -1
   /** Whether the page content overflows the scrollport on the last render —
    * 'e' (and the scroll verbs) are available when true. */
   private lastExpandable = false
@@ -850,11 +997,26 @@ export class QuestionFlow implements Component, Focusable {
   /**
    * Reset the view (scroll + expanded + pending cursor follow) — called on
    * every tab change so each question starts at its top, collapsed.
+   * The last painted body/hit geometry belongs to the OLD page: the host may
+   * deliver another event (wheel/click) before the deferred repaint, so the
+   * old scrollport and hit maps must be revoked here as well.
    */
   private resetBodyView(): void {
     this.bodyScroll = 0
     this.bodyExpanded = false
     this.pendingCursorScroll = false
+    this.lastScrollportStart = -1
+    this.lastScrollportEnd = -1
+    this.lastRegionHeight = 0
+    this.lastContentRows = 0
+    this.lastVisibleRows = 0
+    this.lastExpandable = false
+    this.lastMarkerRow = -1
+    this.pinnedOtherRow = -1
+    this.hitMap.clear()
+    this.paintedActionHits = []
+    this.paintedTabHits = []
+    this.mousePressGesture = undefined
   }
 
   /**
@@ -866,6 +1028,35 @@ export class QuestionFlow implements Component, Focusable {
     if (visible <= 0 || this.lastContentRows <= visible) return
     const maxScroll = this.lastContentRows - visible
     this.bodyScroll = Math.max(0, Math.min(this.bodyScroll + direction * visible, maxScroll))
+  }
+
+  /**
+   * Wheel over the question body: move the unified scrollport by a whole
+   * event's line delta, resolved ONLY against the LAST painted body range.
+   * Returns whether the body really scrolled; a row outside the scrollport
+   * (tabs, action bar, border), a non-overflowing page, a Review page and a
+   * clamped boundary stay inert. The plan-review branch has its own reading
+   * path and never enters here.
+   */
+  wheelBy(deltaLines: number, localRow: number): boolean {
+    if (this.planReview !== undefined || deltaLines === 0) return false
+    if (this.lastScrollportStart < 0 || localRow < this.lastScrollportStart
+      || localRow >= this.lastScrollportEnd) return false
+    const visible = this.lastVisibleRows
+    if (visible <= 0 || this.lastContentRows <= visible) return false
+    const maxScroll = this.lastContentRows - visible
+    const next = Math.max(0, Math.min(this.bodyScroll + deltaLines, maxScroll))
+    if (next === this.bodyScroll) return false
+    this.bodyScroll = next
+    // A real scroll invalidates any in-flight click gesture: the host
+    // consumes the wheel before the alt screen can retire it, so the
+    // press/release identity must be dropped HERE or a release could still
+    // activate a tab/action that was pressed before the viewport moved.
+    this.mousePressGesture = undefined
+    // A wheel move is the user's explicit viewport command: never let the
+    // next render's cursor-follow snap the body back to the highlighted row.
+    this.pendingCursorScroll = false
+    return true
   }
 
   /** Toggle the expanded panel ('e' or a click on the scroll marker).
@@ -911,6 +1102,32 @@ export class QuestionFlow implements Component, Focusable {
         action: actionHit.action,
         startCol: actionHit.startCol,
         endCol: actionHit.endCol,
+        ...(this.planReview === undefined ? {} : { planStep: this.planStep }),
+      }
+      this.mousePressGesture = gesture
+      return gesture
+    }
+
+    const tabHit = x === undefined ? undefined : this.paintedTabHits.find(hit =>
+      hit.row === row && x >= hit.startCol && x < hit.endCol,
+    )
+    if (tabHit !== undefined
+      && tabHit.tab === this.tab
+      && tabHit.questionId === question?.id
+      && tabHit.editingOther === this.editingOther
+      && tabHit.width === this.lastContentWidth) {
+      const gesture: QuestionMouseGesture = {
+        flow: this,
+        questionIndex: this.tab,
+        questionId: question?.id,
+        hitKind: 'tab',
+        hit: undefined,
+        row,
+        editingOther: this.editingOther,
+        width: this.lastContentWidth,
+        targetTab: tabHit.targetTab,
+        startCol: tabHit.startCol,
+        endCol: tabHit.endCol,
         ...(this.planReview === undefined ? {} : { planStep: this.planStep }),
       }
       this.mousePressGesture = gesture
@@ -972,6 +1189,23 @@ export class QuestionFlow implements Component, Focusable {
         || actionHit.editingOther !== this.editingOther
         || actionHit.width !== this.lastContentWidth) return
       this.applyPointerAction(actionHit.action)
+      return
+    }
+
+    if (gesture.hitKind === 'tab') {
+      if (x === undefined || gesture.targetTab === undefined) return
+      const tabHit = this.paintedTabHits.find(hit =>
+        hit.row === row && x >= hit.startCol && x < hit.endCol,
+      )
+      if (tabHit === undefined
+        || tabHit.targetTab !== gesture.targetTab
+        || tabHit.startCol !== gesture.startCol
+        || tabHit.endCol !== gesture.endCol
+        || tabHit.tab !== this.tab
+        || tabHit.questionId !== question?.id
+        || tabHit.editingOther !== this.editingOther
+        || tabHit.width !== this.lastContentWidth) return
+      this.navigateToTab(tabHit.targetTab)
       return
     }
 
@@ -1533,6 +1767,20 @@ export class QuestionFlow implements Component, Focusable {
     this.syncEditMode()
   }
 
+  /**
+   * Jump directly to one top-stage target: a question page or the Review
+   * stage. Pure navigation: it never skips, answers, mutates or submits a
+   * draft. Switching re-runs {@link syncEditMode} so the target page starts
+   * with its own cursor/focus/input owner, exactly like sequential paging.
+   */
+  private navigateToTab(targetIndex: number): void {
+    if (targetIndex < 0 || targetIndex > this.questions.length) return
+    if (targetIndex === this.tab) return
+    this.tab = targetIndex
+    this.cursor = 0
+    this.syncEditMode()
+  }
+
   /** Optionless questions edit text directly; options start in list mode. */
   private syncEditMode(): void {
     this.resetBodyView()
@@ -2075,6 +2323,7 @@ export class QuestionFlow implements Component, Focusable {
     if (this.mouseActionsEnabled === enabled) return
     this.mouseActionsEnabled = enabled
     this.paintedActionHits = []
+    this.paintedTabHits = []
     this.mousePressGesture = undefined
   }
 
@@ -2396,8 +2645,13 @@ export class QuestionFlow implements Component, Focusable {
     // The hit map reflects THIS frame only (the review page populates none).
     this.hitMap.clear()
     this.paintedActionHits = []
+    this.paintedTabHits = []
     this.lastMarkerRow = -1
     this.pinnedOtherRow = -1
+    // The wheel scrollport belongs to the frame being painted NOW: every
+    // early return (plan-review, Review page, header-only) leaves it absent.
+    this.lastScrollportStart = -1
+    this.lastScrollportEnd = -1
     if (this.planReview !== undefined) {
       const planLines = this.renderPlanReview(safeWidth)
       lines.push(...planLines)
@@ -2410,17 +2664,22 @@ export class QuestionFlow implements Component, Focusable {
     // provides the padding), so every content row starts at the same column.
     // One pass derives BOTH the per-tab marks and the Submit mark.
     const answeredFlags = this.drafts.map(draft => this.draftAnswered(draft))
-    const tabs = this.questions.map((_, index) => {
+    const tabSegments: QuestionTabSegment[] = this.questions.map((_, index) => {
       const label = tabLabel(index, this.questions.length)
       const mark = answeredFlags[index] === true ? '✓' : '○'
-      return this.tab === index
-        ? color.textStrong(`${mark} ${label}`)
-        : color.textDim(`${mark} ${label}`)
+      const plain = `${mark} ${label}`
+      return {
+        plain,
+        painted: this.tab === index ? color.textStrong(plain) : color.textDim(plain),
+        targetTab: index,
+      }
     })
-    const reviewText = `${answeredFlags.every(answered => answered) ? '✓' : '○'} Review`
-    tabs.push(this.tab === this.questions.length
-      ? color.textStrong(reviewText)
-      : color.textDim(reviewText))
+    const reviewPlain = `${answeredFlags.every(answered => answered) ? '✓' : '○'} Review`
+    tabSegments.push({
+      plain: reviewPlain,
+      painted: this.tab === this.questions.length ? color.textStrong(reviewPlain) : color.textDim(reviewPlain),
+      targetTab: this.questions.length,
+    })
     // Caller-owned status (timed claim / remaining time / continued
     // guidance) rides ABOVE the tabs and INSIDE the budget, so the header
     // math below accounts for it. It never renders without room.
@@ -2428,7 +2687,24 @@ export class QuestionFlow implements Component, Focusable {
     if (statusText !== undefined && this.budget > MIN_SUPPORTED_BUDGET + 1) {
       appendWrappedBudgeted(lines, '', '', color.textDim(sanitizeDisplayText(statusText)), safeWidth, 1)
     }
-    lines.push(tabs.join('  '))
+    const tabLayout = layoutQuestionTabRow(tabSegments, this.tab, safeWidth)
+    const tabRow = lines.length
+    lines.push(tabLayout.text)
+    if (this.mouseActionsEnabled) {
+      const questionId = this.questions[this.tab]?.id
+      for (const span of tabLayout.spans) {
+        this.paintedTabHits.push({
+          row: tabRow,
+          targetTab: span.targetTab,
+          startCol: span.startCol,
+          endCol: span.endCol,
+          tab: this.tab,
+          questionId,
+          editingOther: this.editingOther,
+          width: safeWidth,
+        })
+      }
+    }
     lines.push('')
     if (this.tab >= this.questions.length) {
       // Review page: the top tab names the Review stage; its bottom Action Bar
@@ -2536,11 +2812,14 @@ export class QuestionFlow implements Component, Focusable {
         }
       }
     }
+    const scrollportStart = lines.length
     for (let index = this.bodyScroll; index < this.bodyScroll + visible && index < content.lines.length; index++) {
       const hit = content.hits[index]
       if (hit !== undefined) this.hitMap.set(lines.length, hit)
       lines.push(content.lines[index]!)
     }
+    this.lastScrollportStart = scrollportStart
+    this.lastScrollportEnd = lines.length
     if (overflow && regionHeight >= 2) {
       const above = this.bodyScroll
       const below = content.lines.length - (this.bodyScroll + visible)

@@ -988,10 +988,11 @@ const MOUSE_SEQUENCE = /^\x1b\[<\d+;\d+;\d+[Mm]$/
 
 /**
  * Decode one SGR/legacy mouse WHEEL report into a 0-based cell and the signed
- * wheel step. `undefined` for every non-wheel mouse chunk, so press/release
- * keep flowing to the alt screen's own click machinery.
+ * wheel step. Shared by the Approval sheet and the active Question body;
+ * `undefined` for every non-wheel mouse chunk, so press/release keep flowing
+ * to the alt screen's own click machinery.
  */
-function parseApprovalWheel(data: string): { x: number; y: number; direction: -1 | 1 } | undefined {
+function parseModalWheel(data: string): { x: number; y: number; direction: -1 | 1 } | undefined {
   const sgr = /^\x1b\[<(\d+);(\d+);(\d+)[Mm]$/.exec(data)
   if (sgr !== null) {
     const button = Number.parseInt(sgr[1]!, 10)
@@ -7137,6 +7138,12 @@ export class TuiApp {
     // did something else in between). Kitty repeat/release are artifacts of
     // the SAME press and deliberately leave the latch alone.
     this.observeWorkspaceGestureInterveningInput(data)
+    // A visible ordinary Question owns the wheel over its whole modal frame:
+    // its painted body scrolls, every other cell is inert (never the
+    // transcript behind it). This runs BEFORE the Approval route so a Question
+    // in front wins the same way it wins the seat.
+    const questionWheel = this.handleQuestionWheel(data)
+    if (questionWheel !== undefined) return questionWheel
     // The approval action sheet is a blocking FULLSCREEN pointer owner: a
     // wheel over its painted body scrolls the reading viewport and every other
     // wheel is inert behind the modal (the transcript's background wheel stays
@@ -16451,6 +16458,48 @@ export class TuiApp {
   }
 
   /**
+   * Fullscreen Question wheel: a wheel while an ordinary Question frame owns
+   * the visible seat belongs to the QUESTION, never to the transcript behind
+   * it. A wheel over the painted body scrolls that body by the configured
+   * line delta; every other wheel while the question is front is consumed as
+   * inert chrome. The official plan-review branch keeps its own reading path
+   * and returns `undefined` here.
+   */
+  private handleQuestionWheel(data: string): TuiInputListenerResult | undefined {
+    if (this.activeScreen.mode !== 'fullscreen') return undefined
+    const wheel = parseModalWheel(data)
+    if (wheel === undefined) return undefined
+    const state = this.activeQuestions
+    if (state === undefined) return undefined
+    // PlanReview owns its own reading/feedback step machine: the generic
+    // question wheel must never invent a second scroll owner there.
+    if (state.flow.isPlanReviewFlow()) return undefined
+    const frame = state.frame
+    if (frame === undefined) return undefined
+    // Only the CURRENT seat occupant may scroll, and only while it really
+    // holds the physical input seat: a focused managed overlay raised above
+    // the modal owns its own pointer plane, so the Question must not swallow
+    // its wheel (the fork's overlay dispatch handles it).
+    if (this.seatFallbackComponent() !== frame || !this.ownsPhysicalKeyboard(frame)) return undefined
+    this.clearExitConfirmation()
+    // A frame that has not rendered at the current terminal size has no
+    // authoritative body geometry: consume the wheel here so it can never
+    // fall through and scroll the transcript behind the modal.
+    if (this.terminal.columns !== frame.termColumns || this.terminal.rows !== frame.termRows) {
+      return { consume: true }
+    }
+    const bounds = this.questionFrameBounds(state)
+    if (bounds === undefined) return { consume: true }
+    const width = Math.max(1, this.terminal.columns)
+    if (wheel.y < bounds.top || wheel.y >= bounds.bottom
+      || wheel.x < 2 || wheel.x >= width - 2) return { consume: true }
+    if (state.flow.wheelBy(wheel.direction * this.wheelScrollLines, wheel.y - bounds.top - 1)) {
+      this.requestRender()
+    }
+    return { consume: true }
+  }
+
+  /**
    * Fullscreen approval wheel: a wheel over the painted body viewport scrolls
    * the sheet; any other wheel while the blocking sheet is active is inert (the
    * modal's pointer plane owns it). Regular never calls this — it has no
@@ -16458,7 +16507,7 @@ export class TuiApp {
    */
   private handleApprovalWheel(data: string): TuiInputListenerResult | undefined {
     if (this.activeScreen.mode !== 'fullscreen' || !this.approvals.isActive()) return undefined
-    const wheel = parseApprovalWheel(data)
+    const wheel = parseModalWheel(data)
     if (wheel === undefined) return undefined
     this.clearExitConfirmation()
     const frame = this.approvals.activeFrame()
