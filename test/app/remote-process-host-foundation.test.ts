@@ -483,97 +483,6 @@ test('the protected thirteen-row dependency assertion rejects a duplicated prote
   )
 })
 
-/**
- * M5-W PR-A + S5-PR5: the official Web rows the Host-only overlay declares, in
- * order. This list is FROZEN here on purpose: the composition assertion below
- * compares the real overlay against it, so a silently dropped, renamed,
- * reordered or re-enabled Web row fails the test instead of being mirrored by a
- * generated list. It is the official browser graph of the installed DSH family
- * minus every row whose authority already exists in this Host, plus the one
- * official `terminal-controller` row the Browser x TUI composition needs. The
- * mandatory client-dependency closure of the shipped official UIs
- * (`ui-context-menu`, `ui-file-drag`), the official file-actions /
- * message-quotes Client features and the `workspace-changes` Host recorder
- * `ui-deliverables` injects are part of it.
- *
- * The list is the contract, not its length: a legitimate future official
- * package may extend it, and the assertion proves the exact set — never a
- * bare count.
- */
-const WEB_ROWS: ReadonlyArray<{ id: string; name: string }> = [
-  { id: 'web-runtime', name: '@deepseek-ai/dsh-web-app' },
-  { id: 'modules', name: '@deepseek-ai/dsh-client-modules' },
-  { id: 'client-hmr', name: '@deepseek-ai/dsh-client-hmr' },
-  { id: 'cordis-client-runner', name: '@deepseek-ai/dsh-cordis-client-runner' },
-  { id: 'open-in-app', name: '@deepseek-ai/dsh-host-open-in-app' },
-  { id: 'ui-file-actions', name: '@deepseek-ai/dsh-client-ui-file-actions' },
-  { id: 'ui-context-menu', name: '@deepseek-ai/dsh-client-ui-context-menu' },
-  { id: 'ui-open-in-app', name: '@deepseek-ai/dsh-client-ui-open-in-app' },
-  { id: 'session-reference', name: '@deepseek-ai/dsh-session-reference' },
-  { id: 'ui-settings-account', name: '@deepseek-ai/dsh-client-ui-settings-account' },
-  { id: 'ui-account-notifications', name: '@deepseek-ai/dsh-client-ui-account-notifications' },
-  { id: 'ui-theme', name: '@deepseek-ai/dsh-client-ui-theme' },
-  { id: 'locale', name: '@deepseek-ai/dsh-client-locale' },
-  { id: 'shortcuts', name: '@deepseek-ai/dsh-client-shortcuts' },
-  { id: 'ui-shortcuts', name: '@deepseek-ai/dsh-client-ui-shortcuts' },
-  { id: 'ui-layout', name: '@deepseek-ai/dsh-client-ui-layout' },
-  { id: 'ui-renderer', name: '@deepseek-ai/dsh-client-ui-renderer' },
-  { id: 'ui-session', name: '@deepseek-ai/dsh-client-ui-session' },
-  { id: 'resources', name: '@deepseek-ai/dsh-client-resources' },
-  { id: 'ui-sidebar', name: '@deepseek-ai/dsh-client-ui-sidebar' },
-  { id: 'ui-sidebar-right', name: '@deepseek-ai/dsh-client-ui-sidebar-right' },
-  { id: 'office-kit', name: '@deepseek-ai/dsh-office-kit' },
-  { id: 'skill-office', name: '@deepseek-ai/dsh-skill-office' },
-  { id: 'ui-sidebar-documentpreview', name: '@deepseek-ai/dsh-client-ui-sidebar-documentpreview' },
-  { id: 'ui-sidebar-terminal', name: '@deepseek-ai/dsh-client-ui-sidebar-terminal' },
-  { id: 'ui-sidebar-files', name: '@deepseek-ai/dsh-client-ui-sidebar-files' },
-  { id: 'ui-settings', name: '@deepseek-ai/dsh-client-ui-settings' },
-  { id: 'ui-settings-general', name: '@deepseek-ai/dsh-client-ui-settings-general' },
-  { id: 'ui-settings-models', name: '@deepseek-ai/dsh-client-ui-settings-models' },
-  { id: 'plugin-inventory', name: '@deepseek-ai/dsh-host-plugin-inventory' },
-  { id: 'ui-plugin-manager', name: '@deepseek-ai/dsh-client-ui-plugin-manager' },
-  { id: 'ui-settings-plugin-inventory', name: '@deepseek-ai/dsh-client-ui-settings-plugin-inventory' },
-  { id: 'ui-conversation', name: '@deepseek-ai/dsh-client-ui-conversation' },
-  { id: 'ui-approval', name: '@deepseek-ai/dsh-client-ui-approval' },
-  { id: 'message-quotes', name: '@deepseek-ai/dsh-message-quotes' },
-  { id: 'ui-chat', name: '@deepseek-ai/dsh-client-ui-chat' },
-  { id: 'ui-brand-official', name: '@deepseek-ai/dsh-client-ui-brand-official' },
-  { id: 'ui-attachment', name: '@deepseek-ai/dsh-client-ui-attachment' },
-  { id: 'ui-file-drag', name: '@deepseek-ai/dsh-client-ui-file-drag' },
-  { id: 'ui-tool', name: '@deepseek-ai/dsh-client-ui-tool' },
-  { id: 'ui-cordis', name: '@deepseek-ai/dsh-client-ui-cordis' },
-  { id: 'workspace-changes', name: '@deepseek-ai/dsh-workspace-changes' },
-  { id: 'ui-deliverables', name: '@deepseek-ai/dsh-client-ui-deliverables' },
-  { id: 'ui-workspace', name: '@deepseek-ai/dsh-client-ui-workspace' },
-  { id: 'ui-workflow-run', name: '@deepseek-ai/dsh-client-ui-workflow-run' },
-  { id: 'ui-input-trigger', name: '@deepseek-ai/dsh-client-ui-input-trigger' },
-  { id: 'ui-commands', name: '@deepseek-ai/dsh-client-ui-commands' },
-  { id: 'ui-skill', name: '@deepseek-ai/dsh-client-ui-skill' },
-  { id: 'ui-agent-team', name: '@deepseek-ai/dsh-client-ui-agent-team' },
-  { id: 'ui-subagent', name: '@deepseek-ai/dsh-client-ui-subagent' },
-  { id: 'ui-reference', name: '@deepseek-ai/dsh-client-ui-reference' },
-  { id: 'ui-secret-mask', name: '@deepseek-ai/dsh-client-ui-secret-mask' },
-  { id: 'ui-jobs', name: '@deepseek-ai/dsh-client-ui-jobs' },
-  { id: 'ui-schedule', name: '@deepseek-ai/dsh-client-ui-schedule' },
-  { id: 'ui-goal', name: '@deepseek-ai/dsh-client-ui-goal' },
-  { id: 'message-feedback', name: '@deepseek-ai/dsh-message-feedback' },
-  { id: 'ui-message-feedback', name: '@deepseek-ai/dsh-client-ui-message-feedback' },
-  { id: 'ui-model-selection', name: '@deepseek-ai/dsh-client-ui-model-selection' },
-  { id: 'ui-permission', name: '@deepseek-ai/dsh-client-ui-permission-presets' },
-  { id: 'ui-agent-preset', name: '@deepseek-ai/dsh-client-ui-agent-preset' },
-  { id: 'entry-customization', name: '@deepseek-ai/dsh-client-ui-entry-customization' },
-  { id: 'ui-settings-session-log', name: '@deepseek-ai/dsh-client-ui-settings-session-log' },
-  { id: 'ui-settings-plugins', name: '@deepseek-ai/dsh-client-ui-settings-plugins' },
-  { id: 'ui-settings-shell', name: '@deepseek-ai/dsh-client-ui-settings-shell' },
-  { id: 'ui-settings-agent-loop', name: '@deepseek-ai/dsh-client-ui-settings-agent-loop' },
-  { id: 'ui-settings-subagent', name: '@deepseek-ai/dsh-client-ui-settings-subagent' },
-  { id: 'ui-settings-web-search', name: '@deepseek-ai/dsh-client-ui-settings-web-search' },
-  { id: 'ui-plan', name: '@deepseek-ai/dsh-client-ui-plan' },
-  { id: 'ui-user-questions', name: '@deepseek-ai/dsh-client-ui-user-questions' },
-  { id: 'ui-trajectory', name: '@deepseek-ai/dsh-client-ui-trajectory' },
-  { id: 'terminal-controller', name: '@deepseek-ai/dsh-api-terminal-controller' },
-]
-
 const WEB_RUNTIME_ID = 'web-runtime'
 const WEB_RUNTIME_PACKAGE = '@deepseek-ai/dsh-web-app'
 const CLIENT_MODULES_PACKAGE = '@deepseek-ai/dsh-client-modules'
@@ -666,19 +575,18 @@ const RC5_WEB_HOST_PROVIDERS: ReadonlyArray<{ readonly id: string; readonly name
 ]
 
 /**
- * Group 1 — the frozen Web roster: exact ids, exact packages, order, ONE row
- * per id and the safety values this project fixes. Shared by the positive
- * assertion and its negative controls so each control proves THIS assertion
- * group rejects the mutation instead of a private copy.
+ * Group 1 — the real generated Web layer's semantic contract: default-OFF,
+ * unique id/package ownership, the three fixed non-user values, the required
+ * official additions/providers, provider-before-consumer order, and the
+ * absence of the already-owned Workspace Controller authority. It does not
+ * compare against a second hand-written roster: the generated layer and the
+ * production table are checked against each other below.
  */
-function assertWebRoster(
-  web: readonly OverlayRow[],
-  expected: readonly { readonly id: string; readonly name: string }[] = WEB_ROWS,
-): void {
-  assert.deepEqual(web.map(candidate => candidate.id), expected.map(row => row.id),
-    'the Web declaration must list exactly the official Web rows in order')
-  assert.deepEqual(web.map(candidate => candidate.name), expected.map(row => row.name),
-    'every Web row id must keep its exact official package')
+function assertWebRoster(web: readonly OverlayRow[]): void {
+  const ids = web.map(candidate => candidate.id)
+  assert.equal(new Set(ids).size, ids.length, 'a duplicated Web row would activate one package twice')
+  const names = web.map(candidate => candidate.name)
+  assert.equal(new Set(names).size, names.length, 'a duplicated Web package would be activated twice')
   for (const candidate of web) {
     assert.equal(candidate.disabled, true, `the "${candidate.id}" Web row must stay disabled by default`)
     if (candidate.id === WEB_RUNTIME_ID) {
@@ -705,8 +613,7 @@ function assertWebRoster(
     // rc.5 modules may legitimately carry deployment config (message-feedback,
     // open-in-app) and their schemas own validation.
   }
-  const ids = web.map(candidate => candidate.id)
-  assert.equal(new Set(ids).size, ids.length, 'a duplicated Web row would activate one package twice')
+  assert.ok(ids.includes(WEB_RUNTIME_ID), 'the Web runtime row is required')
   for (const required of PR5_REQUIRED_WEB_ROWS) {
     const owners = web.filter(candidate => candidate.name === required.name)
     assert.equal(owners.length, 1, `exactly ONE Web row must load "${required.name}", found ${String(owners.length)}`)
@@ -725,6 +632,8 @@ function assertWebRoster(
   assert.equal(ids.includes('terminal-controller'), true, 'the ONE official Host row on top of the roster is terminal-controller')
   assert.equal(ids.includes('workspace-controller'), false,
     'the Workspace Controller authority already exists: the Web declaration must not add a second one')
+  assert.equal(names.includes(WORKSPACE_CONTROLLER_PACKAGE), false,
+    'the Workspace Controller package already exists: the Web declaration must not re-declare it')
 }
 
 /**
@@ -795,7 +704,7 @@ test('the bundle declares the official Web rows DEFAULT-DISABLED and the Host ov
   assertWebRoster(webRosterGroup())
   // The main Direct patch file never re-declares a Web row; the generated
   // layer is the ONE Loader source.
-  for (const { id } of WEB_ROWS) {
+  for (const { id } of PI_TUI_WEB_ACCESS_ROWS) {
     assert.equal(BUNDLE_ROWS.some(row => row.id === id), false,
       `the main bundle patch must not declare the Web row "${id}"`)
   }
@@ -918,17 +827,8 @@ test('the Web composition assertion rejects a re-enabled row, a browser launch a
     }]), OVERLAY_ENTRIES),
     /exactly ONE "@deepseek-ai\/dsh-client-modules"/u,
   )
-  // Drift 5/6: the two mandatory Client dependencies the shipped official UIs
-  // inject may not be missing from the REAL declaration. The expectations are
-  // mutated here (not the declaration), so the control proves the comparison
-  // catches a roster that no longer satisfies the official inject closure.
-  for (const dependency of MANDATORY_CLIENT_DEPENDENCY_PACKAGES) {
-    assert.throws(
-      () => assertWebRoster(web, WEB_ROWS.filter(row => row.name !== dependency)),
-      /must list exactly the official Web rows in order/u,
-      `dropping "${dependency}" from the frozen roster must fail the composition assertion`,
-    )
-  }
+  // The mandatory Client dependency closure is proved separately from the
+  // real installed manifests by `assertMandatoryClientInjectClosure` below.
   // Drift 7/8: a second `connection`/`api-remotes` owner in the Web declaration
   // (or at the top level) is the duplicate Host authority this composition
   // forbids.
@@ -1084,7 +984,7 @@ test('the Web roster satisfies the official Client inject closure of the pinned 
 test('the main Direct patch keeps no Web-only row and its own listener/startup gates', () => {
   const bundleIds = new Set(BUNDLE_ROWS.map(row => row.id))
   const generatedIds = new Set(webRosterGroup().map(row => row.id))
-  for (const { id } of WEB_ROWS) {
+  for (const { id } of PI_TUI_WEB_ACCESS_ROWS) {
     assert.equal(bundleIds.has(id), false, `the main Direct patch must not declare the Web row "${id}"`)
     assert.equal(generatedIds.has(id), true, `the generated bundle layer must declare the Web row "${id}"`)
   }

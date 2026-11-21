@@ -632,9 +632,8 @@ class C1Model extends LlmAdapter {
         yield { type: 'finish', reason: { kind: 'tool-calls' } }
         return
       }
-      const tail = prompt.includes('w5-nochange') ? 'w5-nochange answer'
-        : prompt.includes('> w5-editing') ? 'w5-quote answer' : 'w5-done answer'
-      const text = `w5-editing ${nonce}\n\n[changed.txt](changed.txt) [missing-sentinel.txt](missing-sentinel.txt)\n\n![shot](shot.png)\n\n${tail} ${nonce}`
+      const tail = prompt.includes('w5-nochange') ? 'w5-nochange answer' : 'w5-done answer'
+      const text = `w5-editing ${nonce}\n\n[changed.txt](changed.txt)\n\n${tail} ${nonce}`
       this.record('web-changes-answer', { sessionId, nonce, tail })
       yield { type: 'block-start', index: 0, blockType: 'text' }
       yield { type: 'text-delta', index: 0, text }

@@ -26,7 +26,8 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { parse as parseYaml } from 'yaml'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
 import { assertSelectedVerdict, runSelectedCase, waitForCondition } from '../../scripts/split-process-smoke.mjs'
-import { PR_A_WEB_ROWS, raceWithAbortableDeadline, redactWebQualificationText } from '../../scripts/smoke/split-process/web-helpers.mjs'
+import { readDeclaredWebRows, raceWithAbortableDeadline, redactWebQualificationText } from '../../scripts/smoke/split-process/web-helpers.mjs'
+import { PI_TUI_WEB_ACCESS_ROWS } from '../../src/app/host/features/web-roster.ts'
 import { createSmokeDiagnostics, failureCategoryOf, redactErrorForStep, SplitSmokeAssertionError } from '../../scripts/lib/split-smoke-diagnostics.mjs'
 import { throwSceneFailure, sceneWorkspace } from '../../scripts/smoke/split-process/acp-sdk-content-interoperability.mjs'
 import { statusMatches } from '../../scripts/lib/split-smoke-processes.mjs'
@@ -285,29 +286,44 @@ test('the npm release-tag split-process job pins and requires both Browser quali
     'the Browser qualification must stay release-tag-only (ordinary PRs skip it)')
 })
 
-test('the frozen Web roster matches the Host-only overlay exactly and stays default-disabled', () => {
-  const ids = PR_A_WEB_ROWS.map(row => row.id)
-  assert.equal(new Set(ids).size, ids.length, 'the frozen roster owns each row id once')
+/**
+ * The Web toggle's fixed safety facts. The generated layer and the production
+ * table are compared below; this helper is the small semantic guard shared by
+ * the positive assertion and the two negative controls.
+ */
+function assertWebToggleSafety(rows) {
+  const runtime = rows.find(row => row.id === 'web-runtime')
+  assert.ok(runtime, 'the generated Web layer must declare web-runtime')
+  assert.equal(runtime.name, '@deepseek-ai/dsh-web-app', 'web-runtime must load the official Web app')
+  assert.equal(runtime.disabled, true, 'web-runtime must start disabled')
+  assert.deepEqual(runtime.inject, ['webServer'], 'web-runtime must inject the existing webserver')
+  assert.deepEqual(runtime.config, { openBrowser: false, printUrl: false, surfaceContext: false },
+    'web-runtime must keep the silent non-user values')
+  assert.equal(rows.some(row => row.id === 'workspace-controller'
+    || row.name === '@deepseek-ai/dsh-api-workspace-controller'), false,
+  'the Workspace Controller authority must not become a toggle row')
+}
+
+test('the generated Web layer is the production roster and stays default-disabled', () => {
+  const productionRows = PI_TUI_WEB_ACCESS_ROWS
+  const declared = readDeclaredWebRows(ROOT)
+  assert.deepEqual(declared.map(row => row.id), productionRows.map(row => row.id),
+    'the generated Web ids drifted from the ONE production roster')
+  assert.deepEqual(declared.map(row => row.name), productionRows.map(row => row.name),
+    'the generated Web packages drifted from the ONE production roster')
+  assert.ok(declared.every(row => row.disabled === true), 'every Web row stays disabled by default')
+  assertWebToggleSafety(declared)
   // The mandatory Client dependency closure of the shipped official UIs and
   // the file-actions / message-quotes / changed-files capability rows are
   // asserted independently: the oracle must not silently drop a required row.
-  // The SET is the contract, never a historical row count.
   for (const id of ['ui-context-menu', 'ui-file-drag', 'ui-file-actions', 'message-quotes', 'workspace-changes', 'ui-deliverables']) {
-    assert.equal(ids.includes(id), true, `the frozen roster must include the official "${id}" row`)
+    assert.equal(declared.some(row => row.id === id), true, `the generated roster must include the official "${id}" row`)
   }
-  const generated = parseYaml(readFileSync(join(ROOT, 'generated', 'web-access', 'cordis.patch.yml'), 'utf8'))
-  const inserts = generated.filter(entry => Array.isArray(entry.insert))
-  assert.equal(inserts.length, 1, 'the generated Web layer must hold ONE insert group')
-  const declared = inserts[0].insert
-  assert.deepEqual(declared.map(row => row.id), ids, 'the generated Web ids drifted from the frozen roster')
-  assert.deepEqual(declared.map(row => row.name), PR_A_WEB_ROWS.map(row => row.name),
-    'the generated Web packages drifted from the frozen roster')
-  assert.ok(declared.every(row => row.disabled === true), 'every Web row stays disabled by default')
   // The Host-only overlay must NOT re-declare a Web row: a command-line config
   // override blocks the official ConfigEditor from persisting that entry.
   const overlay = parseYaml(HOST_ONLY_PATCH)
   const overlayRows = overlay.flatMap(entry => entry.insert ?? [entry])
-  for (const id of ids) {
+  for (const { id } of productionRows) {
     if (id === 'web-runtime' || id === 'office-kit' || id === 'skill-office') continue
     assert.equal(overlayRows.some(row => row.id === id), false,
       `the Host-only overlay must not re-declare the Web row "${id}"`)
@@ -317,6 +333,18 @@ test('the frozen Web roster matches the Host-only overlay exactly and stays defa
     assert.equal(overlayRows.filter(row => row.id === id).length, 1,
       `the Host-only overlay must keep exactly one fixed "${id}" override`)
   }
+  // Negative controls: the same semantic guard rejects a re-enabled runtime
+  // and a second Workspace Controller owner.
+  assert.throws(
+    () => assertWebToggleSafety(declared.map(row => row.id === 'web-runtime' ? { ...row, disabled: false } : row)),
+    /web-runtime must start disabled/u,
+  )
+  assert.throws(
+    () => assertWebToggleSafety([...declared, {
+      id: 'workspace-controller', name: '@deepseek-ai/dsh-api-workspace-controller', disabled: true,
+    }]),
+    /Workspace Controller authority must not become a toggle row/u,
+  )
 })
 
 test('account callback failures redact state, code, PKCE and cookie from reports', () => {
@@ -434,7 +462,7 @@ test('listing selectable split cases does not install a profile or claim complet
   ], 'the listing must follow the registry execution order')
   // A listing never becomes a full PASS and never creates a scene.
   for (const forbidden of ['SPLIT_PROCESS_SMOKE_PASS', 'T60 PASS', 'PASS_REAL_SPLIT_PROCESS',
-    'PASS_PRODUCT_BROWSER', 'WC-12 PASS']) {
+    'PASS_PRODUCT_BROWSER']) {
     assert.ok(!`${result.stdout}${result.stderr}`.includes(forbidden),
       `a listing must not claim ${forbidden}`)
   }
@@ -657,11 +685,17 @@ test('selected dispatch fails closed on non-PASS Web and Account verdicts', () =
   assert.equal(assertSelectedVerdict('web.official-composition', { status: 'PASS', browser: 'PASS' }), undefined)
   assert.equal(assertSelectedVerdict('web.runtime-toggle', { status: 'PASS', browser: 'PASS' }), undefined)
   assert.equal(assertSelectedVerdict('web.startup-preference', { verified: true }), undefined)
-  assert.equal(assertSelectedVerdict('web.product-browser-tui', { status: 'DEFERRED_WITH_OWNER', browserSubset: 'PASS' }), undefined)
+  assert.equal(assertSelectedVerdict('web.product-browser-tui', { status: 'PASS', browserSubset: 'PASS' }), undefined)
   assert.throws(() => assertSelectedVerdict('web.official-composition', { status: 'PASS', browser: 'NOT_RUN' }),
     /SELECTED_PASS|selected web\.official-composition/u)
   assert.throws(() => assertSelectedVerdict('web.runtime-toggle', { status: 'PASS', browser: 'INCOMPLETE' }),
     /selected web\.runtime-toggle/u)
+  assert.throws(() => assertSelectedVerdict('web.product-browser-tui', { status: 'DEFERRED_WITH_OWNER', browserSubset: 'PASS' }),
+    /selected web\.product-browser-tui/u)
+  assert.throws(() => assertSelectedVerdict('web.product-browser-tui', { status: 'NOT_RUN', browserSubset: 'PASS' }),
+    /selected web\.product-browser-tui/u)
+  assert.throws(() => assertSelectedVerdict('web.product-browser-tui', { status: 'PASS' }),
+    /selected web\.product-browser-tui/u, 'missing Browser subset facts must not be accepted as PASS')
   assert.throws(() => assertSelectedVerdict('web.product-browser-tui', { status: 'BLOCKED', browserSubset: 'PASS' }),
     /selected web\.product-browser-tui/u)
   assert.throws(() => assertSelectedVerdict('web.product-browser-tui', { status: 'PASS', browserSubset: 'FAIL' }),

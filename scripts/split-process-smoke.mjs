@@ -29,15 +29,16 @@
  *   T14/T16/T17 forged registry, unresponsive Host, protocol/identity/auth failures
  *                and non-destructive installed-payload drift
  *   T15 a dead Host leaves only a stale candidate; a Client safely starts a new one
- *   T75 the PRODUCT Browser x real Split TUI qualification (WP-01..WP-11):
- *                token->Cookie->official Web shell, two-way Session/Turn,
- *                Question/Approval first settlement, TUI reload/exit/SIGKILL,
- *                `/web` toggle + recomposition, locality and the feature matrix
+ *   T75 the PRODUCT Browser x real Split TUI differential subset
+ *                (WP-01..WP-11): token->Cookie->official Web shell,
+ *                two-way Session/Turn, Question/Approval first settlement,
+ *                TUI crash/resume, Host crash cold resume, `/web` toggle,
+ *                locality and the current Browser×Split qualification verdict
  *   T76 FR5-A Subagent settings: two authenticated Split Clients share the
  *                official Limits/Selection sections, one Save verifies partial
  *                success and the stale editor cannot overwrite the Host profile
  *   T73 the official Web frontend runtime toggle on ONE Host: default-off
- *                serving, setEnabled(true) mounting the 59 declared rows,
+ *                serving, setEnabled(true) mounting every declared row,
  *                setEnabled(false) while a real TUI holds an accepted Turn (the
  *                Turn settles, the TUI keeps its Session and keeps prompting),
  *                a second enable on the SAME process with a real Chromium run,
@@ -139,11 +140,11 @@ const FAILPOINT = process.env.SPLIT_PROCESS_SMOKE_FAIL_AFTER
  */
 const REQUIRE_WEB_BROWSER = process.env.SPLIT_PROCESS_REQUIRE_WEB_BROWSER === '1'
 /**
- * M5-W PR-D: whether THIS run must prove the full product Browser x real-TUI
- * qualification (WP-01..WP-10). It defaults OFF and reports `NOT_RUN`; the npm
+ * M5-W PR-D: whether THIS run must prove the current product Browser x real-TUI
+ * differential subset. It defaults OFF and reports `NOT_RUN`; the npm
  * release-tag CI job and a manual PR-D qualification set it to require the
- * whole product matrix. A missing Playwright install, a failed case or a
- * partial matrix is a hard failure only in this required mode.
+ * current Browser×Split subset. A missing Playwright install, a failed case or
+ * an incomplete subset is a hard failure only in this required mode.
  */
 const REQUIRE_WEB_PRODUCT = process.env.SPLIT_PROCESS_REQUIRE_WEB_PRODUCT === '1'
 
@@ -367,13 +368,12 @@ async function main(explicitPath) {
     assert(!requireWebBrowser || (webBrowserVerdict === 'PASS' && toggleBrowserVerdict === 'PASS'),
       `T60 the required real-Browser qualification ended as ${String(webBrowserVerdict)}/${String(toggleBrowserVerdict)}; only PASS qualifies this lane`)
     assert(!requireWebProduct
-      || ((webProductResult?.status === 'PASS' || webProductResult?.status === 'DEFERRED_WITH_OWNER')
+      || (webProductResult?.status === 'PASS'
         && webProductResult?.browserSubset === 'PASS'),
       `T60 the required product Browser x TUI subset ended as ${String(webProductResult?.browserSubset ?? webProductResult?.status)}`)
     assert(webPreferenceResult?.verified === true, 't74 the Web startup preference qualification did not complete')
     assert(webProductResult?.status === 'NOT_RUN'
-      || ((webProductResult?.status === 'PASS' || webProductResult?.status === 'DEFERRED_WITH_OWNER')
-        && webProductResult?.browserSubset === 'PASS'),
+      || (webProductResult?.status === 'PASS' && webProductResult?.browserSubset === 'PASS'),
       `t75 the product Browser x TUI subset ended as ${String(webProductResult?.browserSubset ?? webProductResult?.status)}`)
     assert(createHash('sha256').update(readFileSync(tarball)).digest('hex') === candidateSha256,
       'T60 the candidate artifact changed during the split-process qualification')
@@ -393,14 +393,12 @@ async function main(explicitPath) {
       webStartupPreference: webPreferenceResult?.verified === true
         ? 'PASS_PROFILE_AUTOSTART_AND_WEB_ENTRY_REAL_PROCESSES'
         : 'NOT_VERIFIED',
-      webProduct: webProductStatus === 'PASS'
+      webProduct: webProductStatus === 'PASS' && webProductResult?.browserSubset === 'PASS'
         ? 'PASS_PRODUCT_BROWSER_X_REAL_TUI'
-        : webProductResult?.browserSubset === 'PASS'
-          ? 'BROWSER_SUBSET_PASS_WC12_DEFERRED_WITH_OWNER'
-          : 'NOT_RUN_OR_INCOMPLETE',
+        : webProductStatus === 'NOT_RUN' ? 'NOT_RUN' : `INCOMPLETE(${String(webProductResult?.browserSubset ?? 'missing')})`,
       webProductStatus,
       webProductBrowserSubset: webProductResult?.browserSubset,
-      webProductWc: webProductResult?.wc,
+      webProductVerifiedCaseIds: webProductResult?.verifiedCaseIds,
       f2Account: statusOf('account.official-composition') === 'PASS'
         ? 'PASS_OFFICIAL_HOST_REMOTE_CALLBACK_PKCE_TWO_TUI'
         : 'NOT_RUN',
@@ -440,7 +438,7 @@ async function main(explicitPath) {
       releaseGates: 'not run by this smoke; stage-final lane records the separate release-gate verdict',
       managedHostNative: 'NOT_RUN_SELECTABLE_ONLY',
     })
-    console.log(`split-process registry smoke passed — ${basename(tarball)} × DSH ${targetDshVersion}; cases=${String(actualCaseResults.length)}/${String(registeredIds.length)}; managed-host native cases NOT_RUN (selectable-only); official Web composition ${webBrowserVerdict === 'PASS' ? 'PASS (real Browser)' : `NOT_QUALIFIED (${webBrowserVerdict})`}; official Web runtime toggle ${toggleBrowserVerdict === 'PASS' ? 'PASS (real Browser)' : `NOT_QUALIFIED (${toggleBrowserVerdict})`}; product Web x real TUI ${webProductStatus === 'PASS' ? 'PASS (real Browser + real PTY TUI)' : webProductResult?.browserSubset === 'PASS' ? `BROWSER SUBSET PASS; WC-12 ${webProductStatus} (Owner decision recorded)` : `NOT_RUN (${webProductStatus})`}`)
+    console.log(`split-process registry smoke passed — ${basename(tarball)} × DSH ${targetDshVersion}; cases=${String(actualCaseResults.length)}/${String(registeredIds.length)}; managed-host native cases NOT_RUN (selectable-only); official Web composition ${webBrowserVerdict === 'PASS' ? 'PASS (real Browser)' : `NOT_QUALIFIED (${webBrowserVerdict})`}; official Web runtime toggle ${toggleBrowserVerdict === 'PASS' ? 'PASS (real Browser)' : `NOT_QUALIFIED (${toggleBrowserVerdict})`}; product Web x real TUI ${webProductStatus === 'PASS' && webProductResult?.browserSubset === 'PASS' ? 'PASS (current Browser × Split subset)' : `NOT_RUN (${webProductStatus}/${String(webProductResult?.browserSubset ?? 'missing')})`}`)
   } catch (error) {
     // Report BEFORE the cleanup below: the failure projection must read the
     // still-live process handles, and the work root must still exist while the
@@ -894,9 +892,8 @@ export function assertSelectedVerdict(caseId, result) {
     return
   }
   if (caseId === 'web.product-browser-tui') {
-    assert(result?.browserSubset === 'PASS'
-      && (result?.status === 'PASS' || result?.status === 'DEFERRED_WITH_OWNER'),
-    `selected ${caseId}: the Browser subset ended as ${String(result?.browserSubset ?? 'missing')}/${String(result?.status ?? 'missing')}`)
+    assert(result?.status === 'PASS' && result?.browserSubset === 'PASS',
+      `selected ${caseId}: the Browser subset ended as ${String(result?.browserSubset ?? 'missing')}/${String(result?.status ?? 'missing')}`)
     return
   }
   if (caseId === 'web.headless-cli') {

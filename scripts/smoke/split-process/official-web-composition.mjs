@@ -48,14 +48,15 @@ import {
   waitForHostSessionHeader,
 } from '../../lib/split-smoke-sessions.mjs'
 import {
+  CORE_WEB_ROW_PACKAGES,
   PR_A_CLIENT_MODULES_PACKAGE,
   PR_A_SINGLETON_PACKAGES,
-  PR_A_WEB_ROWS,
   PR_A_WEB_RUNTIME_ID,
   PR_A_WELCOME_NOTICE_VERSION,
   assertWebIndexQualified,
   browserDriverExitBounded,
   openSseFrames,
+  readDeclaredWebRows,
   readHostWebIndex,
   redactWebQualificationText,
   sseProbe,
@@ -110,7 +111,7 @@ export async function runOfficialWebComposition(context) {
     }
     return overlays
   }
-  /** Compare the live Host overlay and the installed bundle declaration against the frozen roster. */
+  /** Compare the live Host overlay and the installed bundle declaration against the core Web contracts. */
   const assertDeclaredWebRows = (overlayPath, label) => {
     const entries = parseYaml(readFileSync(overlayPath, 'utf8'))
     const inserts = entries.filter(entry => Array.isArray(entry.insert))
@@ -120,21 +121,17 @@ export async function runOfficialWebComposition(context) {
       `${label}: the Host execution insert does not own the Cordis Inspect provider row`)
     // The Web roster is declared by the BUNDLE patch, not inserted by the
     // Host-only overlay: the official ConfigEditor must be able to persist
-    // every Web row. Read the installed bundle patch that the candidate
-    // actually ships and compare it with the frozen production roster.
-    const bundlePatch = join(profilePackage, 'generated', 'web-access', 'cordis.patch.yml')
-    const bundleEntries = parseYaml(readFileSync(bundlePatch, 'utf8'))
-    const bundleInserts = bundleEntries.filter(entry => Array.isArray(entry.insert))
-    assert(bundleInserts.length === 1, `${label}: expected ONE Web bundle insert, found ${bundleInserts.length}`)
-    const rows = bundleInserts[0].insert
-    assert(rows.length === PR_A_WEB_ROWS.length,
-      `${label}: the Web insert declares ${rows.length} rows, expected ${PR_A_WEB_ROWS.length}`)
-    // The lane's `assert` is a plain predicate, not node:assert: compare the
-    // two sequences through one canonical JSON projection.
-    assert(JSON.stringify(rows.map(row => row.id)) === JSON.stringify(PR_A_WEB_ROWS.map(row => row.id)),
-      `${label}: the Web insert ids drifted from the frozen roster`)
-    assert(JSON.stringify(rows.map(row => row.name)) === JSON.stringify(PR_A_WEB_ROWS.map(row => row.name)),
-      `${label}: a Web row was re-pointed at a different package`)
+    // every Web row. Read the installed bundle patch the candidate actually
+    // ships, then hold only the small independent core facts plus the graph's
+    // provider-before-consumer order. The full installed declaration is the
+    // authority (`readDeclaredWebRows` answers declaration, never live state).
+    const rows = readDeclaredWebRows(profilePackage)
+    for (const fact of CORE_WEB_ROW_PACKAGES) {
+      const matches = rows.filter(row => row.id === fact.id)
+      assert(matches.length === 1, `${label}: the installed Web declaration must own exactly one "${fact.id}" row, found ${matches.length}`)
+      assert(matches[0].name === fact.name,
+        `${label}: the "${fact.id}" row is pointed at ${matches[0].name}, not ${fact.name}`)
+    }
     assert(rows.every(row => row.disabled === true), `${label}: every Web row must be disabled by default`)
     const runtime = rows.find(row => row.id === PR_A_WEB_RUNTIME_ID)
     assert(runtime !== undefined, `${label}: the Web runtime row is missing`)
@@ -142,6 +139,20 @@ export async function runOfficialWebComposition(context) {
       `${label}: web-runtime must inject the existing webserver only`)
     assert(JSON.stringify(runtime.config) === JSON.stringify({ openBrowser: false, printUrl: false, surfaceContext: false }),
       `${label}: web-runtime config must stay false/false/false`)
+    const ids = rows.map(row => row.id)
+    const indexOf = id => ids.indexOf(id)
+    for (const [provider, consumer] of [
+      ['open-in-app', 'ui-open-in-app'],
+      ['session-reference', 'ui-reference'],
+      ['plugin-inventory', 'ui-settings-plugin-inventory'],
+      ['message-feedback', 'ui-message-feedback'],
+      ['workspace-changes', 'ui-deliverables'],
+    ]) {
+      const providerIndex = indexOf(provider)
+      const consumerIndex = indexOf(consumer)
+      assert(providerIndex >= 0 && consumerIndex >= 0 && providerIndex < consumerIndex,
+        `${label}: the "${provider}" provider must precede the "${consumer}" consumer in the declared Web graph`)
+    }
     return rows
   }
   /** The Host authorities the Web composition must not duplicate. */
@@ -202,7 +213,7 @@ export async function runOfficialWebComposition(context) {
         `PA-01 the Web-only Host service "${service}" is published with Web off`)
     }
     const declaredById = new Map(plainReady.entries.map(entry => [entry.id, entry]))
-    const notAbsent = PR_A_WEB_ROWS.map(row => row.id)
+    const notAbsent = declaredRows.map(row => row.id)
       .filter(id => declaredById.get(id)?.state !== 'absent')
     assert(notAbsent.length === 0, `PA-01 these Web rows are not plainly disabled: ${notAbsent.join(',')}`)
     // The ONE loopback listener and the existing authenticated routes stay
@@ -300,7 +311,7 @@ export async function runOfficialWebComposition(context) {
     mkdirSync(documentsDirectory, { recursive: true, mode: 0o700 })
     chmodSync(documentsDirectory, 0o700)
     const llmOperations = readFileSync(surfaceLlm.patchPath, 'utf8').trimEnd()
-    const webOverrides = PR_A_WEB_ROWS.map(row => row.id === 'ui-settings-general'
+    const webOverrides = declaredRows.map(row => row.id === 'ui-settings-general'
       ? [
         `- id: ${row.id}`,
         '  disabled: false',
@@ -323,6 +334,14 @@ export async function runOfficialWebComposition(context) {
         `PA-02 the Web-only Host service "${service}" is not published by the enabled Host`)
     }
     const webEntriesById = new Map(webReady.entries.map(entry => [entry.id, entry]))
+    // PA-02: the SAME live Host status must expose every declared Web row as
+    // ACTIVE after the enabled composition, not just the core safety subset.
+    // A PENDING/absent non-core row is a real composition failure.
+    for (const row of declaredRows) {
+      const state = webEntriesById.get(row.id)?.state
+      assert(state === 'active',
+        `PA-02 the qualified Host did not activate the declared Web row "${row.id}" (state ${String(state ?? 'missing')})`)
+    }
     for (const id of [
       PR_A_WEB_RUNTIME_ID, 'modules', 'client-hmr', 'cordis-client-runner', 'terminal-controller',
       'message-feedback', 'open-in-app', 'session-reference', 'plugin-inventory',
@@ -417,11 +436,11 @@ export async function runOfficialWebComposition(context) {
       'PA-06 the qualified Host leaked the launch token into its records/stderr')
     assert(!/dsh web:\s*http/iu.test(hostOutput), 'PA-06 the qualified Host printed an authenticated URL line')
     assert(!hostOutput.includes('DSH_WEB_URL'), 'PA-06 the qualified Host exposed the Web shell variable')
-    const activatedWebRows = PR_A_WEB_ROWS.filter(row => webEntriesById.get(row.id)?.state === 'active')
+    const activatedWebRows = declaredRows.filter(row => webEntriesById.get(row.id)?.state === 'active')
     trace('t68-web-qualified', {
       dshVersion: targetDshVersion,
       rowsActivated: activatedWebRows.length,
-      rowsNotActivated: PR_A_WEB_ROWS
+      rowsNotActivated: declaredRows
         .filter(row => webEntriesById.get(row.id)?.state !== 'active')
         .map(row => `${row.id}:${webEntriesById.get(row.id)?.state ?? 'missing'}`),
       indexStatus: facts.index.status,

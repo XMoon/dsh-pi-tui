@@ -416,16 +416,22 @@ whole-lane mutation control (`SPLIT_PROCESS_SMOKE_MUTATION`) is refused in
 selector modes instead of being silently applied.
 
 A selected Web case owns its own Browser requirement: `web.official-composition`
-and `web.runtime-toggle` require the real pinned Playwright Chromium, and
-`web.product-browser-tui` requires the complete Browser×TUI Product subset;
-`web.startup-preference` has no Browser requirement. A missing Playwright
+and `web.runtime-toggle` require the real pinned Playwright Chromium,
+`web.product-browser-tui` requires the complete Browser×TUI Product subset,
+and `web.startup-preference` has no Browser requirement. A missing Playwright
 install is a failure/NOT_RUN, never `SPLIT_PROCESS_SELECTED_PASS`. The
 `--suite web` form may carry both Browser require flags; a Full run without
 those flags keeps the PA/PB Host/HTTP/TTY checks mandatory while their Browser
 case may be `NOT_RUN`, and the Product case may be `NOT_RUN`. Full with the
 require flags demands real Chromium PA/PB PASS and the Product Browser subset
-PASS. WC-12 stays `DEFERRED_WITH_OWNER`; a PASS of the Browser/TUI subset does
-not claim the deferred real Tern GUI half.
+PASS.
+
+`web.product-browser-tui` proves the current Browser×Split Host/TUI differential
+subset: one packed official Web Browser and a real Split TUI sharing a Host,
+competing writes, stale refusals, crash recovery and three-way file locality.
+It is not an inventory of every official Web UI feature and does not claim the
+real Tern GUI/TSP native gesture path, which remains `NOT_VERIFIED` under its
+separate owner.
 
 The Upgrade lane has its own strict selector over two genuinely different
 packaged builds pinned to the same exact DSH runtime (internal qualification

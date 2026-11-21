@@ -49,12 +49,12 @@ import {
 import {
   PR_A_CLIENT_MODULES_PACKAGE,
   PR_A_SINGLETON_PACKAGES,
-  PR_A_WEB_ROWS,
   PR_A_WEB_RUNTIME_ID,
   PR_A_WELCOME_NOTICE_VERSION,
   assertWebIndexQualified,
   browserDriverExitBounded,
   openSseFrames,
+  readDeclaredWebRows,
   readHostWebIndex,
   redactWebQualificationText,
   sseProbe,
@@ -69,6 +69,7 @@ function assert(condition, message) {
 
 export async function runWebStartupPreference(context) {
   const { EntryProcess, SurfaceEntryProcess, workDir, dshHome, base, entries, targetDshVersion, trace } = context
+  const declaredWebRows = readDeclaredWebRows(context.installation.profilePackage)
   let webScopeSuffix
   let statusSequence = 0
   const autostartRoot = join(workDir, 'pr-c-autostart')
@@ -77,7 +78,7 @@ export async function runWebStartupPreference(context) {
   const hosts = []
   const clients = []
   const peers = []
-  const rowStates = ready => new Map(PR_A_WEB_ROWS.map(row => [row.id,
+  const rowStates = ready => new Map(declaredWebRows.map(row => [row.id,
     (ready.entries ?? []).find(entry => entry.id === row.id)?.state]))
   /** No declared Web row is live (absent/state-4 are plainly off). */
   const assertFullyOff = (ready, label) => {

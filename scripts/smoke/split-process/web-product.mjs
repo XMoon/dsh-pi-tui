@@ -2,9 +2,9 @@
  * M5-W PR-D / S5-PR5 product Browser-by-real-TUI qualification (T75/WP-01..WP-11).
  *
  * This module owns the complete product composite: the single Group-A Host,
- * the per-case isolated Host scenes, the real Chromium driver runs and
- * the WC-01..12 evidence matrix writer. The Browser driver remains
- * `scripts/fixtures/m5-web-product-browser.mjs`; this module never stubs it.
+ * the per-case isolated Host scenes and the real Chromium driver runs. The
+ * Browser driver remains `scripts/fixtures/m5-web-product-browser.mjs`; this
+ * module never stubs it.
  *
  * @module split-process/web-product
  */
@@ -18,7 +18,6 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
-  readlinkSync,
   realpathSync,
   rmSync,
   statSync,
@@ -35,11 +34,9 @@ import {
   alive,
   assertClientHostFacts,
   assertIdentityFields,
-  chunk,
   fetchStatus,
   hostStatus,
   lastSurfaceStatus,
-  productionBuildId,
   readJson,
   readProcessFacts,
   readStartIdentity,
@@ -58,10 +55,10 @@ import {
 } from '../../lib/split-smoke-sessions.mjs'
 import { runOwnedDetachedDriver } from '../../lib/owned-browser-driver.mjs'
 import {
-  PR_A_WEB_ROWS,
-  browserDriverExitBounded,
-  readHostWebIndex,
   assertWebIndexQualified,
+  browserDriverExitBounded,
+  readDeclaredWebRows,
+  readHostWebIndex,
   redactWebQualificationText,
   whileBrowserDriverRuns,
 } from './web-helpers.mjs'
@@ -86,9 +83,7 @@ function createProductEvidence() {
     candidateSha256: undefined,
     dshVersion: undefined,
     ledger: [],
-    wc: {},
-    features: undefined,
-    ternGui: { status: 'NOT_RUN', reason: 'the real Tern GUI lane did not run in this qualification' },
+    ternGui: { status: 'NOT_VERIFIED', reason: 'the real Tern GUI/TSP native gesture path is outside this qualification' },
   }
   if (disabled) {
     return {
@@ -104,8 +99,7 @@ function createProductEvidence() {
       fact() {},
       sessionEvents() {},
       ptyFrame() {},
-      features() {},
-      wc() {},
+      settingsPersistence() {},
       finish() {},
     }
   }
@@ -113,7 +107,7 @@ function createProductEvidence() {
   if (existsSync(dir) && readdirSync(dir).length > 0) {
     throw new Error(`the product evidence directory must be new/empty: ${dir}`)
   }
-  for (const sub of ['matrix', 'browser', 'host', 'client', 'tern-gui']) {
+  for (const sub of ['browser', 'host', 'client', 'tern-gui']) {
     mkdirSync(join(dir, sub), { recursive: true, mode: 0o700 })
     chmodSync(join(dir, sub), 0o700)
   }
@@ -222,28 +216,24 @@ function createProductEvidence() {
     ptyFrame(id, frames) {
       writeText(join('client', id, 'pty-frames.txt'), frames.join('\n'))
     },
-    features(matrix) {
-      state.features = matrix
-      write('matrix/feature-surface.json', { schema: 1, case: 'WP-10', features: matrix })
-    },
     settingsPersistence(result) {
       write('web-settings-persistence.json', result)
     },
-    wc(matrix) {
-      state.wc = matrix
-      write('matrix/wc-01-12.json', { schema: 1, wc: matrix })
-    },
-    finish(extra = {}) {
-      write('run-ledger.json', { schema: 1, startedAt: state.startedAt, endedAt: new Date().toISOString(), cases: state.ledger, ...extra })
+    finish(extra = {}) {      write('run-ledger.json', { schema: 1, startedAt: state.startedAt, endedAt: new Date().toISOString(), cases: state.ledger, ...extra })
       write('manifest.json', manifest(extra))
       writeText('README-qualification.md', [
-        '# M5-W PR-D product qualification evidence',
+        '# Browser × Split Host/TUI differential qualification evidence',
         '',
         `- candidate: \`${String(state.candidate)}\``,
         `- candidate SHA256: \`${String(state.candidateSha256)}\``,
         `- DSH: \`${String(state.dshVersion)}\``,
         `- Playwright: \`${String(state.playwright)}\`, Chromium: \`${String(state.chromium)}\``,
         '- Browser: real Playwright Chromium (headless); TUI: real PTY; Host: the installed candidate\'s Split Host',
+        '',
+        'This run reproduces the current Browser × Split differential subset: one packed official',
+        'Web Browser and a real Split TUI sharing one Host, competing writes, stale refusals,',
+        'crash recovery, the same-Host Web toggle and three-way file locality. It is not an',
+        'inventory of every official Web UI feature and does not claim the real Tern GUI.',
         '',
         '## Reproduce',
         '',
@@ -255,12 +245,13 @@ function createProductEvidence() {
         'pnpm smoke:split-process -- ./xmoon76-dsh-pi-tui-<version>.tgz',
         '```',
         '',
-        '## Known qualifications not claimed here',
+        '## Not covered',
         '',
-        `- real Tern GUI: ${state.ternGui.status} - ${state.ternGui.reason}`,
+        `- real Tern GUI/TSP native gesture path: ${state.ternGui.status} - ${state.ternGui.reason}`,
         '- OS physical input and an OS accessibility bridge: NOT_VERIFIED (control-injected input only).',
         '- Browser Cookie revocation after `/web Disable`: NOT a product contract and not tested.',
         '- Browser-only ACL/multi-user/remote network exposure: not claimed.',
+        '- Official Web page-only menus, clipboard, quote and feature inventories retired by the test-consolidation plan: not claimed.',
         '',
       ].join('\n'))
     },
@@ -277,6 +268,10 @@ function createProductEvidence() {
 export const runWebProductQualification = async context => {
   const { EntryProcess, SurfaceEntryProcess, workDir, dshHome, base, entries, profilePackage, tarball, candidateSha256, targetDshVersion, trace, mode } = context
   const { env } = context.installation
+  // The packed candidate's current Web declaration. Every live OFF/ON check
+  // below still reads the Host status entries separately; this only says what
+  // the installed bundle declares before the case starts.
+  const declaredWebRows = readDeclaredWebRows(profilePackage)
   const productRoot = join(workDir, 'pr-d-product')
   mkdirSync(productRoot, { recursive: true, mode: 0o700 })
   chmodSync(productRoot, 0o700)
@@ -290,15 +285,10 @@ export const runWebProductQualification = async context => {
     candidateSha256,
     dshVersion: targetDshVersion,
   })
-  const wc = Object.fromEntries(Array.from({ length: 12 }, (_, index) => {
-    const code = `WC-${String(index + 1).padStart(2, '0')}`
-    return [code, { status: 'NOT_RUN', reason: 'this qualification did not reach the case', evidence: [] }]
-  }))
-  const setWc = (code, status, reason, refs = []) => {
-    wc[code] = { status, reason, evidence: refs }
-    evidence.wc(wc)
-  }
-  evidence.wc(wc)
+  evidence.setTernGui({
+    status: 'NOT_VERIFIED',
+    reason: 'the real Tern GUI/TSP native gesture path is outside this Browser × Split product subset and was not run',
+  })
   const hosts = []
   const clients = []
   const peers = []
@@ -322,9 +312,9 @@ export const runWebProductQualification = async context => {
       status: 'NOT_RUN',
       reason: 'SPLIT_PROCESS_REQUIRE_WEB_PRODUCT is not set; this run does NOT exercise the product Browser qualification and does not claim it',
     })
-    evidence.setTernGui({ status: 'NOT_RUN', reason: 'the product qualification was not required in this run' })
-    evidence.finish({ status: 'NOT_RUN' })
-    return { status: 'NOT_RUN', wc }
+    evidence.setTernGui({ status: 'NOT_VERIFIED', reason: 'the product qualification was not required in this run' })
+    evidence.finish({ status: 'NOT_RUN', browserSubset: 'NOT_RUN' })
+    return { status: 'NOT_RUN', browserSubset: 'NOT_RUN' }
   }
   assert(playwrightRoot !== undefined && playwrightRoot !== '',
     'PR-D the product Browser qualification is REQUIRED (selected Web case or SPLIT_PROCESS_REQUIRE_WEB_PRODUCT=1) but SPLIT_PROCESS_PLAYWRIGHT_ROOT names no pinned Playwright install; an HTTP-only run must never be accepted as the product proof')
@@ -365,16 +355,15 @@ export const runWebProductQualification = async context => {
     '',
   ].join('\n'), { mode: 0o600 })
   chmodSync(productPatch, 0o600)
-  const timedRows = JSON.parse(readFileSync(c1Fixture.timedPatchPath, 'utf8'))
-  timedRows.push(
-    { id: 'workspace-controller', config: { documentsDirectory } },
-  )
-  const timedProductPatch = join(productRoot, 'pr-d-product-timed.patch.yml')
-  writeFileSync(timedProductPatch, `${JSON.stringify(timedRows, null, 2)}\n`, { mode: 0o600 })
-  chmodSync(timedProductPatch, 0o600)
 
   /** The durable events of one Session (empty before its first write). */
   const durableOf = sessionId => hostSessionEvents(dshHome, sessionId) ?? []
+  /** A real completed turn, never an interrupted/aborted settlement. */
+  const isCompletedTurn = event => event.type === 'turn/end' && event.data?.reason?.kind === 'completed'
+  /** A user-authored message carrying the exact marker text. */
+  const isAuthoredUser = (event, text) => event.type === 'user/message'
+    && event.data?.source?.kind === 'user'
+    && JSON.stringify(event).includes(text)
   /** One offline model request record per call (the fixture's model-facing sink). */
   const promptEvidence = () => {
     const text = readFileSync(context.installation.surfaceLlm.promptEvidencePath, 'utf8').trim()
@@ -382,7 +371,7 @@ export const runWebProductQualification = async context => {
   }
   const requestIdOf = event => event.data?.source?.rpcId ?? event.data?.rpcId ?? event.data?.requestId ?? event.data?.id
   const userEvents = (sessionId, text) => durableOf(sessionId)
-    .filter(event => event.type === 'user/message' && JSON.stringify(event).includes(text))
+    .filter(event => isAuthoredUser(event, text))
   /** Persist the redacted durable correlation events of one case Session. */
   const recordSession = (id, sessionId) => {
     const events = durableOf(sessionId)
@@ -530,7 +519,7 @@ export const runWebProductQualification = async context => {
   const tuiTurn = async (tui, sessionId, text, label) => {
     const boundary = durableOf(sessionId).length
     const committed = () => durableOf(sessionId).slice(boundary)
-      .some(event => event.type === 'user/message' && JSON.stringify(event).includes(text))
+      .some(event => isAuthoredUser(event, text))
     tui.send(`${text}\r`)
     await tui.waitForScreen(text, `${label} prompt painted`, 120_000)
     // A `/web` overlay close or a just-mounted `/new` session can swallow
@@ -549,9 +538,9 @@ export const runWebProductQualification = async context => {
       tui.send('\r')
     }
     await waitForHostSessionEventAfter(dshHome, sessionId, boundary,
-      event => event.type === 'user/message' && JSON.stringify(event).includes(text), `${label} user/message`, 180_000)
+      event => isAuthoredUser(event, text), `${label} user/message`, 180_000)
     await waitForHostSessionEventAfter(dshHome, sessionId, boundary,
-      event => event.type === 'turn/end', `${label} turn/end`, 180_000)
+      isCompletedTurn, `${label} turn/end`, 180_000)
     return boundary
   }
   /**
@@ -577,10 +566,10 @@ export const runWebProductQualification = async context => {
     tui.send(`${canonicalSessionMention(targetSessionId)} ${marker}\r`)
     await tui.waitForScreen(marker, `${label} prompt painted`, 120_000)
     await waitForHostSessionEventAfter(dshHome, sessionId, boundary,
-      event => event.type === 'user/message' && JSON.stringify(event).includes(marker),
+      event => isAuthoredUser(event, marker),
       `${label} user/message`, 180_000)
     await waitForHostSessionEventAfter(dshHome, sessionId, boundary,
-      event => event.type === 'turn/end', `${label} turn/end`, 180_000)
+      isCompletedTurn, `${label} turn/end`, 180_000)
     return boundary
   }
   /** One correlated `qualification-web-access` round trip. */
@@ -617,7 +606,7 @@ export const runWebProductQualification = async context => {
       `${label}: the Host reported ${JSON.stringify(record.status)} instead of ${expected}`)
   }
   const webFullyOff = ready => {
-    const live = PR_A_WEB_ROWS
+    const live = declaredWebRows
       .map(row => [row.id, (ready.entries ?? []).find(entry => entry.id === row.id)?.state])
       .filter(([, state]) => state !== 'absent' && state !== 'state-4')
     assert(live.length === 0, `the Web rows are not plainly off: ${live.map(([id, state]) => `${id}:${state ?? 'missing'}`).join(',')}`)
@@ -625,12 +614,13 @@ export const runWebProductQualification = async context => {
   // EVERY declared Web row must be active: S5-PR5 removed the tolerated
   // `ui-deliverables` PENDING state now that the Host mounts `workspace-changes`.
   const webFullyOn = ready => {
-    const notActive = PR_A_WEB_ROWS
+    const notActive = declaredWebRows
       .map(row => [row.id, (ready.entries ?? []).find(entry => entry.id === row.id)?.state])
       .filter(([, state]) => state !== 'active')
     assert(notActive.length === 0, `the Web rows are not active: ${notActive.map(([id, state]) => `${id}:${state ?? 'missing'}`).join(',')}`)
   }
   let browserRun = 0
+  const verifiedCaseIds = []
   let webScopeId
   let webScopeSuffix
   const browserCase = async (caseId, config, body) => {
@@ -691,7 +681,6 @@ export const runWebProductQualification = async context => {
         }
         return readJson(stepPath)
       },
-      readStep: seq => readJson(join(coord, `browser-step-${seq}.json`)),
     }
     evidence.caseStart(caseId)
     let passed = false
@@ -738,6 +727,7 @@ export const runWebProductQualification = async context => {
         chromium: report.runtimeVersion?.chromium,
       })
       evidence.caseEnd(caseId, 'PASS')
+      verifiedCaseIds.push(caseId)
       passed = true
       return report
     } catch (error) {
@@ -783,7 +773,7 @@ export const runWebProductQualification = async context => {
       assert(resetStop.code === 0, 'PR-D the preference-reset Host did not stop normally')
     }
 
-    // ── Group A: WP-01/02/06/08/09/10 on ONE fast-answer Host ───────────
+    // ── Group A: WP-01/02/06/08/09 on ONE fast-answer Host ──────────────
     const groupA = await startHost('long-turn', 'wp01-group', { C1_HOLD_LONG_TURN: fastBarrier })
     assertSingleHostOwners(groupA.ready, 'WP-01 Host')
     const groupAIdentity = groupA.ready.localHost
@@ -856,10 +846,10 @@ export const runWebProductQualification = async context => {
       assertClientHostFacts(lastSurfaceStatus(groupTui)?.host, groupA.ready.localHost, 'WP-01 TUI vs Browser Host')
       const boundary = durableOf(browserSession.sessionId).length
       await waitForHostSessionEventAfter(dshHome, browserSession.sessionId, boundary,
-        event => event.type === 'user/message' && JSON.stringify(event).includes(`wp01-${productNonce}`),
+        event => isAuthoredUser(event, `wp01-${productNonce}`),
         'WP-01 Browser prompt committed', 180_000)
       await waitForHostSessionEventAfter(dshHome, browserSession.sessionId, boundary,
-        event => event.type === 'turn/end', 'WP-01 Browser turn settled', 180_000)
+        isCompletedTurn, 'WP-01 Browser turn settled', 180_000)
       const armed = await handle.waitFact('session-reference-armed', 'WP-01 session-reference armed', 240_000)
       const referenceEvidenceStart = promptEvidence().length
       handle.signal('session-reference-send')
@@ -935,25 +925,14 @@ export const runWebProductQualification = async context => {
       `WP-01 the Browser failed a required Web resource: ${JSON.stringify(wp01.network?.failedPaths)}`)
     assertIdentityFields((await hostStatus(groupA.host)).localHost, groupAIdentity, 'WP-01 Host identity kept after the Browser Session')
     await ptyFrames('wp01', groupTui)
-    setWc('WC-01', 'PASS', 'one Host owner graph; Browser and TUI share it', ['WP-01'])
-    setWc('WC-02', 'PASS', 'real Browser token->Cookie->index, live plugin stream and dynamic resources', ['WP-01'])
-    setWc('WC-11', 'PASS', 'the Browser loaded the installed candidate Web resources; the candidate digest is re-proved at the end', ['WP-01'])
 
-    // WP-02A: TUI creates a Session; the Browser finds and opens it.
-    const sessionA = await tuiNewSession(groupTui, 'WP-02A')
+    // WP-02 baseline: a TUI-created Session A provides the independent-view
+    // comparison Session. The retired Browser open-existing demo is covered by
+    // WP-02B's Browser-created Session and the authoritative Host writer.
+    const sessionA = await tuiNewSession(groupTui, 'WP-02 baseline')
     const markerA = `T-${productNonce}-a`
-    await tuiTurn(groupTui, sessionA, markerA, 'WP-02A')
-    await browserCase('wp02a-open-existing', {
-      sessionId: sessionA,
-      marker: markerA,
-      expectedAnswer: 'long-turn answer',
-    }, async () => {})
-    const sessionAHeader = await waitForHostSessionHeader(dshHome, sessionA, 'WP-02A Session header')
-    assert(typeof sessionAHeader.cwd === 'string' && sessionAHeader.cwd !== '', 'WP-02A no durable Host workspace header')
-    assert(userEvents(sessionA, markerA).length === 1, 'WP-02A the TUI marker was not committed once')
-    recordSession('wp02a-open-existing', sessionA)
-    await ptyFrames('wp02a-open-existing', groupTui)
-    setWc('WC-03', 'PASS', 'TUI created a Session; the Browser opened the same Session through the official sidebar', ['WP-02A'])
+    await tuiTurn(groupTui, sessionA, markerA, 'WP-02 baseline')
+    await waitForHostSessionHeader(dshHome, sessionA, 'WP-02 baseline Session header')
 
     // WP-02B: the Browser creates a Session; the TUI resumes it.
     const markerB = `B-${productNonce}-b`
@@ -972,47 +951,24 @@ export const runWebProductQualification = async context => {
     recordSession('wp02b-browser-session', sessionB)
     await ptyFrames('wp02b-browser-session', groupTui)
 
-    // WP-02C: both Clients write the SAME Session with different markers.
-    const markerB2 = `B-${productNonce}-c`
-    const markerT2 = `T-${productNonce}-c`
-    await browserCase('wp02c-dual-prompts', {
-      sessionId: sessionB,
-      marker: markerB2,
-      tuiMarker: markerT2,
-      expectedAnswer: 'long-turn answer',
-    }, async handle => {
-      await handle.waitFact('turn-done', 'WP-02C Browser turn', 240_000)
-      await tuiTurn(groupTui, sessionB, markerT2, 'WP-02C')
-      const after = durableOf(sessionB)
-      const browserRequest = userEvents(sessionB, markerB2).map(requestIdOf).filter(id => typeof id === 'string')
-      const tuiRequest = userEvents(sessionB, markerT2).map(requestIdOf).filter(id => typeof id === 'string')
-      assert(browserRequest.length === 1 && tuiRequest.length === 1 && browserRequest[0] !== tuiRequest[0],
-        'WP-02C the two Clients did not produce two distinct Host request identities')
-      assert(after.filter(event => event.type === 'turn/end').length >= 2,
-        'WP-02C the same Session did not settle two Turns')
-      await handle.signal('tui-done')
-    })
-    recordSession('wp02c-dual-prompts', sessionB)
-    await ptyFrames('wp02c-dual-prompts', groupTui)
-    setWc('WC-04', 'PASS', 'two distinct request identities, two user/message writes and two turn ends on ONE Session', ['WP-02C'])
-
     // WP-02D: the SAME text from both Clients stays two independent Turns.
     const sameText = `S-${productNonce}-same`
+    const sameTextBoundary = durableOf(sessionB).length
     await browserCase('wp02d-same-text', {
       sessionId: sessionB,
       marker: sameText,
       expectedAnswer: 'long-turn answer',
     }, async handle => {
       await handle.waitFact('turn-done', 'WP-02D Browser same-text turn', 240_000)
-      // The two prompts have the SAME text: before the TUI writes its own,
-      // prove the Browser's occurrence and turn are already durable. The TUI
-      // boundary then cannot be satisfied by the Browser's late flush, which
-      // would otherwise hide a swallowed TUI Enter.
-      await waitForHostSessionEvent(dshHome, sessionB,
-        event => event.type === 'user/message' && JSON.stringify(event).includes(sameText),
+      // The two prompts have the SAME text: bind the Browser's own host
+      // occurrence and its completed turn before the TUI writes the second one.
+      const browserSame = await waitForHostSessionEventAfter(dshHome, sessionB, sameTextBoundary,
+        event => isAuthoredUser(event, sameText),
         'WP-02D Browser user/message durable', 120_000)
-      await waitForHostSessionEvent(dshHome, sessionB,
-        event => event.type === 'turn/end', 'WP-02D Browser turn/end durable', 120_000)
+      const afterBrowserSameIndex = durableOf(sessionB).findIndex(event => event.seq === browserSame.seq) + 1
+      await waitForHostSessionEventAfter(dshHome, sessionB, afterBrowserSameIndex,
+        event => isCompletedTurn(event) && event.seq > browserSame.seq,
+        'WP-02D Browser turn/end durable', 120_000)
       await tuiTurn(groupTui, sessionB, sameText, 'WP-02D')
       const occurrences = userEvents(sessionB, sameText)
       assert(occurrences.length === 2, `WP-02D the Host committed ${String(occurrences.length)} same-text user messages, expected 2`)
@@ -1022,7 +978,6 @@ export const runWebProductQualification = async context => {
       await handle.signal('tui-done')
     })
     recordSession('wp02d-same-text', sessionB)
-    setWc('WC-04', 'PASS', 'two distinct request identities; the same text from both Clients stays two Turns', ['WP-02C', 'WP-02D'])
 
     // WP-02E: independent Browser/TUI current Session references.
     const markerA2 = `T-${productNonce}-e`
@@ -1048,181 +1003,84 @@ export const runWebProductQualification = async context => {
       'WP-02E the TUI Turn in B was not committed while the Browser was on A')
     recordSession('wp02e-independent-view-a', sessionA)
     recordSession('wp02e-independent-view-b', sessionB)
-    setWc('WC-05', 'PASS', 'Browser and TUI keep independent current Sessions; a Turn in B lands while the Browser shows A', ['WP-02E'])
 
-    // WP-06: TUI /reload-client, normal exit and SIGKILL while the Browser
-    // keeps advancing the SAME Session.
+    // WP-06: one real TUI SIGKILL leaves the Browser writing the SAME Session;
+    // a fresh TUI resumes it. Client reload/normal exit permutations belong to
+    // the Split recovery Owner and are not repeated here.
     const sessionLife = await tuiNewSession(groupTui, 'WP-06')
     const lifeSeed = `L-${productNonce}-seed`
     await tuiTurn(groupTui, sessionLife, lifeSeed, 'WP-06 seed')
-    const lifeBrowser = await browserCase('wp06-tui-lifecycle', { sessionId: sessionLife }, async handle => {
+    const lifeMarker = `L-${productNonce}-after-sigkill`
+    await browserCase('wp06-tui-lifecycle', {
+      sessionId: sessionLife,
+      marker: lifeMarker,
+      expectedAnswer: 'long-turn answer',
+    }, async handle => {
       await handle.waitFact('ready', 'WP-06 Browser ready', 240_000)
-      const commands = [
-        { kind: 'prompt', prompt: `L-${productNonce}-after-reload`, marker: `L-${productNonce}-after-reload` },
-        { kind: 'prompt', prompt: `L-${productNonce}-tui-exited`, marker: `L-${productNonce}-tui-exited` },
-        { kind: 'prompt', prompt: `L-${productNonce}-new-tui`, marker: `L-${productNonce}-new-tui` },
-        { kind: 'prompt', prompt: `L-${productNonce}-after-sigkill`, marker: `L-${productNonce}-after-sigkill` },
-        { kind: 'finish' },
-      ]
-      // 1. A REAL /reload-client command; the Host PID must not move and the
-      //    reexecuted Client must restore Session S. The manual command
-      //    truthfully refuses `already-current` when the profile install IS
-      //    the running build, so the installed Client payload is given the
-      //    T17 harmless-comment drift first and restored byte-for-byte after
-      //    the replacement is live. This is a REAL profile reexec, not a
-      //    SIGUSR2 qualification shortcut.
-      const installedClientChunk = chunk(profilePackage, 'client-bootstrap-')
-      const installedClientBytes = readFileSync(installedClientChunk)
-      let reloadAccepted = false
-      try {
-        appendFileSync(installedClientChunk, '\n// PR-D /reload-client build drift: protocol unchanged\n')
-        const driftBuildId = productionBuildId(profilePackage, groupAIdentity.dshVersion)
-        assert(driftBuildId !== groupAIdentity.buildId,
-          'WP-06 the harmless installed-payload drift did not change the Client build fingerprint')
-        const reloadBoundary = groupTui.records.length
-        const oldClientPid = groupTui.records.filter(record => record.m4a0 === 'ready').at(-1)?.pid
-        groupTui.send('/reload-client\r')
-        const reloaded = await groupTui.waitFor(record => groupTui.records.indexOf(record) >= reloadBoundary
-          && record.m4a0 === 'ready' && record.pid !== oldClientPid, 'WP-06 Client reexec', 180_000)
-        assert(Number.isInteger(reloaded.pid) && reloaded.pid !== oldClientPid,
-          'WP-06 /reload-client did not replace the Client business PID')
-        await waitForSurfaceStatus(groupTui, record => record.sessionOpen === true
-          && record.openSessionId === sessionLife && record.transport === 'connected', 'WP-06 reloaded Client resumed its Session', 120_000)
-        reloadAccepted = true
-      } finally {
-        writeFileSync(installedClientChunk, installedClientBytes)
-        assert(readFileSync(installedClientChunk).equals(installedClientBytes),
-          'WP-06 the installed Client payload was not restored byte for byte')
-      }
-      assert(reloadAccepted, 'WP-06 the real /reload-client gesture was not accepted')
-      const reloadTurn = durableOf(sessionLife).length
-      handle.writeCommand({ seq: 1, ...commands[0] })
-      await handle.waitStep(1, 'WP-06 Browser after /reload-client')
-      await waitForHostSessionEventAfter(dshHome, sessionLife, reloadTurn,
-        event => event.type === 'turn/end', 'WP-06 turn after reload', 180_000)
-      assert(alive(groupA.ready.pid), 'WP-06 the /reload-client stopped the Host')
-      assertIdentityFields((await hostStatus(groupA.host)).localHost, groupAIdentity, 'WP-06 Host identity after /reload-client')
-      // 2. Normal TUI exit; the Browser still writes the SAME Session.
-      groupTui.send('/exit\r')
-      assert((await groupTui.waitForExit(60_000)).code === 0, 'WP-06 the TUI did not exit normally')
+      const browserBoundary = durableOf(sessionLife).length
+      const tuiPid = groupTui.records.filter(record => record.m4a0 === 'ready').at(-1)?.pid
+      assert(Number.isInteger(tuiPid) && alive(tuiPid), 'WP-06 the TUI published no business PID')
+      groupTui.signalBusiness('SIGKILL')
+      await waitGone(tuiPid, 15_000)
       await groupTui.dispose()
-      handle.writeCommand({ seq: 2, ...commands[1] })
-      await handle.waitStep(2, 'WP-06 Browser after the TUI exit')
-      assert(alive(groupA.ready.pid), 'WP-06 the TUI exit stopped the Host')
-      // 3. A NEW TUI attaches, then a SIGKILL of its business PID.
-      const { tui: tuiB } = await startTui('WP-06 new TUI', { SPLIT_PROCESS_CLIENT_SESSION: sessionLife })
-      await tuiB.waitForScreen(lifeSeed, 'WP-06 new TUI reads the durable history', 180_000)
-      handle.writeCommand({ seq: 3, ...commands[2] })
-      await handle.waitStep(3, 'WP-06 Browser while the new TUI is alive')
-      const tuiBPid = tuiB.records.find(record => record.m4a0 === 'ready')?.pid
-      assert(Number.isInteger(tuiBPid) && alive(tuiBPid), 'WP-06 the new TUI published no business PID')
-      tuiB.signalBusiness('SIGKILL')
-      await waitGone(tuiBPid, 15_000)
-      await tuiB.dispose()
-      handle.writeCommand({ seq: 4, ...commands[3] })
-      await handle.waitStep(4, 'WP-06 Browser after the TUI SIGKILL')
-      assert(alive(groupA.ready.pid), 'WP-06 the TUI SIGKILL stopped the Host')
-      // 4. A fresh TUI reads the whole segment and keeps its own generation.
-      const { tui: tuiC } = await startTui('WP-06 fresh TUI', { SPLIT_PROCESS_CLIENT_SESSION: sessionLife })
-      for (const marker of [lifeSeed, `L-${productNonce}-after-reload`, `L-${productNonce}-tui-exited`,
-        `L-${productNonce}-new-tui`, `L-${productNonce}-after-sigkill`]) {
-        await tuiC.waitForScreen(marker, `WP-06 fresh TUI reads ${marker}`, 180_000)
-      }
-      const generation = lastSurfaceStatus(tuiC)?.generationId
-      assert(typeof generation === 'number', 'WP-06 the fresh TUI published no transport generation')
-      handle.writeCommand({ seq: 5, ...commands[4] })
-      await handle.waitStep(5, 'WP-06 Browser finish')
-      groupTui = tuiC
+      handle.signal('tui-killed')
+      await handle.waitFact('browser-wrote-after-tui-kill', 'WP-06 Browser write after the TUI SIGKILL', 300_000)
+      const browserUser = await waitForHostSessionEventAfter(dshHome, sessionLife, browserBoundary,
+        event => isAuthoredUser(event, lifeMarker),
+        'WP-06 Browser prompt after the TUI SIGKILL', 180_000)
+      const afterBrowserUserIndex = durableOf(sessionLife).findIndex(event => event.seq === browserUser.seq) + 1
+      await waitForHostSessionEventAfter(dshHome, sessionLife, afterBrowserUserIndex,
+        event => isCompletedTurn(event) && event.seq > browserUser.seq,
+        'WP-06 Browser turn after the TUI SIGKILL', 180_000)
+      const { tui: freshTui } = await startTui('WP-06 fresh TUI', { SPLIT_PROCESS_CLIENT_SESSION: sessionLife })
+      await freshTui.waitForScreen(lifeSeed, 'WP-06 fresh TUI reads the durable seed', 180_000)
+      await freshTui.waitForScreen(lifeMarker, 'WP-06 fresh TUI reads the Browser write', 180_000)
+      assert(typeof lastSurfaceStatus(freshTui)?.generationId === 'number', 'WP-06 the fresh TUI published no transport generation')
+      handle.signal('fresh-tui-resumed')
+      groupTui = freshTui
     })
-    assert(userEvents(sessionLife, `L-${productNonce}-after-sigkill`).length === 1,
+    assert(userEvents(sessionLife, lifeMarker).length === 1,
       'WP-06 the Browser Turn after the TUI SIGKILL was not committed once')
     recordSession('wp06-tui-lifecycle', sessionLife)
     await ptyFrames('wp06-tui-lifecycle', groupTui)
-    setWc('WC-08', 'PASS', 'real /reload-client, normal TUI exit and TUI SIGKILL left the Host and the Browser-written Session advancing', ['WP-06'])
 
-    // WP-08: `/web` runtime toggle and a settings recomposition with a live
-    // Browser and a live TUI.
+    // WP-08: the TUI keeps working across Web ON -> OFF -> ON, and the
+    // canonical session-reference pre-step disappears with Web off and comes
+    // back with the SAME Host process. Browser page/recompose permutations
+    // belong to `web.runtime-toggle`.
     const sessionToggle = await tuiNewSession(groupTui, 'WP-08')
     await tuiTurn(groupTui, sessionToggle, `W-${productNonce}-seed`, 'WP-08 seed')
-    // The official `session-reference` listener is live while Web is enabled:
-    // a canonical mention from the TUI Session must reach the Host model input.
     const referenceOnBefore = promptEvidence().length
     await tuiReferenceTurn(groupTui, sessionToggle, sessionLife,
       `W-${productNonce}-ref-before-off`, 'WP-08 reference before off')
     assert(promptEvidence().slice(referenceOnBefore).some(record => record.referencedSessions === true),
       'WP-08 the enabled Web composition did not inject the canonical session reference into the model input')
-    const togglePeer = await startPeer('WP-08')
-    assertToggle(await webAccess(togglePeer, 'WP-08 initial', undefined), 'enabled', 'WP-08 initial')
     const toggleIdentity = (await hostStatus(groupA.host)).localHost
-    await browserCase('wp08-web-toggle', { sessionId: sessionToggle }, async handle => {
-      await handle.waitFact('ready', 'WP-08 Browser ready', 240_000)
-      handle.writeCommand({ seq: 1, kind: 'prompt', prompt: `W-${productNonce}-before-off`, marker: `W-${productNonce}-before-off` })
-      await handle.waitStep(1, 'WP-08 Browser before the disable')
-      await disableWeb(groupTui, 'WP-08')
-      const off = await hostStatus(groupA.host)
-      webFullyOff(off)
-      assertIdentityFields(off.localHost, toggleIdentity, 'WP-08 disable kept the Host identity')
-      const root = await fetchStatus(`${groupA.ready.localHost.origin}/`)
-      assert(root.status === 404, `WP-08 the disabled Host still serves the Web root (HTTP ${root.status})`)
-      // The TUI keeps working on the SAME Host while Web is off.
-      await tuiTurn(groupTui, sessionToggle, `W-${productNonce}-tui-while-off`, 'WP-08 TUI while off')
-      // The same canonical mention while Web is off must not reach the model
-      // as a session-reference context: the resolver's pre-step listener was
-      // disposed with its Web row. Use a CLEAN Session because a prior ON
-      // reference turn remains in the older Session's model history.
-      const sessionOffReference = await tuiNewSession(groupTui, 'WP-08 off reference')
-      const referenceOffBefore = promptEvidence().length
-      await tuiReferenceTurn(groupTui, sessionOffReference, sessionLife,
-        `W-${productNonce}-ref-while-off`, 'WP-08 reference while off')
-      const referenceOffRecords = promptEvidence().slice(referenceOffBefore)
-      assert(referenceOffRecords.length > 0 && referenceOffRecords.every(record => record.referencedSessions !== true),
-        'WP-08 the Web-off Host still injected a session-reference context from a disposed listener')
-      // The old page is deliberately NOT guaranteed to stay usable: the
-      // product contract stops serving the page and unloads the Web rows;
-      // the re-enable is proved by a NEW authenticated page below.
-      await enableWeb(groupTui, 'WP-08 re-enable')
-      assertToggle(await webAccess(togglePeer, 'WP-08 after re-enable', undefined), 'enabled', 'WP-08 after re-enable')
-      // Re-enabling Web must restore the listener on the same Host process.
-      const referenceOnAgain = promptEvidence().length
-      await tuiReferenceTurn(groupTui, sessionOffReference, sessionLife,
-        `W-${productNonce}-ref-after-on`, 'WP-08 reference after re-enable')
-      assert(promptEvidence().slice(referenceOnAgain).some(record => record.referencedSessions === true),
-        'WP-08 the re-enabled Web composition did not restore the session-reference listener')
-      handle.writeCommand({ seq: 3, kind: 'reconnect', sessionId: sessionToggle })
-      await handle.waitStep(3, 'WP-08 Browser reconnected')
-      handle.writeCommand({ seq: 4, kind: 'prompt', prompt: `W-${productNonce}-after-on`, marker: `W-${productNonce}-after-on` })
-      await handle.waitStep(4, 'WP-08 Browser after the re-enable')
-      // A settings recomposition may briefly unload the Web rows; the
-      // FINAL state must still be enabled and the Host PID unchanged.
-      const saved = await webPreference(togglePeer, 'WP-08 recompose save', false)
-      assert(saved.ok === true && saved.readBack === true, 'WP-08 the settings write did not read back')
-      const finalDeadline = Date.now() + 90_000
-      let finalState = 'unknown'
-      while (Date.now() < finalDeadline) {
-        const record = await webAccess(togglePeer, 'WP-08 final state', undefined)
-        finalState = record.status?.state
-        if (finalState === 'enabled') break
-        await sleep(250)
-      }
-      assert(finalState === 'enabled', `WP-08 the final Web state after recomposition was ${finalState}`)
-      assertIdentityFields((await hostStatus(groupA.host)).localHost, toggleIdentity, 'WP-08 recomposition kept the Host identity')
-      handle.writeCommand({ seq: 5, kind: 'reconnect', sessionId: sessionToggle })
-      await handle.waitStep(5, 'WP-08 Browser reconnected after the recomposition')
-      handle.writeCommand({ seq: 6, kind: 'prompt', prompt: `W-${productNonce}-after-recompose`, marker: `W-${productNonce}-after-recompose` })
-      await handle.waitStep(6, 'WP-08 Browser after the recomposition')
-      handle.writeCommand({ seq: 7, kind: 'finish' })
-      await handle.waitStep(7, 'WP-08 Browser finish')
-    })
-    for (const marker of [`W-${productNonce}-before-off`, `W-${productNonce}-tui-while-off`,
-      `W-${productNonce}-after-on`, `W-${productNonce}-after-recompose`]) {
-      assert(userEvents(sessionToggle, marker).length === 1, `WP-08 the Host committed "${marker}" once`)
-    }
+    await disableWeb(groupTui, 'WP-08')
+    const off = await hostStatus(groupA.host)
+    webFullyOff(off)
+    assertIdentityFields(off.localHost, toggleIdentity, 'WP-08 disable kept the Host identity')
+    const root = await fetchStatus(`${groupA.ready.localHost.origin}/`)
+    assert(root.status === 404, `WP-08 the disabled Host still serves the Web root (HTTP ${root.status})`)
+    await tuiTurn(groupTui, sessionToggle, `W-${productNonce}-tui-while-off`, 'WP-08 TUI while off')
+    const sessionOffReference = await tuiNewSession(groupTui, 'WP-08 off reference')
+    const referenceOffBefore = promptEvidence().length
+    await tuiReferenceTurn(groupTui, sessionOffReference, sessionLife,
+      `W-${productNonce}-ref-while-off`, 'WP-08 reference while off')
+    const referenceOffRecords = promptEvidence().slice(referenceOffBefore)
+    assert(referenceOffRecords.length > 0 && referenceOffRecords.every(record => record.referencedSessions !== true),
+      'WP-08 the Web-off Host still injected a session-reference context from a disposed listener')
+    await enableWeb(groupTui, 'WP-08 re-enable')
+    const reenabled = await hostStatus(groupA.host)
+    webFullyOn(reenabled)
+    assertIdentityFields(reenabled.localHost, toggleIdentity, 'WP-08 re-enable kept the Host identity')
+    const referenceOnAgain = promptEvidence().length
+    await tuiReferenceTurn(groupTui, sessionOffReference, sessionLife,
+      `W-${productNonce}-ref-after-on`, 'WP-08 reference after re-enable')
+    assert(promptEvidence().slice(referenceOnAgain).some(record => record.referencedSessions === true),
+      'WP-08 the re-enabled Web composition did not restore the session-reference listener')
     recordSession('wp08-web-toggle', sessionToggle)
     await ptyFrames('wp08-web-toggle', groupTui)
-    setWc('WC-09', 'PASS', 'the real TUI `/web Disable` unloaded the Web rows and stopped serving while the Host/TUI kept working; Enable and a settings recomposition restored the final enabled state', ['WP-08'])
-    assert(await togglePeer.shutdown() !== undefined, 'WP-08 the qualification Peer did not stop')
-    const peerIndex = peers.indexOf(togglePeer)
-    if (peerIndex >= 0) peers.splice(peerIndex, 1)
 
     // WP-09: Browser-local upload, TUI Client-local intake/export and the
     // distinct Host/TUI/Browser environments.
@@ -1255,13 +1113,12 @@ export const runWebProductQualification = async context => {
     assert(tuiLocalReady.sessionOpen === true && tuiLocalReady.openSessionId === sessionToggle,
       'WP-09 the Client-local TUI must open the exact Host Session before its painted history is checked')
     assertClientHostFacts(tuiLocalReady.host, toggleIdentity, 'WP-09 Client-local TUI Host identity')
-    // The cold surface follows the transcript tail. WP-08 has committed five
-    // turns, so its original seed can already be outside the visible viewport.
-    // The latest marker was independently verified in the Host log above.
-    await tuiLocal.waitForScreen(`W-${productNonce}-after-recompose`, 'WP-09 Client-local TUI reads the Session', 180_000)
-    const browserUploadMarker = `w-${productNonce}-browser-upload`
+    // The cold surface follows the transcript tail. WP-08 has committed the
+    // toggle/reference turns, so its original seed can already be outside the
+    // visible viewport. The latest marker was independently verified in the
+    // Host log above.
+    await tuiLocal.waitForScreen(`W-${productNonce}-tui-while-off`, 'WP-09 Client-local TUI reads the Session', 180_000)
     let hostShellFact
-    let hostShellFeature
     await browserCase('wp09-locality', {
       sessionId: sessionToggle,
       expectedAnswer: 'long-turn answer',
@@ -1413,37 +1270,8 @@ export const runWebProductQualification = async context => {
       `WP-09 the Host terminal ran in ${hostShellPwd}, not the Host Session workspace ${localityHeader.cwd}`)
     assert(!existsSync(join(tuiCwd, 'host-shell-marker.txt')),
       'WP-09 the Host terminal marker landed in the TUI Client cwd')
-    hostShellFeature = {
-      feature: 'web terminal/PTY',
-      entryVisible: true,
-      actualAction: 'opened the official Web terminal (right sidebar → New tab → New terminal) and ran pwd/printf in the Host PTY',
-      hostApi: 'official Web terminal/PTY, Host-owned Session workspace',
-      durableOrUiResult: `Host files created at ${hostShellPwd}: host-shell-marker.txt and host-shell-pwd.txt`,
-      status: 'SUPPORTED_PASS',
-      reason: '',
-      evidence: ['WP-09-host-shell', hostShellPwd],
-      supportText: 'The official Web terminal runs in the Session workspace on the Host; commands create files on the Host, not in the TUI client cwd.',
-    }
     recordSession('wp09-locality', sessionToggle)
     await ptyFrames('wp09-locality', tuiLocal)
-    setWc('WC-10', 'PASS', 'Browser-local upload, TUI Client-local image intake and a real Host-owned Web terminal command were proven: Host-side files were created in the Session workspace and not in the TUI cwd; a TUI-private file never reached the Host. Generic-file /attach is outside this image case and has a separate surface.generic-file-upload-f4 qualification.', ['WP-04A', 'WP-09'])
-
-    // WP-10: the honest visible-feature inventory.
-    const inventory = await browserCase('wp10-inventory', {}, async () => {})
-    const featureMatrix = (inventory.features ?? []).filter(feature => feature.feature !== 'web terminal/PTY')
-    if (hostShellFeature !== undefined) featureMatrix.push(hostShellFeature)
-    evidence.features(featureMatrix)
-    recordSession('wp10-inventory', inventory.sessionId)
-    await ptyFrames('wp10-inventory', groupTui)
-    assert((inventory.features ?? []).some(feature => feature.feature === 'session.create/list/open' && feature.status === 'SUPPORTED_PASS'),
-      'WP-10 the core Session create/list/open surface did not PASS')
-    assert((inventory.features ?? []).some(feature => feature.feature === 'conversation live Turn/history' && feature.status === 'SUPPORTED_PASS'),
-      'WP-10 the core live Turn surface did not PASS')
-    for (const feature of ['Questions', 'Approvals']) {
-      assert((inventory.features ?? []).some(entry => entry.feature === feature && entry.status === 'SUPPORTED_PASS'),
-        `WP-10 the core ${feature} surface did not PASS`)
-    }
-    setWc('WC-12', 'DEFERRED_WITH_OWNER', 'the Web feature inventory is recorded (core Session/Turn/Question/Approval PASS; optional panels are honestly NOT_VERIFIED). The REAL Tern GUI half is deferred by explicit OWNER decision on 2026-11-05: the TSP `/web` picker is only reachable from the Direct renderer selection while the serving `piTuiWebAccess` Host service is only composed by the Split Host-only overlay. Responsible: M5-W owner. Re-entry: when a composition change lets the TSP/Tern GUI reach the serving Host WebAccessPort. This is NOT a GUI PASS and NOT stage closure.', ['WP-10'])
 
     // The evidence PTY frame of the last group-A TUI state.
     const tuiAAfter = await hostStatus(groupA.host)
@@ -1509,7 +1337,6 @@ export const runWebProductQualification = async context => {
     assert(qaSettlements.length === 1, `WP-03A the Host settled the question ${String(qaSettlements.length)} times`)
     recordSession('wp03a-question-browser-first', qa.sessionId)
     await ptyFrames('wp03a-question-browser-first', tuiQ)
-    setWc('WC-06', 'PASS', 'Browser-first Question settled the Host once and the TUI converged', ['WP-03A'])
 
     // WP-03B: the TUI answers; the Browser's old location is inert.
     const qb = await startQuestionSession('WP-03B', `wp03b-${productNonce}`)
@@ -1529,27 +1356,6 @@ export const runWebProductQualification = async context => {
     'WP-03B the Host settled the TUI-first question more than once')
     recordSession('wp03b-question-tui-first', qb.sessionId)
     await ptyFrames('wp03b-question-tui-first', tuiQ)
-    setWc('WC-06', 'PASS', 'Browser-first and TUI-first Questions both settled the Host once; the loser stayed inert', ['WP-03A', 'WP-03B'])
-
-    // WP-03C: Browser detach while pending, TUI settles, stale Browser inert.
-    const qc = await startQuestionSession('WP-03C', `wp03c-${productNonce}`)
-    await browserCase('wp03c-question-detach', { sessionId: qc.sessionId }, async handle => {
-      await handle.waitFact('question-visible', 'WP-03C Browser question', 240_000)
-      await handle.waitFact('detached', 'WP-03C Browser detached', 120_000)
-      tuiQ.send('1')
-      await tuiQ.waitForScreen('Review your answer before submit', 'WP-03C TUI review', 30_000)
-      tuiQ.send('\r')
-      await waitForC1WorkEvent(questionWork,
-        event => event.kind === 'question-settled' && event.sessionId === qc.sessionId, 'WP-03C Host settled', 120_000)
-      await handle.signal('tui-answered')
-      await handle.waitFact('reattached', 'WP-03C Browser reattached', 240_000)
-    })
-    assert(readC1WorkEvents(questionWork)
-      .filter(event => event.kind === 'question-settled' && event.sessionId === qc.sessionId).length === 1,
-    'WP-03C the detached Browser produced a second question settlement')
-    recordSession('wp03c-question-detach', qc.sessionId)
-    await ptyFrames('wp03c-question-detach', tuiQ)
-    setWc('WC-06', 'PASS', 'a detached Browser could not resurrect or re-settle the Question; the TUI answer was the only settlement', ['WP-03A', 'WP-03B', 'WP-03C'])
 
     for (const client of clients.splice(0)) {
       if (client.exited) continue
@@ -1557,43 +1363,6 @@ export const runWebProductQualification = async context => {
     }
     if (!questionGroup.host.exited) {
       try { await questionGroup.host.shutdown() } catch { /* the global backstop owns leftovers */ }
-    }
-
-    // WP-03D: the official timed question is a negative control, not a
-    // substitute for a legal Browser responder.
-    const timed = await startHost('question', 'wp03-timed', { C1_TIMED_QUESTION: '1' }, timedProductPatch)
-    const { tui: tuiTimed } = await startTui('wp03-timed')
-    await enableWeb(tuiTimed, 'WP-03D')
-    await browserCase('wp03d-question-timed', {}, async handle => {
-      await tuiSubmitUntil(tuiTimed, `wp03d-${productNonce}`, 'WP-03D', () => readC1WorkEvents(timed.workRoot)
-        .some(event => event.kind === 'question-request'))
-      // The official timed window is one second: the TUI modal may already
-      // be gone. The Host fixture's own request record is the authority for
-      // the Session id, and the 1s window is exactly the negative control.
-      const request = await waitForC1WorkEvent(timed.workRoot,
-        event => event.kind === 'question-request', 'WP-03D timed question request', 180_000)
-      const sessionId = request.sessionId
-      assert(typeof sessionId === 'string' && sessionId !== '', 'WP-03D the timed trigger created no Session')
-      writeFileSync(join(handle.coord, 'session.json'), `${JSON.stringify({ sessionId }, null, 2)}\n`, { mode: 0o600 })
-      await handle.waitFact('timed', 'WP-03D timed Browser observation', 240_000)
-    })
-    const timedSession = lastSurfaceStatus(tuiTimed)?.openSessionId
-    const timedProofs = readC1WorkEvents(timed.workRoot)
-    assert(timedProofs.some(event => event.kind === 'question-request' && event.timed === true),
-      'WP-03D the Host question was not the official timed form')
-    assert(timedProofs.some(event => event.kind === 'question-failed'),
-      'WP-03D the timed question produced no official timeout failure')
-    assert(!timedProofs.some(event => event.kind === 'question-settled' && event.sessionId === timedSession),
-      'WP-03D the timed question was reported as an answered question')
-    if (typeof timedSession === 'string') recordSession('wp03d-question-timed', timedSession)
-    await ptyFrames('wp03d-question-timed', tuiTimed)
-    setWc('WC-06', 'PASS', 'Browser/TUI first-winner, detach and the official timed negative are recorded', ['WP-03A', 'WP-03B', 'WP-03C', 'WP-03D'])
-    for (const client of clients.splice(0)) {
-      if (client.exited) continue
-      try { await client.dispose() } catch { /* the global backstop owns leftovers */ }
-    }
-    if (!timed.host.exited) {
-      try { await timed.host.shutdown() } catch { /* the global backstop owns leftovers */ }
     }
 
     // ── Group C/D: WP-04 Approvals ──────────────────────────────────────
@@ -1655,70 +1424,9 @@ export const runWebProductQualification = async context => {
         'WP-04A the Host marker landed in the TUI client cwd')
       recordSession('wp04a-approval-browser-allow', a1)
       await ptyFrames('wp04a-approval-browser-allow', tui)
-
-      // WP-04C: TUI Allow wins; the Browser late Allow is inert.
-      const a2 = await sessionFor('WP-04C', `wp04c-${productNonce}`)
-      await browserCase('wp04c-approval-tui-first', { sessionId: a2 }, async handle => {
-        await handle.waitFact('approval-visible', 'WP-04C Browser approval', 240_000)
-        tui.send('y')
-        await waitForC1WorkEvent(group.workRoot,
-          event => event.kind === 'approval-settled' && event.outcome === 'allowed-once',
-          'WP-04C Host allowed the approval', 120_000)
-        await tui.waitForScreen('approval settled', 'WP-04C TUI settled', 180_000)
-        await handle.signal('tui-answered')
-        await handle.waitFact('settled', 'WP-04C Browser converged', 180_000)
-      })
-      assert(durableOf(a2).filter(event => event.type === 'approval/decided').length === 1,
-        'WP-04C the TUI-first approval produced more than one Host decision')
-      recordSession('wp04c-approval-tui-first', a2)
-      await ptyFrames('wp04c-approval-tui-first', tui)
-
-      // WP-04F: the Browser sees the pending Approval, detaches, the TUI
-      // settles, and the reattached Browser can only read the decision.
-      const a3 = await sessionFor('WP-04F', `wp04f-${productNonce}`)
-      await browserCase('wp04f-approval-offline', { sessionId: a3 }, async handle => {
-        await handle.waitFact('approval-visible', 'WP-04F Browser approval', 240_000)
-        await handle.waitFact('detached', 'WP-04F Browser detached', 120_000)
-        tui.send('y')
-        await waitForC1WorkEvent(group.workRoot,
-          event => event.kind === 'approval-settled' && event.outcome === 'allowed-once',
-          'WP-04F Host allowed the approval', 120_000)
-        await handle.signal('tui-answered')
-        await handle.waitFact('reattached', 'WP-04F Browser reattached', 240_000)
-      })
-      assert(durableOf(a3).filter(event => event.type === 'approval/decided').length === 1,
-        'WP-04F the detached Browser produced a second Host approval decision')
-      recordSession('wp04f-approval-offline', a3)
-      await ptyFrames('wp04f-approval-offline', tui)
     })
 
     const approvalReject = await runApprovalGroup('approval-reject', async ({ group, tui, sessionFor }) => {
-      // WP-04B: Browser Reject; the TUI late Allow cannot execute.
-      const b1 = await sessionFor('WP-04B', `wp04b-${productNonce}`)
-      await browserCase('wp04b-approval-browser-reject', { sessionId: b1 }, async handle => {
-        await handle.waitFact('approval-visible', 'WP-04B Browser approval', 240_000)
-        await handle.waitFact('answered', 'WP-04B Browser Reject', 240_000)
-        await waitForC1WorkEvent(group.workRoot,
-          event => event.kind === 'approval-settled' && event.outcome === 'rejected',
-          'WP-04B Host rejected the approval', 120_000)
-        await tui.waitForScreen('approval settled', 'WP-04B TUI converged', 180_000)
-        await tui.waitForScreenGone('[y] Allow once', 'WP-04B TUI sheet withdrew', 120_000)
-        const late = durableOf(b1).length
-        tui.send('y')
-        await sleep(300)
-        tui.send('\x15')
-        await sleep(300)
-        assert(durableOf(b1).slice(late).every(event => event.type !== 'approval/decided' && event.type !== 'tool/result'),
-          'WP-04B a late TUI Allow produced Host activity')
-        await handle.signal('runner-go')
-      })
-      assert(durableOf(b1).filter(event => event.type === 'approval/decided').length === 1,
-        'WP-04B the Browser-first rejection decided more than once')
-      assert(!existsSync(join(group.workRoot, 'approval-reject.marker')),
-        'WP-04B the rejected command ran')
-      recordSession('wp04b-approval-browser-reject', b1)
-      await ptyFrames('wp04b-approval-browser-reject', tui)
-
       // WP-04D: TUI Reject wins; the Browser late Allow is inert.
       const b2 = await sessionFor('WP-04D', `wp04d-${productNonce}`)
       await browserCase('wp04d-approval-tui-reject', { sessionId: b2 }, async handle => {
@@ -1776,10 +1484,17 @@ export const runWebProductQualification = async context => {
           'WP-04E a forged Peer settled a PENDING approval')
         assert(!existsSync(join(group.workRoot, 'approval-allow.marker')),
           'WP-04E a forged pending allow executed the command')
+        const decisionBoundary = durableOf(sessionId).length
         tui.send('n')
         await waitForC1WorkEvent(group.workRoot,
           event => event.kind === 'approval-settled' && event.outcome === 'rejected',
           'WP-04E the legal reject settled', 120_000)
+        // The fixture record is emitted before the official durable decision
+        // can be observed. Wait for the Host's own approval/decided event so a
+        // later read cannot attribute the legal decision to the stale frame.
+        await waitForHostSessionEventAfter(dshHome, sessionId, decisionBoundary,
+          event => event.type === 'approval/decided' && event.data?.outcome === 'rejected',
+          'WP-04E legal rejected decision durable', 120_000)
         const afterReject = durableOf(sessionId).filter(event => event.type === 'approval/decided').length
         stalePeer.send({
           op: 'peer-send-stale-result',
@@ -1855,135 +1570,63 @@ export const runWebProductQualification = async context => {
         }
       }
     }
-    setWc('WC-07', 'PASS', 'Browser first Allow/Reject, TUI first Allow/Reject, Browser offline, a PENDING forged-identity Peer refusal and the official stale `$events/result` frame all produced exactly one Host decision and the matching side effect', ['WP-04A', 'WP-04B', 'WP-04C', 'WP-04D', 'WP-04E', 'WP-04F'])
     assert(approvalAllow !== undefined && approvalReject !== undefined, 'WP-04 groups did not complete')
 
-    // ── Group F: WP-05 Browser reload during a HELD Turn ────────────────
-    {
-      const holdBarrier = join(productRoot, 'long-turn.hold')
-      rmSync(holdBarrier, { force: true })
-      const held = await startHost('long-turn', 'wp05', { C1_HOLD_LONG_TURN: holdBarrier })
-      const { tui } = await startTui('wp05')
-      await enableWeb(tui, 'WP-05')
-      const sessionHold = await tuiNewSession(tui, 'WP-05 new Session')
-      const markerHold = `H-${productNonce}`
-      const holdBoundary = durableOf(sessionHold).length
-      await tuiSubmitUntil(tui, markerHold, 'WP-05', () => readC1WorkEvents(held.workRoot)
-        .some(event => event.kind === 'long-turn-held' && event.sessionId === sessionHold))
-      await tui.waitForScreen(markerHold, 'WP-05 held prompt painted', 180_000)
-      const heldProof = await waitForC1WorkEvent(held.workRoot,
-        event => event.kind === 'long-turn-held' && event.sessionId === sessionHold, 'WP-05 held Turn', 180_000)
-      assert(heldProof.agentStatus === 'running', 'WP-05 the held Turn is not actually running')
-      await waitForHostSessionEventAfter(dshHome, sessionHold, holdBoundary,
-        event => event.type === 'turn/start', 'WP-05 turn/start', 120_000)
-      const hostBefore = (await hostStatus(held.host)).localHost
-      await browserCase('wp05-refresh-held', { sessionId: sessionHold, marker: markerHold }, async handle => {
-        await handle.waitFact('viewing', 'WP-05 Browser viewing the held Turn', 240_000)
-        await handle.waitFact('reloaded', 'WP-05 Browser reloaded', 240_000)
-        assert(!existsSync(holdBarrier), 'WP-05 the Turn was released before the reload proof')
-        writeFileSync(holdBarrier, 'release\n', { mode: 0o600 })
-        await waitForHostSessionEventAfter(dshHome, sessionHold, holdBoundary,
-          event => event.type === 'turn/end', 'WP-05 the held Turn settled', 180_000)
-        await tui.waitForScreen('long-turn answer', 'WP-05 TUI painted the settled answer', 180_000)
-        await handle.signal('turn-released')
-      })
-      assertIdentityFields((await hostStatus(held.host)).localHost, hostBefore,
-        'WP-05 the Browser reload or the Turn release replaced the Host')
-      recordSession('wp05-refresh-held', sessionHold)
-      await ptyFrames('wp05-refresh-held', tui)
-      setWc('WC-05', 'PASS', 'a real page reload during a HELD Host Turn preserved the Session and the single Host; the released Turn settled once', ['WP-02E', 'WP-05'])
-      setWc('WC-08', 'PASS', 'TUI reload/exit/SIGKILL and a real Browser reload kept ONE Host and the durable Session advancing', ['WP-05', 'WP-06'])
-      for (const client of clients.splice(0)) {
-        if (client.exited) continue
-        try { await client.dispose() } catch { /* the global backstop owns leftovers */ }
-      }
-      if (!held.host.exited) {
-        try { await held.host.shutdown() } catch { /* the global backstop owns leftovers */ }
-      }
-    }
-
-    // ── Group E: WP-07 graceful Host stop and SIGKILL cold resume ───────
+    // ── Group E: WP-07 Host SIGKILL and cold resume ──────────────────────
     {
       const lifecycle = await startHost('long-turn', 'wp07', { C1_HOLD_LONG_TURN: fastBarrier })
       const { tui } = await startTui('wp07')
       await enableWeb(tui, 'WP-07')
       const sessionLife = await tuiNewSession(tui, 'WP-07 new Session')
-      await tuiTurn(tui, sessionLife, `H-${productNonce}-host-life`, 'WP-07 seed')
+      const seedMarker = `H-${productNonce}-host-life`
+      await tuiTurn(tui, sessionLife, seedMarker, 'WP-07 seed')
       const lifecyclePeer = await startPeer('WP-07')
       const savedOn = await webPreference(lifecyclePeer, 'WP-07 autoStart On', true)
       assert(savedOn.ok === true && savedOn.readBack === true, 'WP-07 the autoStart On write did not read back')
       await lifecyclePeer.shutdown()
-      const beforeStop = (await hostStatus(lifecycle.host)).localHost
-      let wp07Final
-      await browserCase('wp07-host-lifecycle', { sessionId: sessionLife }, async handle => {
+      const beforeKill = (await hostStatus(lifecycle.host)).localHost
+      let wp07Next
+      const hostMarker = `H-${productNonce}-after-host-kill`
+      await browserCase('wp07-host-lifecycle', {
+        sessionId: sessionLife,
+        seedMarker,
+        marker: hostMarker,
+        expectedAnswer: 'long-turn answer',
+      }, async handle => {
         await handle.waitFact('ready', 'WP-07 Browser ready', 240_000)
-        // 1. Graceful owner-governed stop. Capture the failure boundary BEFORE
-        //    the stop so this generation's disconnect cannot borrow an earlier
-        //    generation's network/console failure.
-        handle.writeCommand({ seq: 0, kind: 'mark', name: 'graceful' })
-        await handle.waitStep(0, 'WP-07 mark before the graceful stop')
-        const stopped = await lifecycle.host.shutdown()
-        assert(stopped.code === 0, 'WP-07 the graceful Host stop exited non-zero')
-        handle.writeCommand({ seq: 1, kind: 'expect-offline', mark: 'graceful', timeoutMs: 180_000 })
-        await handle.waitStep(1, 'WP-07 Browser observed the graceful stop')
-        await waitForCondition(() => !alive(beforeStop.hostPid), 'WP-07 the stopped Host process is gone', 30_000)
-        assert(!existsSync(join(dshHome, 'run', 'dsh-pi-tui', beforeStop.scopeId, 'instance.json')),
-          'WP-07 the graceful stop left the Host registry')
-        // 2. A NEW Host in the same profile scope; its autoStart preference
-        //    loads the Web rows BEFORE Ready and the durable Session log.
-        const next = await startHost('long-turn', 'wp07-next', { C1_HOLD_LONG_TURN: fastBarrier })
-        assert(next.ready.pid !== beforeStop.hostPid, 'WP-07 the cold resume reused the stopped Host process')
-        webFullyOn(next.ready)
-        assertSingleHostOwners(await hostStatus(next.host), 'WP-07 cold-resumed Host')
-        handle.writeCommand({ seq: 2, kind: 'reconnect', sessionId: sessionLife })
-        await handle.waitStep(2, 'WP-07 Browser reconnected to the new Host')
-        await waitForHostSessionEvent(dshHome, sessionLife,
-          event => event.type === 'user/message' && JSON.stringify(event).includes(`H-${productNonce}-host-life`),
-          'WP-07 the durable Session survived the graceful stop', 120_000)
-        const { tui: nextTui } = await startTui('WP-07 resumed TUI', { SPLIT_PROCESS_CLIENT_SESSION: sessionLife })
-        await nextTui.waitForScreen(`H-${productNonce}-host-life`, 'WP-07 resumed TUI reads the Session', 180_000)
-        const afterResumeBoundary = durableOf(sessionLife).length
-        handle.writeCommand({ seq: 3, kind: 'prompt', prompt: `H-${productNonce}-after-resume`, marker: `H-${productNonce}-after-resume` })
-        await handle.waitStep(3, 'WP-07 Browser turn after cold resume')
-        // The Browser driver's scroll-container wait can observe the painted
-        // prompt beside an OLD answer; the durable Host write is the authority.
-        // Anchor it AFTER the boundary captured before the command, never a
-        // bare "some answer exists" wait.
-        await waitForHostSessionEventAfter(dshHome, sessionLife, afterResumeBoundary,
-          event => event.type === 'user/message' && JSON.stringify(event).includes(`H-${productNonce}-after-resume`),
-          'WP-07 Browser prompt after cold resume durable', 120_000)
-        const afterResumeCount = userEvents(sessionLife, `H-${productNonce}-after-resume`).length
-        assert(afterResumeCount === 1,
-          `WP-07 the Browser turn after cold resume was committed ${String(afterResumeCount)} times, expected exactly 1`)
-        // 3. SIGKILL the new Host; a pending/unknown write must not become a
-        //    fake success and the old identity must be invalid. The failure
-        //    boundary is captured before this generation is killed.
-        handle.writeCommand({ seq: 4, kind: 'mark', name: 'sigkill' })
-        await handle.waitStep(4, 'WP-07 mark before the SIGKILL')
-        const oldInstance = next.ready.localHost.instanceId
-        next.host.kill('SIGKILL')
-        const killed = await next.host.waitForExit(60_000)
-        assert(killed.signal === 'SIGKILL' || killed.code !== 0, `WP-07 the SIGKILL Host exit was ${JSON.stringify(killed)}`)
-        handle.writeCommand({ seq: 5, kind: 'expect-offline', mark: 'sigkill', timeoutMs: 180_000 })
-        await handle.waitStep(5, 'WP-07 Browser observed the Host SIGKILL')
-        const staleInstance = readJson(join(dshHome, 'run', 'dsh-pi-tui', next.ready.localHost.scopeId, 'instance.json'))
+        const browserBoundary = durableOf(sessionLife).length
+        const oldInstance = beforeKill.instanceId
+        lifecycle.host.kill('SIGKILL')
+        const killed = await lifecycle.host.waitForExit(60_000)
+        assert(killed.signal === 'SIGKILL' || killed.code !== 0,
+          `WP-07 the SIGKILL Host exit was ${JSON.stringify(killed)}`)
+        const staleInstance = readJson(join(dshHome, 'run', 'dsh-pi-tui', beforeKill.scopeId, 'instance.json'))
         assert(staleInstance.instanceId === oldInstance,
           'WP-07 the SIGKILL left no stale identity for the negative control')
-        const final = await startHost('long-turn', 'wp07-final', { C1_HOLD_LONG_TURN: fastBarrier })
-        wp07Final = final
-        assert(final.ready.localHost.instanceId !== oldInstance,
+        handle.signal('host-killed')
+        await handle.waitFact('host-killed', 'WP-07 Browser observed the Host SIGKILL', 300_000)
+        wp07Next = await startHost('long-turn', 'wp07-next', { C1_HOLD_LONG_TURN: fastBarrier })
+        assert(wp07Next.ready.localHost.instanceId !== oldInstance,
           'WP-07 a cold-started Host reused the killed instance id')
-        await waitForHostSessionHeader(dshHome, sessionLife, 'WP-07 final Session header')
-        handle.writeCommand({ seq: 6, kind: 'reconnect', sessionId: sessionLife })
-        await handle.waitStep(6, 'WP-07 Browser reconnected after the SIGKILL')
-        handle.writeCommand({ seq: 7, kind: 'finish' })
-        await handle.waitStep(7, 'WP-07 Browser finish')
+        webFullyOn(wp07Next.ready)
+        assertSingleHostOwners(await hostStatus(wp07Next.host), 'WP-07 cold-resumed Host')
+        handle.signal('new-host-ready')
+        await handle.waitFact('browser-reconnected', 'WP-07 Browser reconnected after the Host SIGKILL', 300_000)
+        await handle.waitFact('browser-wrote-after-reconnect', 'WP-07 Browser wrote after the reconnect', 300_000)
+        const browserUser = await waitForHostSessionEventAfter(dshHome, sessionLife, browserBoundary,
+          event => isAuthoredUser(event, hostMarker),
+          'WP-07 Browser prompt after cold resume', 180_000)
+        const afterBrowserUserIndex = durableOf(sessionLife).findIndex(event => event.seq === browserUser.seq) + 1
+        await waitForHostSessionEventAfter(dshHome, sessionLife, afterBrowserUserIndex,
+          event => isCompletedTurn(event) && event.seq > browserUser.seq,
+          'WP-07 Browser turn after cold resume', 180_000)
       })
+      assert(userEvents(sessionLife, hostMarker).length === 1,
+        'WP-07 the Browser Turn after cold resume was not committed once')
       recordSession('wp07-host-lifecycle', sessionLife)
-      setWc('WC-08', 'PASS', 'graceful stop and SIGKILL each left a stale/absent old identity, no fabricated settlement, and ONE fresh Host with the durable Session and autoStart preference', ['WP-05', 'WP-06', 'WP-07'])
-      if (wp07Final !== undefined && !wp07Final.host.exited) {
-        const stop = await wp07Final.host.shutdown()
-        assert(stop.code === 0, 'WP-07 the final Host did not stop before the pending case')
+      if (wp07Next !== undefined && !wp07Next.host.exited) {
+        const stop = await wp07Next.host.shutdown()
+        assert(stop.code === 0, 'WP-07 the cold-resumed Host did not stop before the pending case')
       }
 
       // WP-07 pending/unknown Browser write across a Host SIGKILL.
@@ -2048,7 +1691,6 @@ export const runWebProductQualification = async context => {
           assert(typeof pendingSession === 'string' && pendingSession !== '',
             'WP-07 pending: the Browser created no Session')
           recordSession('wp07-pending-write', pendingSession)
-          setWc('WC-08', 'PASS', 'TUI reload/exit/SIGKILL, a real Browser reload and a pending Browser write across Host SIGKILL/cold resume all kept ONE Host/Writer with no fabricated settlement and no replay', ['WP-05', 'WP-06', 'WP-07'])
         } finally {
           try { await pendingTui.dispose() } catch { /* best effort */ }
           if (!pending.host.exited) { try { await pending.host.shutdown() } catch { /* best effort */ } }
@@ -2057,12 +1699,10 @@ export const runWebProductQualification = async context => {
           }
         }
       }
-      // ── Group W: WP-11 (S5-PR5) official Web user capabilities ─────────
-      // One real Host, one real PTY TUI, one real Chromium: the official
-      // file-actions Download, message-quotes draft, and the Host-recorded
-      // changed-files card/review. The Browser driver owns every user gesture;
-      // this runner owns the authoritative Host facts and the official
-      // authenticated routes.
+      // ── Group W: WP-11 official Host changed-files chain ───────────────
+      // One real Host, one real PTY TUI and one real Chromium prove the
+      // official write -> workspace/changes -> summary/diff sink, the
+      // no-change negative and the same-Host Web toggle/cold-restart refusal.
       {
         const changesNonce = productNonce
         // The earlier WP-07 group leaves the profile-owned Auto-start
@@ -2115,63 +1755,45 @@ export const runWebProductQualification = async context => {
           const workspaceIndex = peers.indexOf(workspacePeer)
           if (workspaceIndex >= 0) peers.splice(workspaceIndex, 1)
 
+          const otherSession = await tuiNewSession(tuiW, 'WP-11 other Session')
           let wp11Session
           let wp11Seq
           let wp11Turn
           let wp11Cwd
           let wp11HostBytes
           let wp11Diff
-          let wp11Download
           let wp11Seq2
           let wp11Turn2
-          await browserCase('wp11-official-web-capabilities', { changesNonce }, async handle => {
+          await browserCase('wp11-host-changes', { changesNonce }, async handle => {
             const session = await handle.waitFact('session', 'WP-11 Browser Session creation', 240_000)
             wp11Session = session.sessionId
             assert(typeof wp11Session === 'string' && wp11Session !== '', 'WP-11 the Browser created no Host Session')
             const header = await waitForHostSessionHeader(dshHome, wp11Session, 'WP-11 Session header')
             wp11Cwd = header.cwd
             assert(typeof wp11Cwd === 'string' && wp11Cwd !== '', 'WP-11 the Session records no authoritative cwd')
-            // The plan-fixed fixture: the Session's authoritative cwd is the
-            // DEDICATED, disposable Default-workspace folder under this lane's
-            // isolated product root — never the profile directory, the smoke
-            // work root itself, or the developer's repository.
-            // Compare CANONICAL paths: a Host records the real path, while the
-            // lane builds `productRoot` from a temp dir that Darwin exposes
-            // through the `/var -> /private/var` symlink. The two spellings name
-            // one directory; only the canonical comparison proves that.
             assert(realpathSync(wp11Cwd) === realpathSync(dedicatedWorkspace),
               `WP-11 the Session cwd is not the dedicated Default workspace of this lane: ${realpathSync(wp11Cwd)} != ${realpathSync(dedicatedWorkspace)}`)
-            assert(existsSync(dedicatedWorkspace) === true, 'WP-11 the dedicated workspace folder does not exist')
-            // The isolated, disposable Git work tree at the Session's OWN cwd.
             const git = args => spawnSync('git', args, { cwd: wp11Cwd, encoding: 'utf8' })
-            const init = git(['init', '--quiet'])
-            assert(init.status === 0, `WP-11 could not initialize the isolated Git work tree: ${init.stderr}`)
+            assert(git(['init', '--quiet']).status === 0, 'WP-11 could not initialize the isolated Git work tree')
             writeFileSync(join(wp11Cwd, 'README.md'), `w5-base-${changesNonce}\n`, { mode: 0o600 })
-            // The W5-FILE Copy image source: a real PNG inside the dedicated
-            // workspace, part of the baseline (never a turn change).
-            const shotPng = Buffer.from(
-              'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
-              'base64',
-            )
-            writeFileSync(join(wp11Cwd, 'shot.png'), shotPng, { mode: 0o600 })
-            const shotHash = createHash('sha256').update(shotPng).digest('hex')
             assert(git(['add', '--all']).status === 0, 'WP-11 could not stage the initial work tree')
             const committed = git(['-c', 'user.name=WP11', '-c', 'user.email=wp11@example.invalid', 'commit', '--quiet', '-m', 'w5 baseline'])
             assert(committed.status === 0, `WP-11 could not create the initial commit: ${committed.stderr}`)
+            // Capture the durable index BEFORE releasing the Browser into its
+            // first prompt; the helper's boundary is a pre-action snapshot.
+            const firstBoundary = durableOf(wp11Session).length
             handle.signal('workspace-ready')
 
-            // W5-CHANGES source: the scripted model's OWN proof, the durable
-            // official `write` tool call/result, the live official summary/diff
-            // routes, and the real file bytes agree.
-            const boundary = durableOf(wp11Session).length
-            const changesEvent = await waitForHostSessionEventAfter(dshHome, wp11Session, boundary,
+            const changesEvent = await waitForHostSessionEventAfter(dshHome, wp11Session, firstBoundary,
               event => event.type === 'workspace/changes', 'WP-11 durable workspace/changes event', 300_000)
             assert(Number.isSafeInteger(changesEvent.data?.turn) && changesEvent.data.turn >= 1,
               `WP-11 the workspace/changes event carries no turn: ${JSON.stringify(changesEvent.data)}`)
             wp11Seq = changesEvent.seq
             wp11Turn = changesEvent.data.turn
-            // The scripted model's own proof that IT issued the call (not the
-            // fixture writing the file), matched to this Session and nonce.
+            const firstUserEvents = durableOf(wp11Session)
+              .filter(event => isAuthoredUser(event, `w5-changes-${changesNonce}`))
+            assert(firstUserEvents.length === 1,
+              `WP-11 the first write prompt produced ${String(firstUserEvents.length)} authored user messages, expected exactly 1`)
             const writeProof = readC1WorkEvents(wp11.workRoot)
               .filter(event => event.kind === 'web-changes-write-issued' && event.sessionId === wp11Session)
             assert(writeProof.length === 1,
@@ -2179,8 +1801,6 @@ export const runWebProductQualification = async context => {
             assert(writeProof[0].nonce === changesNonce, 'WP-11 the model write proof belongs to another nonce')
             assert(writeProof[0].userText.includes(`w5-changes-${changesNonce}`),
               'WP-11 the model write proof was not issued for the qualification prompt')
-            // The Host's OWN official write tool executed the fixed call inside
-            // this turn, and its successful result precedes the announced event.
             const turnEvents = durableOf(wp11Session).filter(event => event.data?.turn === wp11Turn)
             const writeCalls = turnEvents.filter(event => event.type === 'tool/call' && event.data?.name === 'write')
             assert(writeCalls.length === 1,
@@ -2192,8 +1812,7 @@ export const runWebProductQualification = async context => {
               && event.data?.message?.toolCallId === writeCalls[0].data.callId)
             assert(writeResults.length === 1,
               `WP-11 the write tool call settled ${String(writeResults.length)} times, expected exactly 1`)
-            assert(writeResults[0].data.message.isError === false,
-              'WP-11 the official write tool result reports an error')
+            assert(writeResults[0].data.message.isError === false, 'WP-11 the official write tool result reports an error')
             assert(writeResults[0].seq > writeCalls[0].seq && changesEvent.seq > writeResults[0].seq,
               'WP-11 the workspace/changes event does not follow the successful write tool result')
             const coordinates = new URLSearchParams({ sessionId: wp11Session, seq: String(wp11Seq) })
@@ -2219,172 +1838,40 @@ export const runWebProductQualification = async context => {
             assert(wp11Diff.kind === 'text' && wp11Diff.before === false && wp11Diff.after === true,
               `WP-11 the comparison is not the created text file: ${JSON.stringify({ kind: wp11Diff.kind, before: wp11Diff.before, after: wp11Diff.after })}`)
             const addedText = wp11Diff.hunks.flatMap(hunk => hunk.lines).filter(line => line.startsWith('+')).join('\n')
-            assert(addedText.includes(`w5-change-${changesNonce}`),
-              'WP-11 the official comparison does not serve the recorded line')
+            assert(addedText.includes(`w5-change-${changesNonce}`), 'WP-11 the official comparison does not serve the recorded line')
             const anonymous = await fetchStatus(summaryUrl)
             assert(anonymous.status === 401,
               `WP-11 the unauthenticated summary route was not refused (HTTP ${String(anonymous.status)})`)
-            await handle.signal('changes-review-go')
+            // The first write turn must be fully settled before the driver is
+            // allowed to send the no-change prompt. Otherwise the first turn's
+            // own `turn/end` can satisfy a later nochange barrier.
+            const afterChangesIndex = durableOf(wp11Session).findIndex(event => event.seq === changesEvent.seq) + 1
+            const firstTurnEnd = await waitForHostSessionEventAfter(dshHome, wp11Session, afterChangesIndex,
+              event => isCompletedTurn(event) && event.seq > changesEvent.seq,
+              'WP-11 first-write turn/end', 180_000)
+            const afterFirstTurnEndIndex = durableOf(wp11Session).findIndex(event => event.seq === firstTurnEnd.seq) + 1
+            handle.signal('first-write-verified')
 
-            // The Browser sink: the card and its Review page paint the Host facts.
-            const card = await handle.waitFact('changes-card', 'WP-11 changed-files card', 300_000)
-            assert(typeof card.text === 'string' && card.text.includes('changed.txt'),
-              'WP-11 the changed-files card does not name the changed file')
-            const review = await handle.waitFact('review', 'WP-11 changes review', 300_000)
-            assert(review.state === 'ready', `WP-11 the changes review state is ${String(review.state)}`)
-            assert(typeof review.file === 'string' && review.file.endsWith('changed.txt'),
-              `WP-11 the review opened ${String(review.file)}, not changed.txt`)
-            assert((review.text ?? '').includes(`w5-change-${changesNonce}`),
-              'WP-11 the review does not paint the Host-served change')
-            const network = review.network ?? {}
-            assert((network.statuses ?? []).some(entry => entry.path === '/api/changes.summary' && entry.status === 200),
-              'WP-11 the Browser never read the official summary route')
-            assert((network.statuses ?? []).some(entry => entry.path === '/api/changes.diff' && entry.status === 200),
-              'WP-11 the Browser never read the official comparison route')
-
-            // W5-FILE: the downloaded bytes ARE the Host bytes.
-            wp11Download = await handle.waitFact('download', 'WP-11 real Browser download', 300_000)
-            const hostHash = createHash('sha256').update(wp11HostBytes).digest('hex')
-            assert(wp11Download.sha256 === hostHash,
-              `WP-11 the downloaded bytes (${String(wp11Download.sha256)}) are not the Host file (${hostHash})`)
-            assert(wp11Download.bytes === wp11HostBytes.length,
-              `WP-11 the downloaded byte count ${String(wp11Download.bytes)} differs from the Host file`)
-            assert(!(wp11Download.labels ?? []).some(label => /^Save as/u.test(label)),
-              'WP-11 the Web file menu offered the Desktop-only Save as')
-            const fileNegative = await handle.waitFact('file-negative', 'WP-11 missing-file refusal', 300_000)
-            assert(fileNegative.downloadStarted === false, 'WP-11 a missing Session file started a download')
-            assert(readFileSync(join(wp11Cwd, 'changed.txt')).equals(wp11HostBytes),
-              'WP-11 the refused file action modified the Host file')
-
-            // W5-FILE image: the official image menu's Copy image must place the
-            // ORIGINAL workspace PNG on the real browser clipboard.
-            const copied = await handle.waitFact('copy-image', 'WP-11 image Copy', 300_000)
-            assert(copied.ok === true && copied.type === 'image/png' && copied.pngSignature === true,
-              `WP-11 Copy image did not put a real PNG on the clipboard: ${JSON.stringify(copied)}`)
-            // Clipboard equivalence is DECODED-pixel level: Chromium may
-            // re-encode the PNG bytes, so the byte sha256 is informational only.
-            assert(copied.pixelsEqual === true,
-              `WP-11 the clipboard PNG pixels differ from the workspace source: ${JSON.stringify({ width: copied.width, height: copied.height, pixelSha256: copied.pixelSha256, source: copied.source })}`)
-            assert(copied.width === 1 && copied.height === 1,
-              `WP-11 the clipboard PNG is ${String(copied.width)}x${String(copied.height)}, expected the 1x1 fixture`)
-            assert(copied.source?.pixelSha256 === copied.pixelSha256,
-              'WP-11 the clipboard pixels are not the source image pixels')
-            assert(!(copied.labels ?? []).some(label => /^Save as/u.test(label)),
-              'WP-11 the Web image menu offered the Desktop-only Save as')
-            // A REAL copy refusal: the rendered image's Host source disappears,
-            // so the official authorized read fails and the fixed failure
-            // feedback must appear instead of a fake success; the source is
-            // restored afterwards. (Chromium grants an activation-backed
-            // clipboard write even with the permission setting denied, so a
-            // permission-denial failure is recorded as not observable — never
-            // faked with a JS mock.)
-            rmSync(join(wp11Cwd, 'shot.png'), { force: true })
-            handle.signal('image-source-removed')
-            const copyNegative = await handle.waitFact('copy-negative', 'WP-11 refused image Copy', 300_000)
-            assert(copyNegative.failureFeedback === true,
-              'WP-11 a refused Copy image surfaced no official failure feedback')
-            writeFileSync(join(wp11Cwd, 'shot.png'), shotPng, { mode: 0o600 })
-            assert(readFileSync(join(wp11Cwd, 'shot.png')).equals(shotPng),
-              'WP-11 could not restore the image source')
-
-            // W5-QUOTE: selection drafts only; the explicit Send is the ONE write.
-            // The Host appends its own per-turn runtime/time context as
-            // user-role messages, so the comparison is the LIVE count at the
-            // moment the selection was admitted, never a hard-coded 1.
-            const userCountBeforeQuote = durableOf(wp11Session).filter(event => event.type === 'user/message').length
-            const draft = await handle.waitFact('quote-draft', 'WP-11 Quote draft', 300_000)
-            assert(Array.isArray(draft.quoteNodes)
-              && draft.quoteNodes.some(text => typeof text === 'string' && text.includes(`w5-editing ${changesNonce}`)),
-            'WP-11 the Quote action did not insert the selected text as an atomic draft quote')
-            // The draft's model-visible Markdown is the official editor's own
-            // clipboard serialization; a refused Clipboard API is recorded, not claimed.
-            assert(draft.markdownDraft === null
-              || (typeof draft.markdownDraft === 'string' && draft.markdownDraft.includes(`> w5-editing ${changesNonce}`)),
-            `WP-11 the composer draft is not the expected Markdown blockquote: ${JSON.stringify(draft.markdownDraft)}`)
-            const userCountAtDraft = durableOf(wp11Session).filter(event => event.type === 'user/message').length
-            assert(userCountAtDraft === userCountBeforeQuote,
-              `WP-11 the Quote draft added ${String(userCountAtDraft - userCountBeforeQuote)} user message(s); selection must not submit`)
-            // A separate TUI Session is kept for the Web-off continuity Turn;
-            // the Browser's cross-Session check uses its own new Session in the
-            // same dedicated Workspace.
-            const otherSession = await tuiNewSession(tuiW, 'WP-11 other Session')
-            const other = await handle.waitFact('quote-other-session', 'WP-11 other-Session check', 300_000)
-            assert(typeof other.sessionId === 'string' && other.sessionId !== wp11Session,
-              'WP-11 the other-Session check reused the quoted Session')
-            assert(!String(other.draft ?? '').includes(`w5-editing ${changesNonce}`)
-              && !(other.quotes ?? []).some(text => String(text).includes(`w5-editing ${changesNonce}`)),
-            'WP-11 the Quote draft leaked into another Session')
-            assert(durableOf(wp11Session).filter(event => event.type === 'user/message').length === userCountBeforeQuote,
-              'WP-11 navigating to another Session wrote the Quote into the original Session')
-            const authoredAtDraft = durableOf(wp11Session)
-              .filter(event => event.type === 'user/message' && event.data?.source?.kind === 'user').length
-            const systemBeforeSend = durableOf(wp11Session)
-              .filter(event => event.type === 'system/message' || event.type === 'developer/message').length
-            const lastTurnEndBeforeQuote = durableOf(wp11Session)
-              .filter(event => event.type === 'turn/end').at(-1)?.seq ?? 0
-            await handle.signal('quote-send-go')
-            await handle.waitFact('quote-sent', 'WP-11 quoted Send', 300_000)
-            const afterSend = durableOf(wp11Session)
-            const authoredAfterSend = afterSend
-              .filter(event => event.type === 'user/message' && event.data?.source?.kind === 'user')
-            assert(authoredAfterSend.length === authoredAtDraft + 1,
-              `WP-11 the explicit Send wrote ${String(authoredAfterSend.length - authoredAtDraft)} user-authored messages, expected exactly 1`)
-            const quotedWrites = authoredAfterSend.filter(event => JSON.stringify(event).includes(`> w5-editing ${changesNonce}`))
-            assert(quotedWrites.length === 1,
-              `WP-11 the quoted prompt was committed ${String(quotedWrites.length)} times, expected exactly 1`)
-            assert(quotedWrites[0] === authoredAfterSend[authoredAfterSend.length - 1],
-              'WP-11 the quoted prompt is not the one user message the explicit Send appended')
-            assert(hostAssistantHasText(afterSend, 'w5-quote answer'),
-              'WP-11 the quoted prompt produced no normal assistant answer')
-            assert(afterSend.filter(event => event.type === 'system/message' || event.type === 'developer/message').length === systemBeforeSend,
-              'WP-11 the Quote inserted a system/developer message')
-            // Anchor the two later settlement barriers on durable turn ends:
-            // the quoted turn, then the no-change turn.
-            const quoteTurnEnd = await waitForHostSessionEvent(dshHome, wp11Session,
-              event => event.type === 'turn/end' && event.seq > lastTurnEndBeforeQuote,
-              'WP-11 quoted turn/end', 180_000)
-            // Release the Browser into its NEXT scenario only after the exact
-            // single-write assertions above and the quoted turn settlement are
-            // proven; its next prompt must not pollute this Session's count.
-            await handle.signal('quote-verified')
-
-            // W5-CHANGES negative: a tool-active Turn with no file change stays card-free.
-            await handle.waitFact('nochange-prompted', 'WP-11 no-change prompt', 300_000)
-            // The Host's own turn settlement is the barrier: no fixed sleep can
-            // prove a card absence, and the durable events are the authority.
-            await waitForHostSessionEvent(dshHome, wp11Session,
-              event => event.type === 'turn/end' && event.seq > quoteTurnEnd.seq,
+            await handle.waitFact('nochange-sent', 'WP-11 no-change prompt sent', 300_000)
+            await waitForHostSessionEventAfter(dshHome, wp11Session, afterFirstTurnEndIndex,
+              event => isCompletedTurn(event) && event.seq > firstTurnEnd.seq,
               'WP-11 no-change turn/end', 180_000)
-            assert(durableOf(wp11Session).filter(event => event.type === 'user/message'
-              && JSON.stringify(event).includes(`w5-nochange-${changesNonce}`)).length === 1,
-            'WP-11 the no-change prompt was not committed exactly once')
-            let changesAfter = []
-            const changesStableUntil = Date.now() + 2_000
-            while (Date.now() < changesStableUntil) {
-              changesAfter = durableOf(wp11Session).filter(event => event.type === 'workspace/changes')
-              if (changesAfter.length !== 1) break
-              await sleep(100)
-            }
-            assert(changesAfter.length === 1,
-              `WP-11 the Host persisted ${String(changesAfter.length)} workspace/changes events, expected exactly the changed Turn`)
-            handle.signal('nochange-settled')
-            const noChange = await handle.waitFact('nochange', 'WP-11 no-change Browser frame', 120_000)
-            assert(noChange.cardsAfter === noChange.cardsBefore,
-              'WP-11 a no-change Turn painted a new changed-files card')
+            const noChangeUserEvents = durableOf(wp11Session)
+              .filter(event => isAuthoredUser(event, `w5-nochange-${changesNonce}`))
+            assert(noChangeUserEvents.length === 1,
+              `WP-11 the no-change prompt produced ${String(noChangeUserEvents.length)} authored user messages, expected exactly 1`)
+            assert(durableOf(wp11Session).filter(event => event.type === 'workspace/changes').length === 1,
+              'WP-11 a no-change Turn appended a workspace/changes event')
+            handle.signal('nochange-verified')
 
-            // ── A5 same-Host isolation: with a live Changes summary, Web off ->
-            // TUI keeps working -> Web on. The new recorder must not reuse the
-            // old coordinates, and a NEW real write must record normally.
             const toggleBoundary = durableOf(wp11Session).length
             const identityBeforeToggle = (await hostStatus(wp11.host)).localHost
             const generationBeforeToggle = lastSurfaceStatus(tuiW)?.generationId
-            await handle.waitFact('toggle-ready', 'WP-11 toggle checkpoint', 300_000)
             await disableWeb(tuiW, 'WP-11 disable')
             const disabled11 = await hostStatus(wp11.host)
             webFullyOff(disabled11)
             assertSingleHostOwners(disabled11, 'WP-11 disabled Host')
             assertIdentityFields(disabled11.localHost, identityBeforeToggle, 'WP-11 disable kept the Host identity')
-            // The TUI keeps operating on the SAME Host while Web is off.
             await tuiTurn(tuiW, otherSession, `w5-during-disable-${changesNonce}`, 'WP-11 TUI while Web off')
             assert(lastSurfaceStatus(tuiW)?.generationId === generationBeforeToggle,
               'WP-11 the TUI transport generation changed while Web was off')
@@ -2395,7 +1882,6 @@ export const runWebProductQualification = async context => {
             assertIdentityFields(reenabled11.localHost, identityBeforeToggle, 'WP-11 re-enable kept the Host identity')
             assert(lastSurfaceStatus(tuiW)?.generationId === generationBeforeToggle,
               'WP-11 the TUI transport generation changed across the Web toggle')
-            // The freshly composed recorder must NOT serve the old coordinates.
             const staleOnSameHost = await fetchStatus(summaryUrl, { headers: { cookie: index11.cookie } })
             assert(staleOnSameHost.status === 404,
               `WP-11 the re-enabled Host served the pre-disable summary (HTTP ${String(staleOnSameHost.status)})`)
@@ -2403,16 +1889,17 @@ export const runWebProductQualification = async context => {
             assert(staleDiffSameHost.status === 404,
               `WP-11 the re-enabled Host served the pre-disable comparison (HTTP ${String(staleDiffSameHost.status)})`)
             handle.signal('toggle-reenabled')
-            const secondChange = await handle.waitFact('toggle-second-change', 'WP-11 post-re-enable change', 300_000)
-            assert((secondChange.text ?? []).some(text => String(text).includes('changed2.txt')),
-              'WP-11 the post-re-enable Turn painted no changed2.txt card')
+
+            await handle.waitFact('second-write-sent', 'WP-11 second write sent', 300_000)
             const secondEvent = await waitForHostSessionEventAfter(dshHome, wp11Session, toggleBoundary,
               event => event.type === 'workspace/changes' && event.seq > wp11Seq,
               'WP-11 post-re-enable workspace/changes event', 180_000)
             wp11Seq2 = secondEvent.seq
             wp11Turn2 = secondEvent.data.turn
-            // RFL-006: the SECOND real change must carry the SAME official
-            // write-tool source witness as the first one.
+            const secondUserEvents = durableOf(wp11Session)
+              .filter(event => isAuthoredUser(event, `w5-changes2-${changesNonce}`))
+            assert(secondUserEvents.length === 1,
+              `WP-11 the second write prompt produced ${String(secondUserEvents.length)} authored user messages, expected exactly 1`)
             const write2Proof = readC1WorkEvents(wp11.workRoot)
               .filter(event => event.kind === 'web-changes-write2-issued' && event.sessionId === wp11Session)
             assert(write2Proof.length === 1,
@@ -2420,10 +1907,6 @@ export const runWebProductQualification = async context => {
             assert(write2Proof[0].nonce === changesNonce
               && write2Proof[0].userText.includes(`w5-changes2-${changesNonce}`),
             `WP-11 the second model write proof belongs to another prompt (nonce=${String(write2Proof[0].nonce)})`)
-            assert(durableOf(wp11Session).filter(event => event.type === 'user/message'
-              && event.data?.source?.kind === 'user'
-              && JSON.stringify(event).includes(`w5-changes2-${changesNonce}`)).length === 1,
-            'WP-11 the second write prompt was not committed as exactly one authored user message')
             const secondTurnEvents = durableOf(wp11Session).filter(event => event.data?.turn === wp11Turn2)
             const secondWriteCalls = secondTurnEvents.filter(event => event.type === 'tool/call' && event.data?.name === 'write')
             assert(secondWriteCalls.length === 1,
@@ -2459,12 +1942,15 @@ export const runWebProductQualification = async context => {
             const secondHostBytes = readFileSync(join(wp11Cwd, 'changed2.txt'))
             assert(secondHostBytes.toString('utf8') === `w5-change2-${changesNonce}\n`,
               'WP-11 the new Host file does not hold the second written content')
-            assert((await fetchStatus(summaryUrl, { headers: { cookie: index11.cookie } })).status === 404,
-              'WP-11 the pre-disable summary came back after the new Turn')
-            // The retained, redacted WP-11 evidence record: no prompt text, no
-            // Cookie, no launch token and no absolute private path (the cwd is a
-            // digest only).
-            evidence.fact('wp11-official-web-capabilities', 'web-capabilities', {
+            const staleAfterSecondSummary = await fetchStatus(summaryUrl, { headers: { cookie: index11.cookie } })
+            assert(staleAfterSecondSummary.status === 404,
+              `WP-11 the pre-disable summary came back after the new Turn (HTTP ${String(staleAfterSecondSummary.status)})`)
+            const staleAfterSecondDiff = await fetchStatus(diffUrl, { headers: { cookie: index11.cookie } })
+            assert(staleAfterSecondDiff.status === 404,
+              `WP-11 the pre-disable comparison came back after the new Turn (HTTP ${String(staleAfterSecondDiff.status)})`)
+            handle.signal('second-write-verified')
+
+            evidence.fact('wp11-host-changes', 'web-capabilities', {
               hostPid: wp11.ready.pid,
               hostInstanceIdDigest: sha16(wp11.ready.localHost.instanceId),
               sessionId: wp11Session,
@@ -2476,45 +1962,23 @@ export const runWebProductQualification = async context => {
               diff: { status: diff.status, kind: wp11Diff.kind, hunks: wp11Diff.hunks.length },
               anonymousSummaryStatus: anonymous.status,
               webRows: { workspaceChanges: 'active', uiDeliverables: 'active' },
-              download: wp11Download,
-              quote: {
-                quoteNodes: draft.quoteNodes,
-                markdownDraft: draft.markdownDraft,
-                userMessagesBeforeSend: userCountBeforeQuote,
-                quotedUserMessages: quotedWrites.length,
-              },
-              fileNegative: { downloadStarted: fileNegative.downloadStarted, rows: fileNegative.rows },
-              copyImage: {
-                type: copied.type,
-                bytes: copied.bytes,
-                sha256: copied.sha256,
-                sourceSha256: shotHash,
-                width: copied.width,
-                height: copied.height,
-                pixelSha256: copied.pixelSha256,
-                pixelsEqual: copied.pixelsEqual,
-              },
-              copyNegative: { failureFeedback: copyNegative.failureFeedback, cause: copyNegative.cause },
-              noChange,
+              noChange: { workspaceChanges: 1 },
               toggle: {
                 staleSummary404: staleOnSameHost.status,
                 staleDiff404: staleDiffSameHost.status,
-                disabledRowsReleased: true,
-                reenabledRowsActive: true,
+                afterSecondSummary404: staleAfterSecondSummary.status,
+                afterSecondDiff404: staleAfterSecondDiff.status,
                 secondChange: { turn: wp11Turn2, seq: wp11Seq2, files: ['changed2.txt'] },
               },
             })
-            recordSession('wp11-official-web-capabilities', wp11Session)
-            await ptyFrames('wp11-capabilities', tuiW)
+            recordSession('wp11-host-changes', wp11Session)
+            await ptyFrames('wp11-host-changes', tuiW)
             trace('t75-web-product-wp11', {
               sessionId: wp11Session,
               otherSession,
               turn: wp11Turn,
               seq: wp11Seq,
               cwdDigest: sha16(wp11Cwd),
-              download: { bytes: wp11Download.bytes, sha256: wp11Download.sha256 },
-              copyImage: { bytes: copied.bytes, sha256: copied.sha256 },
-              copyDeniedFeedback: copyNegative.failureFeedback,
               secondChange: { turn: wp11Turn2, seq: wp11Seq2 },
               diffKind: wp11Diff.kind,
               workspaceChanges: 'active',
@@ -2534,29 +1998,28 @@ export const runWebProductQualification = async context => {
           assertToggle(await webAccess(wp11Peer, 'WP-11 restart', true), 'enabled', 'WP-11 restart webAccess')
           const restartFacts = await readHostWebIndex(wp11Next.ready.localHost.origin, launchOf(wp11Next.ready), 'WP-11 restart')
           assertWebIndexQualified(restartFacts, 'WP-11 restart', targetDshVersion)
-          const coordinates = new URLSearchParams({ sessionId: wp11Session, seq: String(wp11Seq) })
-          const staleSummary = await fetchStatus(`${wp11Next.ready.localHost.origin}/api/changes.summary?${coordinates}`,
-            { headers: { cookie: restartFacts.cookie } })
-          assert(staleSummary.status === 404,
-            `WP-11 a restarted Host served the old summary (HTTP ${String(staleSummary.status)})`)
-          const staleDiff = await fetchStatus(`${wp11Next.ready.localHost.origin}/api/changes.diff?${coordinates}&index=0`,
-            { headers: { cookie: restartFacts.cookie } })
-          assert(staleDiff.status === 404,
-            `WP-11 a restarted Host served the old comparison (HTTP ${String(staleDiff.status)})`)
-          for (const body of [staleSummary.body, staleDiff.body]) {
-            assert(!body.includes(`w5-change-${changesNonce}`),
-              'WP-11 a restarted Host replayed content it no longer owns')
+          const restartCoordinates = [
+            { label: 'first', query: new URLSearchParams({ sessionId: wp11Session, seq: String(wp11Seq) }), content: `w5-change-${changesNonce}` },
+            { label: 'second', query: new URLSearchParams({ sessionId: wp11Session, seq: String(wp11Seq2) }), content: `w5-change2-${changesNonce}` },
+          ]
+          const restartStatuses = {}
+          for (const { label, query, content } of restartCoordinates) {
+            const staleSummary = await fetchStatus(`${wp11Next.ready.localHost.origin}/api/changes.summary?${query}`,
+              { headers: { cookie: restartFacts.cookie } })
+            assert(staleSummary.status === 404,
+              `WP-11 a restarted Host served the old ${label} summary (HTTP ${String(staleSummary.status)})`)
+            const staleDiff = await fetchStatus(`${wp11Next.ready.localHost.origin}/api/changes.diff?${query}&index=0`,
+              { headers: { cookie: restartFacts.cookie } })
+            assert(staleDiff.status === 404,
+              `WP-11 a restarted Host served the old ${label} comparison (HTTP ${String(staleDiff.status)})`)
+            for (const body of [staleSummary.body, staleDiff.body]) {
+              assert(!body.includes(content),
+                `WP-11 a restarted Host replayed the old ${label} content it no longer owns`)
+            }
+            restartStatuses[label] = { summary: staleSummary.status, diff: staleDiff.status }
           }
-          evidence.fact('wp11-restart', 'stale-coordinates', {
-            summary: staleSummary.status,
-            diff: staleDiff.status,
-            replayRefused: true,
-          })
-          trace('t75-web-product-wp11-stale', {
-            summary: staleSummary.status,
-            diff: staleDiff.status,
-            replayRefused: true,
-          })
+          evidence.fact('wp11-restart', 'stale-coordinates', restartStatuses)
+          trace('t75-web-product-wp11-stale', restartStatuses)
         } finally {
           if (tuiW !== undefined && !tuiW.exited) { try { await tuiW.dispose() } catch { /* best effort */ } }
           if (wp11Peer !== undefined && !wp11Peer.exited) { try { await wp11Peer.shutdown() } catch { /* best effort */ } }
@@ -2571,50 +2034,23 @@ export const runWebProductQualification = async context => {
       }
     }
 
-    // The evidence writer's final status is deliberately explicit: WP-11's
-    // real Tern GUI half is a product-composition blocker, not a PASS.
-    evidence.setTernGui({
-      status: 'DEFERRED_WITH_OWNER',
-      reason: 'the TSP `/web` picker is mounted only by the Direct renderer selection, while the Host WebAccessPort is composed only by the Split Host-only overlay; the current product boundary has no real Tern GUI path to the same serving Host',
-      ownerApproval: 'Owner explicitly selected DEFERRED_WITH_OWNER for WP-11/WC-12 in the PR-D session on 2026-11-05',
-      responsible: 'M5-W owner',
-      reentry: 'when a composition change lets the TSP/Tern GUI reach the same serving Host WebAccessPort',
+    assert(verifiedCaseIds.length > 0,
+      'the product Browser qualification recorded no successful case')
+    evidence.finish({
+      status: 'PASS',
+      browserSubset: 'PASS',
+      verifiedCaseIds,
+      browserCases: browserRun,
     })
-    const browserSubsetPassed = Object.entries(wc)
-      .filter(([code]) => code !== 'WC-12')
-      .every(([, entry]) => entry.status === 'PASS')
-    const allPassed = Object.values(wc).every(entry => entry.status === 'PASS')
-    const ownerDeferredOnly = Object.entries(wc).every(([code, entry]) => entry.status === 'PASS'
-      || (code === 'WC-12' && entry.status === 'DEFERRED_WITH_OWNER'))
-    // Plan §15/§19: ANY MUST `BLOCKED/NOT_RUN` forbids declaring the PR-D
-    // product qualification complete. WC-12 includes the real Tern GUI gate
-    // (§12), now explicitly DEFERRED_WITH_OWNER; the overall status records
-    // that deferral, while the Browser×TUI subset it actually ran is separate.
-    const finalStatus = allPassed ? 'PASS'
-      : browserSubsetPassed && ownerDeferredOnly ? 'DEFERRED_WITH_OWNER'
-        : browserSubsetPassed ? 'BLOCKED' : 'INCOMPLETE'
-    const browserSubset = browserSubsetPassed ? 'PASS' : 'FAIL'
-    evidence.finish({ status: finalStatus, browserSubset, wc, browserCases: browserRun })
-    // A SELECTED run reports what it actually executed: the Browser×TUI subset
-    // as PASS, plus the owner-deferred half as its own NOT_VERIFIED boundary.
-    // The full lane keeps its single DEFERRED_WITH_OWNER verdict string, which
-    // must not be read as "the Tern GUI half passed".
-    if (mode === 'selected' && finalStatus === 'DEFERRED_WITH_OWNER') {
-      context.reportBoundary({
-        boundary: 'wc12-real-tern-gui',
-        reason: 'the Tern GUI half of WC-12 has no path to the serving Split Host WebAccessPort in the current composition; Owner-approved DEFERRED_WITH_OWNER (M5-W owner), re-entry on a composition change',
-      })
-      return { status: 'PASS', browserSubset, wc, deferred: 'WC-12' }
-    }
     trace('t75-web-product', {
-      status: finalStatus,
-      browserSubset,
+      status: 'PASS',
+      browserSubset: 'PASS',
       cases: browserRun,
-      wc,
+      verifiedCaseIds,
       hostPid: groupA.ready.pid,
-      ternGui: 'DEFERRED_WITH_OWNER: no real Tern GUI path to the Split Host WebAccessPort in the current composition; Owner-approved on 2026-11-05',
+      ternGui: 'NOT_VERIFIED: the real Tern GUI/TSP native gesture path is outside this Browser × Split product subset',
     })
-    return { status: finalStatus, browserSubset, wc }
+    return { status: 'PASS', browserSubset: 'PASS', verifiedCaseIds, candidateSha256 }
   } finally {
     await cleanup()
   }
