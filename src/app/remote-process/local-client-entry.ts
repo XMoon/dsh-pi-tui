@@ -38,6 +38,13 @@ import { mergeCause } from '../remote/dispose-cause.ts'
 import type { CliSessionLaunchIntent } from '../../startup.ts'
 import { attachEntryControl, createEntryDiag, writeEntryRecord, type EntryControlRequest, type EntryRecordSink } from './entry-control.ts'
 import {
+  clientDiagnosticLocation,
+  clientFatalKind,
+  clientModuleSpecifier,
+  writeClientFatalDiagnostic,
+  type ClientFatalPhase,
+} from './client-fatal-diagnostics.ts'
+import {
   bindProfileKernelSeat,
   NO_PROCESS_SEAT,
   computeBuildId,
@@ -1407,7 +1414,10 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
       // drives this stop path also gets ONE sanitized human line (a clean
       // /exit or signal carries no failure and prints nothing).
       if (options.mode === 'surface' && failure !== undefined) {
-        process.stderr.write(`${surfaceStartupFailureLine(failure, options.profile)}\n`)
+        const phase: ClientFatalPhase = handle !== undefined
+          ? 'client-runtime'
+          : context === undefined ? 'pre-context' : 'client-assembly'
+        process.stderr.write(`${reportSurfaceClientFatal(failure, options.profile, phase, expectedHostInstanceId !== undefined, process.env)}\n`)
       }
       process.stdin.pause()
       resolveStopped?.()
@@ -2553,10 +2563,13 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
     // line; every other failure, including ordinary Host init / Loader /
     // assembly failures, gets the sanitized surface line). Never a bare exit 1.
     if (options.mode === 'surface') {
-      const line = expectedHostInstanceId !== undefined
-        ? handoffStartupFailureLine(failure)
-        : surfaceStartupFailureLine(failure, options.profile)
-      process.stderr.write(`${line}\n`)
+      // The file keeps the primary with its cleanup cause; the terminal
+      // classification stays on the ORIGINAL failure so a typed scope code is
+      // never lost behind an aggregate wrapper.
+      const phase: ClientFatalPhase = handle === undefined
+        ? context === undefined ? 'pre-context' : 'client-assembly'
+        : 'client-runtime'
+      process.stderr.write(`${reportSurfaceClientFatal(failure, options.profile, phase, expectedHostInstanceId !== undefined, process.env, primary)}\n`)
     }
     process.stdin.pause()
     if (cleanupErrors.length === 0 && !timedOut && !transportCleanupFailed) {
@@ -2646,15 +2659,14 @@ function shellProfileArg(profile: string): string {
 }
 
 /**
- * The human-facing surface line for one startup failure. The live-Host
- * protocol/DSH refusal gets a dedicated, actionable line that names the code,
- * keeps the old Host untouched and points at the public daemon management
- * commands for THIS official Profile. It never includes the registry PID, the
- * launch URL/token or a private profile path. Every other startup failure
- * keeps the existing diagnostic plus the same daemon-oriented recovery
- * guidance.
+ * The human-facing surface line for one startup failure. Host Typed
+ * protocol/auth/scope refusals keep their dedicated actionable line: the code,
+ * the untouched Host and the public daemon management commands for THIS
+ * official Profile. A Client-local failure is classified on the Client side
+ * and never pretends `daemon logs` contains its detail. It never includes the
+ * registry PID, the launch URL/token or a private profile path.
  */
-export function surfaceStartupFailureLine(error: unknown, profile: string): string {
+export function surfaceStartupFailureLine(error: unknown, profile: string, phase: ClientFatalPhase = 'client-assembly'): string {
   const daemon = (verb: string): string => `dsh --profile ${shellProfileArg(profile)} daemon ${verb}`
   if (error instanceof LocalScopeError) {
     if (error.code === 'HOST_PROTOCOL_INCOMPATIBLE') {
@@ -2664,28 +2676,64 @@ export function surfaceStartupFailureLine(error: unknown, profile: string): stri
     // message (it can carry a private profile path / Host origin).
     return `split client surface: cannot establish the local Host (${error.code}); the Host was not stopped. Inspect it with: ${daemon('status')}; read its logs with: ${daemon('logs')}. If you choose to recover, run: ${daemon('restart')}; recovery is not guaranteed.`
   }
-  return `split client surface: ${controlledSurfaceReason(error, daemon)}`
+  return `split client surface: ${controlledSurfaceReason(error, phase)}`
 }
 
 /**
- * The ONLY text a surface startup failure is allowed to print: a fixed concise
- * reason for unknown errors, or our OWN authored entry message stripped of
- * terminal control characters, absolute paths and URLs. Detailed diagnostics stay
- * in the controlled Client/Host log; the TTY never receives a raw error, a path
- * or a Host launch URL.
+ * The ONE pure Client-local terminal summary. A missing Client module names
+ * only the safely extracted specifier and points at reinstalling the TUI
+ * plugin; every other failure stays a fixed controlled reason and never
+ * suggests a Host restart, because the Host is not the failing component.
  */
-function controlledSurfaceReason(error: unknown, daemon: (verb: string) => string): string {
-  const raw = error instanceof Error ? error.message : String(error)
-  const entryPrefix = 'local client entry: '
-  if (raw.startsWith(entryPrefix)) {
-    return `${sanitizeSurfaceText(raw.slice(entryPrefix.length))} The Host was not stopped. Inspect with: ${daemon('status')} and ${daemon('logs')}; if you choose to recover, run ${daemon('restart')} (not guaranteed).`
+function controlledSurfaceReason(error: unknown, phase: ClientFatalPhase): string {
+  if (clientFatalKind(error, phase) === 'CLIENT_MODULE_MISSING') {
+    const moduleName = clientModuleSpecifier(error) ?? 'unknown'
+    return `CLIENT_MODULE_MISSING: required Client module ${moduleName} was not found; reinstall the TUI plugin with the supported DSH version. The Host was not stopped.`
   }
-  return `startup failed before the TUI mounted; see the Host log for detail. The Host was not stopped. Inspect with: ${daemon('status')} and ${daemon('logs')}; if you choose to recover, run ${daemon('restart')} (not guaranteed).`
+  if (phase === 'client-runtime') {
+    return 'CLIENT_RUNTIME_FAILED: the Client terminated unexpectedly. The Host was not stopped.'
+  }
+  const entryPrefix = 'local client entry: '
+  let raw: string
+  try {
+    raw = error instanceof Error ? error.message : String(error)
+  } catch {
+    raw = ''
+  }
+  if (raw.startsWith(entryPrefix)) {
+    return `CLIENT_STARTUP_FAILED: ${sanitizeSurfaceText(raw.slice(entryPrefix.length))}. The Host was not stopped.`
+  }
+  return 'CLIENT_STARTUP_FAILED: startup failed before the TUI mounted. The Host was not stopped.'
 }
 
-/** Strip control characters, URLs and absolute paths; bound the length. */
+/**
+ * The ONE surface fatal reporter: build the pure terminal summary, append the
+ * terminal-safe private-file locator, and write exactly one Client artifact.
+ * Used only at the three real fatal entry points (outer catch, body catch and
+ * the stop coordinator), never from an ordinary pure-function test path.
+ */
+export function reportSurfaceClientFatal(
+  failure: unknown,
+  profile: string,
+  phase: ClientFatalPhase,
+  isHandoff: boolean,
+  env: NodeJS.ProcessEnv,
+  primary: unknown = failure,
+): string {
+  const summary = isHandoff
+    ? handoffStartupFailureLine(failure)
+    : surfaceStartupFailureLine(failure, profile, phase)
+  const result = writeClientFatalDiagnostic(primary, phase, env)
+  return `${summary} ${clientDiagnosticLocation(result)}`
+}
+
+/** Strip control characters, known credential carriers, URLs and absolute paths; bound the length. */
 export function sanitizeSurfaceText(text: string): string {
-  let out = text.replace(/[\u0000-\u001f\u007f]/gu, ' ')
+  let out = text
+    .replace(/\b(Authorization|Cookie|Set-Cookie)\s*:\s*[^\r\n]*/giu, '$1: <redacted>')
+    .replace(/([?&](?:token|access_token|cookie)=)[^&#\s'"]+/giu, '$1<redacted>')
+    .replace(/\b(token|access_token|password)\s*=\s*[^\s&;,'"]+/giu, '$1=<redacted>')
+  out = out.replace(/[\u0000-\u001f\u007f]/gu, ' ')
   out = out.replace(/[a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^\s'"]+/gu, '<url>')
   out = out.replace(/(?:\/[\w.@+-]+){2,}\/?/gu, '<path>')
   out = out.replace(/\s+/gu, ' ').trim().slice(0, 200)
@@ -2758,11 +2806,18 @@ if (import.meta.main) {
     }
     if (process.env.SPLIT_PROCESS_CLIENT_MODE === 'surface') {
       // Surface mode owns the tty: a launcher/startup failure is a human line
-      // on stderr, never a JSON record on the terminal.
+      // on stderr plus ONE private Client artifact, never a JSON record on the
+      // terminal. This outer catch covers failures before the body try
+      // (environment/anchor/early assembly), so it owns the `pre-entry` phase
+      // even when no Client Context or record sink exists.
       const handoff = process.env.SPLIT_PROCESS_CLIENT_EXPECTED_INSTANCE_ID
-      const line = handoff === undefined || handoff === ''
-        ? surfaceStartupFailureLine(error, process.env.SPLIT_PROCESS_PROFILE ?? 'pi-tui')
-        : handoffStartupFailureLine(error)
+      const line = reportSurfaceClientFatal(
+        error,
+        process.env.SPLIT_PROCESS_PROFILE ?? 'pi-tui',
+        'pre-entry',
+        handoff !== undefined && handoff !== '',
+        process.env,
+      )
       process.stderr.write(`${line}\n`)
     } else {
       writeEntryRecord(record)

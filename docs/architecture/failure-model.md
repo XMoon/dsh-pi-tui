@@ -14,6 +14,17 @@ diagnostics go to **stderr + `$DSH_HOME/logs/pi-tui-<pid>.log`** (env
 lifecycle logging in diag, not just ctx.logger — a log line that only goes to
 ctx.logger is a log line that never exists here.
 
+The Daemon surface Client is a separate process and owns a SEPARATE fatal
+diagnostics contract (`src/app/remote-process/client-fatal-diagnostics.ts`).
+A real surface fatal writes one private incident artifact at
+`$DSH_HOME/logs/pi-tui-client/startup-*.log` (directory `0700`, file `0600`)
+with the bounded, redacted error name/code/message/stack and its cause chain.
+The artifact is created only for a real fatal, never for a successful start;
+the terminal receives only one controlled Client line plus the file locator.
+A diagnostic IO failure is best effort: it never replaces the primary error,
+changes its exit code or adds a second stop. The generic `pi-tui-<pid>.log`
+sink above remains the Direct/TUI runtime log and is not this incident file.
+
 ## Detached tasks (`src/runtime/process/tasks.ts`)
 
 Rule: **never a bare `void somePromise()`**. Two entries, both taking a TASK
@@ -63,7 +74,11 @@ guarantee.
 
 Startup and exit (`src/index.ts` root catch, `src/app/bootstrap/exit.ts`) protect every
 step individually (diag, cleanup, hint, exit), so no throw can skip
-teardown or leak a rejection. The Direct owned-session retirement
+teardown or leak a rejection. The Client entry's three existing fatal owners
+(the outer pre-entry catch, the body catch and the single `stop` coordinator)
+each report through the one Client fatal writer; the body catch does not report
+when the stop coordinator already owns the failure, so one fatal writes one
+file and one terminal line. The Direct owned-session retirement
 (`src/runtime/direct/owned-session-retirement.ts`) is equally total: every
 phase failure is recorded and the remaining phases still run. Which phases
 run depends on the retirement MODE (the mode orders live in

@@ -151,30 +151,35 @@ test('rejects an illegal backendSource value or source', () => {
 
 // ── surface failure sanitization (R2-02) ─────────────────────────────────
 
-import { surfaceStartupFailureLine, sanitizeSurfaceText } from '../../src/app/remote-process/local-client-entry.ts'
+import { existsSync, readFileSync } from 'node:fs'
+import { join } from 'node:path'
+import {
+  reportSurfaceClientFatal,
+  surfaceStartupFailureLine,
+  sanitizeSurfaceText,
+} from '../../src/app/remote-process/local-client-entry.ts'
 import { LocalScopeError } from '../../src/app/remote-process/local-scope.ts'
+import { testLifecycle } from '../support/temp-lifecycle.ts'
 
 test('surface failure line strips paths, URLs and control characters from an entry error', () => {
   const error = new Error('local client entry: could not open /home/user/.dsh/profiles/pi-tui/x at http://127.0.0.1:9999/launch\u001b[31mBOOM')
   const line = surfaceStartupFailureLine(error, 'pi-tui')
+  assert.match(line, /CLIENT_STARTUP_FAILED/u)
   assert.ok(!line.includes('/home/user'), 'no absolute path')
   assert.ok(!line.includes('127.0.0.1'), 'no host URL')
   assert.ok(!/[\u0000-\u001f]/u.test(line), 'no control characters')
   assert.match(line, /could not open/u)
 })
 
-test('a self-authored entry failure keeps its sanitized reason and daemon recovery guidance', () => {
+test('a self-authored entry failure keeps its sanitized reason without Host restart guidance', () => {
   const line = surfaceStartupFailureLine(new Error('local client entry: context gate missing at /home/user/.dsh/profile'), 'staging')
-  assert.match(line, /context gate missing/u)
+  assert.match(line, /CLIENT_STARTUP_FAILED: context gate missing/u)
   assert.match(line, /The Host was not stopped/u)
-  assert.match(line, /dsh --profile staging daemon status/u)
-  assert.match(line, /dsh --profile staging daemon logs/u)
-  assert.match(line, /dsh --profile staging daemon restart/u)
-  assert.match(line, /not guaranteed/u)
+  assert.doesNotMatch(line, /daemon (?:status|logs|restart)/u, 'a Client-local failure must not point at the Host')
   assert.ok(!line.includes('/home/user'), 'no absolute path')
 })
 
-test('surface recovery commands use the actual profile and shell-safe quoting', () => {
+test('Host typed recovery commands still use the actual profile and shell-safe quoting', () => {
   const staging = surfaceStartupFailureLine(new LocalScopeError('HOST_AUTH_FAILED', 'no cookie'), 'staging')
   assert.match(staging, /dsh --profile staging daemon status/u)
   assert.match(staging, /dsh --profile staging daemon logs/u)
@@ -184,18 +189,59 @@ test('surface recovery commands use the actual profile and shell-safe quoting', 
   assert.ok(quoted.includes("--profile 'team'\\''s profile' daemon restart"), quoted)
 })
 
-test('an unknown surface failure is a fixed concise reason, never the raw message', () => {
+test('an unknown surface failure is a fixed concise reason, never the raw message or Host log pointer', () => {
   const line = surfaceStartupFailureLine(new Error('boom at /etc/passwd http://host/x'), 'pi-tui')
-  assert.match(line, /startup failed before the TUI mounted/u)
+  assert.match(line, /CLIENT_STARTUP_FAILED: startup failed before the TUI mounted/u)
   assert.match(line, /The Host was not stopped/u)
-  assert.match(line, /dsh --profile pi-tui daemon status/u)
-  assert.match(line, /dsh --profile pi-tui daemon logs/u)
-  assert.match(line, /dsh --profile pi-tui daemon restart/u)
+  assert.doesNotMatch(line, /daemon (?:status|logs|restart)/u)
+  assert.doesNotMatch(line, /see the Host log/u)
   assert.ok(!line.includes('/etc/passwd') && !line.includes('http://host'), 'raw detail not surfaced')
 })
 
-test('sanitizeSurfaceText bounds length and replaces path/url', () => {
-  const out = sanitizeSurfaceText('a '.repeat(300) + '/a/b/c http://x/y')
+test('an exact missing Client module names the safe specifier and suggests reinstall, not Host restart', () => {
+  for (const code of ['ERR_MODULE_NOT_FOUND', 'MODULE_NOT_FOUND']) {
+    const line = surfaceStartupFailureLine(
+      Object.assign(new Error("Cannot find package '@deepseek-ai/dsh-client-store' imported from /private/profile/x"), { code }),
+      'pi-tui',
+    )
+    assert.match(line, /CLIENT_MODULE_MISSING: required Client module @deepseek-ai\/dsh-client-store was not found/u)
+    assert.match(line, /reinstall the TUI plugin with the supported DSH version/u)
+    assert.match(line, /The Host was not stopped/u)
+    assert.doesNotMatch(line, /daemon (?:status|logs|restart)/u)
+    assert.ok(!line.includes('/private/profile'), 'raw module path not surfaced')
+  }
+})
+
+test('a missing-module line without a safe specifier says unknown and never guesses or leaks', () => {
+  const line = surfaceStartupFailureLine(
+    Object.assign(new Error("Cannot find module '/private/secret.js'"), { code: 'ERR_MODULE_NOT_FOUND' }),
+    'pi-tui',
+  )
+  assert.match(line, /required Client module unknown was not found/u)
+  assert.ok(!line.includes('/private/secret.js'))
+})
+
+test('sanitizeSurfaceText bounds length and replaces path/url/known credentials', () => {
+  const out = sanitizeSurfaceText('a '.repeat(300) + '/a/b/c http://x/y token=secret Authorization: Bearer secret-token')
   assert.ok(out.length <= 200)
   assert.ok(!out.includes('/a/b/c') && !out.includes('http://x/y'))
+  assert.ok(!out.includes('token=secret') && !out.includes('secret-token'))
+})
+
+test('reportSurfaceClientFatal writes the private file and appends its safe locator', t => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-surface-fatal-')
+  const line = reportSurfaceClientFatal(
+    Object.assign(new Error("Cannot find package '@deepseek-ai/dsh-client-store'"), { code: 'ERR_MODULE_NOT_FOUND' }),
+    'pi-tui',
+    'client-assembly',
+    false,
+    { DSH_HOME: home },
+  )
+  assert.match(line, /CLIENT_MODULE_MISSING/u)
+  assert.match(line, /Client diagnostics: \$DSH_HOME\/logs\/pi-tui-client\/startup-[0-9a-f-]+\.log/u)
+  assert.ok(!line.includes(home), 'the terminal locator never carries the private absolute path')
+  const directory = join(home, 'logs', 'pi-tui-client')
+  assert.equal(existsSync(directory), true)
+  assert.equal(readFileSync(join(directory, line.match(/startup-[0-9a-f-]+\.log/u)![0]), 'utf8').includes('ERR_MODULE_NOT_FOUND'), true)
 })
