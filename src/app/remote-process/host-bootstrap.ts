@@ -330,15 +330,16 @@ export function collectHostEntryStatus(
     PI_TUI_CREDENTIAL_RECORDS_NAMESPACE,
     PI_TUI_SESSION_POLICY_NAMESPACE,
     PI_TUI_DEFAULT_MODEL_NAMESPACE,
-    // Web-only Host providers the Browser roster owns: their presence is a
-    // live readiness fact while Web is enabled and must disappear with it.
-    'messageFeedback',
-    'pluginInventory',
-    'sessionReferenceResolver',
     PI_TUI_HOST_READY_SERVICE,
     'piTuiPerformanceReady',
   ]) {
     services[service] = context.reflect.get(service) !== undefined
+  }
+  // Web-only Host providers the Browser roster owns. They are absent while Web
+  // is off and must not become a Host-ready prerequisite; record them only when
+  // the enabled Web composition publishes them.
+  for (const service of ['messageFeedback', 'pluginInventory', 'sessionReferenceResolver']) {
+    if (context.reflect.get(service) !== undefined) services[service] = true
   }
   /** Only ACTIVE rows own a service; a disabled/absent row proves nothing. */
   const activeIds = (id: string): readonly string[] => entries

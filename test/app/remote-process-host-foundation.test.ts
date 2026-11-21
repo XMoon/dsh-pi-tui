@@ -1169,8 +1169,21 @@ test('the readiness audit passes only when every owner row and binding is real',
     'the Workspace Controller child directory-picker handler must be live')
   assert.deepEqual(status.ownerEntries.deepseekAccount, ['deepseek-account'])
   assert.equal(status.services.deepseekAccount, true, 'the official deepseekAccount service must be live')
+  for (const service of ['messageFeedback', 'pluginInventory', 'sessionReferenceResolver']) {
+    assert.equal(Object.hasOwn(status.services, service), false,
+      `the Web-only Host service "${service}" must be absent with Web off`)
+  }
   for (const { owner, id } of FOUNDATION_ROWS) {
     assert.deepEqual(status.ownerEntries[owner], [id], `${owner} owner row mismatch`)
+  }
+  const webStatus = collectHostEntryStatus(hostContext(baselineRows(), {
+    messageFeedback: {},
+    pluginInventory: {},
+    sessionReferenceResolver: {},
+  }), { profile: 'pi-tui' })
+  for (const service of ['messageFeedback', 'pluginInventory', 'sessionReferenceResolver']) {
+    assert.equal(webStatus.services[service], true,
+      `the Web-only Host service "${service}" must be reported when Web is enabled`)
   }
 })
 
