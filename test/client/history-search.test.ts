@@ -755,13 +755,138 @@ test('a continuation with a mismatched sessionId is a typed error', async (t) =>
   )
 })
 
-test('session scope never scans other cwds', async (t) => {
+test('session scope searches EVERY cwd file for the exact session id', async (t) => {
   const life = testLifecycle(t)
   const home = tempHome(life)
-  writeV2(home, '/a', [{ content: 'mine in a', ts: 1, sessionId: 'ses_a' }])
-  // The same session ALSO has rows in /b — the session scope opens only
-  // the live cwd's file, so /b must never be scanned.
-  writeV2(home, '/b', [{ content: 'mine in b', ts: 2, sessionId: 'ses_a' }])
-  const results = await search(home, 'session', '/a', '', { sessionId: 'ses_a' })
-  assert.deepEqual(results.map(row => row.content), ['mine in a'])
+  // One Session submitted from three working directories; each row lives in
+  // its own cwd-hashed file but carries the same sessionId.
+  writeV2(home, '/ws/a', [
+    { content: 'A1 from a', ts: 100, sessionId: 'ses_a' },
+    { content: 'distractor from B in file a', ts: 150, sessionId: 'ses_b' },
+  ])
+  writeV2(home, '/ws/b', [
+    { content: 'B1 from b', ts: 200, sessionId: 'ses_a' },
+    { content: 'sessionless in file b', ts: 250 },
+  ])
+  writeV2(home, '/ws/c', [{ content: 'C1 from c', ts: 300, sessionId: 'ses_a' }])
+  writeV1(home, '/ws/legacy', ['legacy prompt'])
+
+  const session = await search(home, 'session', '/ws/a', '', { sessionId: 'ses_a' })
+  assert.deepEqual(session.map(row => row.content), ['C1 from c', 'B1 from b', 'A1 from a'],
+    'all three cwd files are searched; other sessions/sessionless/v1 never leak in')
+  assert.deepEqual(session.map(row => row.cwd), ['/ws/c', '/ws/b', '/ws/a'],
+    'each result reports its REAL directory, never the open-time request cwd')
+
+  // Current directory stays the ONE open-time cwd file (all trusted rows, any
+  // session, v1 included) — the session fix must not widen this scope.
+  const current = await search(home, 'current', '/ws/a', '')
+  assert.deepEqual(new Set(current.map(row => row.content)), new Set(['A1 from a', 'distractor from B in file a']),
+    'Current directory reads only the live cwd file')
+  assert.ok(current.every(row => row.cwd === '/ws/a'))
+
+  // All directories stays the pre-existing cross-file, cwd-proofed scope.
+  const all = await search(home, 'all', '/ws/nowhere', '')
+  assert.ok(all.some(row => row.content === 'C1 from c' && row.cwd === '/ws/c'))
+  assert.ok(all.some(row => row.content === 'B1 from b' && row.cwd === '/ws/b'))
+  assert.ok(all.some(row => row.content === 'A1 from a' && row.cwd === '/ws/a'))
+  assert.ok(!all.some(row => row.content === 'legacy prompt'),
+    'an unresolved v1-only file stays excluded from All (Rule 3)')
+})
+
+test('session scope dedupes by content ACROSS files — the newest session occurrence wins', async (t) => {
+  const life = testLifecycle(t)
+  const home = tempHome(life)
+  writeV2(home, '/ws/a', [{ content: 'same prompt', ts: 10, sessionId: 'ses_a' }])
+  writeV2(home, '/ws/b', [{ content: 'same prompt', ts: 20, sessionId: 'ses_a' }])
+  const session = await search(home, 'session', '/ws/a', '', { sessionId: 'ses_a' })
+  assert.equal(session.length, 1, 'session scope keeps ONE row per content across all files')
+  assert.equal(session[0]?.ts, 20)
+  assert.equal(session[0]?.cwd, '/ws/b', 'the winner reports the file it actually came from')
+})
+
+test('session scope tie-breaks equal ts by source file path then row offset', async (t) => {
+  const life = testLifecycle(t)
+  const home = tempHome(life)
+  writeV2(home, '/ws/a', [
+    { content: 'a older row', ts: 500, sessionId: 'ses_a' },
+    { content: 'a newer row', ts: 500, sessionId: 'ses_a' },
+  ])
+  writeV2(home, '/ws/b', [{ content: 'b row', ts: 500, sessionId: 'ses_a' }])
+  const results = await search(home, 'session', '/ws/elsewhere', '', { sessionId: 'ses_a' })
+  const aFile = historyFilePath(home, '/ws/a')
+  const bFile = historyFilePath(home, '/ws/b')
+  const firstFile = aFile.localeCompare(bFile) < 0 ? aFile : bFile
+  assert.equal(results[0]?.sourceFile, firstFile, 'equal ts compares the source file path ASC')
+  // Within one file the equal-ts rows are ordered by byte offset DESC (the
+  // later row in the append-only file is the newer occurrence).
+  const fromA = results.filter(row => row.sourceFile === aFile)
+  if (fromA.length === 2) {
+    assert.equal(fromA[0]?.content, 'a newer row')
+    assert.equal(fromA[1]?.content, 'a older row')
+  }
+})
+
+test('session scope returns content with cwd=null when the file carries no trusted cwd proof', async (t) => {
+  const life = testLifecycle(t)
+  const home = tempHome(life)
+  // The file is keyed by md5('/ws/x'), but its rows claim '/ws/y' — the hash
+  // does not validate, and no known-cwd map entry exists. The session row is
+  // still the requested session and MUST stay searchable; its directory is
+  // honestly unknown (never the open-time request cwd).
+  const file = historyFilePath(home, '/ws/x')
+  mkdirSync(file.slice(0, file.lastIndexOf('/')), { recursive: true })
+  writeFileSync(file, JSON.stringify({ v: 2, content: 'unprovable cwd row', cwd: '/ws/y', ts: 7, sessionId: 'ses_a' }) + '\n', { mode: 0o600 })
+  const results = await search(home, 'session', '/ws/open-time', '', { sessionId: 'ses_a' })
+  assert.deepEqual(results.map(row => row.content), ['unprovable cwd row'])
+  assert.equal(results[0]?.cwd, null, 'no trusted proof => null, never the request cwd')
+})
+
+test('session scope keeps the global 5000-line budget across files and continues without gaps', async (t) => {
+  const life = testLifecycle(t)
+  const home = tempHome(life)
+  const dirs = ['/ws/a', '/ws/b', '/ws/c']
+  for (const [dirIndex, dir] of dirs.entries()) {
+    writeV2(home, dir, Array.from({ length: 100 }, (_, index) => ({
+      content: `needle-${dirIndex}-${index}`,
+      ts: dirIndex * 1000 + index,
+      sessionId: 'ses_a',
+    })))
+  }
+  // Make the scan order deterministic: /ws/a newest mtime, then /ws/b, /ws/c.
+  const { utimesSync } = await import('node:fs')
+  const now = Date.now()
+  utimesSync(historyFilePath(home, '/ws/a'), new Date(now), new Date(now))
+  utimesSync(historyFilePath(home, '/ws/b'), new Date(now - 10_000), new Date(now - 10_000))
+  utimesSync(historyFilePath(home, '/ws/c'), new Date(now - 20_000), new Date(now - 20_000))
+  const stats: HistorySearchDebugStats = { filesVisited: 0, physicalLinesScanned: 0, bytesRead: 0 }
+  const src = new FileHistorySearchSource({ dshHome: home, scanLimit: 150, stats })
+  const request = { scope: 'session' as const, cwd: '/ws/a', sessionId: 'ses_a', query: 'needle', limit: 100 }
+  const page1 = await src.search(request)
+  assert.equal(stats.physicalLinesScanned, 150, 'the budget is GLOBAL across files, never per file')
+  assert.equal(stats.filesVisited, 2, 'file A was consumed fully, file B was cut at the shared budget')
+  assert.equal(page1.exhausted, false)
+  assert.ok(page1.continuation !== undefined)
+  const contents = [...page1.results.map(row => row.content)]
+  let continuation: import('../../src/client/history/search.ts').HistorySearchContinuation | undefined = page1.continuation
+  let pages = 1
+  while (continuation !== undefined) {
+    const page = await src.search(request, continuation)
+    pages += 1
+    assert.ok(pages <= 5, 'the continuation must terminate')
+    contents.push(...page.results.map(row => row.content))
+    continuation = page.exhausted ? undefined : page.continuation
+  }
+  assert.equal(new Set(contents).size, 300, 'every session row appears exactly once across the pages')
+})
+
+test('session scope abort resolves an empty page without partial results', async (t) => {
+  const life = testLifecycle(t)
+  const home = tempHome(life)
+  writeV2(home, '/ws/a', Array.from({ length: 50 }, (_, index) => ({
+    content: `row-${index}`, ts: index, sessionId: 'ses_a',
+  })))
+  const controller = new AbortController()
+  controller.abort()
+  const results = await search(home, 'session', '/ws/a', '', { sessionId: 'ses_a', signal: controller.signal })
+  assert.deepEqual(results, [])
 })

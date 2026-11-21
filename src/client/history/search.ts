@@ -2,14 +2,18 @@
  * Ctrl+R history search — the replaceable search-source seam (plan §10).
  *
  * Scope semantics:
- * - `'session'` — ONE file: `$DSH_HOME/user-history/<md5(cwd)>.jsonl`, like
- *   `'current'`, but ONLY v2 rows whose `sessionId` equals `request.sessionId`
- *   are eligible. v1 rows and v2 rows without (or with a different)
- *   sessionId are EXCLUDED — never guessed: legacy data has no reliable
- *   session proof. A matching row inherits `request.cwd` (the file is keyed
- *   by that cwd — plan §6.1). With `request.sessionId === undefined` nothing
- *   matches (defensive: the panel only defaults to this scope when a live
- *   session identity exists).
+ * - `'session'` — EVERY `*.jsonl` under `$DSH_HOME/user-history/` (a Session
+ *   outlives the working directory it was submitted from, so its rows live in
+ *   several per-cwd files). ONLY v2 rows whose `sessionId` equals
+ *   `request.sessionId` are eligible. v1 rows and v2 rows without (or with a
+ *   different) sessionId are EXCLUDED — never guessed: legacy data has no
+ *   reliable session proof. A matching row's real directory is
+ *   `record.cwd` when it validates against the file, else the SAME file's
+ *   trusted proof (Rule 1/2); with no proof the row is still returned with
+ *   `cwd: null` — never the request cwd, which is only the open-time
+ *   directory. With `request.sessionId === undefined` nothing matches
+ *   (defensive: the panel only defaults to this scope when a live session
+ *   identity exists).
  * - `'current'` — ONE file: `$DSH_HOME/user-history/<md5(cwd)>.jsonl`. Every
  *   row (v1 AND v2) is displayable: legacy rows inherit `request.cwd` (the
  *   file is keyed by that cwd, so the effective cwd is known — plan §6.1).
@@ -112,8 +116,9 @@ export interface HistorySearchResult {
    * without any forward scan). */
   id: string
   content: string
-  /** NULL only for rows excluded in the `all` scope — the panel never
-   * displays "directory unknown" rows (Rule 3). */
+  /** NULL when the row's file has no trusted cwd proof: `all`-scope rows are
+   * then EXCLUDED (Rule 3), while `session`-scope rows keep the content and
+   * show no directory — never the open-time request cwd. */
   cwd: string | null
   /** NULL for legacy (v1) rows — never fabricated. */
   ts: number | null
@@ -281,12 +286,12 @@ export class FileHistorySearchSource implements HistorySearchSource {
     const scope = request.scope
     const files = continuation !== undefined
       ? [...continuation.files]
-      : scope === 'current' || scope === 'session'
-        // The current/session-scope file is known by path; its stat happens
-        // inside the reader (mtime/size are only used for all-scope
-        // ordering). The session scope NEVER scans other cwds — the file
-        // keyed by the live cwd holds every row of the live session.
+      : scope === 'current'
+        // The current-scope file is known by path; its stat happens inside
+        // the reader (mtime/size are only used for multi-file ordering).
         ? [{ path: historyFilePath(this.dshHome, request.cwd), mtimeMs: 0, size: 0 }]
+        // The session scope scans EVERY history file: one Session can span
+        // several working directories and therefore several JSONL files.
         : await this.listAllFiles()
     const stats = this.stats
     if (stats !== undefined) {
@@ -321,7 +326,7 @@ export class FileHistorySearchSource implements HistorySearchSource {
     let pending: HistorySearchPendingRow[] = continuation !== undefined ? [...continuation.pending] : []
     let fileProof: string | null = continuation !== undefined
       ? continuation.fileProof
-      : scope === 'all' ? this.knownCwdFor(files[0]?.path ?? '') : null
+      : scope === 'all' || scope === 'session' ? this.knownCwdFor(files[0]?.path ?? '') : null
     if (continuation !== undefined && scope === 'all' && fileProof === null) {
       // The knownCwds resolver is read on EVERY search (never a startup
       // snapshot): a cwd learned between pages must apply to the first
@@ -355,7 +360,7 @@ export class FileHistorySearchSource implements HistorySearchSource {
       if (fileIndex > 0) {
         // A fresh file: reset the per-file cwd state.
         pending = []
-        fileProof = scope === 'all' ? this.knownCwdFor(file.path) : null
+        fileProof = scope === 'all' || scope === 'session' ? this.knownCwdFor(file.path) : null
       }
       if (stats !== undefined) stats.filesVisited += 1
       // All-scope rows whose cwd is not yet provable are held pending:
@@ -502,24 +507,25 @@ export class FileHistorySearchSource implements HistorySearchSource {
   /** Route ONE parsed row into the result state and return the (possibly
    * updated) file proof.
    *
+   * File proof (Rules 1/2) is the SAME for every multi-file scope: a v2 row
+   * whose `cwd` validates against the file it lives in proves the file's hash,
+   * and the known-cwd map recovers a legacy-only file. The proof is
+   * file-scoped, so a row of ANOTHER Session may prove the file even though it
+   * can never enter the session results.
+   *
    * Session scope: ONLY v2 rows whose `sessionId` matches the request are
    * eligible — v1 rows and v2 rows without (or with a different) sessionId
    * are excluded, never guessed (legacy data has no reliable session
-   * proof). The file IS the current cwd's file, so a matching row inherits
-   * `request.cwd` exactly like the current scope.
+   * proof). A matching row's real directory is its own validating `cwd`,
+   * else the SAME file's trusted proof, else `null` (the content stays
+   * searchable; the open-time request cwd is never presented as the row's
+   * directory). A session row is never held pending for a later proof — the
+   * all-scope legacy recovery is deliberately not extended here.
    *
-   * A v2 row's cwd is trusted ONLY when it validates against the file it
-   * lives in (`historyFilePath(home, cwd) === file` — plan §40: an invalid
-   * v2 cwd/hash mismatch is never trusted; it could be a moved directory or
-   * a hand-edited row). In the all scope, the FIRST validating v2 row also
-   * forms the file proof (Rule 1) and flushes the rows held pending so far.
-   * Untrusted metadata degrades to the file-level proof:
-   * - current scope: the file IS the current cwd's file, so every row
-   *   (v1, valid v2, invalid v2) ends up at `request.cwd` — inherited, not
-   *   fabricated (plan §6.1);
-   * - all scope: the row falls back to the file proof (Rule 1/2), and a
-   *   row whose file is still unresolved is held pending — excluded only
-   *   when the file ends without a proof (Rule 3). */
+   * All scope: untrusted metadata degrades to the file-level proof; a row
+   * whose file is still unresolved is held pending — excluded only when the
+   * file ends without a proof (Rule 3). Current scope: every row belongs to
+   * the request cwd's own file, so it inherits `request.cwd`. */
   private consumeRecord(
     request: HistorySearchRequest,
     file: string,
@@ -530,23 +536,31 @@ export class FileHistorySearchSource implements HistorySearchSource {
     map: Map<string, HistorySearchResult>,
     newKeys: Set<string>,
   ): string | null {
-    if (request.scope === 'session') {
-      if (request.sessionId === undefined) return fileProof
-      if (record.version !== 2 || record.sessionId !== request.sessionId) return fileProof
-      if (!matchesQuery(record.content, request.query)) return fileProof
-      this.mergeResult(map, newKeys, this.buildResult(file, record, request.cwd, byteStart), request.scope)
-      return fileProof
-    }
-    if (record.version === 2 && record.cwd !== null && historyFilePath(this.dshHome, record.cwd) === file) {
-      if (request.scope === 'all' && fileProof === null) {
+    // Rule 1: a v2 row validates its file's hash. This proof is file-scoped
+    // and serves BOTH multi-file scopes; it says nothing about which Session
+    // the row belongs to.
+    const validatesFile = record.version === 2 && record.cwd !== null
+      && historyFilePath(this.dshHome, record.cwd) === file
+    if (validatesFile && (request.scope === 'all' || request.scope === 'session') && fileProof === null) {
+      fileProof = record.cwd
+      if (request.scope === 'all') {
         // The proof forms NOW: flush the pending rows with it.
-        fileProof = record.cwd
         for (const held of pending) {
           if (!matchesQuery(held.record.content, request.query)) continue
           this.mergeResult(map, newKeys, this.buildResult(file, held.record, fileProof, held.byteStart), request.scope)
         }
         pending.length = 0
       }
+    }
+    if (request.scope === 'session') {
+      if (request.sessionId === undefined) return fileProof
+      if (record.version !== 2 || record.sessionId !== request.sessionId) return fileProof
+      if (!matchesQuery(record.content, request.query)) return fileProof
+      const cwd = validatesFile ? record.cwd : fileProof
+      this.mergeResult(map, newKeys, this.buildResult(file, record, cwd, byteStart), request.scope)
+      return fileProof
+    }
+    if (validatesFile) {
       if (!matchesQuery(record.content, request.query)) return fileProof
       this.mergeResult(map, newKeys, this.buildResult(file, record, record.cwd, byteStart), request.scope)
       return fileProof
@@ -566,7 +580,7 @@ export class FileHistorySearchSource implements HistorySearchSource {
     return fileProof
   }
 
-  private buildResult(file: string, record: ParsedHistoryRecord, cwd: string, byteStart: number): HistorySearchResult {
+  private buildResult(file: string, record: ParsedHistoryRecord, cwd: string | null, byteStart: number): HistorySearchResult {
     const result: HistorySearchResult = {
       id: `${file}:${byteStart}`,
       content: record.content,

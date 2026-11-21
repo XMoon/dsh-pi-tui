@@ -74,9 +74,15 @@ below.
 
 - **Scopes**: `Tab` cycles the scope; the query survives the switch.
   - `Current session` (the default when a live session exists) — only the
-    CURRENT session's inputs: v2 rows whose `sessionId` matches the live
-    session id. v1 rows and v2 rows without a sessionId are excluded —
-    never guessed (legacy data has no reliable session proof).
+    CURRENT session's inputs, searched across EVERY history file: v2 rows
+    whose `sessionId` matches the live session id. A Session can outlive the
+    working directory it was submitted from, so its rows may live in several
+    per-cwd files; the scope scans all of them. v1 rows and v2 rows without a
+    sessionId are excluded — never guessed (legacy data has no reliable
+    session proof). A matching row's displayed directory is its own `cwd`
+    when it validates the file hash, else the same file's trusted proof
+    (Rule 1/2), else unknown (`Directory:` omitted) — never the open-time
+    cwd.
   - `Current directory` — the live cwd's file, every trusted row.
   - `All directories` — every history file with the cwd-proof rules.
   - Without a session identity (a deferred start before the first prompt)
@@ -225,10 +231,11 @@ The search never parses a whole history file. Every call reads the JSONL
 store from the tail backwards through `src/client/history/reverse-reader.ts`
 (fixed-size chunks, lines reassembled across chunk boundaries, UTF-8 safe)
 and consumes a GLOBAL scan budget — `HISTORY_SEARCH_SCAN_LIMIT` (5000)
-physical lines across ALL files per call, never per file. The `All
-directories` scope stats the candidates with bounded concurrency and scans
-them serially in mtime-DESC order (most recently active workspace first);
-mtime only schedules files, the final order is always row.ts.
+physical lines across ALL files per call, never per file. The multi-file
+scopes (`Current session` and `All directories`) stat the candidates with
+bounded concurrency and scan them serially in mtime-DESC order (most recently
+active workspace first); mtime only schedules files, the final order is always
+row.ts. `Current directory` keeps its single file.
 
 The result is a `HistorySearchPage`: the matches NEW to the call's window,
 plus a `HistorySearchContinuation` when older history remains. A
