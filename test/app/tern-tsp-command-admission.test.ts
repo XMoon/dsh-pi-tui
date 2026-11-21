@@ -50,7 +50,7 @@ test('the TSP builtin capability unconditionally admits the exit pair and the B2
       `/${name} is available on the TSP renderer`)
   }
   for (const name of [
-    'settings', 'help', 'status', 'tasks', 'model', 'preset', 'acp', 'footer', 'focus', 'display',
+    'settings', 'status', 'tasks', 'model', 'preset', 'acp', 'footer', 'focus', 'display',
     'export', 'transcript', 'rewind', 'plugins', 'keybindings', 'login',
   ]) {
     assert.deepEqual(bare(classify({ tuiCommand: true }), name), { kind: 'unsupported' },
@@ -290,6 +290,18 @@ test('a confirmed title write publishes its own notice only on the card-less TSP
   assert.equal(titleSuccessNoticeVisible({ pituiPresentation: true, backendKind: 'direct' }), false)
 })
 
+test('bare /skill gets the existing error-notice owner without becoming a TSP-supported builtin', () => {
+  // UX PR1: a bare `/skill` returns a fixed usage error on the card-less
+  // Remote PiTui route. The EXISTING error-only result-notice sink owns that
+  // text; membership is notice visibility only, never capability admission.
+  assert.equal(TSP_B2A_RESULT_NOTICE_COMMANDS.has('skill'), true,
+    'the bare /skill usage error needs one visible owner on the card-less route')
+  assert.equal(TSP_SUPPORTED_TUI_BUILTINS.has('skill'), false,
+    'the TSP renderer gains no native /skill builtin')
+  assert.deepEqual(tspSelectedTuiBuiltinAvailability('skill', {}, ''), { kind: 'unsupported' },
+    'the TSP capability predicate keeps /skill unsupported')
+})
+
 test('the card-less result-notice scope covers admitted builtins, the Browser family, /logout and the manual reload', () => {
   // The scope is derived from the ONE admission set (not a second routing list);
   // the conditionally admitted Browser family is included because it has no
@@ -299,7 +311,7 @@ test('the card-less result-notice scope covers admitted builtins, the Browser fa
   // Remote Client command registry appends no result card, so its fixed
   // refusals need THIS one visible owner. Membership is notice ownership only.
   assert.deepEqual([...TSP_B2A_RESULT_NOTICE_COMMANDS].sort(),
-    [...TSP_SUPPORTED_TUI_BUILTINS, 'sessions', 'resume', 'search', 'logout', 'reload-client', 'queue'].sort())
+    [...TSP_SUPPORTED_TUI_BUILTINS, 'sessions', 'resume', 'search', 'logout', 'reload-client', 'queue', 'skill'].sort())
   assert.ok(!TSP_SUPPORTED_TUI_BUILTINS.has('reload-client'),
     'the TSP renderer gains no native reload command')
   assert.deepEqual(tspBuiltinAvailability(classify({ tuiCommand: true }), 'reload-client', {}, ''),

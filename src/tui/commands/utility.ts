@@ -1,5 +1,5 @@
 /**
- * Built-in command definitions for the utility domain (`/exit`, `/help`).
+ * Built-in command definitions for the utility domain (`/exit`, `/reload-client`).
  *
  * Registration is explicit: the coordinator (`src/commands.ts`) calls each
  * registrar at its frozen position in the built-in registration sequence and
@@ -7,22 +7,14 @@
  * @module @xmoon76/dsh-pi-tui/commands/utility
  */
 
-import type { SettingItem } from '@xmoon76/pi-tui'
-import type { AppKeybindingId } from '../keybindings/types.ts'
-import { color } from '../theme/runtime.ts'
-import type { ClientReloadRefusalReason, RegisterOne, RegisterTuiCommand, TuiCommandRunner } from '../../commands.ts'
+import type { ClientReloadRefusalReason, RegisterTuiCommand, TuiCommandRunner } from '../../commands.ts'
 
 /** The runner operations the utility commands consume. */
-type UtilityCommandRunner = Pick<TuiCommandRunner, 'requestExit' | 'listScopedCommands' | 'app' | 'requestClientReload'>
+type UtilityCommandRunner = Pick<TuiCommandRunner, 'requestExit' | 'requestClientReload'>
 
 export interface ExitCommandDeps {
   runner: Pick<UtilityCommandRunner, 'requestExit'>
   registerTuiCommand: RegisterTuiCommand
-}
-
-export interface HelpCommandDeps {
-  runner: Pick<UtilityCommandRunner, 'listScopedCommands' | 'app'>
-  registerOne: RegisterOne
 }
 
 /** The ONE fixed user notice of every Client reload decision (English). */
@@ -93,58 +85,5 @@ export function registerExitCommand({ runner, registerTuiCommand }: ExitCommandD
     description: 'Exit this TUI (the daemon Host keeps running; stop current work only by choosing it)',
     aliases: ['quit'],
     handler: exitHandler,
-  })
-}
-
-/** `/help` — the effective keymap plus the current scoped command list. */
-export function registerHelpCommand({ runner, registerOne }: HelpCommandDeps): void {
-  const app = runner.app
-  registerOne({
-    name: 'help',
-    description: 'Show keybindings and available commands',
-    handler: () => {
-      // M4: the key labels come from the EFFECTIVE keymap (plan §18) — a
-      // user remap updates /help automatically; the UI never hard-codes a
-      // physical shortcut.
-      // PR3-A: /help's keymap labels are PiTui chrome; explicit unavailability
-      // on a non-PiTui renderer instead of a crash.
-      if (app === undefined) return { kind: 'error', text: 'keymap labels are unavailable in this renderer' }
-      const keybindings = app.keybindingsManager()
-      const keysLabel = (action: AppKeybindingId): string => {
-        // The full effective label: ALL direct keys AND ALL leader
-        // sequences (a mixed `['ctrl+z', '<leader>h']` shows
-        // `Ctrl+Z / Leader H`; a disabled action advertises nothing) —
-        // review finding: keysFor() alone dropped the leader bindings.
-        const label = keybindings.keysLabelFor(action)
-        return label === '' ? '—' : label
-      }
-      const rows: SettingItem[] = [        { id: 'k-enter', label: keysLabel('app.input.submit'), description: 'Submit the draft; while the agent is busy, delivery follows the "Submit while busy" preference (skill commands steer too, UI commands run locally)', currentValue: '' },
-        { id: 'k-queue', label: keysLabel('app.input.submitAccelerated'), description: 'Submit with the OPPOSITE of the "Submit while busy" behavior (the web accelerated-submit chord)', currentValue: '' },
-        { id: 'k-exit', label: keysLabel('app.exit.request'), description: 'Exit this TUI (a daemon Host keeps running; while the session is working the default key cancels it once, and an idle exit needs a same-key second press)', currentValue: '' },
-        { id: 'k-cancel', label: keysLabel('app.agent.interrupt'), description: 'Cancel the active turn / tool / shell command (one interrupt while the agent is busy; press the interrupt action twice while idle — with an empty editor it opens the rewind picker)', currentValue: '' },
-        { id: 'k-fold', label: keysLabel('app.transcript.toggleExpand'), description: `Expand/collapse recent transcript detail; in regular Focus it reveals the recent Thought detail; in fullscreen Focus it controls the Thought-root bulk (per-card detail stays mouse-owned). Thinking detail is separate: ${keysLabel('app.transcript.toggleThinking')}`, currentValue: '' },
-        { id: 'k-todo', label: keysLabel('app.todo.toggle'), description: 'Toggle the todo panel', currentValue: '' },
-        { id: 'k-think', label: keysLabel('app.transcript.toggleThinking'), description: 'Expand/collapse thinking detail (detail level — blocks stay visible)', currentValue: '' },
-        { id: 'k-steer', label: keysLabel('app.input.steer'), description: 'Steer the running turn with the draft', currentValue: '' },
-        { id: 'k-editor', label: keysLabel('app.editor.external'), description: 'Edit the draft in $VISUAL/$EDITOR', currentValue: '' },
-
-        { id: 'k-search', label: keysLabel('app.transcript.search'), description: `Search the transcript (${keysLabel('app.transcript.search.next')}/${keysLabel('app.transcript.search.previous')} jump, ${keysLabel('app.transcript.search.close')} closes)`, currentValue: '' },
-
-        { id: 'k-tab', label: 'Tab', description: 'Autocomplete slash commands and file paths', currentValue: '' },
-        { id: 'k-hist', label: '↑/↓', description: 'Recall input history on an empty line', currentValue: '' },
-        { id: 'k-bang', label: '! cmd', description: 'Host user-shell execution is available only when the backend provides it; ! submits the completed command and its output to the Session, !! keeps the result presentation-only', currentValue: '' },
-        { id: 'sep-help', label: color.border('─'.repeat(34)), currentValue: '' },
-        ...runner.listScopedCommands()
-          .map(command => ({
-            id: `cmd-${command.name}`,
-            label: `/${command.name}`,
-            description: command.description,
-            currentValue: '',
-          })),
-      ]
-      if (app === undefined) return { kind: 'error', text: 'the settings panel is unavailable in this renderer' }
-      app.openSettings(rows, () => {}, () => {})
-      return { kind: 'success' }
-    },
   })
 }

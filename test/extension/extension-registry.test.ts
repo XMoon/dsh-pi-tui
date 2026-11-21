@@ -73,7 +73,7 @@ test('CommandBridge: a disposed handle never removes a LATER registration of the
 
 test('CommandBridge: a plugin command can NEVER shadow a host-owned command (P1-04)', () => {
   // The authoritative host catalog (TUI commands + ownership sets).
-  const catalog = new Set(['status', 'sessions', 'help', 'exit', 'kill', 'settings'])
+  const catalog = new Set(['status', 'sessions', 'keybindings', 'exit', 'kill', 'settings'])
   const bridge = new CommandBridge(() => {}, catalog)
   // EXACT collision with a TUI-registered command: rejected loudly.
   const status = bridge.register({ id: 's1', name: 'status', description: '', handler: () => ({ kind: 'success' }) }, 'plugin')

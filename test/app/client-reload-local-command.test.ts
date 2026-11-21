@@ -340,7 +340,7 @@ test('an accepted /preset default command holds the reload gate through its pre-
 })
 
 test('the read-only local command set stays explicit and never includes a writer', () => {
-  for (const name of ['reload-client', 'reload', 'help', 'copy', 'sessions', 'attach']) {
+  for (const name of ['reload-client', 'reload', 'copy', 'sessions', 'attach']) {
     assert.equal(READ_ONLY_LOCAL_COMMANDS.has(name), true, `/${name} must be a declared read-only local command`)
     assert.equal(localCommandMayWrite(name), false)
   }

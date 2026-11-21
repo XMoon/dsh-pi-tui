@@ -2526,7 +2526,7 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
       return
     }
     // A sessionless slash command runs locally BEFORE any session exists:
-    // typing /exit, /settings, /help, ... must not create one (deferred
+    // typing /exit, /settings, ... must not create one (deferred
     // start). Everything else — session-backed commands, core commands
     // like /plan, and plain prompts — creates the session lazily. M5: a
     // plugin-declared sessionless command (CommandBridge) joins the set.

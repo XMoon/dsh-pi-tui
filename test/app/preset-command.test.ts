@@ -292,8 +292,8 @@ function stubRunner(options: {
     ),
     sessionPolicy: unconfiguredSessionPolicyPort(),
     policy: unconfiguredPolicyObservation(),
-    // /help and the collision baseline read the FAKE registry through the
-    // scoped-command facade, exactly like the production provider.
+    // The collision baseline reads the FAKE registry through the scoped-command
+    // facade, exactly like the production provider.
     listScopedCommands: () => (options.ctx.get('commands') as unknown as { list(): readonly SurfaceCommandSummary[] }).list(),
     get currentSessionId() { return (options.state !== undefined ? options.state.agent : options.agent)?.session.id },
     ensureSession: async () => { options.ensureCalls?.push('ensureSession') },
@@ -464,7 +464,7 @@ function setup(options: {
   /** The runner's displayed/current Session preset read. */
   currentPreset?: () => string | undefined
   width?: number
-  /** Viewport height; a taller screen keeps the whole `/help` list on one page. */
+  /** Viewport height. */
   height?: number
 }) {
   const ctx = new Context()
@@ -2158,12 +2158,6 @@ test('/preset stays advertised when the command catalog is healthy (no chooser p
   await waitForCompletion(t.app, 'preset')
   assert.ok(t.app.commandCompletionsForTest().some(command => command.name === 'preset'),
     '/preset must be a normal candidate without any roster policy')
-  await t.runCommand('help')
-  await t.vt.waitForRender()
-  t.vt.sendInput('preset')
-  await t.vt.waitForRender()
-  const view = await t.view()
-  assert.ok(view.includes('Show or switch the session agent preset'), '/help lists /preset')
   t.app.stop()
 })
 

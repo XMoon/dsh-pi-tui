@@ -102,7 +102,7 @@ import type {
 import type { SubmissionComposerPort } from './app/submission/composer-port.ts'
 import { commandSummaryOf, type SurfaceCatalogSnapshot, type SurfaceCommandSummary } from './domain/catalog/surface.ts'
 import { isUserInvocableSkill, type HumanSkillCatalog, type HumanSkillSummary } from './domain/catalog/skill.ts'
-import { registerExitCommand, registerHelpCommand, registerReloadClientCommand } from './tui/commands/utility.ts'
+import { registerExitCommand, registerReloadClientCommand } from './tui/commands/utility.ts'
 import { registerPluginsCommand, registerTasksCommand } from './tui/commands/tasks.ts'
 import { registerScheduleCommand } from './tui/commands/schedule.ts'
 import { registerQueueCommand } from './tui/commands/queue.ts'
@@ -2661,7 +2661,6 @@ export function registerTuiCommands(
     loadSkill,
     takeDelivery,
     splitSkillLine,
-    resolveComposerDelivery,
   }
   registerSkillCommand(skillsCommandDeps)
 
@@ -2773,8 +2772,6 @@ export function registerTuiCommands(
   authCommands.registerLogin()
 
   authCommands.registerLogout()
-
-  registerHelpCommand({ runner, registerOne })
 
   // M4: the keybinding command. Bare /keybindings opens the action-first
   // Keyboard Shortcuts Editor; conflicts/reload/reset remain read-only or

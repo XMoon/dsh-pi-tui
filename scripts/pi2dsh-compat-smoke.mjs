@@ -639,22 +639,26 @@ async function main() {
     await delay(350)
     tmux.sendKey('Enter')
     await delay(500)
-    tmux.sendLiteral('/help')
+    // Negative control with a REAL TUI-owned sessionless command: `/settings`
+    // opens the Settings Workspace, while the Pi fixture's `help` registration
+    // must stay untouched on the Pi bridge. The retired builtin `/help` is no
+    // longer a reserved name and no longer protects this route.
+    tmux.sendLiteral('/settings')
     await delay(350)
     tmux.sendKey('Enter')
-    await waitUntil('native /help command', TIMEOUTS.command, () => {
+    await waitUntil('native /settings command', TIMEOUTS.command, () => {
       if (!tmux.hasSession()) return false
       const pane = tmux.capturePane()
-      return pane.includes('Type to search') && pane.includes('Enter/Space to change')
+      return pane.includes('Settings · Categories')
     }, 'COMPAT_BOOT_FAILURE')
     tmux.sendKey('Escape')
-    await waitUntil('native /help close', TIMEOUTS.input, () => {
+    await waitUntil('native /settings close', TIMEOUTS.input, () => {
       if (!tmux.hasSession()) return false
-      return !tmux.capturePane().includes('Type to search')
+      return !tmux.capturePane().includes('Settings ·')
     }, 'COMPAT_BOOT_FAILURE')
-    const nativeHelpEvidence = readEvidence(evidencePath)
-    if (nativeHelpEvidence.commandInvoked !== false) {
-      fail('COMPAT_BOOT_FAILURE', 'native /help unexpectedly invoked the Pi collision fixture')
+    const nativeSettingsEvidence = readEvidence(evidencePath)
+    if (nativeSettingsEvidence.commandInvoked !== false) {
+      fail('COMPAT_BOOT_FAILURE', 'native /settings unexpectedly invoked the Pi collision fixture')
     }
     assertNoPi2dshSurfaceFailures(tuiLog, tmux)
 

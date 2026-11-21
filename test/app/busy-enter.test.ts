@@ -47,7 +47,7 @@ afterEach(() => {
 
 /** The TUI-owned command names registered by registerTuiCommands (commands.ts). */
 const TUI_OWNED = [
-  'copy', 'exit', 'export', 'fork', 'help', 'kill', 'login', 'logout',
+  'copy', 'exit', 'export', 'fork', 'kill', 'login', 'logout',
   'model', 'new', 'preset', 'quit', 'reload', 'rename', 'resume',
   'search', 'sessions', 'settings', 'skill', 'status', 'subagents', 'tasks',
   'title', 'transcript', 'yolo',
@@ -62,7 +62,7 @@ test('LOCAL_COMMANDS covers every TUI-owned command and nothing else', () => {
   assert.ok(!LOCAL_COMMANDS.has('grilling'), 'skill commands must not be local')
   assert.ok(!LOCAL_COMMANDS.has('matrix-cli'), 'skill commands must not be local')
   // SESSIONLESS_COMMANDS is a subset (sessionless commands run locally).
-  for (const name of ['exit', 'settings', 'help', 'login', 'logout', 'model', 'reload', 'sessions', 'resume', 'search', 'new', 'fork', 'preset']) {
+  for (const name of ['exit', 'settings', 'login', 'logout', 'model', 'reload', 'sessions', 'resume', 'search', 'new', 'fork', 'preset']) {
     assert.ok(LOCAL_COMMANDS.has(name), `sessionless command ${name} must be local`)
   }
 })
@@ -89,7 +89,7 @@ test('resolveSubmitDelivery: plain prompts and skill commands follow the policy;
   assert.equal(resolveSubmitDelivery(cmd('status'), true, 'enter', 'steer'), 'queue', '/status must execute')
   assert.equal(resolveSubmitDelivery(cmd('settings'), true, 'enter', 'steer'), 'queue', '/settings must execute')
   assert.equal(resolveSubmitDelivery(cmd('subagents'), true, 'enter', 'steer'), 'queue', '/subagents alias must execute (alias of /tasks)')
-  assert.equal(resolveSubmitDelivery(cmd('skill'), true, 'enter', 'steer'), 'queue', '/skill picker must execute')
+  assert.equal(resolveSubmitDelivery(cmd('skill'), true, 'enter', 'steer'), 'queue', 'bare /skill is a usage-only local command')
   // A local command's delivery value is never consumed, so the accelerated
   // chord must not turn one into a steer either.
   assert.equal(resolveSubmitDelivery(cmd('status'), true, 'accelerated', 'queue'), 'queue',
@@ -270,7 +270,7 @@ function setup(options: { busyEnter?: string; localShellSandbox?: string; extens
     exit: () => {},
   }
   const installed = registerTuiCommandsWithDirectSeams(runner)
-  // Run ANY registered command (`/help` and the host-claim cases use it).
+  // Run ANY registered command (`/settings` and the host-claim cases use it).
   const runCommand = async (name: string, rawInput = ''): Promise<unknown> => {
     const found = commands.defs.find(entry => entry.name === name)
     assert.ok(found?.handler !== undefined, `${name} handler missing`)
@@ -353,44 +353,13 @@ test('every command registerTuiCommands registers is in LOCAL_COMMANDS', () => {
   t.app.stop()
 })
 
-test('resolveSubmitDelivery: /skill <name> with args follows the policy; the bare picker does not (review finding)', () => {
+test('resolveSubmitDelivery: /skill <name> with args follows the policy; the bare usage-only command does not (review finding)', () => {
   const withArgs = resolveSubmitDelivery({ name: 'skill', rawInput: 'grilling [image #1 (800×600)]' }, true, 'enter', 'steer')
   assert.equal(withArgs, 'steer', '/skill <name> [image ...] is agent input while running')
   const bare = resolveSubmitDelivery({ name: 'skill', rawInput: '' }, true, 'enter', 'steer')
-  assert.equal(bare, 'queue', 'the bare /skill picker stays local')
+  assert.equal(bare, 'queue', 'the bare /skill usage-only command stays local')
   const idle = resolveSubmitDelivery({ name: 'skill', rawInput: 'grilling x' }, false, 'enter', 'steer')
   assert.equal(idle, 'queue', 'idle never steers')
-})
-
-test('/help copy is key-neutral after a remap — no stale bare Esc/Enter claims (review round 37)', async () => {
-  // The effective-key copy convention: after remapping interrupt -> ctrl+x
-  // and submit -> ctrl+z, /help must NOT claim the physical Esc (the
-  // double-action follows the EFFECTIVE interrupt key) or Enter (submit).
-  // The prose is semantic/key-neutral; the LABEL column shows the
-  // effective keys (`Ctrl+X`, `Ctrl+Z`). The settings panel shows the
-  // SELECTED row's description only, so navigate to each row.
-  const t = setup()
-  t.app.keybindingsManager().setUserConfiguration(parseUserKeybindings({
-    'app.agent.interrupt': 'ctrl+x',
-    'app.input.submit': 'ctrl+z',
-  }))
-  await t.runCommand('help')
-  let view = await t.view()
-  // The first row (submit) is selected: its label shows the effective key
-  // and its description is visible.
-  assert.ok(view.includes('Ctrl+Z'), `the effective submit key must be shown:\n${view}`)
-  const submitRow = view.split('\n').find(line => line.includes('Submit the draft'))
-  assert.ok(submitRow !== undefined, 'the selected submit row must render its description')
-  assert.ok(!submitRow!.includes('Enter'), `the submit row must not claim physical Enter:\n${submitRow}`)
-  // Navigate down to the cancel row (row 3: submit, queue, exit, cancel).
-  for (let i = 0; i < 3; i += 1) t.vt.sendInput('\x1b[B')
-  view = await t.view()
-  // The cancel description wraps across panel lines — search the whole
-  // viewport (the label row itself only carries the effective key).
-  assert.ok(view.includes('Cancel the active turn'), 'the selected cancel row must render its description')
-  assert.ok(!view.includes('one Esc while'), `the cancel copy must not claim physical Esc:\n${view}`)
-  assert.ok(view.includes('interrupt action twice'), 'the cancel prose is key-neutral (semantic action)')
-  t.app.stop()
 })
 
 test('hostClaimOf claims the LINE an advertised host command owns, never a skill wrapper (PR115-fix problem 1)', () => {

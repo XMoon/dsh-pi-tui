@@ -165,8 +165,8 @@ test('mixed direct + leader keys both appear in the snapshot and the hint (revie
   assert.equal(manager.keyHint('app.history.search'), 'Ctrl+Z / Leader H', 'the hint shows both forms')
 })
 
-test('keysLabelFor shows ALL direct and leader keys (the /help source)', () => {
-  // Review finding: /help used keysFor() (direct only) — a mixed
+test('keysLabelFor shows ALL direct and leader keys (the semantic key-label projection)', () => {
+  // Review finding: a key-label projection that used keysFor() (direct only) — a mixed
   // ['ctrl+z', '<leader>h'] action showed only the direct key. The
   // manager's keysLabelFor renders every effective form.
   const manager = managerWith({
@@ -181,11 +181,11 @@ test('keysLabelFor shows ALL direct and leader keys (the /help source)', () => {
   assert.equal(disabled.keysLabelFor('app.history.search'), '')
 })
 
-test('keysLabelFor falls back to an overlay action default (the /help source)', () => {
+test('keysLabelFor falls back to an overlay action default', () => {
   // Review finding: capturing-scope actions (search close/next/previous,
   // question/tasks flows) are excluded from the HOST keymap, so keysFor()
-  // is empty and keysLabelFor must render their defaults — /help showed
-  // '—' for Enter submission and the fixed overlay controls.
+  // is empty and keysLabelFor must render their defaults rather than '—'
+  // for Enter submission and the fixed overlay controls.
   const manager = managerWith({})
   assert.equal(manager.keysLabelFor('app.input.submit'), 'Enter', 'submit keeps its default label')
   assert.equal(manager.keysLabelFor('app.transcript.search.close'), 'Esc / Ctrl+C',

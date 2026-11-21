@@ -30,7 +30,7 @@ import { parseCommand } from '@deepseek-ai/dsh-commands'
  * command silently starts creating sessions again.
  */
 export const SESSIONLESS_COMMANDS = new Set([
-  'display', 'exit', 'focus', 'footer', 'settings', 'help', 'attach', 'image', 'login', 'logout', 'model', 'reload',
+  'display', 'exit', 'focus', 'footer', 'settings', 'attach', 'image', 'login', 'logout', 'model', 'reload',
   'sessions', 'resume', 'search', 'new', 'fork', 'rewind', 'preset', 'keybindings', 'plugins',
   // `/web` (M5-W PR-C) controls the Split Host's official Web frontend from the
   // Client. It must answer before any Session exists (the Web frontend is a
@@ -133,7 +133,7 @@ export const SESSION_NAVIGATION_COMMANDS = new Set([
  * reserved-name validation and the extension collision catalog only.
  */
 export const LOCAL_COMMANDS = new Set([
-  'copy', 'display', 'exit', 'export', 'focus', 'footer', 'fork', 'help', 'attach', 'image', 'keybindings', 'kill', 'login', 'logout',
+  'copy', 'display', 'exit', 'export', 'focus', 'footer', 'fork', 'attach', 'image', 'keybindings', 'kill', 'login', 'logout',
   'model', 'new', 'preset', 'plugins', 'quit', 'reload', 'rename', 'resume', 'rewind',
   'search', 'sessions', 'settings', 'skill', 'status', 'subagents', 'tasks',
   'title', 'transcript', 'yolo',
@@ -500,7 +500,7 @@ export const READ_ONLY_LOCAL_COMMANDS: ReadonlySet<string> = new Set([
   // The catalog/settings REFRESH only reads.
   'reload',
   // Exit orchestration and read-only chrome/panels.
-  'exit', 'quit', 'help', 'keybindings',
+  'exit', 'quit', 'keybindings',
   // Local clipboard / attachment intake / artifact output / transcript views.
   'copy', 'attach', 'image', 'export', 'transcript', 'deliverables', 'view-image',
   // Read-only pickers and the task center.

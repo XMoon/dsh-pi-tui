@@ -1036,7 +1036,7 @@ test('a sessionless TUI built-in works before the first Session and creates none
   const life = testLifecycle(t)
   const fixture = await mountRunner(life, {})
   const before = fixture.host.ctx.sessions.list().length
-  submit(fixture, '/help')
+  submit(fixture, '/settings')
   await settle(150)
   assert.equal(fixture.host.ctx.sessions.list().length, before,
     'a sessionless command never creates a Session')

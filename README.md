@@ -95,7 +95,7 @@ Daemon 的选择也可以在 `/settings → General → Backend` 保存，**下�
 | `Ctrl+C` · `Ctrl+D` | 工作中取消、或空闲时遵循实际键位/确认退出 |
 | `!` · `!!` | Host Shell：结果入 Session / 不入 Session |
 
-这里列出的是默认键位和常见入口；自定义后以 `/help`、`/keybindings` 显示的**实际生效键位**为准。`/transcript` 当前的官方 Markdown 导出路径属于 Direct；`/export` 是独立的 ZIP 归档，产物落在 Client 本地目录。`PI_IMAGE_PROTOCOL=none` 只禁止像素预览，不影响附件发送。
+这里列出的是默认键位和常见入口；自定义后以 `/keybindings` 显示的**实际生效键位**为准。输入 `/` 可搜索并选择命令与可用的 Skills；需要显式调用某个 Skill（包括与同名命令冲突时）使用 `/skill <name> [args]`，裸 `/skill` 只显示用法。`/transcript` 当前的官方 Markdown 导出路径属于 Direct；`/export` 是独立的 ZIP 归档，产物落在 Client 本地目录。`PI_IMAGE_PROTOCOL=none` 只禁止像素预览，不影响附件发送。
 
 ## Daemon 快速上手（Linux / macOS）
 
