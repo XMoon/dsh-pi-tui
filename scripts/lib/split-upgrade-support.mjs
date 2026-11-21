@@ -367,6 +367,105 @@ export async function waitForReloadNotice(client, expectedText, label, fromRecor
   }
 }
 
+/** The daemon Exit Choice family title (see `exitChoiceTitle`). */
+const DAEMON_EXIT_CHOICE_TITLE = 'Disconnect from dsh-pi-tui'
+/** The complete safe default row of each daemon Exit Choice family. */
+const DAEMON_BUSY_KEEP = 'Keep working and disconnect'
+const DAEMON_UNKNOWN_DISCONNECT = 'Disconnect without stopping'
+/** Every other exit family title is never the choice this helper may confirm. */
+const FOREIGN_EXIT_CHOICE_TITLES = Object.freeze([
+  'Exit this daemon Client · Backend preference is now Direct',
+  'Exit dsh-pi-tui',
+])
+/** Focused rows that are never the safe detach this helper may confirm. */
+const UNSAFE_EXIT_FOCUS = Object.freeze([
+  'Stop current work and disconnect',
+  'Stop current work and exit',
+  'Stop daemon Host and exit',
+  'Stay in the TUI',
+])
+
+/** One focused option row of the painted frame (`> label`, optionally framed). */
+function focusedExitRows(frame) {
+  const rows = []
+  for (const line of frame) {
+    // A real overlay row keeps the composited transcript cells OUTSIDE its
+    // frame: the focused row is the `│ > label │` segment of the line.
+    const framed = /│\s*> (.+?)\s*│/u.exec(line)
+    if (framed !== null) {
+      rows.push(framed[1].trim())
+      continue
+    }
+    const plain = /^\s*> (.+?)\s*$/u.exec(line)
+    if (plain !== null) rows.push(plain[1].trim())
+  }
+  return rows
+}
+
+/** The bounded last non-empty painted rows a failure report may carry. */
+function exitFrameTail(frame) {
+  return frame.map(line => line.replace(/\s+$/u, '')).filter(line => line !== '').slice(-16)
+}
+
+/**
+ * Exit a REAL Upgrade Client through the current daemon Exit Choice.
+ *
+ * A daemon `/exit` whose exact current Session is provably working opens the
+ * Busy Choice (`Keep working and disconnect` default); an unverifiable state
+ * opens the Unknown Choice (`Disconnect without stopping` default); a proven
+ * idle Session exits directly. The helper reads ONE complete painted frame per
+ * poll and sends exactly one Enter only when that frame carries BOTH the daemon
+ * choice title and the complete safe default as the focused row. A foreign
+ * family, a Stop/Stay focus, or no actionable safe choice fails with the label
+ * and the last painted rows; it never guesses, presses extra keys or touches
+ * the Host. The caller owns `client.dispose()` and every business assertion.
+ */
+export async function exitUpgradeClientKeepHost(client, label, timeoutMs = 120_000) {
+  const deadline = Date.now() + timeoutMs
+  const failure = (message, frame, cause) => {
+    const error = new SplitSmokeAssertionError(
+      `${label}: ${message}; last frame: ${JSON.stringify(exitFrameTail(frame))}`,
+    )
+    if (cause !== undefined) error.cause = cause
+    return error
+  }
+  let lastFrame = []
+  client.send('/exit\r')
+  let action
+  while (!client.exited) {
+    lastFrame = await client.viewport()
+    if (client.exited) break
+    const focused = focusedExitRows(lastFrame)
+    const foreign = FOREIGN_EXIT_CHOICE_TITLES.find(title => lastFrame.some(line => line.includes(title)))
+    if (foreign !== undefined) throw failure(`unexpected exit choice family ${JSON.stringify(foreign)}`, lastFrame)
+    const unsafe = focused.find(row => UNSAFE_EXIT_FOCUS.includes(row))
+    if (unsafe !== undefined) throw failure(`unsafe exit choice focus ${JSON.stringify(unsafe)}`, lastFrame)
+    if (lastFrame.some(line => line.includes(DAEMON_EXIT_CHOICE_TITLE))) {
+      if (focused.includes(DAEMON_BUSY_KEEP)) { action = 'busy-keep'; break }
+      if (focused.includes(DAEMON_UNKNOWN_DISCONNECT)) { action = 'unknown-disconnect'; break }
+    }
+    if (Date.now() >= deadline) {
+      throw failure(
+        `CHOICE_NOT_ACTIONABLE: the Client did not exit and no safe daemon choice became actionable within ${String(timeoutMs)}ms`,
+        lastFrame,
+      )
+    }
+    await sleep(50)
+  }
+  if (action !== undefined && !client.exited) client.send('\r')
+  const remainingMs = Math.max(1, deadline - Date.now())
+  let exit
+  try {
+    exit = await client.waitForExit(remainingMs)
+  } catch (error) {
+    throw failure('Client exit wait failed', lastFrame, error)
+  }
+  if (exit?.code !== 0 || exit?.signal !== null) {
+    throw failure(`Client exit was ${JSON.stringify(exit)}`, lastFrame)
+  }
+  return exit
+}
+
 /**
  * The Client's own `handoff-request-ignored` reasons, projected onto the notice
  * types the product would publish for the same decision (an already-latched or

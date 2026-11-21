@@ -31,6 +31,7 @@ import {
   alive,
   assertProfileClientPeers,
   c1WorkHadRelease,
+  exitUpgradeClientKeepHost,
   hostStatus,
   installSideBuild,
   killProcessGroup,
@@ -282,8 +283,8 @@ async function runUserCommandReloadRound(context) {
 
   // Close the old Client (its in-memory staged image dies with it) and attach a
   // fresh old-build Client to the SAME Host/Session for the positive command.
-  reloadOldClient.send('/exit\r')
-  const reloadOldClientExit = await reloadOldClient.waitForExit(120_000)
+  const reloadOldClientExit = await exitUpgradeClientKeepHost(
+    reloadOldClient, 'U08 baseline Client', 120_000)
   assertEqual(reloadOldClientExit.code, 0, `U08 old Client exit was ${JSON.stringify(reloadOldClientExit)}`)
   await reloadOldClient.dispose()
   assert(alive(hostIdentity.hostPid), 'U08 Host died when the old Client exited')
@@ -455,10 +456,8 @@ async function runUserCommandReloadRound(context) {
   assert((hostSessionEvents(dshHome, sessionId) ?? []).every(event => event.type !== 'turn/end'),
     'U08 the replacement ready observed a turn/end before the original barrier release')
 
-  const replacementExit = await (async () => {
-    reloadClient.send('/exit\r')
-    return await reloadClient.waitForExit(120_000)
-  })()
+  const replacementExit = await exitUpgradeClientKeepHost(
+    reloadClient, 'U08 replacement Client', 120_000)
   assertEqual(replacementExit.code, 0, `U08 replacement Client exit was ${JSON.stringify(replacementExit)}`)
   assert(await waitGone(replacementPid), 'U08 the replacement Client process did not exit')
   assert(await waitGone(reloadClientPid), 'U08 the old Client waiting parent did not exit')
