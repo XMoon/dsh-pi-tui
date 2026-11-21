@@ -295,9 +295,11 @@ different:
 In both adapters, leaving index 0 downward restores the exact draft and caret
 that browsing replaced; a real text edit ends the browse and makes the recalled
 row ordinary editable content. Browsing never submits, writes a row, switches a
-Session or paints a second input surface. The TSP composer retires its short-lived
-browse bookmark at the formal `beginInputHistoryScope` / `resetInputHistory`
-commits (before the kernel commit), while a settlement, a repaint or a
+Session or paints a second input surface. A formal owner publication
+(`beginInputHistoryScope`, before the kernel commit) retires the short-lived
+browse bookmark; a current-owner asynchronous cold reseed
+(`resetInputHistory`) instead restores the exact pre-browse draft/caret, ends
+that browse and replaces the projection, while a settlement, a repaint or a
 pre-publication hydration window leaves the current browse alone. Entering the
 first recalled row consults the application's existing pasted-path delivery and
 plain-history eligibility; a refusal keeps the draft, caret and live paste
