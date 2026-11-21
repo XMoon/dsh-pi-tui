@@ -635,6 +635,12 @@ export class QuestionFlow implements Component, Focusable {
   /** Content rows visible in the region from the last render (region minus
    * the marker row when overflowing). */
   private lastVisibleRows = 0
+  /** The unified body scrollport's content-row range in the last render's
+   * output (`[start, end)`), or -1 when this frame painted no ordinary
+   * question body (Review / plan-review / header-only frames). Wheel events
+   * are resolved against THIS record, never against a re-measured layout. */
+  private lastScrollportStart = -1
+  private lastScrollportEnd = -1
   /** Whether the page content overflows the scrollport on the last render —
    * 'e' (and the scroll verbs) are available when true. */
   private lastExpandable = false
@@ -1007,6 +1013,30 @@ export class QuestionFlow implements Component, Focusable {
     if (visible <= 0 || this.lastContentRows <= visible) return
     const maxScroll = this.lastContentRows - visible
     this.bodyScroll = Math.max(0, Math.min(this.bodyScroll + direction * visible, maxScroll))
+  }
+
+  /**
+   * Wheel over the question body: move the unified scrollport by a whole
+   * event's line delta, resolved ONLY against the LAST painted body range.
+   * Returns whether the body really scrolled; a row outside the scrollport
+   * (tabs, action bar, border), a non-overflowing page, a Review page and a
+   * clamped boundary stay inert. The plan-review branch has its own reading
+   * path and never enters here.
+   */
+  wheelBy(deltaLines: number, localRow: number): boolean {
+    if (this.planReview !== undefined || deltaLines === 0) return false
+    if (this.lastScrollportStart < 0 || localRow < this.lastScrollportStart
+      || localRow >= this.lastScrollportEnd) return false
+    const visible = this.lastVisibleRows
+    if (visible <= 0 || this.lastContentRows <= visible) return false
+    const maxScroll = this.lastContentRows - visible
+    const next = Math.max(0, Math.min(this.bodyScroll + deltaLines, maxScroll))
+    if (next === this.bodyScroll) return false
+    this.bodyScroll = next
+    // A wheel move is the user's explicit viewport command: never let the
+    // next render's cursor-follow snap the body back to the highlighted row.
+    this.pendingCursorScroll = false
+    return true
   }
 
   /** Toggle the expanded panel ('e' or a click on the scroll marker).
@@ -2598,6 +2628,10 @@ export class QuestionFlow implements Component, Focusable {
     this.paintedTabHits = []
     this.lastMarkerRow = -1
     this.pinnedOtherRow = -1
+    // The wheel scrollport belongs to the frame being painted NOW: every
+    // early return (plan-review, Review page, header-only) leaves it absent.
+    this.lastScrollportStart = -1
+    this.lastScrollportEnd = -1
     if (this.planReview !== undefined) {
       const planLines = this.renderPlanReview(safeWidth)
       lines.push(...planLines)
@@ -2758,11 +2792,14 @@ export class QuestionFlow implements Component, Focusable {
         }
       }
     }
+    const scrollportStart = lines.length
     for (let index = this.bodyScroll; index < this.bodyScroll + visible && index < content.lines.length; index++) {
       const hit = content.hits[index]
       if (hit !== undefined) this.hitMap.set(lines.length, hit)
       lines.push(content.lines[index]!)
     }
+    this.lastScrollportStart = scrollportStart
+    this.lastScrollportEnd = lines.length
     if (overflow && regionHeight >= 2) {
       const above = this.bodyScroll
       const below = content.lines.length - (this.bodyScroll + visible)

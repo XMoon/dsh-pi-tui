@@ -3458,3 +3458,123 @@ test('an optionless edit keeps its live text when a tab click changes pages', ()
   clickTab(f, 'Q1')
   assert.ok(render(f, 100).some(line => line.includes('abc')), 'returning reseeds the Q1 input text')
 })
+
+// ── Question body wheel ownership ────────────────────────────────────────
+
+interface WheelGeometry {
+  lastScrollportStart: number
+  lastScrollportEnd: number
+  lastVisibleRows: number
+  lastContentRows: number
+  bodyScroll: number
+}
+
+test('wheelBy moves the painted body by a line delta, clamps at both edges and never mutates drafts', () => {
+  const f = makeFlow([{
+    id: 'q1', question: 'Pick a side', detail: longDetail(40), options: [{ label: 'Alpha' }],
+  }], 12)
+  render(f, 100)
+  const geometry = f as unknown as WheelGeometry
+  assert.ok(geometry.lastScrollportStart >= 0 && geometry.lastScrollportEnd > geometry.lastScrollportStart,
+    'the ordinary body must record its scrollport')
+  const row = geometry.lastScrollportStart
+  const before = render(f, 100).join('\n')
+  assert.equal(f.wheelBy(3, row), true, 'a wheel inside the body scrolls it')
+  const after = render(f, 100).join('\n')
+  assert.notEqual(after, before, 'the painted body must move')
+  assert.ok(!after.includes('detail-00'), `the body must really scroll:\n${after}`)
+  assert.equal(f.wheelBy(0, row), false, 'a zero delta is inert')
+  // Wheel up to the top, then one more is a clamped no-op.
+  for (let guard = 0; guard < 500 && geometry.bodyScroll > 0; guard += 1) f.wheelBy(-7, row)
+  assert.equal(geometry.bodyScroll, 0, 'wheel-up clamps at the top')
+  assert.equal(f.wheelBy(-1, row), false, 'no further up movement at the top')
+  // Wheel down to the bottom, then one more is a clamped no-op.
+  for (let guard = 0; guard < 500 && f.wheelBy(7, row); guard += 1) { /* scroll */ }
+  const bottom = geometry.bodyScroll
+  assert.ok(bottom > 0, 'the page reaches a real bottom')
+  assert.equal(f.wheelBy(1, row), false, 'no further down movement at the bottom')
+  assert.deepEqual(f.draftSnapshot().answers[0], { selected: [], custom: '', skipped: false },
+    'wheel scrolling never mutates an answer draft')
+})
+
+test('wheelBy is inert on the tab strip, the action bar, a fitting page, Review and PlanReview', () => {
+  const short = makeFlow([{ id: 'q1', question: 'Short?', options: [{ label: 'A' }] }], 24)
+  const shortLines = render(short, 100)
+  const shortGeometry = short as unknown as WheelGeometry
+  assert.ok(shortGeometry.lastScrollportStart >= 0)
+  assert.equal(short.wheelBy(1, shortGeometry.lastScrollportStart), false, 'a fitting page cannot scroll')
+  assert.equal(short.wheelBy(1, 0), false, 'the tab row is not a scrollport row')
+  assert.equal(short.wheelBy(1, shortLines.length - 1), false, 'the action bar is not a scrollport row')
+
+  const long = makeFlow([{ id: 'q1', question: 'Pick', detail: longDetail(40), options: [{ label: 'A' }] }], 12)
+  const longLines = render(long, 100)
+  const longGeometry = long as unknown as WheelGeometry
+  assert.ok(longGeometry.lastScrollportStart > 0, 'the status/header rows sit above the body')
+  assert.equal(long.wheelBy(1, longLines.length - 1), false, 'the action bar stays inert')
+  long.handleInput('\x1b[C') // one question: → skip reaches Review
+  render(long, 100)
+  assert.equal(longGeometry.lastScrollportStart, -1, 'Review paints no body scrollport')
+  assert.equal(long.wheelBy(1, 3), false, 'Review never scrolls a question body')
+
+  const plan = new QuestionFlow([{
+    id: 'plan-review',
+    question: 'Approve the plan?',
+    detail: '# Plan\nDo the thing.',
+    options: [{ label: 'Approve' }, { label: 'Keep planning' }],
+    intent: { kind: 'plan-review', approve: 'Approve' },
+  }], () => {}, () => {})
+  plan.setMaxRows(24)
+  plan.render(100)
+  assert.equal(plan.wheelBy(1, 3), false, 'the plan-review branch keeps its own reading path')
+})
+
+test('a status row above the tabs shifts the wheel scrollport together with the body', () => {
+  const f = makeFlow([{
+    id: 'q1', question: 'Pick', detail: longDetail(30), options: [{ label: 'A' }],
+  }], 12)
+  f.setStatus({ text: 'Waiting for the response…' })
+  render(f, 100)
+  const geometry = f as unknown as WheelGeometry
+  assert.ok(geometry.lastScrollportStart > 1, 'the status row must push the body down')
+  assert.equal(f.wheelBy(2, geometry.lastScrollportStart), true,
+    'the recorded range already includes the status shift')
+})
+
+test('a real wheel scroll does not snap back to the cursor on the next render', () => {
+  const f = makeFlow([{
+    id: 'q1',
+    question: 'Pick',
+    options: Array.from({ length: 10 }, (_, i) => ({ label: `Option ${i + 1}`, description: 'd'.repeat(200) })),
+  }], 12)
+  render(f, 100)
+  for (let i = 0; i < 8; i += 1) f.handleInput('\x1b[B') // move the cursor deep into the page
+  render(f, 100)
+  const geometry = f as unknown as WheelGeometry
+  assert.ok(geometry.bodyScroll > 0, 'the cursor follow scrolled the body first')
+  assert.equal(f.wheelBy(-2, geometry.lastScrollportStart), true)
+  const afterWheel = geometry.bodyScroll
+  render(f, 100)
+  assert.equal(geometry.bodyScroll, afterWheel, 'the next frame must not snap back to the cursor')
+})
+
+test('option clicks still resolve against the painted rows after a wheel scroll', () => {
+  const f = makeFlow([{
+    id: 'q1',
+    question: 'Pick many',
+    multiSelect: true,
+    options: Array.from({ length: 12 }, (_, i) => ({ label: `Option ${i + 1}`, description: 'd'.repeat(120) })),
+  }], 12)
+  render(f, 100)
+  const geometry = f as unknown as WheelGeometry
+  assert.equal(f.wheelBy(4, geometry.lastScrollportStart), true)
+  const lines = render(f, 100)
+  const row = lines.findIndex(line => /\[ \] Option \d+/.test(line))
+  assert.ok(row >= 0, `a scrolled option must be visible:\n${lines.join('\n')}`)
+  const label = /Option \d+/.exec(lines[row]!)![0]
+  const x = lines[row]!.indexOf(label)
+  const gesture = f.beginMousePress(row, x)
+  assert.ok(gesture !== undefined)
+  f.completeMouseClick(gesture, row, x)
+  assert.ok(f.draftSnapshot().answers[0]?.selected.includes(label),
+    'the click must toggle the option painted at that row after the scroll')
+})
