@@ -18,6 +18,8 @@ import { createRequire } from 'node:module'
 import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from 'node:fs'
 import { join, relative, sep } from 'node:path'
 
+import { sliceByColumn, visibleWidth } from '@xmoon76/pi-tui'
+
 import { run } from './dsh-smoke-harness.mjs'
 import {
   classifyHandoffRejection,
@@ -385,21 +387,52 @@ const UNSAFE_EXIT_FOCUS = Object.freeze([
   'Stay in the TUI',
 ])
 
-/** One focused option row of the painted frame (`> label`, optionally framed). */
-function focusedExitRows(frame) {
-  const rows = []
-  for (const line of frame) {
-    // A real overlay row keeps the composited transcript cells OUTSIDE its
-    // frame: the focused row is the `│ > label │` segment of the line.
-    const framed = /│\s*> (.+?)\s*│/u.exec(line)
-    if (framed !== null) {
-      rows.push(framed[1].trim())
-      continue
-    }
-    const plain = /^\s*> (.+?)\s*$/u.exec(line)
-    if (plain !== null) rows.push(plain[1].trim())
+/**
+ * One width-aligned `first … last` segment of a composited terminal row, or
+ * `undefined` when this row does not carry that segment.
+ *
+ * The overlay compositor keeps the transcript cells OUTSIDE the frame on the
+ * same terminal row, so a box-drawing glyph in the transcript can never be
+ * mistaken for the overlay's own border: the candidate must be exactly the
+ * frame's display width and start/end with its own border glyphs.
+ */
+function frameSegmentAt(line, width, first, last) {
+  for (let at = line.indexOf(first); at >= 0; at = line.indexOf(first, at + 1)) {
+    const segment = sliceByColumn(line, visibleWidth(line.slice(0, at)), width, true)
+    if (visibleWidth(segment) === width && segment.startsWith(first) && segment.endsWith(last)) return segment
   }
-  return rows
+  return undefined
+}
+
+/**
+ * The content rows of EVERY complete rounded overlay frame on screen. The top
+ * border fixes each frame's exact cell width; every row between the matching
+ * top and bottom border is read as that SAME width-aligned segment, wherever
+ * the composited overlay starts. A screen may carry unrelated cards (the C1
+ * qualification card is one), so the caller selects the box by its own title
+ * instead of trusting the first rounded frame; an incomplete frame is ignored.
+ */
+function overlayFrames(frame) {
+  const boxes = []
+  for (let top = 0; top < frame.length; top += 1) {
+    const border = /╭─{8,}╮/u.exec(frame[top])
+    if (border === null) continue
+    const width = border[0].length
+    const rows = []
+    let bottom = -1
+    for (let index = top + 1; index < frame.length; index += 1) {
+      const line = frame[index]
+      if (frameSegmentAt(line, width, '╰', '╯') !== undefined) { bottom = index; break }
+      const segment = frameSegmentAt(line, width, '│', '│')
+      if (segment === undefined || !segment.startsWith('│ ') || !segment.endsWith(' │')) { rows.length = 0; break }
+      rows.push(segment.slice(2, segment.length - 2))
+    }
+    if (bottom >= 0) {
+      boxes.push(rows)
+      top = bottom
+    }
+  }
+  return boxes
 }
 
 /** The bounded last non-empty painted rows a failure report may carry. */
@@ -435,15 +468,19 @@ export async function exitUpgradeClientKeepHost(client, label, timeoutMs = 120_0
   while (!client.exited) {
     lastFrame = await client.viewport()
     if (client.exited) break
-    const focused = focusedExitRows(lastFrame)
-    const foreign = FOREIGN_EXIT_CHOICE_TITLES.find(title => lastFrame.some(line => line.includes(title)))
+    const boxes = overlayFrames(lastFrame)
+    const foreign = FOREIGN_EXIT_CHOICE_TITLES.find(title =>
+      boxes.some(rows => rows.some(row => row.trim() === title)))
     if (foreign !== undefined) throw failure(`unexpected exit choice family ${JSON.stringify(foreign)}`, lastFrame)
-    const unsafe = focused.find(row => UNSAFE_EXIT_FOCUS.includes(row))
-    if (unsafe !== undefined) throw failure(`unsafe exit choice focus ${JSON.stringify(unsafe)}`, lastFrame)
-    if (lastFrame.some(line => line.includes(DAEMON_EXIT_CHOICE_TITLE))) {
+    for (const rows of boxes) {
+      const focused = rows.filter(row => row.startsWith('> ')).map(row => row.slice(2).trim())
+      const unsafe = focused.find(row => UNSAFE_EXIT_FOCUS.includes(row))
+      if (unsafe !== undefined) throw failure(`unsafe exit choice focus ${JSON.stringify(unsafe)}`, lastFrame)
+      if (!rows.some(row => row.trim() === DAEMON_EXIT_CHOICE_TITLE)) continue
       if (focused.includes(DAEMON_BUSY_KEEP)) { action = 'busy-keep'; break }
       if (focused.includes(DAEMON_UNKNOWN_DISCONNECT)) { action = 'unknown-disconnect'; break }
     }
+    if (action !== undefined) break
     if (Date.now() >= deadline) {
       throw failure(
         `CHOICE_NOT_ACTIONABLE: the Client did not exit and no safe daemon choice became actionable within ${String(timeoutMs)}ms`,

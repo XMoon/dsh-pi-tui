@@ -762,34 +762,40 @@ test('waitForAcceptedHandoff reports the actual refusal of the same action', asy
 
 // ── The Upgrade safe exit: only a confirmed safe default may send Enter ─────
 
+/** One exact-width rounded frame mirroring `Frame.render` row padding. */
+function exitChoiceFrame(rows, width = 64) {
+  const inner = width - 4
+  return [
+    `╭${'─'.repeat(width - 2)}╮`,
+    ...rows.map(row => `│ ${row.padEnd(inner)} │`),
+    `╰${'─'.repeat(width - 2)}╯`,
+  ]
+}
+
 /** The real painted Busy Choice rows (`ExitChoicePanel` inside its frame). */
-const BUSY_EXIT_FRAME = [
-  '╭──────────────────────────────────────────────────────────────╮',
-  '│ Disconnect from dsh-pi-tui                                   │',
-  '│                                                              │',
-  '│ The current session is still working.                         │',
-  '│                                                              │',
-  '│ > Keep working and disconnect                                 │',
-  '│   Stop current work and disconnect                            │',
-  '│   Stay in the TUI                                             │',
-  '│                                                              │',
-  '│ ↑↓ Select · Enter Confirm · Esc Stay                          │',
-  '╰──────────────────────────────────────────────────────────────╯',
-]
+const BUSY_EXIT_FRAME = exitChoiceFrame([
+  'Disconnect from dsh-pi-tui',
+  '',
+  'The current session is still working.',
+  '',
+  '> Keep working and disconnect',
+  '  Stop current work and disconnect',
+  '  Stay in the TUI',
+  '',
+  '↑↓ Select · Enter Confirm · Esc Stay',
+])
 
 /** The real painted Unknown Choice rows: the other daemon safe default. */
-const UNKNOWN_EXIT_FRAME = [
-  '╭──────────────────────────────────────────────────────────────╮',
-  '│ Disconnect from dsh-pi-tui                                   │',
-  '│                                                              │',
-  "│ The current session's running state cannot be verified.       │",
-  '│                                                              │',
-  '│ > Disconnect without stopping                                 │',
-  '│   Stay in the TUI                                             │',
-  '│                                                              │',
-  '│ ↑↓ Select · Enter Confirm · Esc Stay                          │',
-  '╰──────────────────────────────────────────────────────────────╯',
-]
+const UNKNOWN_EXIT_FRAME = exitChoiceFrame([
+  'Disconnect from dsh-pi-tui',
+  '',
+  "The current session's running state cannot be verified.",
+  '',
+  '> Disconnect without stopping',
+  '  Stay in the TUI',
+  '',
+  '↑↓ Select · Enter Confirm · Esc Stay',
+])
 
 /**
  * A contract-shaped Exit Choice Client: exactly the four members the helper
@@ -856,6 +862,34 @@ test('exitUpgradeClientKeepHost reads the focused row from a composited transcri
   assert.deepEqual(client.sends, ['/exit\r', '\r'])
 })
 
+test('exitUpgradeClientKeepHost finds the exit choice below an unrelated rounded card', async () => {
+  // The C1 qualification card is a real 100-wide rounded box above the choice
+  // in the U07 reexec frame; only the daemon choice box may drive the action.
+  const card = exitChoiceFrame([
+    'dsh-pi-tui  dsh-0.2.2-rc.5 · tui-v0.5.7',
+    'model    c1-qualification/c1',
+    'preset   standard',
+    'session  session-00000000-0000-0000-0000-000000000000',
+  ], 100)
+  const client = fakeExitClient({ frames: [...card, ...BUSY_EXIT_FRAME] })
+  const exit = await exitUpgradeClientKeepHost(client, 'card above Client', SHORT_WAIT_MS)
+  assert.deepEqual(exit, { code: 0, signal: null })
+  assert.deepEqual(client.sends, ['/exit\r', '\r'])
+})
+
+test('exitUpgradeClientKeepHost ignores exit-choice-shaped transcript outside the real box', async () => {
+  // A transcript row may repeat the title or a focused-looking option. Only the
+  // complete rounded overlay frame may decide the choice.
+  const client = fakeExitClient({ frames: [
+    'Exit dsh-pi-tui',
+    '> Stop current work and disconnect',
+    ...BUSY_EXIT_FRAME,
+  ] })
+  const exit = await exitUpgradeClientKeepHost(client, 'transcript noise Client', SHORT_WAIT_MS)
+  assert.deepEqual(exit, { code: 0, signal: null })
+  assert.deepEqual(client.sends, ['/exit\r', '\r'], 'the real box still carries the one safe default')
+})
+
 test('exitUpgradeClientKeepHost confirms the painted Unknown safe default exactly once', async () => {
   const client = fakeExitClient({ frames: UNKNOWN_EXIT_FRAME })
   const exit = await exitUpgradeClientKeepHost(client, 'unknown Client', SHORT_WAIT_MS)
@@ -864,18 +898,25 @@ test('exitUpgradeClientKeepHost confirms the painted Unknown safe default exactl
 })
 
 test('exitUpgradeClientKeepHost refuses to confirm a destructive or foreign choice', async () => {
-  const stopFocused = BUSY_EXIT_FRAME.map(line => line.includes('Keep working and disconnect')
-    ? '│   Keep working and disconnect                                 │'
-    : line.includes('Stop current work and disconnect')
-      ? '│ > Stop current work and disconnect                            │'
-      : line)
+  const stopFocused = exitChoiceFrame([
+    'Disconnect from dsh-pi-tui',
+    '',
+    'The current session is still working.',
+    '',
+    '  Keep working and disconnect',
+    '> Stop current work and disconnect',
+    '  Stay in the TUI',
+    '',
+    '↑↓ Select · Enter Confirm · Esc Stay',
+  ])
   for (const [label, frames] of [
     ['Stop focused', stopFocused],
-    ['daemon Host stop', [
-      '│ Exit this daemon Client · Backend preference is now Direct    │',
-      '│ > Leave daemon Host running and exit                         │',
-    ]],
-    ['Direct family', ['│ Exit dsh-pi-tui                                              │']],
+    ['daemon Host stop', exitChoiceFrame([
+      'Exit this daemon Client · Backend preference is now Direct',
+      '',
+      '> Leave daemon Host running and exit',
+    ])],
+    ['Direct family', exitChoiceFrame(['Exit dsh-pi-tui'])],
   ]) {
     const client = fakeExitClient({ frames })
     const error = await rejection(() => exitUpgradeClientKeepHost(client, label, SHORT_WAIT_MS))
@@ -887,12 +928,18 @@ test('exitUpgradeClientKeepHost refuses to confirm a destructive or foreign choi
 
 test('exitUpgradeClientKeepHost waits out a non-actionable choice and sends no key', async () => {
   for (const [label, frames] of [
-    ['title only', ['│ Disconnect from dsh-pi-tui                                   │']],
-    ['unfocused safe label', [
-      '│ Disconnect from dsh-pi-tui                                   │',
-      '│   Keep working and disconnect                                 │',
-      '│   Stop current work and disconnect                            │',
+    ['title only', exitChoiceFrame(['Disconnect from dsh-pi-tui'])],
+    ['unfocused safe label', exitChoiceFrame([
+      'Disconnect from dsh-pi-tui',
+      '',
+      '  Keep working and disconnect',
+      '  Stop current work and disconnect',
+    ])],
+    ['title in box, focus in transcript', [
+      ...exitChoiceFrame(['Disconnect from dsh-pi-tui']),
+      '> Keep working and disconnect',
     ]],
+    ['misleading transcript', ['Disconnect from dsh-pi-tui', '> Keep working and disconnect']],
     ['ordinary transcript', ['cross-build-hold', '  the command was /exit']],
   ]) {
     const started = Date.now()
