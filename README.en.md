@@ -95,7 +95,7 @@ You can also save `Daemon` under `/settings → General → Backend` for the **n
 | `Ctrl+C` · `Ctrl+D` | Cancel while busy, or follow idle exit confirmation |
 | `!` · `!!` | Host Shell with / without Session persistence |
 
-These are default mappings and common entries; `/help` and `/keybindings` show the **effective** keys after customizations. `/transcript` currently uses the official Direct Markdown export; `/export` creates a separate ZIP archive saved on the Client filesystem. `PI_IMAGE_PROTOCOL=none` disables pixel previews, not attachments.
+These are default mappings and common entries; `/keybindings` shows the **effective** keys after customizations. Type `/` to search and select commands and available Skills; use `/skill <name> [args]` to invoke a Skill explicitly (including when a same-named command would otherwise win), while bare `/skill` only prints its usage. `/transcript` currently uses the official Direct Markdown export; `/export` creates a separate ZIP archive saved on the Client filesystem. `PI_IMAGE_PROTOCOL=none` disables pixel previews, not attachments.
 
 ## Daemon quick start (Linux / macOS)
 

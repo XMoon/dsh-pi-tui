@@ -461,8 +461,8 @@ read → construct the cleared doc → persist → apply the SAME local
 projection (no post-write re-read of the Host document — a Remote
 adapter's reset is write + local projection, never GET → PUT → GET; a
 post-write read that failed would fork the disk reset from the runtime).
-`/help` and the footer hints render through `keyHint`/`keysFor` — a user
-remap updates every hint automatically.
+The footer hints render through `keyHint`/`keysFor` — a user remap updates
+every hint automatically.
 
 ## Out of scope (first version)
 
@@ -536,8 +536,8 @@ leader collision or dedup.
 dedupes same-action canonical keys, deactivates same-priority conflicts,
 and shadows lower-priority overlapping rules. Only `effective` rules
 feed the resolver, the host reservation, the editor submit sync, the
-leader availability check and the read model — `runtime == /help ==
-/keybindings == footer` by construction. No fabricated builtin
+leader availability check and the read model — `runtime == /keybindings ==
+footer` by construction. No fabricated builtin
 fallback; a guard no-op stays host-owned; a genuinely declined host
 action (pasteMedia with no handler) falls through to the editor/plugin
 remainder exactly once.
@@ -653,8 +653,7 @@ CONDITIONAL top claim never permanently hides its context fallback.
 
 ## Keyboard Shortcuts Editor
 
-`/help` remains the key-first, read-only help surface. `/keybindings` is the
-separate action-first editor: it groups definitions into non-selectable
+`/keybindings` is the action-first editor: it groups definitions into non-selectable
 category sections, searches labels/descriptions/action IDs/categories/current
 keys/default keys, and marks `*` customized, `!` conflicts, `Unbound`,
 `Disabled`, fixed, and reserved actions. A standalone leader-key row also

@@ -7,12 +7,9 @@
  * @module @xmoon76/dsh-pi-tui/tui/commands/skills
  */
 
-import { SettingsList } from '@xmoon76/pi-tui'
-import type { ComposerSubmitGesture, TuiApp } from '../../tui-app.ts'
-import { abbreviateName } from '../pickers/name-label.ts'
+import type { TuiApp } from '../../tui-app.ts'
 import { safeErrorMessage } from '../../runtime/process/errors.ts'
 import { SupersededReadError } from '../../runtime/read-error.ts'
-import type { HumanSkillCatalog } from '../../domain/catalog/skill.ts'
 import type { CatalogRefreshOutcome } from '../../app/command/catalog-refresh.ts'
 import { resolveThemeSelection } from '../../app/surface/theme-selection.ts'
 import { normalizePersistedTheme } from '../../domain/display/theme-selection.ts'
@@ -29,10 +26,8 @@ type SkillsCommandRunner = Pick<
   TuiCommandRunner,
   | 'applyFooterSettings'
   | 'captureLiveSessionScope'
-  | 'currentSessionActivity'
   | 'effectivePresetId'
   | 'extensions'
-  | 'listScopedSkills'
   | 'refreshSessionCatalog'
   | 'refreshStandingCatalog'
   | 'requireLiveSessionScope'
@@ -51,16 +46,11 @@ export interface SkillsCommandDeps {
   loadSkill: LoadSkill
   takeDelivery: () => SubmitDelivery | undefined
   splitSkillLine: (raw: string) => [string, ...string[]]
-  resolveComposerDelivery: (
-    running: boolean,
-    gesture: ComposerSubmitGesture,
-    busyEnter: string | undefined,
-  ) => SubmitDelivery
 }
 
-/** /skill — load one skill into the live session (or pick from the catalog). */
+/** /skill — load one explicit skill into the live session. */
 export function registerSkillCommand(deps: SkillsCommandDeps): void {
-  const { runner, app, registerOne, detach, loadSkill, takeDelivery, splitSkillLine, resolveComposerDelivery } = deps
+  const { runner, registerOne, loadSkill, takeDelivery, splitSkillLine } = deps
     registerOne({
       name: 'skill',
       description: 'Load a skill into the session context',
@@ -68,84 +58,23 @@ export function registerSkillCommand(deps: SkillsCommandDeps): void {
       handler: async (invocation) => {
         // Captured before any await: the submit boundary's resolved mode.
         const delivery = takeDelivery()
-        // ONE atomic resolution step for the live scope (held across the whole
-        // picker lifecycle: a switch while this picker or its catalog read is in
-        // flight must refuse the selection).
-        const scope = await runner.requireLiveSessionScope()
         // `/skill <name> [args...]`: the first whitespace token is the skill
         // name, the remainder its arguments (forwarded verbatim on the
         // original line, web parity — never carved out or dropped). The
         // invocation line is normalized to `/name args` so the host's pre-step
         // gesture (dsh-tool-skill) also recognizes it when visible.
         const [name, ...args] = splitSkillLine(invocation.rawInput)
-        if (name !== '') return loadSkill(scope, name, args.join(' '), invocation.signal ?? runner.signal, delivery, invocation.commandId)
-        // No argument: pick from the catalog — the same validated, policy-
-        // filtered, sorted view the collector builds (the catalog port's
-        // live read), so hostile or model-only entries never reach the
-        // picker. The read is SCOPE-BOUND: it validates the captured owner
-        // before the dispatch and after the await, so a switch mid-read never
-        // paints another Session's picker.
-        let catalog: HumanSkillCatalog | undefined
-        try {
-          catalog = await runner.listScopedSkills(scope, runner.signal)
-        } catch (error) {
-          if (error instanceof SupersededReadError) {
-            return { kind: 'error', text: 'the session changed while loading skills — try again' }
+        // The bare command is a usage-only local command: it never reads the
+        // skill catalog, opens a picker or starts a Skill write.
+        if (name === '') {
+          return {
+            kind: 'error',
+            text: 'Usage: /skill <name> [args]. Type / to discover available skills.',
           }
-          throw error
         }
-        if (catalog === undefined) return { kind: 'error', text: 'skill service unavailable' }
-        if (catalog.skills.length === 0) return { kind: 'error', text: 'no skills available' }
-        // SettingsList rows: Enter cycles the value, which fires onChange.
-        app.openSettings(
-          catalog.skills.map(skill => ({
-            id: skill.name,
-            // The label column keeps BOTH ends of a long name (head…tail around
-            // one `…`), so two long skill names that share a prefix cannot paint
-            // identically while Enter still runs different ids. That abbreviation
-            // is a DRAWING fact only: the list's search would otherwise lose the
-            // middle of the name, so the COMPLETE name is declared as the search
-            // basis (fork X062). The SELECTED row's description (below) carries
-            // the full name too — the row's identity (id/values) is untouched.
-            label: abbreviateName(skill.name, 34),
-            searchText: skill.name,
-            description: skill.description === '' ? skill.name : `${skill.name} — ${skill.description}`,
-            currentValue: '',
-            values: ['✓'],
-          })),
-          (id) => {
-            // The SELECTION is the delivery boundary (choosing a row submits
-            // the skill like a plain Enter on the completed `/<name>` line), so
-            // the mode is resolved HERE — the picker may have been open while
-            // the agent went idle (or busy) and while the preference was
-            // edited; a mode frozen at picker-open time would be stale. The
-            // resolved mode is handed to the delivery, which never re-derives
-            // it.
-            // The activity read is SCOPE-BOUND: a stale picker refuses the
-            // selection with a notice instead of throwing out of the overlay
-            // callback (or dispatching to the replacement owner).
-            let running: boolean
-            try {
-              running = runner.currentSessionActivity(scope).running
-            } catch (error) {
-              if (error instanceof SupersededReadError) {
-                app.notify('the session changed while loading skills — try again', 'error')
-                return
-              }
-              throw error
-            }
-            const delivery = resolveComposerDelivery(
-              running,
-              'enter',
-              runner.tuiSettings?.get().busyEnter,
-            )
-            detach('skill load', () => loadSkill(scope, id, '', runner.signal, delivery).then(result => {
-              if (result.kind === 'error') app.notify(result.text)
-            }), { notify: true })
-          },
-          () => {},
-        )
-        return { kind: 'success' }
+        // ONE atomic resolution step for the live scope.
+        const scope = await runner.requireLiveSessionScope()
+        return loadSkill(scope, name, args.join(' '), invocation.signal ?? runner.signal, delivery, invocation.commandId)
       },
     })
 }

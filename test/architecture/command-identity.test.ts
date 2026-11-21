@@ -72,10 +72,10 @@ test('the /skill paths resolve ONE atomic live scope and never pair two identity
     'no path may destructure a paired agent+scope identity')
   assert.equal(count(commandLayerSource, 'runner.liveAgent'), 0,
     'the command layer never reads a Direct Agent')
-  // Four /skill call sites across the whole command layer (two wrappers in the
-  // coordinator, the static /skill handler and its picker): every one threads
-  // the SAME atomically captured scope.
-  assert.equal(count(commandLayerSource, 'loadSkill(scope,'), 4,
+  // Three /skill call sites across the whole command layer (two wrappers in the
+  // coordinator and the static explicit /skill handler): every one threads the
+  // SAME atomically captured scope. The retired bare picker had the fourth.
+  assert.equal(count(commandLayerSource, 'loadSkill(scope,'), 3,
     'every loadSkill call must receive the captured scope')
   assert.ok(!commandLayerSource.includes('loadSkill(agent,'),
     'loadSkill must receive the captured scope, never a separately resolved agent')
@@ -272,15 +272,11 @@ test('scope-bound WRITES refuse a stale scope BEFORE dispatching its sessionId',
 })
 
 test('a superseded skill/permission interaction is refused gracefully, never thrown out of the command path', () => {
-  // The /skill definition read and the picker's catalog read map a superseded
-  // read to the user-visible stale notice instead of propagating it.
+  // The /skill definition read maps a superseded read to the user-visible
+  // stale notice instead of propagating it. The retired bare picker's catalog
+  // read had its own notice; the explicit invocation keeps this one.
   assert.ok(commandsSource.includes("text: 'the session changed while loading the skill — try again'"),
     'the skill definition read reports the stale refusal')
-  assert.ok(commandLayerSource.includes("text: 'the session changed while loading skills — try again'"),
-    'the skill catalog read reports the stale refusal')
-  // The picker SELECTION must not let the error escape the overlay callback.
-  assert.ok(commandLayerSource.includes("app.notify('the session changed while loading skills — try again', 'error')"),
-    'the picker selection notifies instead of throwing')
   // A stale /settings approval write tells the user instead of dispatching the
   // retained scope to the replacement owner. C2-R7 retired the legacy editor's
   // local `closeSettings()` seam together with that editor; the SURVIVING

@@ -486,27 +486,15 @@ export async function runLiveSkillsHot(context) {
     await waitForPaintedSkills(clientA, '/f6-live', { visible: [liveDescription] }, 'F6 live A initial catalog')
     await waitForPaintedSkills(clientB, '/f6-live', { visible: [liveDescription] }, 'F6 live B initial catalog')
 
-    // ── The two remaining Live human sinks: the `/skill` picker and the
-    // inline `/name` lexicon both read the SAME installed human catalog. ─────
-    await submit(clientA, '/skill', 'F6 live /skill picker')
-    await clientA.waitForScreen('f6-live-keep', 'F6 live /skill picker rows', 60_000)
-    // The picker's selected-row detail carries the SAME Host description.
-    {
-      const deadline = Date.now() + 30_000
-      let frame = await viewportText(clientA)
-      while (!frame.includes(keepDescription) && Date.now() < deadline) {
-        clientA.send('\x1b[B')
-        await sleep(120)
-        frame = await viewportText(clientA)
-      }
-      assert(frame.includes(keepDescription),
-        `F6 the /skill picker never painted the Host description:\n${frame}`)
-    }
-    clientA.send('\x1b')
-    await sleep(200)
-    clientA.send('\x1b')
-    await sleep(200)
-    await clearComposer(clientA, 'F6 live A after the picker')
+    // ── The two remaining Live human sinks: the leading Slash completion and
+    // the inline `/name` lexicon both read the SAME installed human catalog. ──
+    // The leading `/f6-live-keep` query paints the SAME Host description; the
+    // skill BODY stays a Host pre-step detail and is never a completion field.
+    await waitForPaintedSkills(clientA, '/f6-live-keep', {
+      visible: [keepDescription],
+      absent: [BODY_MARKER],
+    }, 'F6 live leading Slash completion')
+    await clearComposer(clientA, 'F6 live A after the slash completion')
     // A plain prompt token still gets the inline lexicon suggestion (not a
     // command invocation): the draft is not submitted.
     clientA.send('please /f6-live-keep')
@@ -521,7 +509,7 @@ export async function runLiveSkillsHot(context) {
         `F6 the inline skill lexicon never suggested the live skill:\n${frame}`)
     }
     await clearComposer(clientA, 'F6 live A after the inline lexicon')
-    trace('f6-live-human-sinks', { session: sessionY, picker: true, inlineLexicon: true })
+    trace('f6-live-human-sinks', { session: sessionY, slashCompletion: true, inlineLexicon: true })
 
     // ── RFL-001 negative: Add directory from a LIVE Session Workspace must
     // NOT switch the catalog to a sessionless standing target. ──────────────

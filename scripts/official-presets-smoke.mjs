@@ -28,6 +28,7 @@ import {
   assertNoCompatibilityFailures,
   candidateArgument,
   CompatFailure,
+  delay,
   distributionArgument,
   dshInvocation,
   fail,
@@ -126,75 +127,62 @@ export function directPromptAnswerVisible(pane) {
     .some(line => line.trimEnd() === '🐋  direct qualification answer')
 }
 
-function roundedFrameBodies(pane) {
-  const lines = stripTerminalControl(pane).split(/\r?\n/u)
-  const bodies = []
-  for (let start = 0; start < lines.length; start += 1) {
-    const left = lines[start].indexOf('╭')
-    if (left < 0) continue
-    const right = lines[start].indexOf('╮', left + 1)
-    if (right < 0) continue
-    const width = right - left + 1
-    const end = lines.findIndex((line, index) => index > start
-      && line[left] === '╰'
-      && line.slice(left, left + width).includes('╯'))
-    if (end >= 0) {
-      // Overlays are composited over the host frame. Keep only the columns
-      // belonging to this box; otherwise stale host text such as `/help`
-      // becomes indistinguishable from the filtered command rows.
-      bodies.push(lines.slice(start + 1, end).map(line => line.slice(left, left + width)))
-    }
-  }
-  return bodies
-}
-
-function roundedFrameBody(pane) {
+/**
+ * Read the CURRENT composer text and the Slash-completion popup painted below
+ * it. The popup is the editor's own SelectList (`→ /name` rows, or
+ * `No matching commands`), not a SettingsList overlay.
+ */
+export function slashCompletionSnapshot(pane) {
   const text = stripTerminalControl(pane)
   const lines = text.split(/\r?\n/u)
-  const bodies = roundedFrameBodies(text)
-  // A later frame can be partially clipped while a settings frame remains
-  // visible. Select the frame by its semantic hint instead of letting an
-  // unrelated trailing border hide the command catalog.
-  const semantic = bodies.findLast(body => body.some(line => line.includes('Type to search')))
-  if (semantic !== undefined) return semantic
-
-  // Some terminal captures clip a frame border at the viewport edge. The
-  // settings hint is still an unambiguous anchor, so retain the visible frame
-  // body up to that line, preserving the overlay's horizontal slice when its
-  // top border is available.
-  const hint = lines.findLastIndex(line => line.includes('Type to search'))
-  if (hint >= 0) {
-    const start = lines.findLastIndex((line, index) => index < hint && line.includes('╭'))
-    if (start >= 0) {
-      const left = lines[start].indexOf('╭')
-      const right = lines[start].indexOf('╮', left + 1)
-      if (left >= 0 && right >= 0) {
-        return lines.slice(start + 1, hint + 1).map(line => line.slice(left, right - left + 1))
+  const rules = lines.flatMap((line, index) => /^─+$/u.test(line.trim()) ? [index] : [])
+  let composerIndex = -1
+  let composerInput
+  if (rules.length >= 2) {
+    const start = rules.at(-2)
+    const end = rules.at(-1)
+    for (let index = start + 1; index < end; index += 1) {
+      const match = /^\s*❯\s?(.*)$/u.exec(lines[index])
+      if (match !== null) {
+        composerIndex = index
+        composerInput = match[1].trimEnd()
       }
     }
-    return lines.slice(Math.max(0, hint - 20), hint + 1)
   }
-  return bodies.at(-1) ?? []
-}
+  if (composerIndex < 0) {
+    for (let index = 0; index < lines.length; index += 1) {
+      const match = /^\s*❯\s?(.*)$/u.exec(lines[index])
+      if (match !== null) {
+        composerIndex = index
+        composerInput = match[1].trimEnd()
+      }
+    }
+  }
+  if (composerIndex < 0) return { composerInput: undefined, popupVisible: false, candidates: [], noMatches: false }
 
-export function settingsSearchSnapshot(pane) {
-  const body = roundedFrameBody(pane)
-  const searchVisible = body.some(line => line.includes('Type to search'))
-  const queryLine = body.find(line => /(?:^|│)\s*>\s*/u.test(line))
-  const query = queryLine
-    ?.replace(/^\s*│?\s*>\s*/u, '')
-    .replace(/\s*│\s*$/u, '')
-    .trim() ?? ''
-  const commandRows = body.flatMap(line => {
-    const match = line.match(/(?:^|│)\s*(?:❯|›|>)?\s*(\/[A-Za-z][A-Za-z0-9_-]*)(?=\s|│|$)/u)
-    return match === null ? [] : [match[1]]
-  })
-  return {
-    searchVisible,
-    query,
-    commandRows,
-    noMatches: body.some(line => line.includes('No matching settings')),
+  let start = composerIndex + 1
+  while (start < lines.length && /^\s*[│┌┐└┘─╭╮╰╯─]+\s*$/u.test(lines[start])) start += 1
+  const candidates = []
+  let popupVisible = false
+  let noMatches = false
+  for (let index = start; index < lines.length; index += 1) {
+    const line = lines[index]
+    // The dropdown rows are prefixed by `→ ` (selected) or two spaces.
+    const candidate = /^\s*(?:→|›|>)?\s*(\/[A-Za-z][A-Za-z0-9_-]*)(?=\s|$)/u.exec(line)
+    if (candidate !== null) {
+      candidates.push(candidate[1])
+      popupVisible = true
+      continue
+    }
+    if (line.includes('No matching commands')) {
+      popupVisible = true
+      noMatches = true
+      continue
+    }
+    if (popupVisible) break
+    if (line.trim() !== '') break
   }
+  return { composerInput, popupVisible, candidates, noMatches }
 }
 
 const PRESET_DEGRADATION_PATTERNS = [
@@ -222,7 +210,7 @@ function assertOfficialPresetMounted(presetId, tuiLog, tmux) {
 function officialPresetCatalogDiagnostic(presetId, tuiLog, tmux) {
   const pane = stripTerminalControl(tmux.capturePane())
   return [
-    `official preset ${presetId} settings snapshot: ${JSON.stringify(settingsSearchSnapshot(pane))}`,
+    `official preset ${presetId} slash completion snapshot: ${JSON.stringify(slashCompletionSnapshot(pane))}`,
     'tmux pane tail:',
     redact(tail(pane, 24)),
     'TUI log tail:',
@@ -626,6 +614,24 @@ export async function smokeOfficialPresetMounts(
     let probeWriteFailed = false
     let diagnosticErrors = []
     writeLauncher(launcher, invocation, env, presetId)
+    const typeComposerDraft = async (text, label) => {
+      failureStage = `${label}-composer`
+      tmux.sendLiteral(text)
+      await waitUntil(`official preset ${presetId} ${label} composer draft`, TIMEOUTS.command, () => {
+        if (!tmux.hasSession()) return false
+        return slashCompletionSnapshot(tmux.capturePane()).composerInput === text
+      }, 'COMPAT_INPUT_FAILURE')
+    }
+    const clearComposerDraft = async (label) => {
+      failureStage = `${label}-clear`
+      tmux.sendKey('Escape')
+      await delay(120)
+      tmux.sendLiteral('\x7f'.repeat(160))
+      await waitUntil(`official preset ${presetId} ${label} composer cleared`, TIMEOUTS.input, () => {
+        if (!tmux.hasSession()) return false
+        return slashCompletionSnapshot(tmux.capturePane()).composerInput === ''
+      }, 'COMPAT_INPUT_FAILURE')
+    }
     const sendComposerLine = async (text, label, timing, entry) => {
       if (timing !== undefined) timing.startedAt = Date.now()
       failureStage = `${label}-composer-visible`
@@ -856,40 +862,69 @@ export async function smokeOfficialPresetMounts(
         }
       }
 
-      await sendComposerLine('/help', 'help')
+      // Slash-completion channel POSITIVE CONTROL in THIS terminal: typing the
+      // already-existing `/new` candidate proves the popup is observable here.
+      // The retired `/help` SettingsList is no longer the catalog read surface.
+      await typeComposerDraft('/new', 'completion-positive-control')
+      failureStage = 'completion-positive-control'
+      try {
+        await waitUntil(`official preset ${presetId} /new completion`, TIMEOUTS.command, () => {
+          if (!tmux.hasSession()) return false
+          const snapshot = slashCompletionSnapshot(tmux.capturePane())
+          return snapshot.composerInput === '/new' && snapshot.candidates.includes('/new')
+        }, 'COMPAT_BOOT_FAILURE')
+      } catch (error) {
+        if (!(error instanceof CompatFailure)) throw error
+        fail(error.phase, `${error.message}\n${officialPresetCatalogDiagnostic(presetId, tuiLog, tmux)}`)
+      }
+      await clearComposerDraft('completion-positive-control')
+
+      // Same confirmed Session/PTY: the current preset's `/goal` candidate in
+      // the live composer popup. Standard/PTC expose it; Minimal does not.
+      // Only the draft is typed — `/goal` is never executed.
+      await typeComposerDraft('/goal', 'goal-completion')
+      const shouldHaveGoal = presetId !== 'minimal'
       failureStage = 'command-catalog'
       try {
-        await waitUntil(`official preset ${presetId} command catalog`, TIMEOUTS.command, () => {
+        await waitUntil(`official preset ${presetId} /goal composer`, TIMEOUTS.command, () => {
           if (!tmux.hasSession()) return false
-          const snapshot = settingsSearchSnapshot(tmux.capturePane())
-          return snapshot.searchVisible && snapshot.query === ''
+          return slashCompletionSnapshot(tmux.capturePane()).composerInput === '/goal'
         }, 'COMPAT_BOOT_FAILURE')
+        if (shouldHaveGoal) {
+          await waitUntil(`official preset ${presetId} /goal completion`, TIMEOUTS.command, () => {
+            if (!tmux.hasSession()) return false
+            return slashCompletionSnapshot(tmux.capturePane()).candidates.includes('/goal')
+          }, 'COMPAT_BOOT_FAILURE')
+        } else {
+          // A bounded observation is enough ONLY because the SAME session's
+          // `/new` positive control already proved the channel is painted; an
+          // empty popup is therefore a fact about this input, not a dead UI.
+          await delay(500)
+        }
       } catch (error) {
         if (!(error instanceof CompatFailure)) throw error
         fail(error.phase, `${error.message}\n${officialPresetCatalogDiagnostic(presetId, tuiLog, tmux)}`)
       }
-      tmux.sendLiteral('goal')
-      const shouldHaveGoal = presetId !== 'minimal'
-      try {
-        await waitUntil(`official preset ${presetId} goal command isolation`, TIMEOUTS.command, () => {
-          if (!tmux.hasSession()) return false
-          const pane = tmux.capturePane()
-          const snapshot = settingsSearchSnapshot(pane)
-          const hasOnlyGoal = snapshot.commandRows.length === 1 && snapshot.commandRows[0] === '/goal'
-          return snapshot.searchVisible
-            && snapshot.query === 'goal'
-            && hasOnlyGoal === shouldHaveGoal
-            && snapshot.noMatches === !shouldHaveGoal
-        }, 'COMPAT_BOOT_FAILURE')
-      } catch (error) {
-        if (!(error instanceof CompatFailure)) throw error
-        fail(error.phase, `${error.message}\n${officialPresetCatalogDiagnostic(presetId, tuiLog, tmux)}`)
+      const goalSnapshot = slashCompletionSnapshot(tmux.capturePane())
+      if (goalSnapshot.composerInput !== '/goal') {
+        fail('COMPAT_BOOT_FAILURE', `official preset ${presetId} lost the current /goal draft\n${officialPresetCatalogDiagnostic(presetId, tuiLog, tmux)}`)
       }
-      tmux.sendKey('Escape')
-      await waitUntil(`official preset ${presetId} command catalog close`, TIMEOUTS.input, () => {
-        if (!tmux.hasSession()) return false
-        return !settingsSearchSnapshot(tmux.capturePane()).searchVisible
-      }, 'COMPAT_BOOT_FAILURE')
+      if (goalSnapshot.candidates.includes('/goal') !== shouldHaveGoal) {
+        fail('COMPAT_BOOT_FAILURE', `official preset ${presetId} /goal completion mismatch (expected ${String(shouldHaveGoal)}): ${JSON.stringify(goalSnapshot)}`)
+      }
+      if (!shouldHaveGoal && goalSnapshot.popupVisible && !goalSnapshot.noMatches && goalSnapshot.candidates.length > 0) {
+        fail('COMPAT_BOOT_FAILURE', `official preset ${presetId} painted a non-empty popup for the absent /goal command: ${JSON.stringify(goalSnapshot)}`)
+      }
+      console.log(`OFFICIAL_PRESET_COMPLETION_EVIDENCE ${JSON.stringify({
+        presetId,
+        positiveControl: '/new',
+        composerInput: goalSnapshot.composerInput,
+        popupVisible: goalSnapshot.popupVisible,
+        candidates: goalSnapshot.candidates,
+        noMatches: goalSnapshot.noMatches,
+        expectGoal: shouldHaveGoal,
+      })}`)
+      await clearComposerDraft('goal-completion')
       await sendComposerLine('/exit', 'exit')
       failureStage = 'shutdown'
       await waitUntil(`official preset ${presetId} shutdown`, TIMEOUTS.dispose, () => !tmux.hasSession(), 'COMPAT_DISPOSE_FAILURE')

@@ -935,9 +935,14 @@ function cardlessController(options: {
   readonly clientCommands: ReturnType<typeof createClientCommandRegistry>
   readonly images: DraftImageStore
   readonly files: DraftFileStore
+  /** The production argument-shape classifier a suite needs; defaults to no skill invocation. */
+  readonly isSkillInvocation?: (parsed: { name: string; rawInput?: string } | undefined, text: string) => boolean
+  /** Whether this card-less mount is a PiTui presentation (no TSP builtin gate). */
+  readonly supportsTuiBuiltinUi?: boolean
 }) {
   const notices: { text: string; kind: 'info' | 'error' | undefined }[] = []
   const modelPrompts: string[] = []
+  let cleanedUp = false
   const core = createSessionOwnershipCore({ isSurfaceDisposed: () => false, resetForGeneration: () => {} })
   core.setCurrentOwner({} as never, 'session-remote')
   const scopeAuthority = createSessionScopeAuthority({
@@ -955,7 +960,7 @@ function cardlessController(options: {
     hostCatalogResolves: () => false,
     clientClaimsLine: (parsed: { name: string; rawInput?: string } | undefined) => options.clientCommands.claimsLine(parsed),
     isSkillWrapperName: () => false,
-    isSkillInvocation: () => false,
+    isSkillInvocation: options.isSkillInvocation ?? (() => false),
     withCommandDelivery: <T>(_delivery: unknown, run: () => T): T => run(),
     takeCommandDraftDisposition: () => undefined,
     clientCommands: options.clientCommands,
@@ -998,7 +1003,7 @@ function cardlessController(options: {
     app: () => options.composer,
     diag: { debug: () => {}, info: () => {}, warn: () => {}, error: () => {}, dispose: () => {} },
     signal: new AbortController().signal,
-    isCleanedUp: () => false,
+    isCleanedUp: () => cleanedUp,
     logError: () => {},
     liveAgent: () => agent,
     ownership: {
@@ -1055,8 +1060,7 @@ function cardlessController(options: {
     artifacts: { start: () => {} },
     shell: { capturePlacement: () => ({ anchor: undefined, turn: undefined, target: 'beginning' as const, acceptedOrder: 0 }), run: () => {}, interrupt: () => {}, cancelRun: () => false },
     supportsLocalShellCards: false,
-    // The TSP renderer: no PiTui builtin UI.
-    supportsTuiBuiltinUi: false,
+    supportsTuiBuiltinUi: options.supportsTuiBuiltinUi ?? false,
     retainsStaleDraftRestore: false,
     model: { selected: { get current() { return undefined } } },
     image: { attachments: () => undefined as never, llm: () => undefined as never },
@@ -1067,7 +1071,15 @@ function cardlessController(options: {
     requestExit: () => {},
     isPlanActive: () => false,
   })
-  return { controller, notices, modelPrompts }
+  return {
+    controller,
+    notices,
+    modelPrompts,
+    /** Replace the live owner: the scope captured by the submission is stale. */
+    replaceOwner: () => core.setCurrentOwner({} as never, 'session-remote'),
+    /** Mark the surface disposed while an accepted command result is in flight. */
+    setCleanedUp: (value: boolean) => { cleanedUp = value },
+  }
 }
 
 test('a card-less Remote /image with no argument publishes exactly one Usage error and starts no intake', async (t) => {
@@ -1121,6 +1133,87 @@ test('a card-less Remote /attach with no argument publishes exactly one Usage er
   assert.equal(h.composer.getDraft(), '/attach', 'the refused line returns to the editor, never a token')
   assert.deepEqual(notices, [], 'no second (submission-level) notice duplicates the refusal')
   assert.deepEqual(modelPrompts, [])
+})
+
+test('a card-less Remote bare /skill publishes exactly one Usage error and starts no Skill write', async (t) => {
+  const life = testLifecycle(t)
+  const h = mountedHarness({ cwd: life.tempDir('dsh-cardless-skill-usage-') })
+  const { controller, notices, modelPrompts } = cardlessController({
+    composer: h.composer,
+    clientCommands: h.clientCommands,
+    images: h.imageStore,
+    files: h.fileStore,
+    supportsTuiBuiltinUi: true,
+  })
+
+  // The bare line is a TUI-local command, so the card-less route executes it
+  // through the REAL Client registry and the existing error-only result-notice
+  // sink is its only possible visible owner.
+  controller.submit('/skill', 'enter')
+  await waitFor(() => h.composer.notices.length === 1)
+
+  assert.deepEqual(h.composer.notices, [{
+    text: 'Usage: /skill <name> [args]. Type / to discover available skills.',
+    kind: 'error',
+  }], 'the fixed usage error is visible exactly once')
+  assert.deepEqual(notices, [], 'no second (submission-level) notice duplicates the usage error')
+  assert.deepEqual(modelPrompts, [], 'the bare usage line never becomes a model prompt')
+  assert.equal(h.composer.getDraft(), '/skill', 'the refused line returns to the editor')
+})
+
+test('a bare /skill result notice is suppressed when the captured scope moved or the surface was disposed', async (t) => {
+  const life = testLifecycle(t)
+  for (const fact of ['moved', 'disposed'] as const) {
+    const h = mountedHarness({ cwd: life.tempDir(`dsh-cardless-skill-${fact}-`) })
+    let executed = false
+    let release!: (execution: ClientCommandExecution) => void
+    const held = new Promise<ClientCommandExecution>(resolve => { release = resolve })
+    const heldCommands = {
+      claimsLine: (parsed: { name: string } | undefined) => parsed?.name === 'skill',
+      execute: () => { executed = true; return held },
+    } as unknown as ReturnType<typeof createClientCommandRegistry>
+    const cardless = cardlessController({
+      composer: h.composer,
+      clientCommands: heldCommands,
+      images: h.imageStore,
+      files: h.fileStore,
+      supportsTuiBuiltinUi: true,
+    })
+    cardless.controller.submit('/skill', 'enter')
+    await waitFor(() => executed)
+    if (fact === 'moved') cardless.replaceOwner()
+    else cardless.setCleanedUp(true)
+    release({ commandId: 'cmd-skill', result: { kind: 'error', text: 'Usage: /skill <name> [args]. Type / to discover available skills.' } })
+    for (let index = 0; index < 100; index += 1) await Promise.resolve()
+    assert.deepEqual(cardless.notices, [], `${fact}: a stale/disposed scope never receives the old result`)
+    assert.equal(h.composer.notices.length, 0, `${fact}: no notice reaches the mounted composer`)
+  }
+})
+
+test('an explicit /skill <name> line never takes the bare-command error notice on the card-less route', async (t) => {
+  const life = testLifecycle(t)
+  const h = mountedHarness({ cwd: life.tempDir('dsh-cardless-skill-explicit-') })
+  const usage = 'Usage: /skill <name> [args]. Type / to discover available skills.'
+  const { controller, notices } = cardlessController({
+    composer: h.composer,
+    clientCommands: h.clientCommands,
+    images: h.imageStore,
+    files: h.fileStore,
+    supportsTuiBuiltinUi: true,
+    isSkillInvocation: (parsed, _text) => parsed?.name === 'skill' && (parsed.rawInput?.trim() ?? '') !== '',
+  })
+
+  // First prove the bare form DOES publish the fixed usage error exactly once.
+  controller.submit('/skill', 'enter')
+  await waitFor(() => h.composer.notices.length === 1)
+  assert.deepEqual(h.composer.notices, [{ text: usage, kind: 'error' }])
+  // The explicit line is argument-shaped and must follow the Skill invocation
+  // route, never the Client-command error-result branch: no second usage text.
+  controller.submit('/skill demo', 'enter')
+  for (let index = 0; index < 100; index += 1) await Promise.resolve()
+  assert.equal(h.composer.notices.filter(notice => notice.text === usage).length, 1,
+    'the explicit invocation never republishes the bare usage error')
+  assert.deepEqual(notices, [], 'no submission-level notice duplicates the bare usage error')
 })
 
 test('a card-less Remote /image with a real path reaches the mounted composer through the REAL controller', async (t) => {

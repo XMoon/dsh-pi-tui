@@ -25,13 +25,13 @@ test('a plain prompt with an image is NOT a command rejection', () => {
 test('a local command with an image placeholder is rejected', () => {
   const store = storeWithImage()
   const image = store.values()[0]!
-  assert.equal(commandRejectsImages({ name: 'help' }, `/help ${image.placeholder}`, store, LOCAL_COMMANDS.has('help')), true)
+  assert.equal(commandRejectsImages({ name: 'settings' }, `/settings ${image.placeholder}`, store, LOCAL_COMMANDS.has('settings')), true)
   assert.equal(commandRejectsImages({ name: 'status' }, `/status ${image.placeholder}`, store, LOCAL_COMMANDS.has('status')), true)
 })
 
 test('a command without images is never rejected', () => {
   const store = storeWithImage()
-  assert.equal(commandRejectsImages({ name: 'help' }, '/help', store, LOCAL_COMMANDS.has('help')), false)
+  assert.equal(commandRejectsImages({ name: 'settings' }, '/settings', store, LOCAL_COMMANDS.has('settings')), false)
   assert.equal(commandRejectsImages({ name: 'model' }, '/model', store, LOCAL_COMMANDS.has('model')), false)
 })
 
@@ -43,7 +43,7 @@ test('a skill-style slash prompt with an image is AGENT input and NOT rejected (
 
 test('a stale placeholder text is not a rejection (no staged image)', () => {
   const store = new DraftImageStore()
-  assert.equal(commandRejectsImages({ name: 'help' }, '/help [image #1 (800×600)]', store, LOCAL_COMMANDS.has('help')), false)
+  assert.equal(commandRejectsImages({ name: 'settings' }, '/settings [image #1 (800×600)]', store, LOCAL_COMMANDS.has('settings')), false)
 })
 
 test('every LOCAL_COMMANDS entry is covered by the rejection matrix', () => {
@@ -84,7 +84,7 @@ test('normalizeSkillInvocation rewrites /skill <name> <args> to /<name> <args> (
   assert.equal(normalizeSkillInvocation('/skill grilling foo bar'), '/grilling foo bar')
   assert.equal(normalizeSkillInvocation('/skill matrix-cli'), '/matrix-cli')
   assert.equal(normalizeSkillInvocation('/skill'), undefined, 'bare picker stays unnormalized')
-  assert.equal(normalizeSkillInvocation('/help me'), undefined, 'non-skill commands untouched')
+  assert.equal(normalizeSkillInvocation('/settings me'), undefined, 'non-skill commands untouched')
   assert.equal(normalizeSkillInvocation('plain prompt'), undefined)
 })
 
@@ -105,7 +105,7 @@ test('a LIVE skill wrapper is agent-facing even when a client contribution share
     'a live skill wrapper is agent-facing (multimodal), never a local command')
   assert.equal(isLocalCommandLine('grilling', undefined, contribution, false), true,
     'without a live wrapper the contribution IS the local client command')
-  assert.equal(isLocalCommandLine('help', wrapper, contribution, false), true, 'core local commands stay local')
+  assert.equal(isLocalCommandLine('settings', wrapper, contribution, false), true, 'core local commands stay local')
   assert.equal(isLocalCommandLine('plain', wrapper, contribution, false), false, 'an unknown name is not local')
 })
 
@@ -141,10 +141,10 @@ test('a HOST claim outranks a same-named client contribution in the attachment g
   )
   assert.equal(commandRejectsImages({ name: 'deploy' }, `/deploy prod ${image.placeholder}`, store, colliding), false,
     'a host-claimed line is never a local command (the host route owns it)')
-  const core = commandIsLocalForAttachments({ name: 'help', rawInput: '' }, undefined, undefined, true)
+  const core = commandIsLocalForAttachments({ name: 'settings', rawInput: '' }, undefined, undefined, true)
   assert.equal(core, false,
     '§D3 line authority (review round 2): a host-RESOLVED name is never TUI-local — even a LOCAL_COMMANDS member defers to the host route when the catalog claims its line')
-  assert.equal(commandRejectsImages({ name: 'help' }, `/help ${image.placeholder}`, store, core), false,
+  assert.equal(commandRejectsImages({ name: 'settings' }, `/settings ${image.placeholder}`, store, core), false,
     'the host descriptor owns the attachment policy of its own claimed line')
 })
 
@@ -217,9 +217,9 @@ test('parity matrix (review round 2 external gate): the TUI-built-in observable 
   const noHost = false
   // /settings bare: still an immediately-executed TUI local command.
   assert.equal(isLocalCommandLine('settings', undefined, undefined, noHost), true)
-  // /help while running: still the queue placeholder (a local command never
+  // /settings while running: still the queue placeholder (a local command never
   // steers), NOT the ordinary queue/steer policy.
-  assert.equal(resolveSubmitDelivery({ name: 'help', rawInput: '' }, true, 'enter', 'steer', isLocalCommandLine('help', undefined, undefined, noHost)), 'queue')
+  assert.equal(resolveSubmitDelivery({ name: 'settings', rawInput: '' }, true, 'enter', 'steer', isLocalCommandLine('settings', undefined, undefined, noHost)), 'queue')
   // /export with NO external Host claim: the TUI built-in path (local).
   assert.equal(isLocalCommandLine('export', undefined, undefined, noHost), true)
   // An argued line of a NO-collision TUI built-in: execute-kind built-ins keep

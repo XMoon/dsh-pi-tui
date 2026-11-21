@@ -742,7 +742,6 @@ test('a TUI builtin this renderer cannot run is never offered as a bare candidat
 
     const withdrawn: Array<[token: string, name: string]> = [
       ['/set', 'settings'],
-      ['/hel', 'help'],
       ['/log', 'login'],
       ['/log', 'logout'],
       ['/mod', 'model'],
@@ -777,7 +776,7 @@ test('a TUI builtin this renderer cannot run is never offered as a bare candidat
 
     // The business behaviour is UNCHANGED: submitting the original text still takes
     // the existing post-classification TSP admission refusal and restores the draft.
-    for (const line of ['/settings', '/help']) {
+    for (const line of ['/settings']) {
       // The refusal text is re-painted by every later frame, so only a notice id
       // minted AFTER this Enter can prove THIS command was really processed.
       const seenNotices = new Set(refusalNoticeIds(fixture))

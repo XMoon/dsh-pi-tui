@@ -5,7 +5,7 @@
  * 1. ONE canonical physical-key identity (aliases and modifier order can
  *    never bypass conflict / leader collision).
  * 2. declared / effective / shadowed / conflicted rules are distinct —
- *    runtime, /help, /keybindings, footer and editor-submit sync see the
+ *    runtime, /keybindings, footer and editor-submit sync see the
  *    SAME facts; nothing advertises a key that cannot fire.
  * 3. editor-owned submit lives in the unified rule model (conflict /
  *    shadow / fail-soft all apply), while direct submit stays on the fork
@@ -1118,7 +1118,7 @@ test('a working submit remap is not advertised alongside the replaced Enter (sna
   assert.equal(manager.keyHint('app.input.submit'), 'Ctrl+X')
   // Round-9 finding: the keymap snapshot iterated the raw top-trigger set
   // and re-advertised the builtin Enter next to the working override —
-  // /keybindings lied while /help was right. Snapshot now projects the
+  // /keybindings lied while the effective key hint was right. Snapshot now projects the
   // SAME visible rules as keysFor/keyHint/editorSubmitKeysFor.
   const binding = manager.snapshot().bindings.find(entry => entry.action === 'app.input.submit')
   assert.ok(binding !== undefined)

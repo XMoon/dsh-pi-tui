@@ -3307,13 +3307,13 @@ test('a written occurrence whose row is beyond the recall window is not re-inlin
 })
 
 test('a sessionless occurrence another owner wrote never re-enters the new Session', async () => {
-  // F6: a deferred `/help` writes a SESSIONLESS row. The occurrence IS settled,
+  // F6: a deferred `/settings` writes a SESSIONLESS row. The occurrence IS settled,
   // but its row is not part of any Session's projection, so the reseed that
   // adopts the pool must not re-inline it.
   const { vt, app, submitted, settleAt } = startApp()
-  await submitThroughEditor(app, vt, '/help')          // the sessionless pool occurrence
+  await submitThroughEditor(app, vt, '/settings')          // the sessionless pool occurrence
   await submitThroughEditor(app, vt, 'first B prompt') // the occurrence that creates B
-  assert.deepEqual(submitted, ['/help', 'first B prompt'])
+  assert.deepEqual(submitted, ['/settings', 'first B prompt'])
   settleAt(0, undefined, 'written')                    // the row is sessionless
   app.beginInputHistoryScope('B')                      // the pool is adopted by B
   app.resetInputHistory([], 'B')
@@ -3537,15 +3537,15 @@ test('the first Session publication isolates the boot recall of the CWD history'
 })
 
 test('the first publication never re-seeds an occurrence another identity already wrote', async () => {
-  // A sessionless `/help` (its row is written with `sessionId: undefined`) followed
+  // A sessionless `/settings` (its row is written with `sessionId: undefined`) followed
   // by the prompt that creates Session B: the publication must NOT re-seed the
   // sessionless occurrence into B's temporary recall, while the accepted but still
   // unpersisted prompt stays.
   const { vt, app, submitted, settleAt } = startApp()
-  await submitThroughEditor(app, vt, '/help')
+  await submitThroughEditor(app, vt, '/settings')
   await submitThroughEditor(app, vt, 'first prompt')
-  assert.deepEqual(submitted, ['/help', 'first prompt'])
-  settleAt(0, undefined, 'written')       // /help wrote a SESSIONLESS row
+  assert.deepEqual(submitted, ['/settings', 'first prompt'])
+  settleAt(0, undefined, 'written')       // /settings wrote a SESSIONLESS row
   app.beginInputHistoryScope('B')         // the boot recall is dropped, B published
   app.setDraft('')
   vt.sendInput('\x1b[A')
@@ -3555,7 +3555,7 @@ test('the first publication never re-seeds an occurrence another identity alread
   vt.sendInput('\x1b[A')
   vt.sendInput('\x1b[A')
   await vt.waitForRender()
-  assert.notEqual(app.getDraft(), '/help',
+  assert.notEqual(app.getDraft(), '/settings',
     'a sessionless occurrence already written under another identity is not re-seeded')
   app.resetInputHistory([], 'B')
   assert.deepEqual(app.getInputHistory(), ['first prompt'],
@@ -3565,11 +3565,11 @@ test('the first publication never re-seeds an occurrence another identity alread
 
 test('a skipped sessionless occurrence is not re-seeded into the new Session either', async () => {
   // The sessionless identity decides cross-Session visibility, not whether a row
-  // happened to be written: `/help` skipped by the CWD-level dedupe is as foreign
+  // happened to be written: `/settings` skipped by the CWD-level dedupe is as foreign
   // as a written sessionless row, and must not appear in the new Session's recall
   // even before hydration replaces the mirror.
   const { vt, app, settleAt } = startApp()
-  await submitThroughEditor(app, vt, '/help')
+  await submitThroughEditor(app, vt, '/settings')
   await submitThroughEditor(app, vt, 'first prompt')
   settleAt(0, undefined, 'written')    // a sessionless row
   settleAt(0, undefined, 'skipped')    // (idempotent: the durable fact stays sessionless)

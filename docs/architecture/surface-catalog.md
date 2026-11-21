@@ -185,14 +185,16 @@ same-target refresh:
   (a failed/incomplete skills observation never replaces it)
 ```
 
-`/skill <name>` and per-skill wrappers are agent-facing prompts: they follow the
-resolved `queue|steer` mode, build the normalized `/<name> <args>` line, and
-inject the body only when the Host loader does not (without a loader, keep the
-order-preserving steer even under queue mode). Mode is resolved once at the
-submitting gesture boundary; a picker selection is its own boundary; a TUI-owned
-skill command with no submission delivers queued. Never re-read busyEnter/agent
-status during asynchronous preparation, and never merge wrapper/skill/Host
-command precedence.
+Explicit `/skill <name>` and per-skill wrappers are agent-facing prompts: they
+share `loadSkill`, follow the resolved `queue|steer` mode, build the normalized
+`/<name> <args>` line, and inject the body only when the Host loader does not
+(without a loader, keep the order-preserving steer even under queue mode). Mode
+is resolved once at the submitting gesture boundary; a TUI-owned skill command
+with no submission delivers queued. The bare `/skill` form is a usage-only local
+command and never reads the catalog or starts a Skill write. Inline `/name`
+references only insert text; the official Host `agent/pre-step` gesture remains
+their activation authority. Never re-read busyEnter/agent status during
+asynchronous preparation, and never merge wrapper/skill/Host command precedence.
 
 ## Command-line precedence and attachment declaration
 

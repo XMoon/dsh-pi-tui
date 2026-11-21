@@ -19,7 +19,7 @@ import {
   officialPresetStatusResultMatches,
   officialPresetStatusVisible,
   presetDegradationLine,
-  settingsSearchSnapshot,
+  slashCompletionSnapshot,
   smokeOfficialPresetMounts,
   writeOfficialPresetFailureEvidence,
 } from '../../scripts/official-presets-smoke.mjs'
@@ -126,11 +126,11 @@ test('the preset status classifier requires a qualified Session and pairs by com
     kind: 'success', text: 'preset: cordis · default: cordis', observedAt: 102, pairedRun: true,
   }
   const unrelatedRun = {
-    recordType: 'event', sessionId, seq: 14, type: 'command/run', commandId: 'cmd-help',
-    name: 'help', args: '', observedAt: 103, pairedRun: true,
+    recordType: 'event', sessionId, seq: 14, type: 'command/run', commandId: 'cmd-new',
+    name: 'new', args: '', observedAt: 103, pairedRun: true,
   }
   const unrelatedDone = {
-    recordType: 'event', sessionId, seq: 15, type: 'command/done', commandId: 'cmd-help',
+    recordType: 'event', sessionId, seq: 15, type: 'command/done', commandId: 'cmd-new',
     kind: 'success', observedAt: 104, pairedRun: true,
   }
   const foreignDone = { ...done, sessionId: 'session-2', seq: 99, observedAt: 105 }
@@ -207,73 +207,58 @@ test('Direct prompt diagnostics expose counts and stable model-request facts onl
   assert.doesNotMatch(diagnostic, /PRIVATE_SESSION_ID|PRIVATE_MESSAGE_ID|TOKEN_SENTINEL|SECRET_SENTINEL|FAKE_SECRET_123|private-profile|private-session|full prompt|auxiliary title message|runtime log/u)
 })
 
-test('official preset settings snapshots read the filtered /help frame rather than stale pane text', () => {
+test('official preset slash completion snapshots read the live composer popup rather than stale pane text', () => {
   const goalPane = [
-    'transcript mentioned /goal before the overlay',
-    '╭────────────────────────╮',
-    '│ > goal                 │',
-    '│                        │',
-    '│ ❯ /goal               │',
-    '│                        │',
-    '│ Type to search · Enter/Space to change · Esc to cancel │',
-    '╰────────────────────────╯',
+    'transcript mentioned /goal before the composer',
+    '────────',
+    '❯ /goal',
+    '────────',
+    '  → /goal  Set the session goal',
+    '    /goalx something else',
   ].join('\n')
-  assert.deepEqual(settingsSearchSnapshot(goalPane), {
-    searchVisible: true,
-    query: 'goal',
-    commandRows: ['/goal'],
+  assert.deepEqual(slashCompletionSnapshot(goalPane), {
+    composerInput: '/goal',
+    popupVisible: true,
+    candidates: ['/goal', '/goalx'],
     noMatches: false,
   })
 
   const minimalPane = [
-    'transcript mentioned /goal before the overlay',
-    '╭────────────────────────╮',
-    '│ > goal                 │',
-    '│ No matching settings   │',
-    '│ Type to search · Enter/Space to change · Esc to cancel │',
-    '╰────────────────────────╯',
+    'transcript mentioned /goal before the composer',
+    '────────',
+    '❯ /goal',
+    '────────',
+    '    No matching commands',
   ].join('\n')
-  assert.deepEqual(settingsSearchSnapshot(minimalPane), {
-    searchVisible: true,
-    query: 'goal',
-    commandRows: [],
+  assert.deepEqual(slashCompletionSnapshot(minimalPane), {
+    composerInput: '/goal',
+    popupVisible: true,
+    candidates: [],
     noMatches: true,
   })
 
-  // A capturing overlay is composited over the host frame, so the overlay's
-  // left border can share a line with stale host text. The parser must slice
-  // the inner frame before looking for query text or command rows.
-  const compositedPane = [
-    '╭──────────────────────────────────────────────────────────────────────────────╮',
-    '│ 🐋  session session-1                                                        │',
-    '│ de╭──────────────────────────────────────────────────────────────────────╮   │',
-    '│ /h│ >                                                                    │   │',
-    '╰───│                                                                      │───╯',
-    '    │   (1/48)                                                             │',
-    '────│   Type to search · Enter/Space to change · Esc to cancel             │────',
-    '❯   ╰──────────────────────────────────────────────────────────────────────╯',
+  // Stale transcript text (even an old `/goal` mention above the composer)
+  // never becomes a completion candidate: only rows BELOW the composer box are
+  // read.
+  const transcriptOnlyPane = [
+    '🎛 /goal was mentioned here in history',
+    '────────',
+    '❯ /go',
+    '────────',
+    'status line',
   ].join('\n')
-  assert.deepEqual(settingsSearchSnapshot(compositedPane), {
-    searchVisible: true,
-    query: '',
-    commandRows: [],
+  assert.deepEqual(slashCompletionSnapshot(transcriptOnlyPane), {
+    composerInput: '/go',
+    popupVisible: false,
+    candidates: [],
     noMatches: false,
   })
 
-  const compositedGoalPane = [
-    '╭──────────────────────────────────────────────────────────────────────────────╮',
-    '│ 🐋  session session-1                                                        │',
-    '│ de╭──────────────────────────────────────────────────────────────────────╮   │',
-    '│ /h│ > goal                                                               │   │',
-    '╰───│ ›/goal                                                             │───╯',
-    '    │                                                                      │',
-    '────│   Type to search · Enter/Space to change · Esc to cancel             │────',
-    '❯   ╰──────────────────────────────────────────────────────────────────────╯',
-  ].join('\n')
-  assert.deepEqual(settingsSearchSnapshot(compositedGoalPane), {
-    searchVisible: true,
-    query: 'goal',
-    commandRows: ['/goal'],
+  // No composer at all is an unproven input fact, never a PASSED empty list.
+  assert.deepEqual(slashCompletionSnapshot('boot frame without an editor'), {
+    composerInput: undefined,
+    popupVisible: false,
+    candidates: [],
     noMatches: false,
   })
 })
@@ -569,23 +554,20 @@ test('a successful mocked preset matrix creates no failure artifact', async (t) 
     const sessionId = `test-${presetId}-session`
     let alive = false
     let line = ''
-    let searchVisible = false
-    let searchQuery = ''
     let sessionLive = false
     let statusText
+    const popupRows = () => {
+      if (!line.startsWith('/')) return []
+      if (line === '/new') return ['  → /new  Start a new session']
+      if (line === '/goal') {
+        return presetId === 'minimal'
+          ? ['    No matching commands']
+          : ['  → /goal  Set the session goal']
+      }
+      return ['    No matching commands']
+    }
     const pane = () => {
       if (!alive) return ''
-      if (searchVisible) {
-        return [
-          '╭────────────────────────╮',
-          `│ > ${searchQuery.padEnd(18)} │`,
-          ...(presetId === 'minimal' && searchQuery === 'goal'
-            ? ['│ No matching settings   │']
-            : ['│ ❯ /goal                │']),
-          '│ Type to search · Enter/Space to change · Esc to cancel │',
-          '╰────────────────────────╯',
-        ].join('\n')
-      }
       return [
         ...(sessionLive ? [`session  ${sessionId}`] : []),
         '🎛 /new [ok]',
@@ -593,6 +575,7 @@ test('a successful mocked preset matrix creates no failure artifact', async (t) 
         '────────',
         `❯ ${line}`,
         '────────',
+        ...popupRows(),
       ].join('\n')
     }
     return {
@@ -600,11 +583,13 @@ test('a successful mocked preset matrix creates no failure artifact', async (t) 
       hasSession: () => alive,
       capturePane: pane,
       sendLiteral: text => {
-        if (searchVisible) searchQuery += text
-        else line = text
+        for (const character of text) {
+          if (character === '\x7f') line = line.slice(0, -1)
+          else line += character
+        }
       },
       sendKey: key => {
-        if (key === 'Escape') { searchVisible = false; return }
+        if (key === 'Escape') return
         if (key !== 'Enter') return
         const submitted = line
         line = ''
@@ -623,9 +608,6 @@ test('a successful mocked preset matrix creates no failure artifact', async (t) 
             { recordType: 'event', sessionId, seq: 12, type: 'command/run', commandId: `cmd-${presetId}`, name: 'preset', args: ' status', observedAt: runAt, pairedRun: true },
             { recordType: 'event', sessionId, seq: 13, type: 'command/done', commandId: `cmd-${presetId}`, kind: 'success', text: statusText, observedAt: runAt, pairedRun: true },
           ].map(record => JSON.stringify(record)).join('\n') + '\n')
-        } else if (submitted === '/help') {
-          searchVisible = true
-          searchQuery = ''
         } else if (submitted === '/exit') {
           alive = false
         }
