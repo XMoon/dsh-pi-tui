@@ -39,6 +39,7 @@ import {
   type TuiExtensionDiagnostics,
 } from '../plugin-manager/extension-inventory.ts'
 import type { SurfaceExtensionService } from './extension-runtime.ts'
+import type { ClientExtensionObservationSource } from '../client-extensions/mount-owner.ts'
 
 /**
  * The presentation capabilities the composition zone injects. The page lays
@@ -61,6 +62,9 @@ export interface PluginManagerWorkspacePanelDeps {
   readonly onYieldNavigation: () => void
   /** PR-5/MAC-09 v2: the Settings root's in-lease Computer Use navigation. */
   readonly openComputerUseSettings?: () => string | undefined
+  /** R8-E PR-4: the CURRENT Client's live Loader observation source. It is a
+   *  read/notification port only; the page never writes Host or Client state. */
+  readonly clientExtensions?: () => ClientExtensionObservationSource | undefined
   /** Release the owner once, on a REAL teardown (never a navigation yield). */
   readonly onDispose: () => void
 }
@@ -102,6 +106,8 @@ export interface PluginManagerRuntimeOptions {
   readonly createPanel: PluginManagerPanelFactory
   /** Read-only inventory-commit observer owned by the composition zone. */
   readonly onInventoryCommitted?: (snapshot: import('../../runtime/plugin-manager-port.ts').PluginManagerSnapshot) => void
+  /** R8-E PR-4: the CURRENT Client's real per-package Loader observations. */
+  readonly clientExtensions?: () => ClientExtensionObservationSource | undefined
 }
 
 /** The surface Plugin Manager owner `createSurfaceRuntime()` consumes. */
@@ -159,10 +165,12 @@ export function createPluginManagerRuntime(options: PluginManagerRuntimeOptions)
             },
             extensionService,
             extensionService.api().capabilities,
+            options.clientExtensions?.()?.observation(),
           )
         },
         onYieldNavigation,
         ...(openComputerUseSettings === undefined ? {} : { openComputerUseSettings }),
+        ...(options.clientExtensions === undefined ? {} : { clientExtensions: options.clientExtensions }),
         onDispose: () => { claim.release() },
       })
       const page = (onYieldNavigation: () => void, openComputerUseSettings?: () => string | undefined): Component | undefined => {

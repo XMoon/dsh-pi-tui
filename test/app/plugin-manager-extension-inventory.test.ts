@@ -8,7 +8,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { observeTuiExtensions } from '../../src/app/plugin-manager/extension-inventory.ts'
+import { classifyCurrentClientPluginStatus, observeTuiExtensions } from '../../src/app/plugin-manager/extension-inventory.ts'
 
 test('aggregates contributions per owner with health and capability use', () => {
   const observations = observeTuiExtensions({
@@ -31,4 +31,24 @@ test('aggregates contributions per owner with health and capability use', () => 
   assert.equal(observations[2]!.usesUnstableCapability, true)
   assert.equal(observations[2]!.health, 'failed')
   assert.ok(Object.isFrozen(observations[0]))
+})
+
+test('classifies the CURRENT Client ./tui status without deriving it from Host enabled', () => {
+  const active = [{ packageName: '@r8/a', phase: 'active' as const, entryId: 'client-a', configRevision: 2 }]
+  assert.deepEqual(classifyCurrentClientPluginStatus('@r8/a', true, true, active), {
+    status: 'ACTIVE',
+    label: 'Active',
+    entryId: 'client-a',
+    configRevision: 2,
+  })
+  // Host selected but Client failed/reloading is still reported independently.
+  assert.equal(classifyCurrentClientPluginStatus('@r8/a', true, true, [{ ...active[0]!, phase: 'error', reason: 'apply failed' }]).status, 'ERROR')
+  assert.equal(classifyCurrentClientPluginStatus('@r8/a', true, true, [{ ...active[0]!, phase: 'reload-required' }]).status, 'RELOAD_REQUIRED')
+  assert.equal(classifyCurrentClientPluginStatus('@r8/a', true, true, [{ ...active[0]!, phase: 'pending' }]).status, 'PENDING')
+  // No observation: a normal Host plugin is NOT opted in, never an error.
+  assert.equal(classifyCurrentClientPluginStatus('@r8/plain', true, true, []).status, 'NOT_OPTED_IN')
+  assert.equal(classifyCurrentClientPluginStatus('@r8/plain', true, false, []).status, 'NOT_SELECTED')
+  assert.equal(classifyCurrentClientPluginStatus('@r8/missing', false, true, []).status, 'UNAVAILABLE')
+  // Two live observations for one bundle name are unavailable, not a guess.
+  assert.equal(classifyCurrentClientPluginStatus('@r8/a', true, true, [active[0]!, { ...active[0]!, entryId: 'client-b' }]).status, 'UNAVAILABLE')
 })

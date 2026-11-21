@@ -1139,6 +1139,35 @@ test('the Host default-listing decision is preserved as a explained fact', () =>
   assert.equal(cardByName(model, 'hidden-by-default')!.listedByDefault, false)
 })
 
+test('one bundle Detail states Host installed/selected AND the CURRENT Client status independently (PR-4)', () => {
+  const model = buildPluginManagerModel(snapshot([bundle({ name: '@r8/a', enabled: true, installed: true })], []), new Map())
+  const card = cardByName(model, '@r8/a')!
+  const active = buildPluginDetailView(card, [], [{ packageName: '@r8/a', phase: 'active', entryId: 'client-a', configRevision: 2 }])
+  const activeFacts = active.groups.flatMap(group => group.facts)
+  assert.equal(activeFacts.find(entry => entry.label === 'Host package')?.value, 'Installed')
+  assert.equal(activeFacts.find(entry => entry.label === 'Host profile')?.value, 'Selected')
+  assert.equal(activeFacts.find(entry => entry.label === 'This Client ./tui')?.value, 'Active')
+
+  const error = buildPluginDetailView(card, [], [{ packageName: '@r8/a', phase: 'error', entryId: 'client-a', reason: 'apply failed' }])
+  const errorFacts = error.groups.flatMap(group => group.facts)
+  assert.equal(errorFacts.find(entry => entry.label === 'This Client ./tui')?.value, 'Error')
+  assert.equal(errorFacts.find(entry => entry.label === 'Client reason')?.value, 'apply failed')
+  assert.equal(errorFacts.find(entry => entry.label === 'Host profile')?.value, 'Selected', 'a Client error never rewrites the Host selection')
+
+  const plain = buildPluginManagerModel(snapshot([bundle({ name: '@r8/plain', enabled: true, installed: true })], []), new Map())
+  const notOptedIn = buildPluginDetailView(cardByName(plain, '@r8/plain')!, [], [])
+  assert.equal(
+    notOptedIn.groups.flatMap(group => group.facts).find(entry => entry.label === 'This Client ./tui')?.value,
+    'Not opted in',
+    'an ordinary DSH plugin is not presented as a Host or Client error',
+  )
+
+  // Without a Client observation source the same Detail paints no invented
+  // Client facts at all.
+  const noSource = buildPluginDetailView(card)
+  assert.equal(noSource.groups.flatMap(group => group.facts).some(entry => entry.label === 'This Client ./tui'), false)
+})
+
 test('the Status group names the profile selection for a bundle and effective enablement for an entry', () => {
   // The SAME Host `enabled` boolean means "profile selection" for a bundle…
   const bundleModel = buildPluginManagerModel(snapshot([bundle({ name: 'selected', enabled: true })], []), new Map())

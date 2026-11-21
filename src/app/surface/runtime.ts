@@ -973,6 +973,12 @@ export interface SurfaceRuntimeOptions {
    */
   readonly onPluginInventoryCommitted?: (snapshot: import('../../runtime/plugin-manager-port.ts').PluginManagerSnapshot) => void
   /**
+   * R8-E PR-4: the CURRENT Client's real per-package Loader observation source.
+   * The Plugin Manager page reads it late-bound for its independent
+   * `This Client ./tui` facts; it is never part of the Host snapshot.
+   */
+  readonly clientExtensionObservation?: () => import('../client-extensions/mount-owner.ts').ClientExtensionObservationSource | undefined
+  /**
    * PR2 (experimental, absent on the production path): a READ-ONLY observer of
    * the active transcript projection the surface has ALREADY selected and
    * committed. It is not an event/fold/window owner and must not drive the
@@ -1667,6 +1673,9 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     ...(options.onPluginInventoryCommitted === undefined
       ? {}
       : { onInventoryCommitted: options.onPluginInventoryCommitted }),
+    ...(options.clientExtensionObservation === undefined
+      ? {}
+      : { clientExtensions: options.clientExtensionObservation }),
   })
   // A4-7 presentation event routing (plan §16): the injected routing source the
   // router and this aggregate's own pending-input/search coordination read. The

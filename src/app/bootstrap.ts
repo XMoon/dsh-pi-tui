@@ -971,6 +971,12 @@ export function applyRunnerWithRuntime(
         }
         directClientExtensionReconcile?.(snapshot)
       },
+      // R8-E PR-4: the CURRENT Client's real per-package Loader observations,
+      // late-bound (Direct owns the runner-local mount owner; the internal Split
+      // Client reads its current surface revision through the override seam).
+      clientExtensionObservation: () => override === undefined
+        ? directClientExtensionOwner
+        : override.clientExtensionObservationSource?.(),
       // The PR2 read-only visual snapshot supply: Direct main attachment or the
       // mounted viewed child's exact Session, undefined on Remote.
       visualEventSnapshotFor,
@@ -2895,6 +2901,29 @@ export function applyRunnerWithRuntime(
             editors: service.editors,
             api: () => service.api(),
             health: () => service._ledger().healthSnapshot(),
+            // R8-E PR-4: the CURRENT Client's exact ownership facts. Direct
+            // reads its runner-owned mount owner; the internal Split Client
+            // reads the current surface revision's process-local owner through
+            // the existing override seam (never the Host wire).
+            ownerEntryIds: () => service._ownerEntryIds(),
+            clientObservations: () => override === undefined
+              ? directClientExtensionOwner?.observation() ?? []
+              : override.clientExtensionObservationSource?.()?.observation() ?? [],
+            refreshClientExtensions: () => {
+              if (override === undefined) {
+                const reconcile = directClientExtensionReconcile
+                if (reconcile === undefined) return
+                runDetached('direct client extension config re-read', async () => {
+                  reconcile(await backend.pluginManager.snapshot())
+                }, { diag })
+                return
+              }
+              const reconcile = override.reconcilePluginInventory
+              if (reconcile === undefined) return
+              runDetached('client extension config re-read', async () => {
+                await reconcile(await backend.pluginManager.snapshot())
+              }, { diag })
+            },
           }
         },
         recordError: (ref, error) => extensionService?._recordRegistryError(ref, error),
