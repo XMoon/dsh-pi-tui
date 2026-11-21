@@ -154,7 +154,6 @@ const result = {
     chromium: null,
     node: process.version,
   },
-  features: [],
 }
 const startedAt = Date.now()
 
@@ -828,30 +827,6 @@ async function waitOffline(page, timeoutMs, marks = { failed: 0, console: 0 }) {
   throw new Error('browser timed out waiting for an observable offline/disconnected page')
 }
 
-/** One optional feature probe: a missing control is NOT_VERIFIED, not a failure. */
-async function probeFeature(page, feature, action) {
-  const entry = {
-    feature,
-    entryVisible: true,
-    actualAction: 'probe',
-    hostApi: '',
-    durableOrUiResult: '',
-    status: 'NOT_VERIFIED',
-    reason: '',
-    evidence: [],
-    supportText: '',
-  }
-  try {
-    const outcome = await action()
-    Object.assign(entry, outcome)
-  } catch (error) {
-    entry.status = 'NOT_VERIFIED'
-    entry.reason = `the official Web UI did not expose a driveable control for this automated probe (${redacted(String(error.message)).slice(0, 240)})`
-  }
-  result.features.push(entry)
-  return entry
-}
-
 /** A bounded "find one visible control whose aria/text matches a regex" probe. */
 async function findControlMatching(page, pattern, timeoutMs = 3_000) {
   const deadline = Date.now() + timeoutMs
@@ -894,11 +869,17 @@ async function openBuiltInPluginInventory(page) {
     new URL(response.url()).pathname === '/api/pluginInventory/list'
     && response.request().method() === 'POST'
     && response.status() === 200, { timeout: 60_000 }).catch(() => undefined)
-  // The official `settings.open` shortcut: primary+Alt+Comma on the Web
-  // platform. The sidebar trigger is icon-only in narrow shells, so the
-  // registered shortcut is the stable, user-reachable entry.
-  const primary = process.platform === 'darwin' ? 'Meta' : 'Control'
-  await page.keyboard.press(`${primary}+Alt+Comma`)
+  // Open Settings through the official sidebar account menu, the same
+  // user-reachable path the upstream Web tests use. The narrow rail may need
+  // its own "Open sidebar" action before the menu trigger is visible.
+  const accountMenu = page.getByRole('button', { name: 'Account menu', exact: true, includeHidden: true })
+  await accountMenu.waitFor({ state: 'attached', timeout: 30_000 })
+  if (!(await accountMenu.isVisible())) {
+    const openSidebar = page.getByRole('button', { name: 'Open sidebar', exact: true })
+    if (await openSidebar.count() > 0) await openSidebar.click()
+  }
+  await accountMenu.click()
+  await page.getByRole('menuitem', { name: 'Settings', exact: true }).click()
   await page.getByText('Settings', { exact: true }).last().waitFor({ state: 'visible', timeout: 30_000 })
   const pluginsNav = await findControlMatching(page, /Built-in plugins/iu, 10_000)
   if (pluginsNav === null) throw new Error('Settings exposes no Built-in plugins section')
@@ -1005,443 +986,6 @@ async function observeSessionReference(page, originalSessionId) {
   return { siblingId, marker }
 }
 
-/** WP-10: the honest inventory of the Web UI's really reachable features. */
-async function inventory(page) {
-  // Session create/list/open are the core MUST surfaces.
-  const createdSession = await newSession(page)
-  let rowVisible = true
-  try {
-    await page.locator(`[data-row-key="session:${createdSession}"]`).first().waitFor({ state: 'visible', timeout: 30_000 })
-  } catch {
-    rowVisible = false
-  }
-  result.features.push({
-    feature: 'session.create/list/open',
-    entryVisible: rowVisible,
-    actualAction: 'clicked New session, read the sidebar Session row, opened it',
-    hostApi: 'official session/create + session/list Remote; durable Session log',
-    durableOrUiResult: `session ${createdSession} created and listed; opening the same row selects it`,
-    status: rowVisible ? 'SUPPORTED_PASS' : 'FAIL_REGRESSION',
-    reason: rowVisible ? '' : 'the created Session never appeared in the official sidebar',
-    evidence: [`sessionId=${createdSession}`, `data-row-key=session:${createdSession}`],
-    supportText: 'Creating, listing and opening Sessions from the official Web shell works against the same Host the Split TUI uses.',
-  })
-
-  // Live turn + answer.
-  const liveMarker = `wp10-live-${nonce}`
-  const liveBefore = await conversationCount(page, liveMarker, 'long-turn answer')
-  await promptAndWait(page, liveMarker, 'long-turn answer')
-  const liveAfter = await conversationCount(page, liveMarker, 'long-turn answer')
-  result.features.push({
-    feature: 'conversation live Turn/history',
-    entryVisible: true,
-    actualAction: 'typed a marker prompt, pressed Send, read the durable answer in the conversation',
-    hostApi: 'official Host Session Writer/Agent turn',
-    durableOrUiResult: liveAfter > liveBefore ? 'the Browser painted the Host answer' : 'no answer painted',
-    status: liveAfter > liveBefore ? 'SUPPORTED_PASS' : 'FAIL_REGRESSION',
-    reason: '',
-    evidence: [liveMarker],
-    supportText: 'Prompt submission and live assistant output work in the official Web conversation.',
-  })
-
-  // Stop/interrupt: a core Turn control; this inventory did not drive it.
-  result.features.push({
-    feature: 'turn.stop/interrupt',
-    entryVisible: true,
-    actualAction: 'not driven in this inventory pass',
-    hostApi: 'official Agent turn cancellation',
-    durableOrUiResult: 'no stop action was executed',
-    status: 'NOT_VERIFIED',
-    reason: 'the Web stop/interrupt control was not exercised in this run; the held-turn lanes do not claim it',
-    evidence: [],
-    supportText: '',
-  })
-
-  // Questions: proven by the real WP-03 lane; the inventory records the same fact.
-  result.features.push({
-    feature: 'Questions',
-    entryVisible: true,
-    actualAction: 'WP-03A/WP-03B real Browser x real TUI first-winner lanes',
-    hostApi: 'official userQuestions waterfall + durable question tool events',
-    durableOrUiResult: 'one Host settlement, Browser and TUI both converge',
-    status: 'SUPPORTED_PASS',
-    reason: '',
-    evidence: ['WP-03A', 'WP-03B'],
-    supportText: 'Pending Questions are answerable in the official Web UI; the first legal answer settles the Host once.',
-  })
-  result.features.push({
-    feature: 'Approvals',
-    entryVisible: true,
-    actualAction: 'WP-04A/WP-04B real Browser Allow/Reject lanes',
-    hostApi: 'official approval waterfall + durable approval/decided events',
-    durableOrUiResult: 'one Host decision and the matching tool side effect',
-    status: 'SUPPORTED_PASS',
-    reason: '',
-    evidence: ['WP-04A', 'WP-04B'],
-    supportText: 'Pending Approvals are answerable in the official Web UI with Allow once / Reject.',
-  })
-
-  // Session rename: a real row action if the shell exposes it.
-  await probeFeature(page, 'session.rename/delete', async () => {
-    const row = page.locator(`[data-row-key="session:${createdSession}"]`).first()
-    await row.hover()
-    const buttons = await page.evaluate(id => {
-      const rowNode = document.querySelector(`[data-row-key="session:${id}"]`)
-      if (rowNode === null) return []
-      return [...rowNode.querySelectorAll('button')].map(button => (button.getAttribute('aria-label') ?? button.textContent ?? '').trim())
-    }, createdSession)
-    return {
-      actualAction: `hovered the Session row; rename/delete controls=${JSON.stringify(buttons)}`,
-      durableOrUiResult: 'row action controls were observed but not driven',
-      status: 'NOT_VERIFIED',
-      reason: 'the row rename/delete action menu was not driven by this automated inventory probe',
-      evidence: [`rowControls=${JSON.stringify(buttons)}`],
-      supportText: '',
-    }
-  })
-
-  // Models: the composer's own model identity control is read-only here.
-  await probeFeature(page, 'models/provider/account/credentials', async () => {
-    const point = await findControl(page, { text: 'stub' }, 5_000)
-    if (point === null) return { status: 'NOT_VERIFIED', reason: 'the composer model control text was not found' }
-    await clickCentre(page, point)
-    await page.waitForTimeout(500)
-    const body = (await page.evaluate(() => document.body.innerText)).replace(/\s+/gu, ' ').slice(0, 800)
-    await page.keyboard.press('Escape')
-    return {
-      actualAction: 'clicked the composer model identity control; read the opened model surface',
-      durableOrUiResult: body.length > 0 ? 'the model surface is reachable and readable' : 'no readable model surface',
-      status: 'NOT_VERIFIED',
-      reason: 'the qualification model is a deterministic test fixture; a real provider/account write is out of scope',
-      evidence: [`modelSurface=${body.slice(0, 240)}`],
-      supportText: 'The Web shell exposes the model identity control; provider/account/credential writes are not claimed by this qualification.',
-    }
-  })
-
-  // Settings/plugin/automation panels: record whether the shell advertises them.
-  const shellControls = await page.evaluate(() => {
-    const buttons = [...document.querySelectorAll('button')]
-    return buttons.map(button => (button.getAttribute('aria-label') ?? button.textContent ?? '').replace(/\s+/gu, ' ').trim())
-      .filter(text => text !== '').slice(0, 200)
-  })
-  for (const feature of ['settings/profile', 'plugin manager/HMR', 'jobs/schedule/goal/subagent']) {
-    result.features.push({
-      feature,
-      entryVisible: true,
-      actualAction: 'read the shell control inventory',
-      hostApi: 'not exercised by this probe',
-      durableOrUiResult: 'shell controls observed',
-      status: 'NOT_VERIFIED',
-      reason: 'the panel was not driven in this inventory pass; no support claim is made',
-      evidence: [`shellControls=${JSON.stringify(shellControls.slice(0, 40))}`],
-      supportText: '',
-    })
-  }
-
-  // File upload: the composer's own hidden file input is a real browser-local
-  // file picker; the Host upload is asserted by the runner on its own storage.
-  await probeFeature(page, 'file upload/attachments', async () => {
-    const upload = join(coordinationDir, 'browser-upload.txt')
-    writeFileSync(upload, `prd browser local upload ${nonce}\n`, { mode: 0o600 })
-    const input = page.locator('input[type=file]').last()
-    await input.setInputFiles(upload, { timeout: 15_000 })
-    const appeared = await page.evaluate(name => (document.body.innerText ?? '').includes(name), 'browser-upload.txt')
-    return {
-      actualAction: 'set the composer file input to a browser-local file',
-      durableOrUiResult: appeared ? 'the composer painted the selected file' : 'no file card painted',
-      status: appeared ? 'SUPPORTED_PASS' : 'NOT_VERIFIED',
-      reason: appeared ? '' : 'the composer painted no file card for the selected browser-local file',
-      evidence: ['input[type=file]', 'browser-upload.txt'],
-      supportText: 'The official Web composer accepts a browser-local file through its own file input; the runner proves the Host receives the bytes.',
-    }
-  })
-
-  // Web terminal / PTY: report the real visible control, never a claimed action.
-  await probeFeature(page, 'web terminal/PTY', async () => {
-    const labels = await page.evaluate(() => [...document.querySelectorAll('button,[role=button]')]
-      .map(node => (node.getAttribute('aria-label') ?? node.textContent ?? '').replace(/\s+/gu, ' ').trim())
-      .filter(label => label !== ''))
-    const control = labels.find(label => /terminal|shell/iu.test(label))
-    return control === undefined
-      ? {
-          entryVisible: false,
-          actualAction: 'read the shell control inventory',
-          hostApi: 'none',
-          durableOrUiResult: 'no terminal/shell control visible',
-          status: 'UNAVAILABLE_BY_DESIGN',
-          reason: 'the official Web shell exposed no terminal/shell control in this composition',
-          evidence: ['no terminal/shell control'],
-          supportText: 'A Web terminal/PTY is not offered by this Web shell; no Host PTY action is claimed.',
-        }
-      : {
-          entryVisible: true,
-          actualAction: `found the "${control}" control but did not drive it`,
-          hostApi: 'official Web terminal/PTY (not exercised)',
-          durableOrUiResult: 'control visible only',
-          status: 'NOT_VERIFIED',
-          reason: 'a terminal control is visible; this inventory did not execute a Host command through it',
-          evidence: [`control=${control}`],
-          supportText: '',
-        }
-  })
-
-  // Downloaded deliverables / export: no UI action was driven.
-  await probeFeature(page, 'downloaded deliverables/export', async () => {
-    const labels = await page.evaluate(() => [...document.querySelectorAll('button,a[href],[role=button]')]
-      .map(node => (node.getAttribute('aria-label') ?? node.textContent ?? '').replace(/\s+/gu, ' ').trim())
-      .filter(label => label !== ''))
-    const control = labels.find(label => /download|export|deliverable/iu.test(label))
-    return control === undefined
-      ? {
-          entryVisible: false,
-          actualAction: 'read the shell control inventory',
-          hostApi: 'none',
-          durableOrUiResult: 'no download/export control visible',
-          status: 'UNAVAILABLE_BY_DESIGN',
-          reason: 'the observed Web shell exposed no download/export deliverable control',
-          evidence: ['no download/export control'],
-          supportText: '',
-        }
-      : {
-          entryVisible: true,
-          actualAction: `found the "${control}" control but did not drive it`,
-          hostApi: 'official deliverables/download (not exercised)',
-          durableOrUiResult: 'control visible only',
-          status: 'NOT_VERIFIED',
-          reason: 'a download/export control is visible; this inventory did not execute the file transfer',
-          evidence: [`control=${control}`],
-          supportText: '',
-        }
-  })
-
-  // Session deep link: record what the shell really does after opening a row.
-  result.features.push({
-    feature: 'session deep link/cross-client navigation',
-    entryVisible: true,
-    actualAction: 'opened a Session by its sidebar row and read the page URL',
-    hostApi: 'none',
-    durableOrUiResult: `pathname=${new URL(page.url()).pathname}`,
-    status: 'UNAVAILABLE_BY_DESIGN',
-    reason: 'the product contract opens the Web home page and lets the user choose a Session; no stable Session deep link is claimed',
-    evidence: [`pathname=${new URL(page.url()).pathname}`],
-    supportText: 'Open the Web home page from the TUI and choose a Session in the official Web UI; no Session-specific deep link is provided.',
-  })
-  return createdSession
-}
-
-
-/** The shared context-menu popup's live rows (label + disabled), read from its real DOM. */
-async function menuRows(page) {
-  return page.evaluate(() => [...document.querySelectorAll('button[role="menuitem"]')]
-    .map(node => ({
-      label: (node.textContent ?? '').replace(/\s+/gu, ' ').trim(),
-      disabled: node.getAttribute('aria-disabled') === 'true' || node.disabled === true,
-    })))
-}
-
-/** Wait until the ONE shared context-menu popup owns no row (its exit finished). */
-async function waitMenuClosed(page, timeoutMs = 15_000) {
-  const deadline = Date.now() + timeoutMs
-  while (Date.now() < deadline) {
-    if ((await menuRows(page)).length === 0) return
-    await page.waitForTimeout(100)
-  }
-  throw new Error('the shared context menu did not close')
-}
-
-/**
- * Open the REAL right-click menu of one visible control and return its rows.
- * The shared popup is single: the previous menu's exit animation must finish
- * BEFORE the next read, or a stale (enabled) row would answer for the new
- * target.
- */
-async function openContextMenu(page, locator, label) {
-  await waitMenuClosed(page)
-  await locator.waitFor({ state: 'visible', timeout: 120_000 })
-  await locator.click({ button: 'right' })
-  const deadline = Date.now() + 30_000
-  while (Date.now() < deadline) {
-    const rows = await menuRows(page)
-    // The file-actions contribution resolves asynchronously (an authorized
-    // stat); only a menu that already carries its Download row is complete.
-    if (rows.some(row => row.label === 'Download')) return rows
-    await page.waitForTimeout(150)
-  }
-  throw new Error(`the context menu of ${label} exposed no complete file-action menu`)
-}
-
-/** Close the shared menu without selecting an action. */
-async function dismissMenu(page) {
-  await page.keyboard.press('Escape')
-  await page.waitForTimeout(250)
-}
-
-/** The composer's live draft text (the LAST role=textbox is the official composer). */
-async function composerDraft(page) {
-  return page.evaluate(() => {
-    const node = [...document.querySelectorAll('[role=textbox]')].at(-1)
-    if (node === undefined) return null
-    if (node instanceof HTMLTextAreaElement || node instanceof HTMLInputElement) return node.value
-    return node.innerText
-  })
-}
-
-/** The atomic Quote previews currently inside the composer (exact visible text). */
-async function composerQuotes(page) {
-  return page.evaluate(() => [...document.querySelectorAll('[role=textbox] [data-quote-preview-text]')]
-    .map(node => node.textContent ?? ''))
-}
-
-/**
- * The model-visible Markdown of the live composer draft. The official editor
- * exposes it through its OWN clipboard serialization, so a real select-all +
- * copy runs the production path; an unavailable Clipboard API is reported as a
- * refusal, never as a claimed success.
- */
-async function composerMarkdownDraft(page) {
-  const composer = page.locator('[role=textbox]').last()
-  await composer.click()
-  await page.keyboard.press('ControlOrMeta+a')
-  await page.keyboard.press('ControlOrMeta+c')
-  await page.waitForTimeout(250)
-  return page.evaluate(async () => {
-    try {
-      return { ok: true, text: await navigator.clipboard.readText() }
-    } catch (error) {
-      return { ok: false, reason: String(error?.name ?? error) }
-    }
-  })
-}
-
-/**
- * Select one occurrence of `text` with a REAL pointer drag (pointerdown inside
- * the conversation, move, pointerup) and return the resulting DOM selection.
- */
-async function dragSelectText(page, text) {
-  const rect = await page.evaluate(needle => {
-    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT)
-    let node = walker.nextNode()
-    while (node !== null) {
-      const content = node.textContent ?? ''
-      const at = content.indexOf(needle)
-      if (at >= 0) {
-        const range = document.createRange()
-        range.setStart(node, at)
-        range.setEnd(node, at + needle.length)
-        const box = range.getBoundingClientRect()
-        if (box.width > 0 && box.height > 0) {
-          return { x: box.x, y: box.y, width: box.width, height: box.height }
-        }
-      }
-      node = walker.nextNode()
-    }
-    return null
-  }, text)
-  if (rect === null) throw new Error(`the conversation does not paint "${text}"`)
-  const y = rect.y + rect.height / 2
-  await page.mouse.move(rect.x + 1, y)
-  await page.mouse.down()
-  await page.mouse.move(rect.x + rect.width - 1, y, { steps: 8 })
-  await page.mouse.up()
-  await page.waitForTimeout(400)
-  return page.evaluate(() => document.getSelection()?.toString() ?? '')
-}
-
-/** The number of official turn-completion lines the conversation paints. */
-async function completedTurnCount(page) {
-  return page.evaluate(() => (document.body.innerText.match(/Completed in/gu) ?? []).length)
-}
-
-/**
- * Wait until a NEW official turn-completion line is painted. The Web client
- * applies the ORDERED Session event stream, and a turn's `workspace/changes`
- * event (when one exists) is appended BEFORE its `turn/end`; observing this
- * turn's completion therefore proves every earlier event of the turn has
- * already been applied.
- */
-async function waitCompletedTurn(page, before, timeoutMs) {
-  const deadline = Date.now() + timeoutMs
-  let count = await completedTurnCount(page)
-  while (count <= before && Date.now() < deadline) {
-    await page.waitForTimeout(150)
-    count = await completedTurnCount(page)
-  }
-  return count
-}
-
-/**
- * Read the Browser Clipboard's image/png content: type, byte length, PNG
- * signature and sha256. A refused Clipboard API is reported, never guessed.
- */
-async function readClipboardPng(page) {
-  return page.evaluate(async () => {
-    const sha = async value => {
-      const digest = await crypto.subtle.digest('SHA-256', value)
-      return [...new Uint8Array(digest)].map(item => item.toString(16).padStart(2, '0')).join('')
-    }
-    try {
-      const items = await navigator.clipboard.read()
-      for (const item of items) {
-        if (!item.types.includes('image/png')) continue
-        const blob = await item.getType('image/png')
-        const bytes = new Uint8Array(await blob.arrayBuffer())
-        const signature = bytes.length >= 8 && [137, 80, 78, 71, 13, 10, 26, 10].every((value, index) => bytes[index] === value)
-        // The stable contract is the DECODED image, not the byte encoding:
-        // Chromium is free to re-encode the PNG on the clipboard.
-        const bitmap = await createImageBitmap(blob)
-        const canvas = new OffscreenCanvas(bitmap.width, bitmap.height)
-        const context = canvas.getContext('2d')
-        context.drawImage(bitmap, 0, 0)
-        const rgba = context.getImageData(0, 0, bitmap.width, bitmap.height).data
-        return {
-          ok: true,
-          type: 'image/png',
-          bytes: bytes.length,
-          pngSignature: signature,
-          sha256: await sha(bytes),
-          width: bitmap.width,
-          height: bitmap.height,
-          pixelSha256: await sha(rgba),
-        }
-      }
-      return { ok: false, reason: 'no image/png clipboard item' }
-    } catch (error) {
-      return { ok: false, reason: String(error?.name ?? error) }
-    }
-  })
-}
-
-/** Poll the Clipboard until the Copy action's async write lands (bounded). */
-async function waitForClipboardPng(page, timeoutMs) {
-  const deadline = Date.now() + timeoutMs
-  let last = { ok: false, reason: 'not read' }
-  while (Date.now() < deadline) {
-    last = await readClipboardPng(page)
-    if (last.ok === true) return last
-    await page.waitForTimeout(200)
-  }
-  return last
-}
-
-/** Wait for the official file-actions copy-failure feedback. */
-async function waitForCopyFailure(page, timeoutMs = 20_000) {
-  const deadline = Date.now() + timeoutMs
-  while (Date.now() < deadline) {
-    const text = await page.evaluate(() => document.body.innerText ?? '')
-    if (text.includes('Could not copy. Check that the content is available, then retry.')) {
-      return { failureFeedback: true }
-    }
-    await page.waitForTimeout(150)
-  }
-  return { failureFeedback: false }
-}
-
-/** Every changed-files card the conversation currently paints. */
-async function changedCards(page) {
-  return page.evaluate(() => [...document.querySelectorAll('[data-changed-files]')]
-    .map(node => ({ text: (node.innerText ?? '').replace(/\s+/gu, ' ').trim() })))
-}
-
 /** The case programs. A case name is the frozen coordination interface. */
 const cases = {
   /** WP-01: login, dynamic resources, a real Session UI action. */
@@ -1472,18 +1016,6 @@ const cases = {
     await waitSignal('runner-go')
   },
 
-  /** WP-02A: the Browser opens a TUI-created Session through the sidebar UI. */
-  'wp02a-open-existing': async context => {
-    const page = await login(context)
-    const sessionId = caseConfig.sessionId
-    if (typeof sessionId !== 'string') throw new Error('wp02a requires the TUI-created Session id')
-    await openSession(page, sessionId)
-    await waitConversation(page, caseConfig.marker, [caseConfig.expectedAnswer ?? 'long-turn answer'], 180_000, 'the TUI prompt and Host answer')
-    await screenshot(page, 'tui-session')
-    driverFact('confirmed', { sessionId })
-    step('opened-tui-session', true, { sessionId })
-  },
-
   /** WP-02B: the Browser creates a Session; the runner resumes it in the TUI. */
   'wp02b-browser-session': async context => {
     const page = await login(context)
@@ -1494,22 +1026,6 @@ const cases = {
     step('created-browser-session', true, { sessionId, marker })
     await waitSignal('runner-go')
     await screenshot(page, 'browser-session')
-  },
-
-  /** WP-02C: both Clients write one Session with different markers. */
-  'wp02c-dual-prompts': async context => {
-    const page = await login(context)
-    await openSession(page, caseConfig.sessionId)
-    const browserMarker = caseConfig.marker
-    const answerNeedle = caseConfig.expectedAnswer ?? 'long-turn answer'
-    await promptAndWait(page, browserMarker, answerNeedle)
-    driverFact('turn-done', { marker: browserMarker })
-    await waitSignal('tui-done')
-    await waitConversation(page, browserMarker, [caseConfig.tuiMarker, answerNeedle], 240_000, 'both Client markers and answers')
-    const tuiAnswers = await conversationCount(page, browserMarker, answerNeedle)
-    if (tuiAnswers < 2) throw new Error(`the conversation shows ${String(tuiAnswers)} answers, expected two independent turns`)
-    await screenshot(page, 'dual-prompts')
-    step('two-independent-turns', true, { browserMarker, tuiMarker: caseConfig.tuiMarker, answers: tuiAnswers })
   },
 
   /** WP-02D: the same text from both Clients stays two independent Turns. */
@@ -1584,53 +1100,6 @@ const cases = {
     step('tui-first-question-browser-inert', true, { lateSubmitFound: submitPoint !== null, lateClick })
   },
 
-  /** WP-03C: the Browser detaches while a Question is pending. */
-  'wp03c-question-detach': async context => {
-    let page = await login(context)
-    await openSession(page, caseConfig.sessionId)
-    await waitQuestionCard(page)
-    driverFact('question-visible', {})
-    await page.close()
-    driverFact('detached', {})
-    await waitSignal('tui-answered')
-    page = await login(context)
-    await openSession(page, caseConfig.sessionId)
-    const settled = await waitQuestionSettled(page)
-    const submitPoint = await findControl(page, { text: 'Submit' }, 500)
-    if (submitPoint !== null) {
-      await clickCentre(page, submitPoint)
-    }
-    await screenshot(page, 'question-reattached')
-    driverFact('reattached', { settled: settled !== null, lateSubmitFound: submitPoint !== null })
-    step('detached-question-cannot-resurrect', true, { lateSubmitFound: submitPoint !== null })
-  },
-
-  /** WP-03D: the official TIMED question, observed as a negative control. */
-  'wp03d-question-timed': async context => {
-    const page = await login(context)
-    // The runner writes the Session id once the TUI's trigger created it.
-    const sessionFile = join(coordinationDir, 'session.json')
-    const deadline = Date.now() + 180_000
-    while (!existsSync(sessionFile) && Date.now() < deadline) await sleep(100)
-    if (!existsSync(sessionFile)) throw new Error('the timed question case never learned its Session id')
-    const sessionId = readJson(sessionFile).sessionId
-    result.sessionId = sessionId
-    await openSession(page, sessionId)
-    // A timed question settles without a Browser answer. The official card may
-    // already be in `continued` state; the assertion is that no answerable
-    // Submit exists and that the Browser never submits one.
-    const card = await questionCard(page)
-    const submitPoint = await findControl(page, { text: 'Submit' }, 1_000)
-    if (submitPoint !== null) await clickCentre(page, submitPoint)
-    await page.waitForTimeout(1_500)
-    const finalCard = await questionCard(page)
-    const answerable = finalCard !== null && finalCard.submit !== null && finalCard.submit.disabled === false
-    if (answerable) throw new Error('the timed question stayed answerable after its official timeout')
-    await screenshot(page, 'question-timed')
-    driverFact('timed', { initialCard: card !== null, finalCard: finalCard !== null, answerable })
-    step('timed-question-not-answerable', true, { initialCard: card !== null, finalCard: finalCard !== null })
-  },
-
   /** WP-04A: the Browser wins one Approval with Allow once. */
   'wp04a-approval-browser-allow': async context => {
     const page = await login(context)
@@ -1644,36 +1113,6 @@ const cases = {
     await waitSignal('runner-go')
     await screenshot(page, 'approval-allowed')
     step('browser-first-approval-allow', true, { action: 'allow-once' })
-  },
-
-  /** WP-04B: the Browser wins one Approval with Reject. */
-  'wp04b-approval-browser-reject': async context => {
-    const page = await login(context)
-    await openSession(page, caseConfig.sessionId)
-    const card = await waitApprovalCard(page)
-    if (!card.buttons.some(button => button.text === 'Reject')) throw new Error('the approval card does not offer Reject')
-    driverFact('approval-visible', { buttons: card.buttons })
-    await clickTextButton(page, 'Reject')
-    await waitApprovalSettled(page)
-    driverFact('answered', { action: 'reject' })
-    await waitSignal('runner-go')
-    await screenshot(page, 'approval-rejected')
-    step('browser-first-approval-reject', true, { action: 'reject' })
-  },
-
-  /** WP-04C/D: the TUI wins; the Browser's old location is inert. */
-  'wp04c-approval-tui-first': async context => {
-    const page = await login(context)
-    await openSession(page, caseConfig.sessionId)
-    await waitApprovalCard(page)
-    driverFact('approval-visible', {})
-    await waitSignal('tui-answered')
-    const settled = await waitApprovalSettled(page)
-    const allowPoint = await findControl(page, { text: 'Allow once' }, 500)
-    if (allowPoint !== null) await clickCentre(page, allowPoint)
-    driverFact('settled', { settled: settled !== null, lateAllowFound: allowPoint !== null })
-    await screenshot(page, 'approval-tui-first')
-    step('tui-first-approval-browser-inert', true, { lateAllowFound: allowPoint !== null })
   },
 
   /** WP-04C/D: the TUI wins; the Browser's old location is inert. */
@@ -1691,67 +1130,40 @@ const cases = {
     step('tui-first-approval-reject-browser-inert', true, { lateAllowFound: allowPoint !== null })
   },
 
-  /** WP-04F: the Browser detaches while an Approval is pending. */
-  'wp04f-approval-offline': async context => {
-    let page = await login(context)
-    await openSession(page, caseConfig.sessionId)
-    await waitApprovalCard(page)
-    driverFact('approval-visible', {})
-    await page.close()
-    driverFact('detached', {})
-    await waitSignal('tui-answered')
-    page = await login(context)
-    await openSession(page, caseConfig.sessionId)
-    const settled = await waitApprovalSettled(page)
-    const allowPoint = await findControl(page, { text: 'Allow once' }, 500)
-    if (allowPoint !== null) await clickCentre(page, allowPoint)
-    await screenshot(page, 'approval-reattached')
-    driverFact('reattached', { settled: settled !== null, lateAllowFound: allowPoint !== null })
-    step('detached-approval-cannot-resurrect', true, { lateAllowFound: allowPoint !== null })
-  },
-
-  /** WP-05: a real page reload during a HELD Host Turn. */
-  'wp05-refresh-held': async context => {
-    const page = await login(context)
-    const sessionId = caseConfig.sessionId
-    await openSession(page, sessionId)
-    await waitConversation(page, caseConfig.marker, ['long-turn started'], 180_000, 'the running Host Turn')
-    driverFact('viewing', { sessionId })
-    await page.reload({ waitUntil: 'load', timeout: 120_000 })
-    await waitShell(page)
-    await openSession(page, sessionId)
-    await waitConversation(page, caseConfig.marker, ['long-turn started'], 180_000, 'the restored running Host Turn')
-    driverFact('reloaded', { sessionId })
-    await waitSignal('turn-released')
-    await waitConversation(page, caseConfig.marker, [caseConfig.expectedAnswer ?? 'long-turn answer'], 240_000, 'the released Turn answer')
-    // The SAME Browser context opens a NEW page: both pages read the current
-    // Session history of the one Host.
-    const second = await login(context)
-    await openSession(second, sessionId)
-    await waitConversation(second, caseConfig.marker, [caseConfig.expectedAnswer ?? 'long-turn answer'], 120_000, 'the second page history')
-    await second.close()
-    await screenshot(page, 'after-reload')
-    step('reload-kept-the-session', true, { sessionId })
-  },
-
-  /** WP-06: TUI reload/exit/SIGKILL while the Browser keeps advancing. */
+  /** WP-06: a TUI SIGKILL leaves the Browser writing; a fresh TUI resumes. */
   'wp06-tui-lifecycle': async context => {
     const page = await login(context)
     await openSession(page, caseConfig.sessionId)
     driverFact('ready', {})
-    const current = await commandLoop(page, context)
-    step('browser-kept-writing-across-tui-lifecycle', true, {})
-    await screenshot(current, 'tui-lifecycle')
+    await waitSignal('tui-killed', 300_000)
+    const marker = caseConfig.marker ?? `wp06-${nonce}`
+    await promptAndWait(page, marker, caseConfig.expectedAnswer ?? 'long-turn answer')
+    driverFact('browser-wrote-after-tui-kill', { marker })
+    await waitSignal('fresh-tui-resumed', 300_000)
+    await screenshot(page, 'tui-lifecycle')
+    step('browser-kept-writing-after-tui-kill', true, { marker })
   },
 
-  /** WP-07: Host stop/crash, offline page, cold resume. */
+  /** WP-07: Host SIGKILL, new Host instance, Browser reconnect and write. */
   'wp07-host-lifecycle': async context => {
     const page = await login(context)
     await openSession(page, caseConfig.sessionId)
+    const marks = { failed: result.network.failedPaths.length, console: result.consoleErrors.length }
     driverFact('ready', {})
-    const current = await commandLoop(page, context)
-    step('host-lifecycle-observed', true, {})
-    await screenshot(current, 'host-lifecycle')
+    await waitSignal('host-killed', 300_000)
+    const offline = await waitOffline(page, 180_000, marks)
+    driverFact('host-killed', offline)
+    await waitSignal('new-host-ready', 300_000)
+    const fresh = await login(context)
+    await openSession(fresh, caseConfig.sessionId)
+    await waitConversation(fresh, caseConfig.seedMarker, [caseConfig.expectedAnswer ?? 'long-turn answer'], 180_000,
+      'the durable Session after the Host restart')
+    driverFact('browser-reconnected', {})
+    const marker = caseConfig.marker ?? `wp07-${nonce}`
+    await promptAndWait(fresh, marker, caseConfig.expectedAnswer ?? 'long-turn answer')
+    driverFact('browser-wrote-after-reconnect', { marker })
+    await screenshot(fresh, 'host-lifecycle')
+    step('host-sigkill-cold-resume', true, { marker })
   },
 
   /** WP-07 pending/unknown Browser write across a Host SIGKILL. */
@@ -1763,16 +1175,6 @@ const cases = {
     const current = await commandLoop(page, context)
     step('pending-write-killed-and-not-replayed', true, { sessionId })
     await screenshot(current, 'pending-write')
-  },
-
-  /** WP-08: `/web` toggle and settings recomposition with a live Browser. */
-  'wp08-web-toggle': async context => {
-    const page = await login(context)
-    await openSession(page, caseConfig.sessionId)
-    driverFact('ready', {})
-    const current = await commandLoop(page, context)
-    step('web-toggle-observed', true, {})
-    await screenshot(current, 'web-toggle')
   },
 
   /** WP-09: Browser-local file intake; the runner owns the Host-side checks. */
@@ -1817,255 +1219,26 @@ const cases = {
 
 
   /**
-   * WP-11 (S5-PR5): the official Web file actions, message quotes and
-   * Host-recorded changed files on ONE real Host + Browser.
+   * WP-11: the official Host changed-files chain, same-Host Web toggle and
+   * cold-restart stale refusal, with Browser and TUI on ONE real Host.
    */
-  'wp11-official-web-capabilities': async context => {
+  'wp11-host-changes': async context => {
     const changesNonce = caseConfig.changesNonce
     if (typeof changesNonce !== 'string' || changesNonce === '') throw new Error('wp11 requires caseConfig.changesNonce')
     const page = await login(context)
-    const origin = currentLaunch().url.origin
-    // The Clipboard API is permission-gated by the browser; the W5-FILE case
-    // records a refusal honestly instead of claiming a copy.
-    await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin }).catch(() => undefined)
-    // The Session's authoritative cwd must be the isolated, disposable
-    // Default-workspace folder (the fixture's dedicated Git work tree), never
-    // the profile directory or the developer's repository.
     const sessionId = await newSessionInWorkspace(page, 'w5-changed-files')
     result.sessionId = sessionId
     driverFact('session', { sessionId })
-    await waitSignal('workspace-ready')
-
-    // ── W5-CHANGES positive: one real official `write` tool call changed the
-    // working tree; the official recorder announces the turn and the card must
-    // render it.
-    const changesMarker = `w5-changes-${changesNonce}`
-    await sendPrompt(page, changesMarker)
-    await waitConversation(page, changesMarker, ['w5-editing'], 240_000, 'the changed-files answer')
-    const card = page.locator('[data-changed-files]').last()
-    await card.waitFor({ state: 'visible', timeout: 120_000 })
-    const cardText = (await card.innerText()).replace(/\s+/gu, ' ').trim()
-    if (!cardText.includes('changed.txt')) throw new Error(`the changed-files card does not name changed.txt: ${cardText}`)
-    await screenshot(page, 'changed-files-card')
-    driverFact('changes-card', { text: cardText })
-    await waitSignal('changes-review-go')
-
-    // The card opens the REAL review tab; its summary/diff come from the
-    // official authenticated Host routes.
-    const sidebar = await findControlMatching(page, /open right sidebar/iu, 1_500)
-    if (sidebar !== null) {
-      await clickCentre(page, sidebar)
-      await page.waitForTimeout(400)
-    }
-    await card.locator('button').first().click()
-    await page.locator('[data-changes-review]').last().waitFor({ state: 'visible', timeout: 120_000 })
-    let reviewFacts = null
-    const reviewDeadline = Date.now() + 120_000
-    while (Date.now() < reviewDeadline) {
-      reviewFacts = await page.evaluate(() => {
-        const root = [...document.querySelectorAll('[data-changes-review]')].at(-1)
-        if (root === undefined) return null
-        return {
-          state: root.getAttribute('data-review-state'),
-          file: root.querySelector('[data-review-file]')?.getAttribute('data-review-file') ?? null,
-          text: (root.innerText ?? '').replace(/\s+/gu, ' ').trim(),
-        }
-      })
-      if (reviewFacts?.state === 'ready' && (reviewFacts.text ?? '').includes(`w5-change-${changesNonce}`)) break
-      await page.waitForTimeout(250)
-    }
-    if (reviewFacts?.state !== 'ready') throw new Error(`the changes review did not become ready (${String(reviewFacts?.state)})`)
-    if (typeof reviewFacts.file !== 'string' || !reviewFacts.file.endsWith('changed.txt')) {
-      throw new Error(`the changes review opened ${String(reviewFacts.file)}, not changed.txt`)
-    }
-    if (!reviewFacts.text.includes(`w5-change-${changesNonce}`)) {
-      throw new Error('the review does not paint the exact changed content the Host recorded')
-    }
-    await screenshot(page, 'changes-review')
-    const routeReads = result.network.statuses
-      .filter(entry => entry.path === '/api/changes.summary' || entry.path === '/api/changes.diff')
-    driverFact('review', { ...reviewFacts, network: { statuses: routeReads } })
-    step('changes-card-to-review', true, { file: reviewFacts.file })
-
-    // ── W5-FILE positive: the official right-click Download of a Session file.
-    const fileLink = page.getByRole('button', { name: 'changed.txt', exact: true }).last()
-    const fileRows = await openContextMenu(page, fileLink, 'changed.txt')
-    const fileLabels = fileRows.map(row => row.label)
-    if (!fileLabels.includes('Download')) throw new Error(`the file menu exposes no Download: ${JSON.stringify(fileLabels)}`)
-    if (fileLabels.some(label => /^Save as/u.test(label))) {
-      throw new Error('the Web file menu exposed the Desktop-only Save as')
-    }
-    const downloadsDir = join(coordinationDir, 'downloads')
-    mkdirSync(downloadsDir, { recursive: true, mode: 0o700 })
-    chmodSync(downloadsDir, 0o700)
-    await screenshot(page, 'file-menu')
-    const downloadPromise = page.waitForEvent('download', { timeout: 60_000 })
-    await page.getByRole('menuitem', { name: 'Download', exact: true }).last().click()
-    const download = await downloadPromise
-    const savedPath = join(downloadsDir, `changed-${nonce}.txt`)
-    await download.saveAs(savedPath)
-    const bytes = readFileSync(savedPath)
-    const downloadFacts = {
-      suggestedFilename: download.suggestedFilename(),
-      bytes: bytes.length,
-      sha256: createHash('sha256').update(bytes).digest('hex'),
-      labels: fileLabels,
-    }
-    result.downloads = [downloadFacts]
-    driverFact('download', downloadFacts)
-
-    // W5-FILE negative: a missing Session file cannot start a download and its
-    // action is disabled by the official metadata read.
-    const missingRows = await openContextMenu(page,
-      page.getByRole('button', { name: 'missing-sentinel.txt', exact: true }).last(), 'missing-sentinel.txt')
-    const missingDownload = missingRows.find(row => row.label === 'Download')
-    if (missingDownload === undefined) throw new Error('the missing file menu exposes no Download row to refuse')
-    await screenshot(page, 'file-menu-missing')
-    if (missingDownload.disabled !== true) throw new Error('a missing Session file left Download enabled')
-    const attempted = page.waitForEvent('download', { timeout: 3_000 }).then(() => true, () => false)
-    await page.getByRole('menuitem', { name: 'Download', exact: true }).last().click({ force: true }).catch(() => undefined)
-    const started = await attempted
-    await dismissMenu(page)
-    if (started) throw new Error('a missing Session file still started a download')
-    driverFact('file-negative', { rows: missingRows, downloadStarted: false })
-
-    // W5-FILE image: the official image menu's Copy image must put the ORIGINAL
-    // PNG on the real browser clipboard. A permission denial must surface the
-    // official failure feedback, never a fake success.
-    const image = page.locator('img[alt="shot"]').last()
-    await image.scrollIntoViewIfNeeded({ timeout: 30_000 }).catch(() => undefined)
-    await image.waitFor({ state: 'visible', timeout: 60_000 })
-    const imageRows = await openContextMenu(page, image, 'shot.png')
-    await screenshot(page, 'image-menu')
-    const imageLabels = imageRows.map(row => row.label)
-    if (!imageLabels.includes('Copy image')) {
-      throw new Error(`the image menu exposes no Copy image: ${JSON.stringify(imageLabels)}`)
-    }
-    await page.bringToFront()
-    await page.getByRole('menuitem', { name: 'Copy image', exact: true }).last().click()
-    // The official copy action is async (authorized read + clipboard write); the
-    // menu click returns first, so the clipboard is polled to a bounded settle.
-    const copied = await waitForClipboardPng(page, 15_000)
-    if (copied.ok !== true) throw new Error(`Copy image put no PNG on the clipboard: ${JSON.stringify(copied)}`)
-    if (copied.pngSignature !== true) throw new Error('the clipboard image/png is not a real PNG')
-    // Equivalence is pixel-level: Chromium may re-encode the PNG bytes.
-    const source = await image.evaluate(async element => {
-      const response = await fetch(element.src, { cache: 'no-store' })
-      const blob = await response.blob()
-      const bitmap = await createImageBitmap(blob)
-      const canvas = new OffscreenCanvas(bitmap.width, bitmap.height)
-      const context = canvas.getContext('2d')
-      context.drawImage(bitmap, 0, 0)
-      const rgba = context.getImageData(0, 0, bitmap.width, bitmap.height).data
-      const digest = await crypto.subtle.digest('SHA-256', rgba)
-      return {
-        width: bitmap.width,
-        height: bitmap.height,
-        pixelSha256: [...new Uint8Array(digest)].map(item => item.toString(16).padStart(2, '0')).join(''),
-      }
-    })
-    const pixelsEqual = source.width === copied.width && source.height === copied.height
-      && source.pixelSha256 === copied.pixelSha256
-    if (!pixelsEqual) {
-      throw new Error(`the clipboard PNG pixels differ from the source image: clipboard ${JSON.stringify(copied)} source ${JSON.stringify(source)}`)
-    }
-    result.copyImage = { ...copied, source, pixelsEqual, labels: imageLabels }
-    driverFact('copy-image', { ...copied, source, pixelsEqual, labels: imageLabels })
-
-    // Chromium's permission type behind the clipboard API is
-    // `clipboardReadWrite`; the Chrome "denied" setting is a real browser
-    // permission denial (not a JS mock), so the official failure path runs.
-    // A REAL refusal path: the Host removes the rendered image's source, so the
-    // official authorized read fails and the menu must surface the fixed
-    // failure feedback. (Chromium grants an activation-backed clipboard write
-    // even when the permission setting is denied, so that case is recorded as
-    // not observable rather than faked.)
-    await waitSignal('image-source-removed')
-    const refusedRows = await openContextMenu(page, image, 'shot.png (source removed)')
-    if (!refusedRows.some(row => row.label === 'Copy image')) {
-      throw new Error('the image menu exposes no Copy image for the refusal case')
-    }
-    await page.getByRole('menuitem', { name: 'Copy image', exact: true }).last().click()
-    const refused = await waitForCopyFailure(page)
-    if (refused.failureFeedback !== true) throw new Error('a refused Copy image surfaced no official failure feedback')
-    driverFact('copy-negative', { ...refused, cause: 'source-unavailable' })
-    step('image-copy-and-refusal', true, { bytes: copied.bytes, sha256: copied.sha256 })
-    step('file-download-and-refusal', true, downloadFacts)
-
-    // ── W5-QUOTE: a real selection becomes a composer draft, never a Session write.
-    const sentence = `w5-editing ${changesNonce}`
-    const selected = await dragSelectText(page, sentence)
-    if (!selected.includes(sentence)) throw new Error(`the pointer drag selected ${JSON.stringify(selected)}, not the fixture sentence`)
-    const quoteButton = page.getByRole('button', { name: 'Quote text', exact: true }).last()
-    await quoteButton.waitFor({ state: 'visible', timeout: 30_000 })
-    await quoteButton.click()
-    const quoteNodes = await composerQuotes(page)
-    if (!quoteNodes.some(text => text.includes(sentence))) {
-      throw new Error(`the Quote action inserted no atomic quote into the composer: ${JSON.stringify(quoteNodes)}`)
-    }
-    const markdown = await composerMarkdownDraft(page)
-    if (markdown.ok && !markdown.text.includes(`> ${sentence}`)) {
-      throw new Error(`the composer's Markdown draft is not a blockquote: ${JSON.stringify(markdown.text)}`)
-    }
-    await screenshot(page, 'quote-draft')
-    driverFact('quote-draft', { quoteNodes, markdownDraft: markdown.ok ? markdown.text : null, clipboardRefused: markdown.ok ? null : markdown.reason })
-
-    // Negative: the draft belongs to the current Session. A NEW Session in the
-    // same Workspace must not carry it, so the quoted text cannot be sent into
-    // the wrong Session.
-    const otherSessionId = await newSessionInWorkspace(page, 'w5-changed-files')
-    const otherDraft = await composerDraft(page)
-    const otherQuotes = await composerQuotes(page)
-    if ((typeof otherDraft === 'string' && otherDraft.includes(sentence))
-      || otherQuotes.some(text => text.includes(sentence))) {
-      throw new Error('the Quote draft leaked into another Session')
-    }
-    driverFact('quote-other-session', { sessionId: otherSessionId, draft: otherDraft ?? null, quotes: otherQuotes })
-    await openSession(page, sessionId)
-    const restored = await composerQuotes(page)
-    if (!restored.some(text => text.includes(sentence))) {
-      throw new Error(`the current Session lost its Quote draft on navigation: ${JSON.stringify(restored)}`)
-    }
-    await waitSignal('quote-send-go')
-    await sendDraft(page)
-    await waitConversation(page, changesMarker, ['w5-quote answer'], 240_000, 'the quoted prompt answer')
-    driverFact('quote-sent', { quoted: `> ${sentence}` })
-    // The runner must finish its single-write settlement assertions before this
-    // Browser starts the NEXT scenario: its next prompt would otherwise become
-    // a second user-authored message in the same Session and invalidate them.
-    await waitSignal('quote-verified')
-    step('quote-draft-then-send', true, { quoted: `> ${sentence}` })
-
-    // ── W5-CHANGES negative: a tool-active Turn with NO file change paints no card.
-    const cardsBefore = (await changedCards(page)).length
-    const completedBefore = await completedTurnCount(page)
+    await waitSignal('workspace-ready', 300_000)
+    const firstMarker = `w5-changes-${changesNonce}`
+    await sendPrompt(page, firstMarker)
+    await waitConversation(page, firstMarker, ['w5-editing'], 240_000, 'the changed-files answer')
+    await waitSignal('first-write-verified', 300_000)
     const noChangeMarker = `w5-nochange-${changesNonce}`
-    await promptAndWait(page, noChangeMarker, 'w5-nochange answer')
-    // The rendered card list is not the authority: the runner waits for the
-    // durable turn/end AND proves no `workspace/changes` event was appended.
-    driverFact('nochange-prompted', {})
-    await waitSignal('nochange-settled')
-    // Official render barrier, not a fixed sleep: this turn's completion line
-    // proves the ordered event stream was applied through its `turn/end`, so a
-    // changed-files event for the turn (which would precede `turn/end`) cannot
-    // still be pending in the client.
-    const completedAfter = await waitCompletedTurn(page, completedBefore, 30_000)
-    if (completedAfter <= completedBefore) {
-      throw new Error('the no-change Turn never rendered its official completion state')
-    }
-    const cardsAfter = await changedCards(page)
-    if (cardsAfter.length !== cardsBefore) {
-      throw new Error(`a no-change Turn painted ${String(cardsAfter.length - cardsBefore)} new changed-files card(s)`)
-    }
-    await screenshot(page, 'no-change-turn')
-    driverFact('nochange', { cardsBefore, cardsAfter: cardsAfter.length, completedBefore, completedAfter })
-    step('no-false-changed-files-card', true, { cardsBefore })
-
-    // ── A5 same-Host isolation: Web disable -> TUI keeps working -> re-enable.
-    // The old recorder/summary must not be reused, and a NEW real write must
-    // record through the freshly composed chain.
-    driverFact('toggle-ready', {})
-    await waitSignal('toggle-reenabled')
+    await sendPrompt(page, noChangeMarker)
+    driverFact('nochange-sent', { marker: noChangeMarker })
+    await waitSignal('nochange-verified', 300_000)
+    await waitSignal('toggle-reenabled', 300_000)
     await page.reload({ waitUntil: 'load', timeout: 120_000 })
     await waitShell(page)
     await assertNoPreviewNotice(page)
@@ -2073,32 +1246,12 @@ const cases = {
     const secondMarker = `w5-changes2-${changesNonce}`
     await sendPrompt(page, secondMarker)
     await waitConversation(page, secondMarker, ['w5-editing2'], 240_000, 'the post-re-enable changed-files answer')
-    // The changed-files card is painted from its own event, which can be
-    // applied just AFTER the answer row the conversation wait returned on.
-    // Wait for THIS turn's card instead of sampling the DOM once: the fact
-    // required is the card, and a single read is a race against its render.
-    const cardDeadline = Date.now() + 60_000
-    let cardsAfterReenable = await changedCards(page)
-    while (!cardsAfterReenable.some(card => card.text.includes('changed2.txt'))) {
-      if (Date.now() > cardDeadline) {
-        throw new Error(`the post-re-enable Turn painted no changed2.txt card: ${JSON.stringify(cardsAfterReenable)}`)
-      }
-      await page.waitForTimeout(250)
-      cardsAfterReenable = await changedCards(page)
-    }
-    await screenshot(page, 'post-reenable-change')
-    driverFact('toggle-second-change', { cards: cardsAfterReenable.length, text: cardsAfterReenable.map(card => card.text) })
-    step('same-host-toggle-isolation', true, { cards: cardsAfterReenable.length })
+    driverFact('second-write-sent', { marker: secondMarker })
+    await waitSignal('second-write-verified', 300_000)
+    await screenshot(page, 'host-changes')
+    step('first-write-nochange-second-write', true, { sessionId })
   },
-  /** WP-10: the honest visible-feature inventory. */
-  'wp10-inventory': async context => {
-    const page = await login(context)
-    await inventory(page)
-    const matrix = result.features
-    driverFact('features', { matrix })
-    step('feature-inventory', true, { features: matrix.length })
-    await screenshot(page, 'inventory')
-  },
+
 }
 
 /** The exact set of case ids this driver implements (unknown values fail). */
