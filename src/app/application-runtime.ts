@@ -366,6 +366,13 @@ export interface RemoteApplicationOverride {
   readonly extensionService: PiTuiExtensionService
   /** Split-Client only: the Client-root interaction delivery owner. */
   readonly interactionDelivery?: SplitClientInteractionDeliveryControl
+  /**
+   * Split-Client only: reconcile external PiTui `./tui` entries against ONE
+   * committed official Plugin Manager inventory snapshot. This is a
+   * process-local method pointing at the CURRENT surface revision's own mount
+   * owner; it is never a Gateway/RPC or a cross-process callback.
+   */
+  readonly reconcilePluginInventory?: (snapshot: import('../runtime/plugin-manager-port.ts').PluginManagerSnapshot) => void | Promise<void>
   /** Split-Client only: the mounted private session-view presence capability
    *  (M6 PR-C C3). Direct leaves it absent — the local fold needs no wire ACK. */
   readonly promptPresence?: RemotePromptPresenceCapability

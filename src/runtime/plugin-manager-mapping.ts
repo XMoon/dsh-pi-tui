@@ -168,6 +168,8 @@ function detachExemptions(value: PluginExemptionsValue): readonly PluginExemptio
 export interface PluginManagerSnapshotInput {
   readonly bundles: readonly BundleInfo[]
   readonly plugins: readonly PluginInfo[]
+  /** Exact Loader entry ids the CURRENT Client mount owner created. */
+  readonly ownedClientEntryIds?: ReadonlySet<string>
   readonly registries: PluginRegistries
   readonly exemptions: PluginExemptionsValue
 }
@@ -176,7 +178,14 @@ export interface PluginManagerSnapshotInput {
 export function detachPluginManagerSnapshot(input: PluginManagerSnapshotInput): PluginManagerSnapshot {
   return Object.freeze({
     bundles: Object.freeze(input.bundles.map(detachBundle)),
-    plugins: Object.freeze(input.plugins.map(detachPlugin)),
+    // A Direct process mounts opted-in `./tui` packages as ephemeral
+    // Client-local Loader entries. Only entries PROVEN owned by the current
+    // Client mount owner are excluded; a legitimate profile/Host row that
+    // merely reuses the naming shape stays visible and manageable.
+    plugins: Object.freeze((input.ownedClientEntryIds === undefined
+      ? input.plugins
+      : input.plugins.filter(plugin => !input.ownedClientEntryIds!.has(String(plugin.entryId))))
+      .map(detachPlugin)),
     registries: detachRegistries(input.registries),
     exemptions: detachExemptions(input.exemptions),
     exemptionWarnings: Object.freeze([...input.exemptions.warnings]),

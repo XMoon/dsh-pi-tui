@@ -135,6 +135,13 @@ export interface PluginManagerControllerHooks {
   isOpen(): boolean
   /** The runner's diagnostics channel for the owned async tasks. */
   diag: Diag
+  /**
+   * ONE read-only notification at the exact successful inventory commit
+   * point: the snapshot has passed the read-epoch currentness check and is
+   * now this controller's committed authority. It never fires for a failed,
+   * superseded, install-start or invalidation-only event.
+   */
+  onInventoryCommitted?: (snapshot: PluginManagerSnapshot) => void
 }
 
 /** Optional dependencies (test seams / the live extension runtime read). */
@@ -1708,6 +1715,7 @@ export class PluginManagerController {
       if (this.message === this.refreshErrorMessage) this.message = undefined
       this.refreshErrorMessage = undefined
       this.settleUpdateReadback('ready', snapshot)
+      this.hooks.onInventoryCommitted?.(snapshot)
       this.notifyChanged()
     } catch (error) {
       if (this.disposed || epoch !== this.readEpoch) return

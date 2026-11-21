@@ -1288,3 +1288,38 @@ test('update version eligibility is a pure Host-list narrowing, never an eligibi
     incompatible: { name: 'pkg', version: '1.1.0', runtimeVersion: '0.2.2-rc.1', requirements: { 'engines.dsh': '>=9' } },
   }) ?? '', /rejects DSH/u)
 })
+
+test('only entries proven owned by the Client mount owner leave the Host PM inventory', () => {
+  const ephemeral = 'pi-tui-client-d7fa9de1d5de190a92d683a273637c09'
+  const lookalike = 'pi-tui-client-ffffffffffffffffffffffffffffffff'
+  const mapped = detachPluginManagerSnapshot({
+    bundles: [],
+    plugins: [
+      {
+        entryId: ephemeral,
+        moduleName: '@r8-pr1-fixture/a/tui',
+        enabled: true,
+        fiberPhase: 'active',
+        readOnlyReason: 'unaddressable',
+      },
+      {
+        entryId: lookalike,
+        moduleName: '@user/legitimate-host-row',
+        enabled: true,
+        fiberPhase: 'active',
+        readOnlyReason: 'unaddressable',
+      },
+      {
+        entryId: 'ordinary-host-row',
+        moduleName: '@r8-pr1-fixture/plain/host',
+        enabled: true,
+        fiberPhase: 'active',
+        readOnlyReason: 'unaddressable',
+      },
+    ],
+    ownedClientEntryIds: new Set([ephemeral]),
+    registries: { registry: null, fallbackRegistries: [], resolved: null },
+    exemptions: { exemptions: {}, warnings: [] },
+  } as never)
+  assert.deepEqual(mapped.plugins.map(plugin => plugin.entryId), [lookalike, 'ordinary-host-row'])
+})

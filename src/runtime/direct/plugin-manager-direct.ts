@@ -42,6 +42,7 @@ import type {
   PluginUpdateResultFact,
   PluginVersionListFact,
 } from '../plugin-manager-port.ts'
+import { ownedClientExtensionEntryIds } from '../plugin-manager-ownership.ts'
 import {
   detachChange,
   detachInspection,
@@ -108,11 +109,14 @@ export class DirectPluginManagerPort implements PluginManagerPort {
     // listVersionExemptions is synchronous and reports reader problems
     // instead of failing; the shared mapping carries the warnings so the
     // surface can show them.
+    const loader = this.ctx.get('loader')
+    const ownedClientEntryIds = ownedClientExtensionEntryIds(loader === undefined ? undefined : loader as object)
     return detachPluginManagerSnapshot({
       bundles,
       plugins,
       registries,
       exemptions: service.listVersionExemptions(),
+      ...(ownedClientEntryIds === undefined ? {} : { ownedClientEntryIds }),
     })
   }
 

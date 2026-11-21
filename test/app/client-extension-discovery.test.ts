@@ -25,6 +25,12 @@ import {
   type ClientExtensionPackage,
   type ClientExtensionRow,
 } from '../../src/app/plugin-manager/client-extension-discovery.ts'
+import {
+  discoverCurrentClientExtensions,
+  type CurrentClientPackage,
+  type CurrentClientPackageLookup,
+} from '../../src/app/client-extensions/discovery.ts'
+import type { PluginManagerSnapshot } from '../../src/runtime/plugin-manager-port.ts'
 
 function packageManifest(name: string, overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
@@ -160,4 +166,215 @@ test('a legitimate ./host row never blocks or fakes a Client candidate', () => {
     configRowId: extensionConfigRowId(name),
     tuiSpecifier: `${name}/tui`,
   })
+})
+
+/* ------------------------------------------------------------------ *
+ * Current-Client discovery over the official Host snapshot
+ * ------------------------------------------------------------------ */
+
+function bundleFact(name: string, enabled: boolean): PluginManagerSnapshot['bundles'][number] {
+  return {
+    name,
+    official: false,
+    availability: 'profile',
+    enabled,
+    installed: true,
+    optional: false,
+    removable: true,
+    rows: [],
+    overrides: [],
+  }
+}
+
+function pluginRow(
+  patchId: string | undefined,
+  moduleName: string,
+  fiberPhase: string | null = 'active',
+  enabled = true,
+): PluginManagerSnapshot['plugins'][number] {
+  return {
+    entryId: `entry-${moduleName}-${String(patchId)}`,
+    moduleName,
+    enabled,
+    fiberPhase,
+    ...(patchId === undefined ? {} : { patchId }),
+  }
+}
+
+function snapshotOf(
+  bundles: readonly PluginManagerSnapshot['bundles'][number][],
+  plugins: readonly PluginManagerSnapshot['plugins'][number][] = [],
+): PluginManagerSnapshot {
+  return {
+    bundles,
+    plugins,
+    registries: { registry: null, fallbackRegistries: [], resolved: null },
+    exemptions: [],
+    exemptionWarnings: [],
+  }
+}
+
+function packageLookup(
+  packages: Readonly<Record<string, CurrentClientPackage>>,
+  calls: Array<{ specifier: string; parentURL: string }> = [],
+): CurrentClientPackageLookup {
+  return {
+    packageOf(specifier, parentURL) {
+      calls.push({ specifier, parentURL })
+      return packages[specifier]
+    },
+  }
+}
+
+function livePackages(...names: readonly string[]): Record<string, CurrentClientPackage> {
+  return Object.fromEntries(names.map(name => [name, {
+    name,
+    dir: `/profile/node_modules/${name}`,
+    manifest: packageManifest(name),
+  }]))
+}
+
+test('an enabled opt-in bundle becomes a candidate through its live carrier row', () => {
+  const name = '@r8-pr1-fixture/a'
+  const calls: Array<{ specifier: string; parentURL: string }> = []
+  const outcomes = discoverCurrentClientExtensions(
+    snapshotOf(
+      [bundleFact(name, true)],
+      [pluginRow(extensionConfigRowId(name), EXTENSION_CONFIG_MODULE)],
+    ),
+    packageLookup(livePackages(name), calls),
+    'file:///profile/node_modules/@xmoon76/dsh-pi-tui/dist/local-client.mjs',
+  )
+  assert.deepEqual(outcomes, [{
+    kind: 'candidate',
+    bundleName: name,
+    packageName: name,
+    packageDir: `/profile/node_modules/${name}`,
+    configRowId: extensionConfigRowId(name),
+    tuiSpecifier: `${name}/tui`,
+    packageVersion: '1.0.0',
+  }])
+  assert.deepEqual(calls, [{
+    specifier: name,
+    parentURL: 'file:///profile/node_modules/@xmoon76/dsh-pi-tui/dist/local-client.mjs',
+  }])
+})
+
+test('a bundle alias resolves through the installed manifest name', () => {
+  const alias = '@r8-alias/tui-display-name'
+  const installed = '@r8-pr1-fixture/a'
+  const outcomes = discoverCurrentClientExtensions(
+    snapshotOf(
+      [bundleFact(alias, true)],
+      [pluginRow(extensionConfigRowId(installed), EXTENSION_CONFIG_MODULE)],
+    ),
+    {
+      packageOf: specifier => specifier === alias
+        ? { name: installed, dir: '/profile/node_modules/@r8-pr1-fixture/a', manifest: packageManifest(installed) }
+        : undefined,
+    },
+    'file:///profile/node_modules/@xmoon76/dsh-pi-tui/dist/local-client.mjs',
+  )
+  assert.equal(outcomes[0]?.kind, 'candidate')
+  assert.equal(outcomes[0]?.kind === 'candidate' ? outcomes[0].packageName : undefined, installed)
+  assert.equal(outcomes[0]?.kind === 'candidate' ? outcomes[0].configRowId : undefined, extensionConfigRowId(installed))
+})
+
+test('an unselected bundle contributes no Client outcome even when installed', () => {
+  const name = '@r8-pr1-fixture/a'
+  const outcomes = discoverCurrentClientExtensions(
+    snapshotOf(
+      [bundleFact(name, false)],
+      [pluginRow(extensionConfigRowId(name), EXTENSION_CONFIG_MODULE)],
+    ),
+    packageLookup(livePackages(name)),
+    'file:///profile/package.json',
+  )
+  assert.deepEqual(outcomes, [])
+})
+
+test('a carrier row that is not live loses Client qualification only', () => {
+  const name = '@r8-pr1-fixture/a'
+  for (const fiberPhase of ['pending', 'failed', 'unloading', null]) {
+    const outcomes = discoverCurrentClientExtensions(
+      snapshotOf(
+        [bundleFact(name, true)],
+        [pluginRow(extensionConfigRowId(name), EXTENSION_CONFIG_MODULE, fiberPhase)],
+      ),
+      packageLookup(livePackages(name)),
+      'file:///profile/package.json',
+    )
+    assert.equal(outcomes[0]?.kind, 'invalid-opt-in')
+    assert.equal(
+      outcomes[0]?.kind === 'invalid-opt-in' ? outcomes[0].reason : undefined,
+      `profile has no Loader row "${extensionConfigRowId(name)}"`,
+    )
+  }
+})
+
+test('a disabled carrier row does not qualify an opted-in package', () => {
+  const name = '@r8-pr1-fixture/a'
+  const outcomes = discoverCurrentClientExtensions(
+    snapshotOf(
+      [bundleFact(name, true)],
+      [pluginRow(extensionConfigRowId(name), EXTENSION_CONFIG_MODULE, 'active', false)],
+    ),
+    packageLookup(livePackages(name)),
+    'file:///profile/package.json',
+  )
+  assert.equal(outcomes[0]?.kind, 'invalid-opt-in')
+})
+
+test('two enabled bundles resolving to one manifest package fail closed', () => {
+  const name = '@r8-pr1-fixture/a'
+  const outcomes = discoverCurrentClientExtensions(
+    snapshotOf(
+      [bundleFact('@r8-alias/one', true), bundleFact('@r8-alias/two', true)],
+      [pluginRow(extensionConfigRowId(name), EXTENSION_CONFIG_MODULE)],
+    ),
+    {
+      packageOf: () => ({ name, dir: '/profile/node_modules/@r8-pr1-fixture/a', manifest: packageManifest(name) }),
+    },
+    'file:///profile/package.json',
+  )
+  assert.equal(outcomes.length, 2)
+  for (const outcome of outcomes) {
+    assert.equal(outcome.kind, 'invalid-opt-in')
+    assert.equal(
+      outcome.kind === 'invalid-opt-in' ? outcome.reason : undefined,
+      `multiple enabled bundles resolve to package "${name}"`,
+    )
+  }
+})
+
+test('a selected bundle the Client cannot resolve is unresolved, not opted-in', () => {
+  const outcomes = discoverCurrentClientExtensions(
+    snapshotOf([bundleFact('@r8-pr1-fixture/missing', true)]),
+    packageLookup({}),
+    'file:///profile/package.json',
+  )
+  assert.deepEqual(outcomes, [{
+    kind: 'unresolved',
+    bundleName: '@r8-pr1-fixture/missing',
+    reason: 'the Client process cannot resolve bundle "@r8-pr1-fixture/missing"',
+  }])
+})
+
+test('a plain Host bundle stays not-opted-in through the live snapshot', () => {
+  const name = '@r8-pr1-fixture/plain'
+  const outcomes = discoverCurrentClientExtensions(
+    snapshotOf(
+      [bundleFact(name, true)],
+      [pluginRow('r8-pr1-fixture-plain-host', `${name}/host`)],
+    ),
+    packageLookup({
+      [name]: {
+        name,
+        dir: `/profile/node_modules/${name}`,
+        manifest: { name, version: '1.0.0', type: 'module', exports: { './host': './dist/host.mjs' } },
+      },
+    }),
+    'file:///profile/package.json',
+  )
+  assert.deepEqual(outcomes, [{ kind: 'not-opted-in', bundleName: name, packageName: name }])
 })

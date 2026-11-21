@@ -966,6 +966,13 @@ export interface SurfaceRuntimeOptions {
    */
   readonly createPluginManagerPanel: PluginManagerPanelFactory
   /**
+   * Read-only observer of ONE successfully committed official Plugin Manager
+   * inventory snapshot. The composition root binds it to the CURRENT Client's
+   * external-extension mount owner; it never fires on invalidation or failure
+   * and is never a second inventory.
+   */
+  readonly onPluginInventoryCommitted?: (snapshot: import('../../runtime/plugin-manager-port.ts').PluginManagerSnapshot) => void
+  /**
    * PR2 (experimental, absent on the production path): a READ-ONLY observer of
    * the active transcript projection the surface has ALREADY selected and
    * committed. It is not an event/fold/window owner and must not drive the
@@ -1657,6 +1664,9 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     mounted: () => mounted(),
     service: () => extension.service(),
     createPanel: options.createPluginManagerPanel,
+    ...(options.onPluginInventoryCommitted === undefined
+      ? {}
+      : { onInventoryCommitted: options.onPluginInventoryCommitted }),
   })
   // A4-7 presentation event routing (plan §16): the injected routing source the
   // router and this aggregate's own pending-input/search coordination read. The

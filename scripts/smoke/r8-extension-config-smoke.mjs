@@ -26,6 +26,8 @@
  *  - P1-08 the PACKED `./extension-config` export, declaration file and static
  *    dependency graph;
  *  - P1-09 the plain DSH Host plugin (no `dshPiTui`) staying fully native.
+ *  - P3-03/P3-04 the real Direct TUI painting the packed A/B Footer
+ *    contributions and executing a real `/r8-a` slash command (tmux PTY).
  *
  * Output: a machine-readable evidence JSON and a short log under the gitignored
  * `temp/r8/pr1/<stamp>/`. Exit code is non-zero when any judged gate FAILs.
@@ -419,6 +421,12 @@ function readSentinel() {
   return readFileSync(path, 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line))
 }
 
+/** Read one explicit sentinel path (the Direct-TUI phase owns its own file). */
+function readSentinelFrom(path) {
+  if (!existsSync(path)) return []
+  return readFileSync(path, 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line))
+}
+
 /** Boot the real profile in a child process and return its report. */
 function runHost({ env, runRoot, stampDir, sentinel, label, steps = [], extraPatch, host }) {
   const reportPath = join(stampDir, `host-${label}.json`)
@@ -460,6 +468,92 @@ function runHost({ env, runRoot, stampDir, sentinel, label, steps = [], extraPat
 }
 
 const bootAudit = { sentinelEvents: [], fixtureTuiRows: [] }
+
+/** Quote one shell word for the real Direct TUI command line. */
+function shellQuote(value) {
+  return `'${String(value).replaceAll("'", "'\\''")}'`
+}
+
+/**
+ * Real Direct-TUI product proof for the Client-local `./tui` loader.
+ *
+ * The SAME isolated profile (candidate + packed fixtures installed by the
+ * official `dsh plugin` command) is booted by the real `dsh --profile pi-tui`
+ * binary inside a real tmux PTY; the assertion reads the painted Footer and a
+ * real `/r8-a` slash-command execution recorded by the fixture itself.
+ */
+async function runDirectTuiQualification({ env, stampDir, sentinel }) {
+  if (process.platform === 'win32') {
+    notVerified('P3-03', 'real Direct TUI paints fixture A + B Footer contributions', 'the Direct TUI PTY lane is not supported on win32')
+    notVerified('P3-04', 'real Direct TUI slash input executes the external package command', 'the Direct TUI PTY lane is not supported on win32')
+    return
+  }
+  const tmuxVersion = spawnSync('tmux', ['-V'], { encoding: 'utf8' })
+  if (tmuxVersion.status !== 0) {
+    notVerified('P3-03', 'real Direct TUI paints fixture A + B Footer contributions', 'tmux is not installed in this environment')
+    notVerified('P3-04', 'real Direct TUI slash input executes the external package command', 'tmux is not installed in this environment')
+    return
+  }
+  const session = `r8-pr3-direct-${String(process.pid)}-${String(Date.now())}`
+  const workDir = join(stampDir, 'direct-work')
+  mkdirSync(workDir, { recursive: true })
+  writeFileSync(sentinel, '')
+  const command = `env -u NO_COLOR DSH_HOME=${shellQuote(env.DSH_HOME)} TERM=xterm-256color R8_EXTENSION_CONFIG_SENTINEL=${shellQuote(sentinel)} ${shellQuote(realBinOf('dsh'))} --profile ${PROFILE}`
+  const tmux = args => spawnSync('tmux', args, { encoding: 'utf8' })
+  try {
+    const started = tmux(['new-session', '-d', '-s', session, '-x', '140', '-y', '42', '-c', workDir])
+    if (started.status !== 0) throw new Error(`tmux new-session failed: ${started.stderr ?? ''}`)
+    tmux(['send-keys', '-t', session, '-l', command])
+    tmux(['send-keys', '-t', session, 'Enter'])
+    const deadline = Date.now() + 180_000
+    let frame = ''
+    const seen = new Set()
+    while (Date.now() < deadline) {
+      const captured = tmux(['capture-pane', '-t', session, '-p'])
+      frame = captured.stdout ?? ''
+      for (const needle of ['R8-A-LIVE', 'R8-B-LIVE']) {
+        if (frame.includes(needle)) seen.add(needle)
+      }
+      if (seen.size === 2) break
+      if (spawnSync('tmux', ['has-session', '-t', session]).status !== 0) break
+      await new Promise(resolve => setTimeout(resolve, 200))
+    }
+    check('P3-03', seen.has('R8-A-LIVE') && seen.has('R8-B-LIVE'),
+      'the real Direct TUI paints both external Footer contributions',
+      seen.size === 2 ? 'R8-A-LIVE + R8-B-LIVE painted' : `painted=${[...seen].join(',')} lastFrame=${JSON.stringify(frame.slice(-400))}`)
+    tmux(['send-keys', '-t', session, '-l', '/r8-a'])
+    // Wait for the REAL painted composer to hold the text before Enter: an
+    // input sent before the surface accepts it would be lost, not delayed.
+    const composerDeadline = Date.now() + 30_000
+    let composerHeld = false
+    while (Date.now() < composerDeadline) {
+      const captured = tmux(['capture-pane', '-t', session, '-p']).stdout ?? ''
+      if (captured.includes('/r8-a')) {
+        composerHeld = true
+        break
+      }
+      if (spawnSync('tmux', ['has-session', '-t', session]).status !== 0) break
+      await new Promise(resolve => setTimeout(resolve, 100))
+    }
+    if (!composerHeld) throw new Error('the real Direct TUI composer never painted /r8-a')
+    tmux(['send-keys', '-t', session, 'Enter'])
+    const commandDeadline = Date.now() + 30_000
+    let commandRecord
+    while (Date.now() < commandDeadline && commandRecord === undefined) {
+      commandRecord = readSentinelFrom(sentinel).find(line => line.event === 'command-call' && line.package === '@r8-pr1-fixture/a')
+      if (commandRecord === undefined) await new Promise(resolve => setTimeout(resolve, 100))
+    }
+    check('P3-04', commandRecord !== undefined,
+      'the real Direct TUI slash input executes the external package handler',
+      commandRecord === undefined ? 'no fixture command-call record' : JSON.stringify({ event: commandRecord.event, package: commandRecord.package }))
+  } catch (error) {
+    gate('P3-03', 'FAIL', 'the real Direct TUI paints both external Footer contributions', error instanceof Error ? error.message : String(error))
+    notVerified('P3-04', 'the real Direct TUI slash input executes the external package handler', 'the Direct TUI did not reach the command phase')
+  } finally {
+    tmux(['kill-session', '-t', session])
+  }
+}
+
 
 const snapshotOf = (report, name) => report.snapshots.find(entry => entry.name === name && entry.settings !== undefined)
 
@@ -616,7 +710,7 @@ function rc3Qualification({ stampDir, candidate, tarballs, evidence }) {
  * Parent mode
  * ------------------------------------------------------------------ */
 
-function main() {
+async function main() {
   mkdirSync(EVIDENCE_ROOT, { recursive: true })
   const stampDir = join(EVIDENCE_ROOT, stamp())
   const runRoot = join(stampDir, 'run')
@@ -1055,6 +1149,10 @@ function main() {
       gate('P1-10', 'FAIL', 'a skipped rc.3 environment can never produce a successful qualification verdict',
         'internal guard: the refusal gate was not recorded')
     }
+    // PR-3 Direct product proof runs LAST: it uses the same isolated profile
+    // (candidate + packed fixtures installed by the official CLI) and its own
+    // sentinel, so it cannot perturb any preceding Host-boot audit.
+    await runDirectTuiQualification({ env, stampDir, sentinel })
   } catch (error) {
     gate('INFRA', 'FAIL', 'the runner completes', error instanceof Error ? `${error.name}: ${error.message}` : String(error))
   } finally {
@@ -1084,5 +1182,5 @@ function main() {
 if (process.env.R8_PR1_CHILD === 'host') {
   await hostChild()
 } else {
-  main()
+  await main()
 }

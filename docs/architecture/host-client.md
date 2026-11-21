@@ -1065,6 +1065,61 @@ dispatched failure whose settlement cannot be observed is
 write counter or Client-side optimistic value, and no namespace, path or
 secret crosses the port.
 
+### Client-local external `./tui` loading
+
+An opted-in npm package's `./tui` entry is loaded ONLY by the CURRENT Client,
+through that Client's EXISTING official Cordis Loader. The semantic owner is
+`src/app/client-extensions/**`, shared by Direct and Split:
+
+- Inputs are ONE committed official Host `PluginManagerPort.snapshot()`
+  (`bundles[].enabled` plus the live `plugins[].patchId/moduleName/enabled/
+  fiberPhase` rows), the current process's official `PluginPackages.packageOf`
+  identity/manifest, and the existing pure Client-extension qualification.
+  A Client-local `package.json` scan, a profile path read or a second npm
+  resolver is never an authority.
+- `ConfigPort.extensionConfigs` supplies the package's effective `data` value
+  verbatim. An unavailable/stale/unreadable read is an explicit Client-local
+  state; a previously mounted package is unloaded through the official Loader
+  with awaited Fiber cleanup, so it never becomes `{}`, a stale value or a
+  live ACTIVE entry.
+- The Loader entry id is `pi-tui-client-` + the validated 32-char
+  `extensionConfigRowId` suffix. `loader.create()` returning is not activation:
+  the entry's real Fiber must exist, settle and be ACTIVE.
+- Code identity is the SHA-256 of the exact module file the official Loader's
+  ESM resolver will import — never a `require`-condition path or a second
+  resolver. The official package version is a second currentness input: a
+  changed version, or a failed first apply after a successful import, is
+  remembered as an import-attempt identity so a same-PID retry cannot report
+  new disk bytes as ACTIVE. Identity memory is process-lifetime per Loader,
+  so a same-PID surface revision inherits the identity of the module v1 that
+  Node's ESM cache actually holds.
+- A transition to `reload-required` emits one actionable user notice through
+  the existing PiTui notification seam: Split says `/reload-client`; Direct
+  says to restart the Client. This is an advisory, not a Plugin Manager page
+  or a second management surface.
+- Unload captures the real Fiber, removes the entry from the Loader tree
+  first, then awaits that Fiber's terminal disposal before the id may be
+  reused. A same-PID byte change is never re-imported; the old entry keeps
+  running and the package becomes `reload-required` until a new process
+  imports the new module.
+- Direct mounts these entries in its own Host-process Loader as ephemeral
+  Client runtime entries — never as profile `cordis.patch.yml` rows. The Host
+  Plugin Manager projection excludes only the entries PROVEN owned by the
+  current Client mount owner: they are Client runtime facts, not manageable
+  profile plugins; a Host row that merely shares the naming shape stays
+  visible. A Split Client mounts
+  them in its own Client Context/Loader; closing one Client releases only
+  that Client's entries.
+- The Plugin Manager's committed-explicit-refresh callback drives an
+  incremental reconcile. It is a process-local method pointing at the CURRENT
+  surface revision; there is no polling, Gateway callback or cross-process
+  callback, and a superseded revision never publishes a stale observation.
+
+The live Entry/Fiber and per-package `active`/`error`/`reload-required`
+observation is the only Client runtime status. Official Plugin Manager
+`enabled` is install/selection truth and is never re-labelled as Client
+ACTIVE.
+
 ### MCP server management (ONE Host manager)
 
 The ONE official Host MCP manager (`@deepseek-ai/dsh-mcp-manager`,

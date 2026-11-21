@@ -371,6 +371,10 @@ const OLD_CLIENT_ENVIRONMENT = [
   'SPLIT_PROCESS_CLIENT_HOLD_STARTUP_GATE',
   'SPLIT_PROCESS_CLIENT_EXTENSION_CONFIG_PROBE',
   'SPLIT_PROCESS_CLIENT_EXTENSION_CONFIG_PACKAGES',
+  'SPLIT_PROCESS_CLIENT_EXTENSION_LOADER_PROBE',
+  'SPLIT_PROCESS_CLIENT_EXTENSION_LOADER_PACKAGES',
+  'SPLIT_PROCESS_CLIENT_EXTENSION_LOADER_KEEP_BYTES',
+  'SPLIT_PROCESS_CLIENT_EXTENSION_LOADER_NOTICE_PROBE',
   'SPLIT_PROCESS_CLIENT_FORCE_FAILURE',
   'SPLIT_PROCESS_CLIENT_FORCE_STARTUP_FATAL',
   'SPLIT_PROCESS_CLIENT_FORCE_REFRESH_UNRESPONSIVE_ONCE',
@@ -1224,6 +1228,10 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
     : NO_PROCESS_SEAT
   let context: import('@deepseek-ai/cordis').Context | undefined
   let loaderFiber: Fiber | undefined
+  /** The SAME official Loader installed below (surface/peer modes only). */
+  let clientLoader: import('@deepseek-ai/cordis-plugin-loader').Loader | undefined
+  /** The SAME official `PluginPackages` service this Client process resolved. */
+  let clientPluginPackages: import('../client-extensions/discovery.ts').CurrentClientPackageLookup | undefined
   let startupGate: InteractionStartupGate | undefined
   let installedTransport: InstalledLocalClientTransport | undefined
   let transport: LocalClientTransport | undefined
@@ -1479,6 +1487,8 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
     context = new hostModules.Context()
     const packageFiber = context.plugin(hostModules.PluginPackages as never, { resolution } as never)
     await packageFiber
+    clientPluginPackages = context.get('pluginPackages') as unknown as
+      import('../client-extensions/discovery.ts').CurrentClientPackageLookup | undefined
     emit({ m4a0: 'context-ready', processRole: 'client', pid: process.pid, phase: 'context-ready' })
 
     // The official resolution interception is live before these dynamic
@@ -1503,10 +1513,17 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
       // until the Session resolver and the root interaction listeners exist;
       // the upstream `ClientRemoteService` sees that pending entry in
       // `loader.await()` and therefore does not start `connection.start()`.
-      loaderFiber = clientContext.plugin(hostModules.Loader as never, {} as never)
+      loaderFiber = clientContext.plugin(hostModules.Loader as never, {
+        // The official Loader resolves bare plugin specifiers from this base.
+        // A Split Client Context is created bare, so without the profile anchor
+        // a dynamically created `<pkg>/tui` entry could not import. This is
+        // the ONE existing Loader — never a second resolver or Context.
+        baseUrl: pathToFileURL(join(profileDir, 'package.json')).href,
+      } as never)
       await loaderFiber
       const loader = clientContext.get('loader') as import('@deepseek-ai/cordis-plugin-loader').Loader | undefined
       if (loader === undefined) throw new Error('local client entry: the official Cordis Loader did not install')
+      clientLoader = loader
       startupGate = createInteractionStartupGate()
       loader.builtins[INTERACTION_STARTUP_GATE] = startupGate.plugin as never
       await loader.create({ name: `cordis:${INTERACTION_STARTUP_GATE}` })
@@ -2288,6 +2305,17 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
           mountRunner,
           profileDaemonAdmin,
           diag,
+          ...(clientLoader === undefined || clientPluginPackages === undefined
+            ? {}
+            : {
+                clientExtensions: {
+                  loader: clientLoader,
+                  pluginPackages: clientPluginPackages,
+                  // This module lives inside the installed Client package, so
+                  // Node resolves the profile package table from its real path.
+                  parentURL: import.meta.url,
+                },
+              }),
           onStatus: status => {
             emit({ m4b2s: 'surface-status', ...traceStatus(status) })
           },

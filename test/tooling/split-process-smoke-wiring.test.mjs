@@ -467,6 +467,11 @@ test('every registry entry declares a conservative platform list and the ten sha
     // it has a real packed-candidate Darwin run (multi-Client, dual-Session,
     // identity-kept, quiesced).
     'prompt.session-focus-turn-parity',
+    // The R8-E Client-local loader case drives two real surface Clients over
+    // the shared Split harness (tmux PTY, authenticated Host, official PM
+    // snapshot) with a real packed-candidate Darwin run; it uses no
+    // platform-specific primitive beyond that shared seam.
+    'host-settings.r8-extension-client-loader-pr3',
   ]
   const cases = listSelectableCases()
   for (const entry of cases) {

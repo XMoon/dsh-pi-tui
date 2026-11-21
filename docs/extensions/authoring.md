@@ -67,6 +67,53 @@ own `dsh.bundle.patch` and points that row at the trusted carrier subpath:
 - The row is a Host configuration carrier only: it performs no work, publishes
   no service and declares no TUI surface.
 
+## Client-local `./tui` entry
+
+A package that also contributes TUI surfaces declares the opt-in in its
+installed `package.json` and exports the module from the same package:
+
+```json
+{
+  "exports": { "./tui": "./dist/tui.mjs" },
+  "dshPiTui": {
+    "manifestVersion": 1,
+    "entrypoints": { "./tui": "tui-local" }
+  }
+}
+```
+
+The `./tui` module is an ordinary Cordis plugin (`name`, optional `inject`,
+`apply(ctx, config)`), not a second plugin system. When the package is
+selected in the active profile AND its trusted Config row is mounted, the
+CURRENT Client loads it through that Client's EXISTING official Loader:
+
+- Direct loads it in the Direct session's Client scope; a Split Client loads
+  it in its own Client Context. The Host never imports `./tui`, and the
+  official Host Plugin Manager remains the only install/selection authority.
+- `config` is the Config row's effective `data` value verbatim — `null`,
+  `false`, `0`, arrays and absent values are real values. A failed read is
+  reported as unavailable, its live contributions are unloaded, and the value
+  is never replaced by `{}`.
+- The contributions (commands, Footer, settings, …) are owned by the real
+  Loader entry's fiber, so disabling the bundle, unloading the surface or
+  exiting the Client disposes them. The same bytes enabled again create a new
+  fiber; no duplicate registration survives the old one.
+- Code identity is taken from the exact ESM module file the official Loader
+  imports, not from a `require` condition, and the process remembers the
+  identity it actually imported across same-PID surface revisions, including a
+  failed first apply after a successful import. The official package version
+  is also a currentness input: a version bump makes the old `./tui` code
+  `reload-required` even when a thin entry file is unchanged. Changed `./tui`
+  bytes are never hot-imported in the same process: the old code keeps running
+  and the package reports `reload-required`; a Split Client sees an actionable
+  `/reload-client` notice, while Direct requires an explicit application
+  restart.
+
+A malformed opt-in, missing `./tui` export, missing/wrong Config row, or a
+failed import/apply only costs that package's PiTui Client status. It never
+blocks the package's official DSH installation, Host rows or native
+enable/disable lifecycle.
+
 ## Rules that never change
 
 - **One service, one runtime.** The tiers are capability facades over the

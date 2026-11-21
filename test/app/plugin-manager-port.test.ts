@@ -2076,3 +2076,33 @@ test('update: Check updates after a completed update starts a fresh lifecycle an
   assert.equal(controller.updateView()?.lastObservedVersion, '1.2.0')
   assert.notEqual(controller.updateView()?.requestId, firstRequest, 'the second update has its own request id')
 })
+
+test('only a committed read emits the inventory callback; failures and superseded reads never do', async () => {
+  let fail = false
+  const committed: PluginManagerSnapshot[] = []
+  const snap = snapshot([bundle()])
+  const { port } = fakePort({
+    snapshotImpl: async () => {
+      if (fail) throw new Error('inventory unavailable')
+      return snap
+    },
+  })
+  const controller = new PluginManagerController(port, {
+    requestRender: () => {},
+    notify: () => {},
+    isOpen: () => true,
+    diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
+    onInventoryCommitted: value => { committed.push(value) },
+  }, { observations: () => [] })
+
+  controller.open()
+  await tick()
+  assert.equal(committed.length, 1)
+  assert.equal(committed[0], snap, 'the callback receives the exact committed snapshot')
+
+  fail = true
+  controller.refresh()
+  await tick()
+  assert.equal(committed.length, 1, 'a failed refresh never emits a committed inventory')
+  controller.dispose()
+})

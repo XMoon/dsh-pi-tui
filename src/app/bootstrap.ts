@@ -148,6 +148,7 @@ import type { NavigationIntent } from '../app/session/transition.ts'
 import { bindSubmissionRuntime, type SubmissionRuntime } from '../app/submission/runtime.ts'
 import type { SessionOwnerRef, SessionSubject } from '../app/session/subject.ts'
 import { createSurfaceRuntime } from '../app/surface/runtime.ts'
+import { createClientExtensionMountOwner, type ClientExtensionMountOwner } from '../app/client-extensions/mount-owner.ts'
 import { createVisualEventSnapshotProvider, type VisualEventSnapshotProvider } from './bootstrap/visual-snapshot.ts'
 import type { SurfaceRendererMount } from '../app/surface/runtime.ts'
 import { productionTspConnector, selectRendererMount, tspRequested } from './bootstrap/renderer-selection.ts'
@@ -454,6 +455,15 @@ export function applyRunnerWithRuntime(
    * safety instead of fabricating a mounted-surface cleanup.
    */
   let disposeSurfaceRef: (() => void) | undefined
+  /**
+   * Direct only: the ONE Client-extension mount owner of this runner fiber and
+   * the late-bound reconcile entry its surface Plugin Manager callback uses.
+   * Both stay undefined on the Split branch (its surface revision owns them).
+   */
+  let directClientExtensionOwner: ClientExtensionMountOwner | undefined
+  let directClientExtensionReconcile: ((snapshot: import('../runtime/plugin-manager-port.ts').PluginManagerSnapshot) => void) | undefined
+  /** The initial Direct activation task, awaited right before the first surface attach. */
+  let directClientExtensionActivation: Promise<void> | undefined
 
   /**
    * The terminal-total fatal catch (TS2 §11): the orchestration is owned by
@@ -949,6 +959,18 @@ export function applyRunnerWithRuntime(
       // implementation; the application surface owner consumes only the injected
       // factory and never imports `tui/**` itself.
       createPluginManagerPanel: createPluginManagerWorkspacePanel,
+      // The Plugin Manager controller's ONE committed-inventory callback:
+      // Direct feeds this runner's own mount owner; a Split Client forwards it
+      // to the CURRENT surface revision through the process-local override.
+      onPluginInventoryCommitted: snapshot => {
+        if (override !== undefined) {
+          const reconcile = override.reconcilePluginInventory
+          if (reconcile === undefined) return
+          runDetached('remote client extension inventory reconcile', () => reconcile(snapshot), { diag })
+          return
+        }
+        directClientExtensionReconcile?.(snapshot)
+      },
       // The PR2 read-only visual snapshot supply: Direct main attachment or the
       // mounted viewed child's exact Session, undefined on Remote.
       visualEventSnapshotFor,
@@ -3916,6 +3938,55 @@ export function applyRunnerWithRuntime(
       ? ctx.get(PI_TUI_EXTENSIONS_SERVICE) as typeof extensionService
       : override.extensionService as typeof extensionService
     if (extensionService !== undefined) surface.attachExtensionHost(extensionService)
+    // Direct is its own Client logical seat: activate external PiTui `./tui`
+    // packages on THIS Host process's existing Context/Loader/package table.
+    // The owner belongs to this runner fiber (`ctx.effect` awaits its disposal)
+    // and never writes `cordis.patch.yml` or a Host plugin row.
+    if (override === undefined && extensionService !== undefined) {
+      const pluginPackages = ctx.get('pluginPackages' as never) as unknown as
+        import('./client-extensions/discovery.ts').CurrentClientPackageLookup | undefined
+      const loader = ctx.get('loader')
+      if (pluginPackages !== undefined && loader !== undefined) {
+        const owner = createClientExtensionMountOwner({
+          context: ctx,
+          loader,
+          pluginPackages,
+          config: backend.config.extensionConfigs,
+          // This module's own installed file is inside the profile tree, so
+          // Node's lookup order already anchors on the profile package table —
+          // never a guessed profile path or a second resolver.
+          parentURL: import.meta.url,
+          notifyReloadRequired: packageName => {
+            ;(extensionService as unknown as {
+              _advancedUiNotify?: (message: string, options?: { readonly type?: 'info' | 'error' }) => void
+            })._advancedUiNotify?.(`Client reload required: restart this Client to load ${packageName}`, { type: 'error' })
+          },
+          signal: lifecycleController.signal,
+          diag,
+        })
+        directClientExtensionOwner = owner
+        directClientExtensionReconcile = snapshot => {
+          runDetached('direct client extension inventory reconcile', () => owner.reconcile(snapshot), { diag })
+        }
+        ctx.effect(async () => {
+          return async () => {
+            directClientExtensionReconcile = undefined
+            if (directClientExtensionOwner === owner) directClientExtensionOwner = undefined
+            await owner.dispose()
+          }
+        }, 'direct client extension mount owner')
+        directClientExtensionActivation = (async () => {
+          try {
+            const snapshot = await backend.pluginManager.snapshot()
+            await owner.reconcile(snapshot)
+          } catch (error) {
+            // External UI packages are an additive Client capability: a failed
+            // inventory read never blocks the already-authoritative Direct TUI.
+            diag.warn('direct client extension activation failed', { error: safeErrorMessage(error) })
+          }
+        })()
+      }
+    }
     // The TUI is about to mount: the pre-mount status line must be gone
     // before the first frame (no stale scrollback line after mount).
     if (lifecycleController.signal.aborted) {
@@ -4219,6 +4290,9 @@ export function applyRunnerWithRuntime(
     // capabilities, extension registries + input routes, resize/workflow hooks)
     // from these narrow injected capabilities and owns the mounted TuiApp from
     // here on.
+    // Direct external `./tui` entries must exist before the first surface
+    // attach; later refreshes reconcile through the Plugin Manager callback.
+    if (directClientExtensionActivation !== undefined) await directClientExtensionActivation
     try {
       surface.start({
       // M6 UX PR1: the LIVE authoritative activity fact for the renderer-level
