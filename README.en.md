@@ -21,17 +21,17 @@ English | [简体中文](README.md)
 
 ### Stable / latest
 
-For general use, install the currently published stable build. Install DeepSeek Harness first, then the TUI bundle into the `pi-tui` profile:
+**0.5.7 is the current stable release (npm `@latest`).** The recommended DSH pairing is **0.2.2-rc.5**. Install DeepSeek Harness first, then the TUI bundle into the `pi-tui` profile:
 
 ~~~sh
-npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty @deepseek-ai/dsh@latest
+npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty @deepseek-ai/dsh@0.2.2-rc.5
 dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@latest
 dsh --profile pi-tui
 ~~~
 
-### Exact pairing (0.5.7 candidate / not yet published)
+### Exact version pairing (0.5.7)
 
-The currently published npm `@latest` is **0.5.6 × DSH 0.2.2-rc.1**. The **0.5.7** candidate requires **Node.js ≥24.9.0** and **DSH ≥0.2.2-rc.3**; the exact current qualification target is **DSH 0.2.2-rc.5**. Use the following pinned 0.5.7 pair **only after publication**, not as evidence that 0.5.7 is available now:
+**0.5.7 requires Node.js ≥24.9.0 and DSH ≥0.2.2-rc.3. DSH 0.2.2-rc.5 is recommended** (the exact qualification target for this release). For a reproducible installation, pin both package versions:
 
 ~~~sh
 npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty @deepseek-ai/dsh@0.2.2-rc.5
@@ -39,12 +39,12 @@ dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.5.7
 dsh --profile pi-tui
 ~~~
 
-To qualify this checkout against its pinned npm DSH family, run `pnpm compat:dsh:npm`.
+When building or validating from source, run `pnpm compat:dsh:npm` to check the pinned npm DSH family.
 
 | TUI | DSH | Status |
 |---|---|---|
-| `0.5.7` | `>=0.2.2-rc.3`; exactly qualified against `0.2.2-rc.5` | Unpublished candidate |
-| `0.5.6` | `0.2.2-rc.1` | Published stable |
+| `0.5.7` | `>=0.2.2-rc.3`; recommended `0.2.2-rc.5` | **Current latest** |
+| `0.5.6` | `0.2.2-rc.1` | Previous release |
 
 **Upgrade precaution:** Before changing the DSH Runtime, finish in-flight Turns/Jobs, stop the previous Host and back up Profiles, Sessions and required data. Cross-DSH schema downgrade in place is not guaranteed. Do not pair 0.5.7 with rc.2 or earlier. See the [compatibility guide](docs/guides/dsh-compatibility.md) for historical pairs and recovery.
 
@@ -58,7 +58,7 @@ dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@next
 dsh --profile pi-tui
 ~~~
 
-To verify the pinned candidate in this checkout:
+To verify this checkout's pinned npm pairing:
 
 ~~~sh
 pnpm compat:dsh:npm

@@ -21,17 +21,17 @@ Agent Loop、模型、工具、持久化、权限和并发写入权威都属于 
 
 ### Stable / latest
 
-普通用户使用当前已经发布的 stable 版本。先安装 DeepSeek Harness，再将 TUI 添加到 `pi-tui` Profile：
+**0.5.7 是当前最新稳定版（npm `@latest`）**。推荐搭配 **DSH 0.2.2-rc.5**；先安装 DeepSeek Harness，再将 TUI 添加到 `pi-tui` Profile：
 
 ~~~sh
-npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty @deepseek-ai/dsh@latest
+npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty @deepseek-ai/dsh@0.2.2-rc.5
 dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@latest
 dsh --profile pi-tui
 ~~~
 
-### 精确版本配对（0.5.7 候选 / 尚未发布）
+### 精确版本配对（0.5.7）
 
-目前 npm `@latest` 对应 **0.5.6 × DSH 0.2.2-rc.1**。正在准备的 **0.5.7** 要求 **Node.js ≥24.9.0**、**DSH ≥0.2.2-rc.3**，当前精确验证目标为 **DSH 0.2.2-rc.5**。下面的 0.5.7 命令用于正式发布后的安装；**发布前不要把它当作已经可下载的版本**：
+**0.5.7 要求 Node.js ≥24.9.0、DSH ≥0.2.2-rc.3，推荐使用 DSH 0.2.2-rc.5**（本版本的精确验证目标）。需要可复现安装时，固定两个包的版本：
 
 ~~~sh
 npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty @deepseek-ai/dsh@0.2.2-rc.5
@@ -39,12 +39,12 @@ dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.5.7
 dsh --profile pi-tui
 ~~~
 
-当前 checkout 可以运行 `pnpm compat:dsh:npm` 验证仓库锁定的 npm DSH 配对。
+从源码构建或验证时，可以运行 `pnpm compat:dsh:npm` 检查仓库锁定的 npm DSH 配对。
 
 | TUI | DSH | 状态 |
 |---|---|---|
-| `0.5.7` | `>=0.2.2-rc.3`；以 `0.2.2-rc.5` 为精确验证目标 | 候选，未发布 |
-| `0.5.6` | `0.2.2-rc.1` | 已发布 stable |
+| `0.5.7` | `>=0.2.2-rc.3`；推荐 `0.2.2-rc.5` | **当前 latest** |
+| `0.5.6` | `0.2.2-rc.1` | 上一版本 |
 
 **升级注意**：跨 DSH Runtime 升级必须先完成正在运行的 Turn/Job、停止旧 Host 并备份 Profile、Session 与所需数据；不保证跨 DSH 数据 Schema 的原地回退。不要将 0.5.7 配到 DSH rc.2 或更早版本。完整配对和恢复方法见[兼容性指南](docs/guides/dsh-compatibility.md)。
 
@@ -58,7 +58,7 @@ dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@next
 dsh --profile pi-tui
 ~~~
 
-从本仓库验证候选的精确配对：
+从本仓库验证锁定的 npm 配对：
 
 ~~~sh
 pnpm compat:dsh:npm
