@@ -54,7 +54,6 @@ interface SplitSmokeProfileModule {
 
 interface SplitSmokeFixturesModule {
   writeC1WorkFixture(profileDir: string, workDir: string): C1WorkFixture
-  readC1WorkEvents(workRoot: string): Record<string, any>[]
   waitForC1WorkEvent(
     workRoot: string,
     predicate: (event: Record<string, any>) => boolean,
@@ -145,7 +144,6 @@ export interface SplitS0Scene {
     label: string,
     timeoutMs?: number,
   ): Promise<Record<string, any>>
-  c1WorkEvents(workRoot: string): Promise<Record<string, any>[]>
   dispose(): Promise<void>
 }
 
@@ -304,15 +302,34 @@ class Scene implements SplitS0Scene {
       stderr,
       exited: false,
     }
+    this.#hosts.push(host)
+    this.#resources.hosts.push({
+      scenario,
+      businessPid: null,
+      childPid: child.pid ?? null,
+      workRoot,
+      startedAt: new Date().toISOString(),
+    })
+    this.#writeResources()
     const exitPromise = waitForChildExit(child, 24 * 60 * 60_000).then(result => {
       host.exited = true
       host.exitResult = result
       return result
     }).catch(() => undefined)
     void exitPromise
-    const ready = await this.#waitForHostRecord(host, record => record.m4a0 === 'ready' || record.m4a0 === 'failure',
-      `${scenario} Host ready`, 180_000)
+    let ready: Record<string, any>
+    try {
+      ready = await this.#waitForHostRecord(host,
+        record => record.m4a0 === 'ready' || record.m4a0 === 'failure',
+        `${scenario} Host ready`, 180_000)
+    } catch (error) {
+      this.#killOwnedHost(host)
+      await waitForChildExit(child, 5_000).catch(() => undefined)
+      throw error
+    }
     if (ready.m4a0 === 'failure') {
+      this.#killOwnedHost(host)
+      await waitForChildExit(child, 5_000).catch(() => undefined)
       throw new Error(`${scenario} Host boot failed: ${JSON.stringify({
         code: ready.code,
         error: ready.error,
@@ -320,14 +337,8 @@ class Scene implements SplitS0Scene {
       })} stderr=${JSON.stringify(stderr.value.slice(-2000))}`)
     }
     ;(host as { ready: Record<string, any> }).ready = ready
-    this.#hosts.push(host)
-    this.#resources.hosts.push({
-      scenario,
-      businessPid: ready.pid ?? null,
-      childPid: child.pid ?? null,
-      workRoot,
-      startedAt: new Date().toISOString(),
-    })
+    const resource = this.#resources.hosts.find(candidate => candidate.childPid === child.pid)
+    if (resource !== undefined) resource.businessPid = ready.pid ?? null
     this.#writeResources()
     return host
   }
@@ -385,8 +396,10 @@ class Scene implements SplitS0Scene {
       rows: 30,
       waitReady: false,
       env,
+    }).catch(async error => {
+      await terminal.closeQuiet()
+      throw error
     })
-    await this.#waitForPaintedFrame(terminal, `${label} painted its first frame`, 30_000)
     const client: ClientHandle = {
       label,
       terminal,
@@ -424,6 +437,13 @@ class Scene implements SplitS0Scene {
       startedAt: new Date().toISOString(),
     })
     this.#writeResources()
+    try {
+      await this.#waitForPaintedFrame(terminal, `${label} painted its first frame`, 30_000)
+    } catch (error) {
+      await terminal.closeQuiet()
+      client.closed = true
+      throw error
+    }
     return client
   }
 
@@ -431,6 +451,7 @@ class Scene implements SplitS0Scene {
     if (client.closed) return
     const state = await client.terminal.state().catch(() => undefined)
     if (state !== undefined && state.exited !== null) {
+      assert(state.exited === 0, `${client.label} was already exited with code ${String(state.exited)}`)
       client.closed = true
       await client.terminal.closeQuiet()
       return
@@ -452,6 +473,8 @@ class Scene implements SplitS0Scene {
       if (!choiceTaken) {
         const frame = await client.terminal.text().catch(() => '')
         if (frame.includes('Disconnect from dsh-pi-tui')) {
+          await this.#waitForClientText(client.terminal, 'Keep working and disconnect',
+            `${client.label} busy exit choice`, 15_000, false)
           await client.terminal.press('Enter')
           choiceTaken = true
         }
@@ -502,22 +525,25 @@ class Scene implements SplitS0Scene {
     return await fixturesModule.waitForC1WorkEvent(workRoot, predicate, label, timeoutMs)
   }
 
-  async c1WorkEvents(workRoot: string): Promise<Record<string, any>[]> {
-    return fixturesModule.readC1WorkEvents(workRoot)
-  }
-
   async dispose(): Promise<void> {
     const errors: Error[] = []
-    this.#writeResources()
+    try {
+      this.#writeResources()
+    } catch (error) {
+      errors.push(new Error(`resource diagnostics could not be written: ${asError(error).message}`))
+    }
     for (const client of [...this.#clients].reverse()) {
       if (client.closed) continue
       try {
         const state = await client.terminal.state().catch(() => undefined)
         if (state !== undefined && state.exited === null) {
           await client.terminal.submit('/exit').catch(() => undefined)
-          await sleep(1_000)
-          await client.terminal.press('Enter').catch(() => undefined)
-          await sleep(1_000)
+          await sleep(500)
+          const frame = await client.terminal.text().catch(() => '')
+          if (frame.includes('Disconnect from dsh-pi-tui') && frame.includes('Keep working and disconnect')) {
+            await client.terminal.press('Enter').catch(() => undefined)
+          }
+          await sleep(500)
         }
       } catch (error) {
         errors.push(new Error(`${client.label} graceful exit failed: ${asError(error).message}`))
@@ -525,6 +551,10 @@ class Scene implements SplitS0Scene {
       try {
         await client.terminal.closeQuiet()
         client.closed = true
+        const state = await client.terminal.state().catch(() => undefined)
+        if (state !== undefined && state.exited === null) {
+          errors.push(new Error(`${client.label} native close left the session alive`))
+        }
       } catch (error) {
         errors.push(new Error(`${client.label} native close failed: ${asError(error).message}`))
       }

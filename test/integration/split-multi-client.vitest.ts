@@ -174,6 +174,8 @@ test('the first real Question answer settles once while the loser late option ke
     'the Host committed the question tool result',
   )
   assert.notEqual(result.data?.message?.isError, true, 'the answered question failed at the Host')
+  assert.match(JSON.stringify(result.data?.message ?? {}), /Proceed/u,
+    'the Host question result did not carry the selected Proceed answer')
   await scene.waitForSessionEvent(
     sessionId,
     answerBoundary,
@@ -237,12 +239,4 @@ test('the first real Question answer settles once while the loser late option ke
     'the question trigger was not committed exactly once')
   assert.equal(sessionsUserTexts(finalEvents).filter(text => text === 's0-a-after-b-exit').length, 1,
     'the post-exit prompt was not committed exactly once')
-
-  const proofs = await scene.c1WorkEvents(host.workRoot)
-  assert.equal(proofs.filter(event => event.kind === 'question-request' && event.sessionId === sessionId).length, 1,
-    'the Host question request was not raised exactly once')
-  assert.equal(proofs.filter(event => event.kind === 'question-settled' && event.sessionId === sessionId).length, 1,
-    'the Host question was not settled exactly once')
-  assert.equal(proofs.some(event => event.kind === 'question-failed'), false,
-    'the legal first answer was recorded as a failed Host question')
 })

@@ -3,7 +3,7 @@ import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 
 import { expect, test } from 'vitest'
-import { TuiTest } from '@microsoft/tui-test'
+import { TuiTest as Terminal } from '@microsoft/tui-test'
 
 /**
  * Bottom-up engine probe: prove the native terminal backend can start a real
@@ -13,12 +13,16 @@ import { TuiTest } from '@microsoft/tui-test'
  * This is deliberately independent of the packaged candidate and the S0
  * fixture; it validates only the terminal engine on this OS.
  */
-const engineRoot = join(process.cwd(), 'temp', 's0-terminal-engine')
-mkdirSync(join(engineRoot, 'trace'), { recursive: true })
-mkdirSync(join(engineRoot, 'artifacts'), { recursive: true })
+function prepareEngineRoot(): string {
+  const root = join(process.cwd(), 'temp', 's0-terminal-engine')
+  mkdirSync(join(root, 'trace'), { recursive: true })
+  mkdirSync(join(root, 'artifacts'), { recursive: true })
+  return root
+}
 
 test('the xtermjs engine paints a real PTY frame, accepts Enter, and reports a clean exit', async () => {
-  const terminal = TuiTest.ephemeral('split-terminal-engine', {
+  const engineRoot = prepareEngineRoot()
+  const terminal = Terminal.ephemeral('split-terminal-engine', {
     backend: 'xtermjs',
     trace: { mode: 'on-failure', directory: join(engineRoot, 'trace') },
     artifacts: { dir: join(engineRoot, 'artifacts'), onFailure: 'text' },
@@ -49,7 +53,8 @@ test('the xtermjs engine paints a real PTY frame, accepts Enter, and reports a c
 })
 
 test('a missing terminal locator rejects with a diagnosable expectation error', async () => {
-  const terminal = TuiTest.ephemeral('split-terminal-engine-negative', {
+  const engineRoot = prepareEngineRoot()
+  const terminal = Terminal.ephemeral('split-terminal-engine-negative', {
     backend: 'xtermjs',
     trace: { mode: 'on-failure', directory: join(engineRoot, 'trace') },
     artifacts: { dir: join(engineRoot, 'artifacts'), onFailure: 'text' },
