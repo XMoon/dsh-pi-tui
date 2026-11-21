@@ -128,9 +128,14 @@ function hubActionIds(fixture: DirectTspFixture): string[] {
 function pickerFrame(fixture: DirectTspFixture, prefix: string): string {
   const props = pickerProps(fixture.pane, prefix)
   const items = (props.items ?? []) as Array<{ readonly id: string }>
+  const actions = (props.actions ?? []) as Array<{ readonly id: string }>
   return JSON.stringify({
     state: props.state,
     items: items.map(item => item.id),
+    selected: props.selected,
+    subtitle: props.subtitle,
+    actions: actions.map(action => action.id),
+    frameCount: fixture.pane.frameCount(),
     current: props.current,
     message: props.message,
   })
@@ -160,6 +165,51 @@ async function waitForReadyPicker(
     const props = pickerProps(fixture.pane, prefix)
     if (props.state === 'ready' && isReady(props)) return
     await new Promise(resolve => setTimeout(resolve, 25))
+  }
+  throw new Error(`timed out waiting for ${label}; last ${prefix} frame: ${pickerFrame(fixture, prefix)}`)
+}
+
+/**
+ * Wait until the visible action bar has STOPPED MOVING before sending its token.
+ *
+ * `PickerProps.state === 'ready'` is not by itself the coordinator's final
+ * refresh commit: `TspWorkHub.setItems()` also promotes a loading panel to
+ * `ready` and then the coordinator's own `setRefreshState('ready')` commits the
+ * SAME visible facts under a NEW `#<revision>` action token. A later runtime
+ * refresh can advance the revision again. The native action admission correctly
+ * rejects a superseded token, so the test must send only after the action set
+ * has been unchanged long enough to cover the measured commit burst.
+ *
+ * This is a bounded observation window, never an operation delay: the startup
+ * refresh's consecutive revisions were measured ~12 ms apart; 200 ms is an
+ * order of magnitude beyond that burst. Any change to the state, items or raw
+ * action ids restarts the window.
+ */
+async function waitForStablePickerAction(
+  fixture: DirectTspFixture,
+  label: string,
+  prefix: string,
+  isReady: (props: Record<string, unknown>) => boolean,
+  timeoutMs = 25_000,
+): Promise<void> {
+  const quietMs = 200
+  const deadline = Date.now() + timeoutMs
+  let previousKey: string | undefined
+  let quietSince = Date.now()
+  while (Date.now() < deadline) {
+    const props = pickerProps(fixture.pane, prefix)
+    const key = JSON.stringify({
+      state: props.state,
+      items: ((props.items ?? []) as Array<{ readonly id: string }>).map(item => item.id),
+      actions: ((props.actions ?? []) as Array<{ readonly id: string }>).map(action => action.id),
+    })
+    if (key !== previousKey) {
+      previousKey = key
+      quietSince = Date.now()
+    } else if (Date.now() - quietSince >= quietMs && props.state === 'ready' && isReady(props)) {
+      return
+    }
+    await new Promise(resolve => setTimeout(resolve, 10))
   }
   throw new Error(`timed out waiting for ${label}; last ${prefix} frame: ${pickerFrame(fixture, prefix)}`)
 }
@@ -274,9 +324,24 @@ test('/tasks from the real editor reaches the ONE TaskRuntime and mounts the nat
       () => pickerNode(fixture.pane, HUB) !== undefined, 25_000)
     // The rows are the REAL Task Runtime projection of the facts above: one
     // descendant from the durable catalog and one ACTIVE Job from the official
-    // registry; the two terminal Jobs stay behind the manual disclosure.
-    await waitFor('the real descendant and active Job reach the Hub', () =>
-      hubIds(fixture).includes(`agent:${CHILD}`) && hubIds(fixture).includes(`job:${runningJobId}`), 25_000)
+    // registry; the two terminal Jobs stay behind the manual disclosure. The
+    // wait is the COMMITTED `ready` frame itself: `items` arriving earlier does
+    // not mean the presenter has finally published the interactive frame whose
+    // action token this case sends. The stability wait then covers the second
+    // refresh's own commits, which advance the revision under identical visible
+    // facts.
+    const readyHubWithActiveRoster = (props: Record<string, unknown>): boolean => {
+      const itemIds = ((props.items ?? []) as Array<{ readonly id: string }>).map(item => item.id)
+      const actionIds = ((props.actions ?? []) as Array<{ readonly id: string }>).map(action =>
+        action.id.replace(/#\d+$/u, ''))
+      const subtitle = typeof props.subtitle === 'string' ? props.subtitle : ''
+      return itemIds.length === 2 && itemIds[0] === `agent:${CHILD}` && itemIds[1] === `job:${runningJobId}`
+        && actionIds.length === 3 && actionIds[0] === 'close' && actionIds[1] === 'jobs-history' && actionIds[2] === 'details'
+        && subtitle.includes('1 failed')
+        && subtitle.includes('2 retained Jobs hidden')
+    }
+    await waitForReadyPicker(fixture, 'the /tasks ready Hub with the active roster and native history action', HUB, readyHubWithActiveRoster)
+    await waitForStablePickerAction(fixture, 'the /tasks ready Hub action bar to settle', HUB, readyHubWithActiveRoster)
     assert.deepEqual(hubIds(fixture), [`agent:${CHILD}`, `job:${runningJobId}`],
       'the default view is the exact active projection, with no terminal Job row')
     assert.deepEqual(hubActionIds(fixture), ['close', 'jobs-history', 'details'],
@@ -285,9 +350,17 @@ test('/tasks from the real editor reaches the ONE TaskRuntime and mounts the nat
     assert.ok(hiddenSubtitle.includes('1 failed') && hiddenSubtitle.includes('2 retained Jobs hidden'),
       `the full-roster status facts stay truthful while folded: ${hiddenSubtitle}`)
     // The disclosure is the REAL native action event, not a direct presenter call.
+    const beforeNativeAction = pickerFrame(fixture, HUB)
     sendPickerAction(fixture.pane, 'jobs-history', HUB)
-    await waitFor('the retained terminal Jobs are revealed by the native action',
-      () => hubIds(fixture).includes(`job:${completedJobId}`) && hubIds(fixture).includes(`job:${failedJobId}`), 25_000)
+    try {
+      await waitForReadyPicker(fixture, 'the ready Hub to reveal both retained terminal Jobs after the native action', HUB,
+        props => {
+          const ids = ((props.items ?? []) as Array<{ readonly id: string }>).map(item => item.id)
+          return ids.includes(`job:${completedJobId}`) && ids.includes(`job:${failedJobId}`)
+        })
+    } catch (error) {
+      throw new Error(`native Job history action did not settle; before=${beforeNativeAction}; after=${pickerFrame(fixture, HUB)}`, { cause: error })
+    }
     assert.deepEqual(hubIds(fixture).slice(0, 2), [`agent:${CHILD}`, `job:${runningJobId}`],
       'the expanded view keeps the active projection at its head')
     assert.deepEqual([...hubIds(fixture).slice(2)].sort(),
