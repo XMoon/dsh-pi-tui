@@ -860,6 +860,9 @@ export const runWebProductQualification = async context => {
         'WP-01 Browser prompt committed', 180_000)
       await waitForHostSessionEventAfter(dshHome, browserSession.sessionId, boundary,
         event => event.type === 'turn/end', 'WP-01 Browser turn settled', 180_000)
+      const armed = await handle.waitFact('session-reference-armed', 'WP-01 session-reference armed', 240_000)
+      const referenceEvidenceStart = promptEvidence().length
+      handle.signal('session-reference-send')
       const wiring = await handle.waitFact('rc5-host-wiring', 'WP-01 rc.5 Host wiring', 240_000)
       assert(wiring.inventoryModule === '@deepseek-ai/dsh-client-connection'
         && wiring.enabled !== false && wiring.inventoryPhase === 'active'
@@ -867,8 +870,10 @@ export const runWebProductQualification = async context => {
       `WP-01 the Browser did not report the rc.5 Host wiring facts: ${JSON.stringify(wiring)}`)
       const reference = handle.readFact('session-reference')
       assert(reference.candidatesStatus === 200 && typeof reference.siblingId === 'string'
-        && reference.siblingId !== browserSession.sessionId,
-      `WP-01 the Browser did not observe a real session-reference candidate: ${JSON.stringify(reference)}`)
+        && reference.siblingId === armed.siblingId
+        && reference.siblingId !== browserSession.sessionId
+        && reference.selectedFromCandidates === true,
+      `WP-01 the Browser did not select a real session-reference candidate: ${JSON.stringify(reference)}`)
       assert(wiring.sessionReference === true && wiring.referenceMarker === reference.marker,
         `WP-01 the session-reference fact does not match the wiring report: ${JSON.stringify({ wiring, reference })}`)
       await waitForHostSessionEventAfter(dshHome, browserSession.sessionId, 0,
@@ -876,15 +881,17 @@ export const runWebProductQualification = async context => {
         'WP-01 canonical session-reference user/message', 120_000)
       const referenceDeadline = Date.now() + 120_000
       let referenceReached = false
+      let referenceRecords = []
       while (Date.now() < referenceDeadline) {
-        if (promptEvidence().some(record => record.referencedSessions === true)) {
+        referenceRecords = promptEvidence().slice(referenceEvidenceStart)
+        if (referenceRecords.some(record => record.referencedSessions === true)) {
           referenceReached = true
           break
         }
         await sleep(250)
       }
       assert(referenceReached,
-        `WP-01 canonical session reference reaches the Host model input: ${JSON.stringify(promptEvidence().slice(-4))}`)
+        `WP-01 canonical session reference reaches the Host model input: ${JSON.stringify(referenceRecords.slice(-4))}`)
       const feedbackEvents = durableOf(browserSession.sessionId)
         .filter(event => event.type === 'feedback/message-put')
       assert(feedbackEvents.length === 1,

@@ -971,14 +971,37 @@ async function observeSessionReference(page, originalSessionId) {
   await composer.type('@')
   const response = await candidates
   if (response === undefined) throw new Error('the Browser never issued the sessionReferenceResolver/candidates Remote request')
-  await page.keyboard.press('Escape')
+  const payload = await response.json().catch(() => undefined)
+  const value = payload?.result?.value ?? payload?.result ?? payload?.value
+  const candidatesList = Array.isArray(value) ? value : undefined
+  if (candidatesList === undefined) throw new Error('the sessionReferenceResolver/candidates reply carries no candidate array')
+  const candidate = candidatesList.find(entry => entry?.sessionId === siblingId)
+  if (candidate === undefined) throw new Error('the sessionReferenceResolver candidates did not include the sibling Session')
+  const label = candidate.displayTitle ?? candidate.label ?? siblingId
+  const option = page.getByRole('option').filter({ hasText: label }).first()
+  await option.waitFor({ state: 'visible', timeout: 30_000 })
+  await option.click()
+  const draftDeadline = Date.now() + 10_000
+  let draft = ''
+  while (Date.now() < draftDeadline) {
+    draft = (await composer.innerText()).replace(/\s+/gu, ' ').trim()
+    if (draft.includes(candidate.mention) || draft.includes(label)) break
+    await page.waitForTimeout(100)
+  }
+  if (!draft.includes(candidate.mention) && !draft.includes(label)) {
+    throw new Error(`the official candidate choice did not insert a mention into the composer: ${JSON.stringify({ label, mention: candidate.mention, draft })}`)
+  }
   const marker = `wp01-ref-${nonce}`
-  const payload = Buffer.from(JSON.stringify(siblingId), 'utf8').toString('base64url')
-  // A bare canonical URI is accepted by the official Host parser and survives
-  // the Browser composer unchanged; the `@` menu above separately proves the
-  // candidate Remote was really called.
-  await sendPrompt(page, `dsh-session:${payload} ${marker}`)
-  driverFact('session-reference', { siblingId, marker, candidatesStatus: response.status() })
+  driverFact('session-reference-armed', { siblingId, candidateLabel: label, marker })
+  await waitSignal('session-reference-send', 120_000)
+  await composer.click()
+  await composer.type(` ${marker}`)
+  const promptRequest = page.waitForRequest(candidate =>
+    new URL(candidate.url()).pathname === '/api/session/prompt' && candidate.method() === 'POST',
+    { timeout: 30_000 })
+  await clickSend(page)
+  await promptRequest
+  driverFact('session-reference', { siblingId, marker, candidatesStatus: response.status(), candidateLabel: label, selectedFromCandidates: true })
   return { siblingId, marker }
 }
 
