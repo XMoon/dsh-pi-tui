@@ -91,13 +91,20 @@ function readLaunch(dshHome, instanceId) {
   return JSON.parse(readFileSync(path.launchPath, 'utf8'))
 }
 
+/** Hard bound on one smoke-driver HTTP request, including a partial response. */
+const WEB_CLI_HTTP_TIMEOUT_MS = 30_000
+
 /**
  * One fresh-connection HTTP request for the smoke driver. Node fetch's pooled
  * keep-alive socket can already be closed after an earlier authenticated or
  * rejected response, so the token exchange and Web-shell reads deliberately use
  * a non-pooled request. The URL and its token never enter an error message.
+ *
+ * A response can begin and then lose its socket before `end`; the response
+ * `error`/`aborted`/incomplete-`close` paths and the overall timeout all reject,
+ * so a partial 200 can never leave the smoke awaiting forever.
  */
-function requestFresh(rawUrl, init = {}) {
+export function requestFresh(rawUrl, init = {}) {
   return new Promise((resolve, reject) => {
     let url
     try {
@@ -106,8 +113,27 @@ function requestFresh(rawUrl, init = {}) {
       reject(new SplitSmokeAssertionError('the Web CLI smoke driver received an invalid URL'))
       return
     }
+    let settled = false
+    let timer
+    const fail = code => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      reject(new SplitSmokeAssertionError(`HTTP request failed during the Web CLI case${code === undefined ? '' : ` (${code})`}`))
+    }
+    const succeed = value => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      resolve(value)
+    }
     const request = url.protocol === 'https:' ? httpsRequest : httpRequest
-    const req = request(url, {
+    let req
+    timer = setTimeout(() => {
+      fail('ETIMEDOUT')
+      req?.destroy()
+    }, WEB_CLI_HTTP_TIMEOUT_MS)
+    req = request(url, {
       method: init.method ?? 'GET',
       headers: init.headers ?? {},
       agent: false,
@@ -115,7 +141,7 @@ function requestFresh(rawUrl, init = {}) {
       const chunks = []
       response.on('data', chunk => { chunks.push(chunk) })
       response.on('end', () => {
-        resolve({
+        succeed({
           status: response.statusCode ?? 0,
           headers: {
             get: name => {
@@ -127,10 +153,15 @@ function requestFresh(rawUrl, init = {}) {
           text: async () => Buffer.concat(chunks).toString('utf8'),
         })
       })
+      response.on('error', () => { fail() })
+      response.on('aborted', () => { fail('ECONNRESET') })
+      response.on('close', () => {
+        if (!response.complete) fail('ECONNRESET')
+      })
     })
     req.on('error', error => {
       const code = error !== null && typeof error === 'object' && typeof error.code === 'string' ? error.code : undefined
-      reject(new SplitSmokeAssertionError(`HTTP request failed during the Web CLI case${code === undefined ? '' : ` (${code})`}`))
+      fail(code)
     })
     if (init.body !== undefined) req.write(init.body)
     req.end()
