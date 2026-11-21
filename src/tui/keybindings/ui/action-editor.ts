@@ -220,6 +220,7 @@ export class ActionEditorPanel implements Component {
   private mutationGeneration = 0
   private disposed = false
   private message: string | undefined
+  private messageKind: 'success' | 'error' | undefined
   /** Physical row → hit entry from the LAST render (mouse parity). */
   private hitMap: ActionEditorMouseHit[] = []
   /** The pressed binding identity (mouse parity): a click may only act on
@@ -330,10 +331,14 @@ export class ActionEditorPanel implements Component {
       if (safeWidth < escapeWidth + 3) {
         // Whole-segment degradation: keep the complete exit affordance and a
         // one-cell failure marker when there is room, never a half token.
-        const marker = safeWidth >= escapeWidth + 2 ? '! ' : ''
+        const marker = safeWidth >= escapeWidth + 2 && this.messageKind === 'success'
+        ? '✓ '
+        : safeWidth >= escapeWidth + 2
+          ? '! '
+          : ''
         const startCol = visibleWidth(marker)
         this.paintedEscapeSpanValue = { startCol, endCol: startCol + escapeWidth }
-        return [truncateToWidth(`${marker === '' ? '' : color.error(marker)}${paintActionSpan(escape, 'secondary')}`, safeWidth)]
+        return [truncateToWidth(`${marker === '' ? '' : (this.messageKind === 'success' ? color.success(marker) : color.error(marker))}${paintActionSpan(escape, 'secondary')}`, safeWidth)]
       }
       const message = truncateToWidth(this.message, safeWidth - escapeWidth - 3)
       const startCol = visibleWidth(message) + 3
@@ -901,6 +906,7 @@ export class ActionEditorPanel implements Component {
     const generation = ++this.mutationGeneration
     this.pending = true
     this.message = undefined
+    this.messageKind = undefined
     this.requestRender()
     try {
       this.runMutation(
@@ -919,6 +925,7 @@ export class ActionEditorPanel implements Component {
     this.settlementAwaitingPaint = true
     if (result.kind !== 'applied') {
       this.message = result.message
+      this.messageKind = 'error'
       this.requestRender()
       return
     }
@@ -928,6 +935,7 @@ export class ActionEditorPanel implements Component {
     const editableCount = this.row.customized ? this.row.configured.length : this.row.editableDefaults.length
     this.selectedIndex = Math.min(this.selectedIndex, editableCount)
     this.message = result.message
+    this.messageKind = 'success'
     this.onModelChange(result.model)
     this.requestRender()
   }
@@ -937,6 +945,7 @@ export class ActionEditorPanel implements Component {
     this.pending = false
     this.settlementAwaitingPaint = true
     this.message = error instanceof Error ? error.message : 'Could not save keyboard shortcuts.'
+    this.messageKind = 'error'
     this.requestRender()
   }
 }

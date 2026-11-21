@@ -1243,6 +1243,7 @@ test('/keybindings conflicts: a failed Action write stays readable and exitable 
   assert.match(last, /save failed on the host/u, `the one-row settlement stays visible:\n${view.join('\n')}`)
   assert.match(last, /Back \[Esc\]/u, 'the one-row settlement keeps the only exit affordance')
   const lease = (h.app as unknown as { workspaceLease?: object }).workspaceLease
+  assert.ok(lease !== undefined, 'precondition: the real Settings lease exists')
   const back = last.indexOf('Back [Esc]')
   h.vt.sendInput(`\x1b[<0;${back + 1};${view.length}M`)
   await frames(h.vt)
