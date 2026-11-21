@@ -3630,3 +3630,48 @@ test('option clicks still resolve against the painted rows after a wheel scroll'
   assert.ok(f.draftSnapshot().answers[0]?.selected.includes(label),
     'the click must toggle the option painted at that row after the scroll')
 })
+
+test('a wheel before the next paint cannot apply the old page geometry to a new page', () => {
+  const make = (): QuestionFlow => {
+    const f = new QuestionFlow([
+      { id: 'q1', question: 'FIRST?', detail: longDetail(40), options: [{ label: 'A' }] },
+      { id: 'q2', question: 'SECOND?', detail: longDetail(40), options: [{ label: 'B' }] },
+    ], () => {}, () => {})
+    f.setMaxRows(12)
+    f.setMouseActionsEnabled(true)
+    return f
+  }
+  // Tab click: the old page's painted scrollport must be revoked at the
+  // navigation boundary, not only when the deferred render lands.
+  const clicked = make()
+  render(clicked, 100)
+  const clickedGeometry = clicked as unknown as WheelGeometry
+  const oldStart = clickedGeometry.lastScrollportStart
+  assert.ok(oldStart >= 0, 'precondition: the first page recorded a scrollport')
+  clickTab(clicked, 'Q2')
+  assert.equal(clickedGeometry.lastScrollportStart, -1, 'tab navigation revokes the old scrollport')
+  assert.equal(clicked.wheelBy(5, oldStart), false, 'a pre-paint wheel cannot use the old page range')
+  assert.equal(clickedGeometry.bodyScroll, 0, 'the new page must not be scrolled before its first paint')
+  clicked.handleInput('\x1b[6~') // keyboard page-down in the same unpainted window
+  assert.equal(clickedGeometry.bodyScroll, 0, 'the stale keyboard page geometry is revoked too')
+  const clickedView = render(clicked, 100)
+  assert.ok(clickedView.some(line => line.includes('SECOND?')), 'the new page paints its question')
+  assert.ok(clickedView.some(line => line.includes('detail-00')), 'the new page starts at its top')
+  // After the paint, ordinary wheel scrolling still works on the new page.
+  const freshStart = (clicked as unknown as WheelGeometry).lastScrollportStart
+  assert.ok(freshStart >= 0)
+  assert.equal(clicked.wheelBy(3, freshStart), true, 'post-paint wheel scrolling remains live')
+
+  // Keyboard navigation has the same invalidation boundary.
+  const keyboard = make()
+  render(keyboard, 100)
+  const keyboardGeometry = keyboard as unknown as WheelGeometry
+  const keyboardOldStart = keyboardGeometry.lastScrollportStart
+  keyboard.handleInput('\x1b[C') // skip Q1 → Q2
+  assert.equal(keyboardGeometry.lastScrollportStart, -1, 'keyboard page advance revokes the old scrollport')
+  assert.equal(keyboard.wheelBy(5, keyboardOldStart), false,
+    'a pre-paint wheel cannot use the keyboard-old page range')
+  assert.equal(keyboardGeometry.bodyScroll, 0)
+  const keyboardView = render(keyboard, 100)
+  assert.ok(keyboardView.some(line => line.includes('detail-00')), 'keyboard navigation starts the new page at top')
+})

@@ -997,11 +997,26 @@ export class QuestionFlow implements Component, Focusable {
   /**
    * Reset the view (scroll + expanded + pending cursor follow) — called on
    * every tab change so each question starts at its top, collapsed.
+   * The last painted body/hit geometry belongs to the OLD page: the host may
+   * deliver another event (wheel/click) before the deferred repaint, so the
+   * old scrollport and hit maps must be revoked here as well.
    */
   private resetBodyView(): void {
     this.bodyScroll = 0
     this.bodyExpanded = false
     this.pendingCursorScroll = false
+    this.lastScrollportStart = -1
+    this.lastScrollportEnd = -1
+    this.lastRegionHeight = 0
+    this.lastContentRows = 0
+    this.lastVisibleRows = 0
+    this.lastExpandable = false
+    this.lastMarkerRow = -1
+    this.pinnedOtherRow = -1
+    this.hitMap.clear()
+    this.paintedActionHits = []
+    this.paintedTabHits = []
+    this.mousePressGesture = undefined
   }
 
   /**

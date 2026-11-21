@@ -353,3 +353,48 @@ test('pointer Leave edit exits only the text edit and keeps the flow alive', asy
   assert.equal(app.focusedComponentForTest(), app.seatEditorForTest().component,
     'the editor seat is restored after leaving the edit and cancelling')
 })
+
+test('a wheel in the unpainted tab/keyboard navigation window cannot scroll the new page', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  await view(vt)
+  const question = app.askQuestions([
+    { id: 'q1', question: 'FIRST-QUESTION?', detail: LONG_DETAIL, options: [{ label: 'ALPHA' }] },
+    { id: 'q2', question: 'SECOND-QUESTION?', detail: LONG_DETAIL, options: [{ label: 'BETA' }] },
+  ])
+  question.catch(() => {})
+  let lines = await view(vt)
+  const bounds = frameBounds(lines)
+  assert.ok(bounds !== undefined)
+  const bodyCell = { x: 10, y: bounds.top + 4 }
+  const flow = (): { bodyScroll: number } =>
+    (app as unknown as { activeQuestions: { flow: { bodyScroll: number } } }).activeQuestions.flow
+  // Hold paint scheduling ONLY to reproduce the production deferred-paint
+  // window; the SGR input route itself stays the real TuiApp/AltScreen path.
+  const realRequestRender = app.requestRender.bind(app)
+  let paintHeld = true
+  app.requestRender = () => {
+    if (!paintHeld) realRequestRender()
+  }
+
+  // SGR tab click followed immediately by an SGR wheel, with no render wait.
+  click(vt, cellOf(lines, 'Q2'))
+  wheel(vt, 'down', bodyCell)
+  assert.equal(flow().bodyScroll, 0, 'the pre-paint tab click must not let the wheel scroll the new page')
+  paintHeld = false
+  realRequestRender()
+  lines = await view(vt)
+  assert.ok(lines.join('\n').includes('SECOND-QUESTION?'), 'the new page paints its question at the top')
+  assert.ok(lines.join('\n').includes('detail-00'), 'the new page must start at its top')
+
+  // Keyboard page navigation followed immediately by an SGR wheel.
+  paintHeld = true
+  vt.sendInput('\x1b[D') // ← back to Q1
+  wheel(vt, 'down', bodyCell)
+  assert.equal(flow().bodyScroll, 0, 'the pre-paint keyboard advance must revoke the old wheel geometry')
+  paintHeld = false
+  realRequestRender()
+  lines = await view(vt)
+  assert.ok(lines.join('\n').includes('FIRST-QUESTION?'), 'the keyboard-returned page paints at the top')
+  assert.ok(lines.join('\n').includes('detail-00'), 'the returned page must also start at its top')
+})

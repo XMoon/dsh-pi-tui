@@ -317,8 +317,11 @@ Fullscreen Question pointer handling uses the same semantic boundary:
   visible seat owner AND holds the physical input seat: a wheel over its
   last-painted body scrollport moves only that body by the configured line
   step (never a page step), and a real scroll revokes an in-flight tab/action
-  press and cancels the pending cursor follow instead of snapping back. The
-  tab row, action bar, frame chrome, borders and the area outside the frame
+  press and cancels the pending cursor follow instead of snapping back. A
+  tab/page transition revokes the previous page's painted scrollport and hit
+  geometry immediately, so an event delivered before the next paint cannot
+  scroll the newly selected page. The tab row, action bar, frame chrome,
+  borders and the area outside the frame
   are inert while the Question owns the input seat and must never scroll the
   transcript or a hidden Approval. A focused managed overlay explicitly raised
   above the Question keeps its own pointer plane. PlanReview keeps its own
