@@ -222,6 +222,15 @@ export class TuiEditor extends Editor {
   /** Whether a completion provider has been installed through this host
    *  override (the base field is private; the host only needs the fact). */
   private autocompleteProviderInstalled = false
+  /** The draft captured when the user entered ↑/↓ history browse. The base
+   *  editor owns the browse bookmark privately; this host copy survives a
+   *  history-list replacement (an async recall reseed) so the user's own
+   *  draft and caret are never lost. */
+  private historyBrowseDraft: {
+    readonly text: string
+    readonly cursor: { readonly line: number; readonly col: number }
+    readonly mode: EditorInputMode
+  } | undefined
 
   constructor(tui: TUI, theme: EditorTheme, options: TuiEditorOptions = {}) {
     // paddingX: 2 reserves the left two cells for the mode prompt painted
@@ -250,8 +259,16 @@ export class TuiEditor extends Editor {
       this.setInputMode(mode)
       return text
     }
-    this.onHistoryDraftSave = () => this.inputMode
+    this.onHistoryDraftSave = () => {
+      this.historyBrowseDraft = {
+        text: this.getText(),
+        cursor: this.getCursor(),
+        mode: this.inputMode,
+      }
+      return this.inputMode
+    }
     this.onHistoryDraftRestore = (state) => {
+      this.historyBrowseDraft = undefined
       if (state === 'prompt' || state === 'shell-context' || state === 'shell-local') {
         this.setInputMode(state)
       }
@@ -261,6 +278,27 @@ export class TuiEditor extends Editor {
   /** The current input mode (read-only for the host). */
   getInputMode(): EditorInputMode {
     return this.inputMode
+  }
+
+  /**
+   * Take the draft/caret/mode captured by the ACTIVE ↑/↓ history browse and
+   * clear the local copy. Returns undefined when the editor is not browsing
+   * (a later edit exits the base editor's browse without firing the restore
+   * callback; the stale snapshot is then rejected by the caller's entry check).
+   * The caller replaces the history list and restores this snapshot itself, so
+   * an asynchronous recall reseed can never lose a non-empty draft.
+   */
+  takeHistoryBrowseDraft(entries: readonly string[]): {
+    readonly text: string
+    readonly cursor: { readonly line: number; readonly col: number }
+    readonly mode: EditorInputMode
+  } | undefined {
+    const draft = this.historyBrowseDraft
+    this.historyBrowseDraft = undefined
+    if (draft === undefined) return undefined
+    const current = this.getText()
+    const stillBrowsing = entries.some(entry => editorModeFromHistoryEntry(entry).text === current)
+    return stillBrowsing ? draft : undefined
   }
 
   /**

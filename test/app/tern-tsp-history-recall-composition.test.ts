@@ -26,7 +26,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { EventEmitter } from 'node:events'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { connect as sdkConnect, concatBytes } from '@stencil-hq/tern'
 import type { Op, Session, TermInput, TermOutput } from '@stencil-hq/tern'
@@ -45,6 +45,7 @@ import { draftHasAttachments } from '../../src/client/media/draft-attachments.ts
 import { DraftFileStore } from '../../src/client/media/attachment/file-draft.ts'
 import { DraftImageStore } from '../../src/client/media/image/draft-store.ts'
 import { historyFilePath, loadHistoryRecords } from '../../src/client/history/store.ts'
+import { FileHistorySearchSource } from '../../src/client/history/search.ts'
 import { TranscriptFolder } from '../../src/domain/transcript/folder.ts'
 import { TranscriptWindowController } from '../../src/domain/transcript/window.ts'
 import { createPluginManagerWorkspacePanel } from '../../src/tui/plugin-manager/workspace.ts'
@@ -525,8 +526,8 @@ test('a tokenless writer between two real Enters stays visible between them in t
     // 4. The owner's formal hydration reseed uses the REAL disk rows (the
     // same reverse/filter the session presentation makes), through the SAME
     // production display seam this mounted composer reads.
-    const diskRows = rows.map(row => row.content).reverse()
-    h.surface.display.resetInputHistory(diskRows, SESSION_ID)
+    const seed = await new FileHistorySearchSource({ dshHome: home }).readSessionRecall(SESSION_ID)
+    h.surface.display.resetInputHistory(seed.entries, SESSION_ID, seed.writeIds)
     assert.ok(h.renderer().reconcileStepsForTest() > 0, 'the kernel really reconciled the settled window')
 
     // 5. REAL decoded ↑/↓ on the SAME controlled editor. A text-only
@@ -581,8 +582,8 @@ test('the same chain keeps a written occurrence, a policy skip and two identical
     assert.equal(h.renderer().scopeFactCountForTest(), 2,
       'the skipped occurrence and its later written twin keep their two settled facts')
 
-    const diskRows = rowsOf(home).map(row => row.content).reverse()
-    h.surface.display.resetInputHistory(diskRows, SESSION_ID)
+    const seed = await new FileHistorySearchSource({ dshHome: home }).readSessionRecall(SESSION_ID)
+    h.surface.display.resetInputHistory(seed.entries, SESSION_ID, seed.writeIds)
     await h.key(UP)
     assert.deepEqual(h.editor(), { text: 'plain prompt', cursor: 0 })
     await h.key(UP)
@@ -590,6 +591,73 @@ test('the same chain keeps a written occurrence, a policy skip and two identical
     await h.key(UP)
     assert.deepEqual(h.editor(), { text: 'plain prompt', cursor: 0 },
       'the two identical occurrences are still two recallable positions')
+  } finally {
+    await h.dispose()
+    await h.session.close()
+  }
+})
+
+test('R05 real writer + kernel: true append order beats the stored submission ts', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('pi-tui-tsp-recall-write-order-')
+  const h = await mountChain(life, home)
+  t.after(() => h.dispose())
+  h.surface.display.beginInputHistoryScope(SESSION_ID)
+  try {
+    // TWO real tokened Enters: both occurrences are accepted, both rows are
+    // written by the production writer. Their REAL submission timestamps are
+    // captured before the async writes; the fixture then rewrites the stored
+    // `ts` so the disk order is the reverse of the true append order — exactly
+    // the conflict the provenance prefix must resolve.
+    await h.enter('a')
+    await h.enter('b')
+    assert.equal(typeof h.submits[0]!.token, 'number', 'a is a real accepted occurrence')
+    assert.equal(typeof h.submits[1]!.token, 'number', 'b is a real accepted occurrence')
+    assert.deepEqual(rowsOf(home).map(row => row.content), ['a', 'b'],
+      'the real JSONL file order IS the writer append order')
+    const file = historyFilePath(home, home)
+    const raw = readFileSync(file, 'utf8').trim().split('\n').map(line => JSON.parse(line) as { ts: number })
+    raw[0]!.ts = T0 + 200
+    raw[1]!.ts = T0 + 100
+    writeFileSync(file, raw.map(row => JSON.stringify(row)).join('\n') + '\n', { mode: 0o600 })
+    const seed = await new FileHistorySearchSource({ dshHome: home }).readSessionRecall(SESSION_ID)
+    assert.deepEqual(seed.entries, ['a', 'b'],
+      'the raw disk seed is sorted by stored ts, which is the opposite of the true append order')
+    h.surface.display.resetInputHistory(seed.entries, SESSION_ID, seed.writeIds)
+    // The kernel MUST recall b first: it was truly appended last, even though
+    // its stored ts is older. Each row appears exactly once.
+    await h.key(UP)
+    assert.deepEqual(h.editor(), { text: 'b', cursor: 0 }, 'the true newest append leads the recall')
+    await h.key(UP)
+    assert.deepEqual(h.editor(), { text: 'a', cursor: 0 }, 'the older append is second, exactly once')
+  } finally {
+    await h.dispose()
+    await h.session.close()
+  }
+})
+
+test('R11 TSP: the cold cross-cwd seed drives the real composer ↑/↓ without a submit', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('pi-tui-tsp-recall-cross-cwd-')
+  const h = await mountChain(life, home)
+  t.after(() => h.dispose())
+  try {
+    // The same Session in another cwd file, newer than the current-cwd rows.
+    const other = historyFilePath(home, '/other-workspace')
+    const { mkdirSync: mkdirOther } = await import('node:fs')
+    mkdirOther(dirname(other), { recursive: true })
+    const { writeFileSync: writeOther } = await import('node:fs')
+    writeOther(other, JSON.stringify({ v: 2, content: 'from the other cwd', cwd: '/other-workspace', ts: T0 + 1000, sessionId: SESSION_ID }) + '\n', { mode: 0o600 })
+    h.surface.display.beginInputHistoryScope(SESSION_ID)
+    const seed = await new FileHistorySearchSource({ dshHome: home }).readSessionRecall(SESSION_ID)
+    assert.equal(seed.entries[0], 'from the other cwd', 'the cold reader sees the other cwd file')
+    h.surface.display.resetInputHistory(seed.entries, SESSION_ID, seed.writeIds)
+    await h.key(UP)
+    assert.deepEqual(h.editor(), { text: 'from the other cwd', cursor: 0 },
+      'the first ↑ recalls the cross-cwd newest row into the REAL composer')
+    await h.key(DOWN)
+    assert.deepEqual(h.editor(), { text: '', cursor: 0 }, 'leaving the browse restores the empty draft')
+    assert.equal(h.writes.length, 0, 'browsing never submits')
   } finally {
     await h.dispose()
     await h.session.close()

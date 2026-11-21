@@ -73,6 +73,7 @@
 import { readdir, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import { historyFilePath, parseHistoryRecordLine, type ParsedHistoryRecord } from './store.ts'
+import { INPUT_RECALL_LIMIT } from './recall-scope.ts'
 import { readJsonlReverseBatch, ReverseJsonlRevisionError, type ReverseJsonlCursor } from './reverse-reader.ts'
 
 /** The three scope categories (`/sessions` vocabulary). */
@@ -191,6 +192,38 @@ export interface HistorySearchSource {
   ): Promise<HistorySearchPage>
 }
 
+/** The cold-session recall seed: the same Client-local history files, filtered
+ *  to ONE session, with NO content dedupe and NO cwd metadata. */
+export interface SessionRecallSeed {
+  /** Newest-first by stored ts; source rows are NOT content-deduped. */
+  readonly entries: readonly string[]
+  /** Same length, positionally aligned; undefined for old v2 records. */
+  readonly writeIds: readonly (string | undefined)[]
+}
+
+/** The narrow cold-read capability the Session presentation consumes. */
+export interface SessionRecallReader {
+  /** Read this Session's recall rows across every Client history file. */
+  readSessionRecall(sessionId: string, signal?: AbortSignal): Promise<SessionRecallSeed>
+}
+
+/** A cold session-recall read diagnostic (per-file failures are isolated; a
+ *  global enumeration failure is reported and thrown). */
+export interface HistorySourceDiagnostic {
+  readonly kind: 'session-recall-partial-file' | 'session-recall-global-failure'
+  readonly file?: string
+  readonly error: string
+}
+
+/** Thrown when the history directory itself cannot be enumerated: the caller
+ *  must fall back to the current cwd file instead of treating it as empty. */
+export class HistorySessionRecallReadError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'HistorySessionRecallReadError'
+  }
+}
+
 /** One candidate history file with its stat metadata (mtime drives the
  * scan order; the final result order never uses it). */
 export interface HistoryFileCandidate {
@@ -255,19 +288,23 @@ export interface FileHistorySearchSourceOptions {
   /** Optional mutable stats sink, reset and filled on every search call
    * (test-only instrumentation). */
   stats?: HistorySearchDebugStats
+  /** Optional cold-read diagnostics: a per-file failure is isolated but
+   * recorded, a global enumeration failure is recorded and thrown. */
+  diagnostics?: (event: HistorySourceDiagnostic) => void
 }
 
 /**
  * The default search source over the canonical JSONL store
  * (`$DSH_HOME/user-history/<md5(cwd)>.jsonl`, history.ts layout).
  */
-export class FileHistorySearchSource implements HistorySearchSource {
+export class FileHistorySearchSource implements HistorySearchSource, SessionRecallReader {
   private readonly dshHome: string
   private readonly knownCwds: ReadonlyMap<string, string> | (() => ReadonlyMap<string, string>)
   private readonly concurrency: number
   private readonly scanLimit: number
   private readonly readChunkBytes: number
   private readonly stats: HistorySearchDebugStats | undefined
+  private readonly diagnostics: ((event: HistorySourceDiagnostic) => void) | undefined
 
   constructor(options: FileHistorySearchSourceOptions) {
     this.dshHome = options.dshHome
@@ -276,6 +313,7 @@ export class FileHistorySearchSource implements HistorySearchSource {
     this.scanLimit = Math.max(1, options.scanLimit ?? HISTORY_SEARCH_SCAN_LIMIT)
     this.readChunkBytes = Math.max(1, options.readChunkBytes ?? HISTORY_SEARCH_READ_CHUNK_BYTES)
     this.stats = options.stats
+    this.diagnostics = options.diagnostics
   }
 
   async search(
@@ -468,6 +506,122 @@ export class FileHistorySearchSource implements HistorySearchSource {
     }
   }
 
+  /**
+   * Read ONE Session's editor-recall seed from every Client history file.
+   *
+   * This is the COLD HYDRATION reader — not `search()`:
+   * - no content dedupe (the editor kernel owns its adjacent-duplicate rule);
+   * - no `HISTORY_SEARCH_SCAN_LIMIT` (a search window is not a recall window):
+   *   every file is scanned to EOF so the globally newest 100 rows are correct,
+   *   in bounded reverse-reader batches and with only the top 100 rows kept;
+   * - only valid v2 rows whose `sessionId` matches exactly; v1/sessionless/
+   *   other-session/corrupt rows never participate.
+   *
+   * Ordering is the history order: ts DESC (`ts === null` last), sourceFile
+   * ASC, byteOffset DESC. `writeIds` stay positionally aligned with `entries`.
+   * A per-file read failure is isolated and reported; a global enumeration
+   * failure is reported and thrown so the caller can fall back instead of
+   * presenting an empty history as success. A missing history directory is
+   * legitimately empty.
+   */
+  async readSessionRecall(sessionId: string, signal?: AbortSignal): Promise<SessionRecallSeed> {
+    if (signal?.aborted) throw abortError()
+    const files = await this.listAllFilesForRecall(signal)
+    const top: RecallCandidate[] = []
+    const consider = (candidate: RecallCandidate): void => {
+      // Binary insert into the bounded newest-first set: the first position
+      // whose row the candidate BEATS; anything at/after the 100th row is
+      // outside the recall window.
+      let low = 0
+      let high = top.length
+      while (low < high) {
+        const middle = (low + high) >>> 1
+        if (compareRecallCandidates(candidate, top[middle]!) < 0) high = middle
+        else low = middle + 1
+      }
+      if (low >= INPUT_RECALL_LIMIT) return
+      top.splice(low, 0, candidate)
+      if (top.length > INPUT_RECALL_LIMIT) top.pop()
+    }
+    for (const file of files) {
+      if (signal?.aborted) throw abortError()
+      let cursor: ReverseJsonlCursor | undefined
+      let verifyRevision = false
+      try {
+        for (;;) {
+          if (signal?.aborted) throw abortError()
+          const batch = await readJsonlReverseBatch(file.path, {
+            cursor,
+            maxRows: 128,
+            chunkBytes: this.readChunkBytes,
+            signal,
+            verifyRevision,
+          })
+          verifyRevision = false
+          for (const line of batch.lines) {
+            const record = parseHistoryRecordLine(line.text)
+            if (record === null || record.version !== 2 || record.sessionId !== sessionId) continue
+            consider({ record, file: file.path, byteStart: line.byteStart })
+          }
+          if (batch.eof) break
+          cursor = batch.nextCursor
+        }
+      } catch (error) {
+        if (isAbortError(error)) throw error
+        // Per-file isolation: keep the rows already collected, record the
+        // partial read, continue with the remaining files.
+        this.diagnose({
+          kind: 'session-recall-partial-file',
+          file: file.path,
+          error: describeError(error),
+        })
+      }
+    }
+    if (signal?.aborted) throw abortError()
+    return {
+      entries: top.map(candidate => candidate.record.content),
+      writeIds: top.map(candidate => candidate.record.writeId),
+    }
+  }
+
+  private diagnose(event: HistorySourceDiagnostic): void {
+    this.diagnostics?.(event)
+  }
+
+  /** Enumerate the cold-recall candidate files: a missing history directory is
+   *  legitimately empty; any other enumeration failure is reported and thrown
+   *  (never disguised as "no history"). A vanished individual file is a
+   *  recorded partial read, not a global failure. */
+  private async listAllFilesForRecall(signal?: AbortSignal): Promise<HistoryFileCandidate[]> {
+    if (signal?.aborted) throw abortError()
+    let names: string[]
+    try {
+      names = await readdir(join(this.dshHome, 'user-history'))
+    } catch (error) {
+      if (isNotFoundError(error)) return []
+      this.diagnose({ kind: 'session-recall-global-failure', error: describeError(error) })
+      throw new HistorySessionRecallReadError(
+        `cannot enumerate the client history directory: ${describeError(error)}`,
+      )
+    }
+    const candidates = names
+      .filter(name => name.endsWith('.jsonl') && !name.endsWith('.tmp') && !name.endsWith('.lock'))
+      .map(name => join(this.dshHome, 'user-history', name))
+    const stats = await mapBounded(candidates, this.concurrency, async (path) => {
+      if (signal?.aborted) throw abortError()
+      try {
+        const info = await stat(path)
+        return { path, mtimeMs: info.mtimeMs, size: info.size }
+      } catch (error) {
+        this.diagnose({ kind: 'session-recall-partial-file', file: path, error: describeError(error) })
+        return null
+      }
+    })
+    return stats
+      .filter((candidate): candidate is HistoryFileCandidate => candidate !== null)
+      .sort((a, b) => b.mtimeMs - a.mtimeMs || a.path.localeCompare(b.path))
+  }
+
   /** Every candidate file in the `all` scope, stat'd with bounded
    * concurrency and ordered mtime DESC (most recently active first), then
    * path ASC as the deterministic tie-breaker. A file that fails to stat
@@ -630,6 +784,37 @@ export class FileHistorySearchSource implements HistorySearchSource {
   }
 }
 
+/** One candidate of the cold session-recall read. */
+interface RecallCandidate {
+  readonly record: ParsedHistoryRecord
+  readonly file: string
+  readonly byteStart: number
+}
+
+/** The session-recall order: ts DESC (unknown ts last), file ASC, byte
+ *  offset DESC — the same history order as the Ctrl+R result comparison. */
+function compareRecallCandidates(left: RecallCandidate, right: RecallCandidate): number {
+  const byTs = compareTimestamps(left.record.ts, right.record.ts)
+  if (byTs !== 0) return byTs
+  const byFile = left.file.localeCompare(right.file)
+  if (byFile !== 0) return byFile
+  return right.byteStart - left.byteStart
+}
+
+function abortError(): Error {
+  const error = new Error('aborted')
+  error.name = 'AbortError'
+  return error
+}
+
+function describeError(error: unknown): string {
+  return error instanceof Error ? `${error.name}: ${error.message}` : String(error)
+}
+
+function isNotFoundError(error: unknown): boolean {
+  return error instanceof Error && (error as NodeJS.ErrnoException).code === 'ENOENT'
+}
+
 /** Case-insensitive literal substring (`''` matches everything). */
 function matchesQuery(content: string, query: string): boolean {
   if (query === '') return true
@@ -646,12 +831,21 @@ function dedupeKey(scope: HistoryScope, result: HistorySearchResult): string {
 /** Newest-first by ts (legacy rows — ts NULL — sort after every timed row),
  * then file ASC, then newest row first within the file (deterministic). */
 function compareResults(left: HistorySearchResult, right: HistorySearchResult): number {
-  const lt = left.ts ?? -1
-  const rt = right.ts ?? -1
-  if (rt !== lt) return rt - lt
+  const byTs = compareTimestamps(left.ts, right.ts)
+  if (byTs !== 0) return byTs
   const byFile = left.sourceFile.localeCompare(right.sourceFile)
   if (byFile !== 0) return byFile
   return right.sourceByteOffset - left.sourceByteOffset
+}
+
+/** Total timestamp order: a real finite `ts` (including negative epochs)
+ *  always sorts before an unknown one; unknown timestamps tie with each
+ *  other. `ts ?? -1` would misplace a legitimate `ts < -1` after NULL. */
+function compareTimestamps(left: number | null, right: number | null): number {
+  if (left === null && right === null) return 0
+  if (left === null) return 1
+  if (right === null) return -1
+  return right - left
 }
 
 /** The abort contract: an aborted search resolves an empty page (the panel

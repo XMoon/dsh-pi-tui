@@ -40,6 +40,9 @@ export interface HistoryPersistContext {
   hasAttachments?: boolean
   /** Legacy image-only spelling retained for existing callers. */
   hasImages?: boolean
+  /** The optional per-append identity written into a v2 row (the open recall
+   * scope's provenance). Absent for callers that do not participate. */
+  writeId?: string
   /** The history file path for the cwd. */
   file: string
 }
@@ -55,6 +58,7 @@ export function persistHistoryRecord(context: HistoryPersistContext): boolean {
     cwd: context.cwd,
     ts: context.ts,
     sessionId: context.sessionId,
+    ...(context.writeId === undefined ? {} : { writeId: context.writeId }),
   }, context.lastContent)
 }
 

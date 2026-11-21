@@ -6193,7 +6193,8 @@ test('submissions the fresh session already persisted are not duplicated by the 
     releaseNewWhenIdle()
   }
   if (transition !== undefined) await transition
-  assert.ok(hydrationCommits.length > 0, 'the fresh session hydration committed')
+  assert.equal(await drainUntil(() => hydrationCommits.length > 0, 5_000), true,
+    'the fresh session hydration committed')
   // The reconcile invariant: every covered row appears exactly once in the
   // recall window and exactly once on disk (no doubled projection).
   const recall = [...mounted.app.getInputHistory()]

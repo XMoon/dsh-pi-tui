@@ -2207,12 +2207,20 @@ test('a real TSP Enter reaches the production history owner, writes its row and 
     assert.equal(rows[0]!.sessionId, SESSION_ID, 'the row carries the live session id')
     // SINK 2 — the same synchronous stack settled THAT occurrence, and the
     // settlement reached the mounted renderer's own seam (exactly one call).
-    assert.deepEqual(settlements, [{
+    assert.equal(settlements.length, 1, 'persist settled the occurrence on its own stack, once')
+    const settlement = settlements[0]!
+    assert.equal(typeof settlement.writeId, 'string', 'the written settlement carries the row writeId')
+    assert.deepEqual({
+      token: settlement.token,
+      owner: settlement.owner,
+      outcome: settlement.outcome,
+      text: settlement.text,
+    }, {
       token: submitted[0]!.scopeToken,
       owner: SESSION_ID,
       outcome: 'written',
       text: 'recall chain prompt',
-    }], 'persist settled the occurrence on its own stack, once')
+    }, 'the settlement keeps the occurrence identity and owner')
     // SINK 3 — THAT settlement became a durable per-token fact INSIDE this
     // mount's kernel. This is what proves the seam delegates rather than
     // swallowing: a `settleScopeInput` body that ignored its argument would

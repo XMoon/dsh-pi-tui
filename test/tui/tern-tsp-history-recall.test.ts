@@ -396,6 +396,24 @@ test('the Session Browser and the Work Hub consume the arrows before the compose
   assert.deepEqual(h.editor(), { text: 'newest entry', cursor: 0 }, 'and the recall resumes for the composer')
 })
 
+test('RFL-005 TSP: an async recall reseed restores the non-empty draft/caret from an active browse', async (t) => {
+  const h = await mountRecallPane(t)
+  h.seed(['old row'])
+  await h.key('my draft')
+  await h.key(UP) // first ↑ bookmarks the draft/caret and moves to the line start
+  await h.key(UP) // second ↑ enters the browse
+  assert.deepEqual(h.editor(), { text: 'old row', cursor: 0 },
+    'the browse really replaced the draft with the recalled row')
+  const mark = h.frameCount()
+  h.seed(['new row']) // the async cold-seed commit, same owner
+  await h.awaitFrame(mark, 'the reseed restored the draft')
+  assert.deepEqual(h.editor(), { text: 'my draft', cursor: 8 },
+    'the same-owner reseed restores the exact abandoned draft and caret')
+  await h.quietKey(DOWN)
+  assert.deepEqual(h.editor(), { text: 'my draft', cursor: 8 }, 'the browse is closed, not left half-active')
+  await h.dispose()
+})
+
 test('a formal scope begin or reseed retires the open browse so an outgoing draft cannot be walked back in', async (t) => {
   const h = await mountRecallPane(t)
   // Boot: the sessionless launch-cwd pool is a real scope.

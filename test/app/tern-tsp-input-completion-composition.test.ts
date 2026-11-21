@@ -2147,7 +2147,7 @@ test('a real Client-local row whose accepted value would cross the logical line 
 
 // ── N. Currentness of one answer across every formal commit (matrix D17) ─────
 
-test('a Host @ answer that settles after the seat moved is dropped by every formal commit -> a session publication, a catalog commit, a hydration, an input-history reset and a draft clear each paint nothing, write nothing and still allow a fresh query', async (t) => {
+test('a Host @ answer that settles after the seat moved is dropped by every formal seat commit -> a session publication, a catalog commit, a hydration and a draft clear each paint nothing, write nothing and still allow a fresh query', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('pi-tui-tsp-id-stale-at-')
   const h = await mountChain(life, home, {
@@ -2164,7 +2164,6 @@ test('a Host @ answer that settles after the seat moved is dropped by every form
       // formal display commit the application owner performs.
       h.surface.display.setTranscript([], undefined, undefined, undefined, undefined, {})
     } },
-    { name: 'an input-history reset', run: () => h.surface.display.resetInputHistory(['a row'], 'B') },
     { name: 'a draft clear', run: () => h.surface.composer.setDraft('') },
   ]
   for (const invalidation of invalidations) {
@@ -2196,6 +2195,19 @@ test('a Host @ answer that settles after the seat moved is dropped by every form
     await h.setDraft('')
     await waitUntil('the seat is clear for the next invalidation', () => h.editor().text === '')
   }
+  // A hydration recall RESET is a projection replace, not a seat commit: the
+  // same-owner completion query in flight must survive and paint its answer.
+  await h.setDraft('请看 @src/')
+  h.host.holdNext()
+  await h.triggerQuietly(TAB)
+  await waitUntil('the reset case: the Host request is in flight', () => h.host.heldCount() === 1)
+  h.surface.display.resetInputHistory(['a row'], 'B')
+  assert.equal(h.host.lastAborted(), false, 'an input-history reset never aborts the same-owner query')
+  h.host.releaseHeld()
+  await waitUntil('the surviving query paints its answer', () => h.rows().length > 0)
+  assert.deepEqual(h.rows().map(row => row.text), ['@src/deep.ts'])
+  await h.setDraft('')
+  await waitUntil('the reset case seat clears', () => h.editor().text === '')
   // Returning to A resurrects nothing: the retired scope's rows are gone for good.
   h.surface.display.beginInputHistoryScope('A')
   assert.deepEqual(h.values(), [], 'no candidate list survives a scope publication')

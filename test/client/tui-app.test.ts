@@ -39,6 +39,8 @@ import { APP_KEYBINDINGS } from '../../src/tui/keybindings/definitions.ts'
 import { buildOsc52Sequence, copyToClipboard, type CopyExecutor } from '../../src/client/clipboard/copy.ts'
 import { runOwned } from '../../src/runtime/process/tasks.ts'
 import { createDiag } from '../../src/runtime/process/diagnostics.ts'
+import { FileHistorySearchSource } from '../../src/client/history/search.ts'
+import { historyFilePath } from '../../src/client/history/store.ts'
 
 const { started: startedApps, disposeAll: disposeStartedApps } = createAppLifecycleGuard<TuiApp>()
 afterEach(() => {
@@ -2952,6 +2954,54 @@ async function submitThroughEditor(app: TuiApp, vt: VirtualTerminal, text: strin
   vt.sendInput('\r')
   await vt.waitForRender()
 }
+
+test('R11 PiTui: the cold cross-cwd session seed drives real ↑/↓ recall', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('pi-tui-app-cross-cwd-')
+  // The same Session in two cwd files; the OTHER cwd row is newer.
+  const other = historyFilePath(home, '/other-workspace')
+  await mkdir(join(home, 'user-history'), { recursive: true })
+  await writeFile(other, JSON.stringify({ v: 2, content: 'cross cwd newest', cwd: '/other-workspace', ts: 2_000, sessionId: 'ses_a', writeId: 'w1' }) + '\n', 'utf8')
+  const current = historyFilePath(home, '/current-workspace')
+  await writeFile(current, JSON.stringify({ v: 2, content: 'current cwd older', cwd: '/current-workspace', ts: 1_000, sessionId: 'ses_a' }) + '\n', 'utf8')
+  const seed = await new FileHistorySearchSource({ dshHome: home }).readSessionRecall('ses_a')
+  assert.deepEqual(seed.entries, ['cross cwd newest', 'current cwd older'])
+  const { vt, app, submitted } = startApp()
+  app.resetInputHistory(seed.entries, 'ses_a', seed.writeIds)
+  await vt.waitForRender()
+  app.setDraft('')
+  vt.sendInput('\x1b[A')
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), 'cross cwd newest', 'the first ↑ recalls the cross-cwd newest row')
+  vt.sendInput('\x1b[A')
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), 'current cwd older', 'the second ↑ walks to the older row')
+  vt.sendInput('\x1b[B')
+  vt.sendInput('\x1b[B')
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), '', 'leaving the browse restores the empty draft')
+  assert.deepEqual(submitted, [], 'browsing and restoring never submit')
+  app.stop()
+})
+
+test('RFL-005 PiTui: an async recall reseed restores the non-empty draft abandoned to ↑ browse', async () => {
+  const { vt, app } = startApp()
+  app.resetInputHistory(['old row'])
+  app.setDraft('my draft')
+  await vt.waitForRender()
+  vt.sendInput('\x1b[H') // Home: the first ↑ from column 0 enters the browse
+  await vt.waitForRender()
+  vt.sendInput('\x1b[A')
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), 'old row', 'the browse really replaced the draft with the recalled row')
+  // The cold cross-cwd seed lands while the browse is open: the user's own
+  // draft/caret must come back, not silently disappear with the bookmark.
+  app.resetInputHistory(['new row'])
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), 'my draft', 'the async reseed restores the abandoned draft')
+  assert.deepEqual(app.getInputHistory(), ['new row'], 'and commits the new projection')
+  app.stop()
+})
 
 test('the recall scope reconciles written, skipped and pending occurrences in the append order', async () => {
   const { vt, app, submitted, settleAt } = startApp()

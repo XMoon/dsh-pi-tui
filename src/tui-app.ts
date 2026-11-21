@@ -8670,11 +8670,23 @@ export class TuiApp {
    *  only where the whole recall context was replaced (a scope publish or a
    *  hydration reseed) — never on a settlement, which must not touch the
    *  draft. */
-  private restoreEditorRecall(): void {
+  private restoreEditorRecall(browseEntries?: readonly string[]): void {
+    // A cold hydration reseed may land while the user is browsing the
+    // provisional recall with their own non-empty draft. The base editor owns
+    // that draft bookmark privately (and clearHistory drops it), so take the
+    // host copy FIRST and restore it after the list replacement. `browseEntries`
+    // is the PREVIOUS projection (the rows the browse was actually walking);
+    // absence means a formal owner publication, which must drop the bookmark.
+    const browseDraft = this.editor.takeHistoryBrowseDraft(browseEntries ?? [])
     this.editor.clearHistory()
     const entries = this.historyRecall.snapshot()
     for (let index = entries.length - 1; index >= 0; index -= 1) {
       this.editor.addToHistory(entries[index]!)
+    }
+    if (browseDraft !== undefined) {
+      this.editor.setText(browseDraft.text)
+      this.editor.setCursor(browseDraft.cursor)
+      this.editor.setInputMode(browseDraft.mode)
     }
   }
 
@@ -8713,12 +8725,14 @@ export class TuiApp {
    *   sessionless boot seed passes no owner: it only seeds the recall pool and
    *   leaves the scope open (boot is not a published Session).
    */
-  resetInputHistory(entries: readonly string[], owner?: string): void {
+  resetInputHistory(entries: readonly string[], owner?: string, writeIds?: readonly (string | undefined)[]): void {
     // The kernel is the ONLY recall state: reset it first, then mirror its
     // snapshot into the editor. Re-seeding through `seedInputHistory` here
-    // would feed the kernel twice.
-    this.historyRecall.reset(entries, owner)
-    this.restoreEditorRecall()
+    // would feed the kernel twice. The PREVIOUS snapshot is the browse's own
+    // entry list (needed to recognise/restore an active browse draft).
+    const previous = this.historyRecall.snapshot()
+    this.historyRecall.reset(entries, owner, writeIds)
+    this.restoreEditorRecall(previous)
   }
 
   /**

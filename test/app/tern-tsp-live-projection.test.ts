@@ -1009,7 +1009,11 @@ function mountPresentationHarness(options: {
       updateWelcomeCard: noop,
       scheduleInitialMeasurement: noop, markContextDirty: noop, refreshContextMeasurement: noop,
     },
-    history: { rememberCwd: noop, currentCwd: () => '/tmp', records: () => [], setLastContent: noop },
+    history: {
+      rememberCwd: noop, currentCwd: () => '/tmp', records: () => [], setLastContent: noop,
+      readSessionRecall: async () => ({ entries: [], writeIds: [] }),
+    },
+    currentness: { captureGeneration: () => 0, isStillCurrent: () => true },
     commands: { register: noop },
     submission: { clearPending: noop },
     viewer: { resetAutoPop: noop, teardownForSessionSwap: noop },

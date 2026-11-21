@@ -38,12 +38,14 @@ prevents a settings whole-file replacement from erasing another window's input.
   `JSON.stringify`), so pastes cannot corrupt the layout.
   - **v1** (legacy, kimi layout): `{"content": "..."}` — still read forever.
   - **v2** (canonical since the Ctrl+R milestone): `{"v":2,"content":"...",
-    "cwd":"...","ts":<epoch-ms>,"sessionId":"ses_..."}`. New rows carry the
-    working directory and a submission timestamp so the all-directory
-    history search can merge files and order globally by time. Unknown
-    future fields are tolerated; a v2 row with invalid metadata degrades
-    the field to null (content stays searchable) instead of dropping the
-    row.
+    "cwd":"...","ts":<epoch-ms>,"sessionId":"ses_..."}`. New rows may also
+    carry an optional `writeId` (a per-append identity used ONLY to recognise
+    the open recall scope's own row at a cold reseed; old v2 rows omit it and
+    stay valid). New rows carry the working directory and a submission
+    timestamp so the all-directory history search can merge files and order
+    globally by time. Unknown future fields are tolerated; a v2 row with
+    invalid metadata degrades the field to null (content stays searchable)
+    instead of dropping the row.
 - Writes: append-only (`O_APPEND`), 0600 file, 0700 directory, created on
   demand. Consecutive repeats and empty lines are skipped (shell-history
   behavior); non-consecutive repeats are legal history and survive.
@@ -315,11 +317,21 @@ first session is born (and on every session switch).
 
 ### Editor recall scope: session-first (↑/↓), cwd-first (Ctrl+R)
 
-The EDITOR's ↑/↓ recall is session-scoped once a live session exists:
-`initLiveSession` seeds it with **only the rows whose `sessionId` matches
-the live session** (`recallHistoryForSession` in `src/client/history/store.ts`) —
-resuming session A in a shared cwd never recalls session B's inputs. With
-no live session (fresh/deferred start) the recall pool is the whole cwd
+The EDITOR's ↑/↓ recall is session-scoped once a live session exists: the
+hydration reseed reads the SAME Client-local history source's
+`readSessionRecall(sessionId)` — every client history file, only valid v2
+rows whose `sessionId` matches, no content dedupe, the globally newest
+`HISTORY_RECALL_LIMIT` (100) rows by stored `ts` (then file path and byte
+offset). A resumed Session therefore recalls its inputs across every working
+directory it submitted from. v1/sessionless/other-session rows never
+participate and are never guessed. The read is asynchronous: its ownership
+generation (and, on Remote, the exact transport binding token) is captured
+before the read and re-checked in the same synchronous stack as the recall
+commit; a Session replacement or teardown aborts the in-flight scan, and a
+superseded read is discarded without touching the recall kernel. A global history-read failure is
+diagnosed and falls back to the same Session's CURRENT cwd file (with the
+same optional `writeId` provenance), never to an empty or unfiltered pool.
+With no live session (fresh/deferred start) the recall pool is the whole cwd
 file, v1 legacy rows included. Explicitly **no automatic fallback**: when
 the session's rows run out, ↑ stops (it never silently switches to cwd
 history — the scope would become invisible to the user).
@@ -436,6 +448,27 @@ them:
   nothing, and a written row older than the recall window (the 100-row cap) is not
   in the projection at all. The seed then performs the adjacent-duplicate
   compression and the 100-entry truncation LAST, exactly as the baseline did.
+- The cold CROSS-CWD seed may also supply a `writeIds` array aligned with
+  `entries` (the optional v2 `writeId`, undefined for old rows). When present
+  for the reseed owner, `reset` rebuilds the deterministic prefix instead of
+  trusting the disk `ts` order: the open scope's successful WRITTEN
+  settlements of that owner — the true synchronous append order, including
+  tokenless steer/extension appends, never a `ts` guess — are the newest rows
+  (bounded to the last 100); their exact `(writeId, text)` pairs are removed
+  from the disk baseline (a reused id with different text is a different row
+  and stays), and the reversed append order prepends the remaining baseline.
+  A written settlement without a `writeId` fails loudly: a production writer
+  that omits it broke the provenance contract, and silently falling back to
+  `ts` would be wrong. `writeId` is only this row identity — not a Session
+  id, a cross-client order or a lock. The reset is a PROJECTION replace, not
+  an owner publication: the renderer's open search/completion seats for the
+  CURRENT owner survive it (only `beginInputHistoryScope` retires them on an
+  owner change), so an asynchronous hydration commit can never close a card
+  the user opened in the new Session. A reseed that lands while the user is
+browsing provisional recall with a non-empty draft restores that exact draft
+and caret from each renderer's own browse bookmark (and a reseed with no open
+browse leaves the document/edit revision untouched), so asynchronous
+hydration can never lose a draft or falsely refuse a live attachment intake.
 
 While a reseed is still pending, the outgoing Session's rows remain recallable
 (`resetForGeneration` is an invalidation signal, not a confirmed switch); they
@@ -482,7 +515,9 @@ unwritten entries.
 - `src/client/history/search.ts` — the Ctrl+R search source (`HistorySearchSource`
   seam + `FileHistorySearchSource`): scope, bounded recent-first reverse
   scanning, the global scan budget, the page/continuation contract, legacy
-  cwd recovery, matching, ordering, dedupe, cancellation. Pinned by
+  cwd recovery, matching, ordering, dedupe, cancellation, and the SAME
+  source's cold `readSessionRecall(sessionId)` editor-recall reader (all
+  files, no content dedupe, newest 100, per-file error isolation). Pinned by
   `test/client/history-search.test.ts`.
 - `src/client/history/reverse-reader.ts` — the reverse JSONL batch reader
   (EOF-backwards chunks, cross-chunk/UTF-8-safe line assembly, revision-

@@ -228,8 +228,11 @@ export interface SurfaceDisplaySeam {
    * persistence owner.
    * @param entries - the current Session's rows, most recent first.
    * @param owner - the owner whose hydration committed this reseed. Omitted
-   *   for the sessionless boot seed, which only seeds the recall pool. */
-  resetInputHistory(entries: readonly string[], owner?: string): void
+   *   for the sessionless boot seed, which only seeds the recall pool.
+   * @param writeIds - optional provenance of a cold cross-cwd seed, positionally
+   *   aligned with `entries`; the kernel uses it to rebuild the open scope's
+   *   true append prefix. Omitted by every other caller. */
+  resetInputHistory(entries: readonly string[], owner?: string, writeIds?: readonly (string | undefined)[]): void
   /** Open the editor-recall scope of the owner a Session commit section is
    * publishing (or creating): the following {@link resetInputHistory} for that
    * owner must reconcile the inputs accepted since the publication

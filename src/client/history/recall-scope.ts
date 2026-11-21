@@ -50,6 +50,9 @@ export interface HistoryScopeSettlement {
   readonly outcome: 'written' | 'skipped'
   /** The submitted text (the owner's trimmed row content). */
   readonly text: string
+  /** The optional per-append identity of a WRITTEN row (absent on skips and
+   *  on writers that do not participate in provenance). */
+  readonly writeId?: string
 }
 
 /** The kernel's public contract: one short-lived recall projection + scope
@@ -63,8 +66,11 @@ export interface HistoryRecallScope {
   seed(entries: readonly string[]): void
   /** Called ONLY at formal Session publication; may adopt sessionless pool. */
   begin(owner: string | undefined): void
-  /** Boot with owner omitted; hydrate/reconcile and close with owner present. */
-  reset(entries: readonly string[], owner?: string): void
+  /** Boot with owner omitted; hydrate/reconcile and close with owner present.
+   *  `writeIds` (aligned with `entries`) is the cold cross-cwd seed's optional
+   *  provenance: when provided for an owner, the scope rebuilds the deterministic
+   *  prefix from its own successful appends before the baseline history. */
+  reset(entries: readonly string[], owner?: string, writeIds?: readonly (string | undefined)[]): void
   /** Actual row owner's synchronous append/skip report, ordered by writer. */
   settle(settlement: HistoryScopeSettlement): void
   /** Relocated existing headless diagnostics; no new production consumers. */
@@ -92,6 +98,13 @@ interface ScopeSettledFact {
   /** The number of the ROW OWNER's appends that preceded this settlement —
    *  its rank among the covered rows, which survives the queue's cap. */
   readonly appendsBefore: number
+}
+
+/** One successful written settlement the open scope keeps for its cold-seed
+ *  provenance (append order, bounded to the recall window). */
+interface ScopeWrittenSettlement {
+  readonly writeId: string | undefined
+  readonly text: string
 }
 
 /** Create ONE recall kernel (TSP I-A). */
@@ -142,6 +155,14 @@ export function createHistoryRecallScope(): HistoryRecallScope {
    *  the exact watermark of how many of the snapshot's newest rows the window
    *  owns, even for settlements the bounded queue evicted. */
   const scopeAppends = new Map<string | undefined, number>()
+  /**
+   * The recent successful WRITTEN settlements of the OPEN scope, per row
+   * owner, in the writer's true synchronous append order (oldest first). This
+   * is the only authority for the cold-seed prefix: `ts` can never reproduce
+   * this order. Bounded to {@link INPUT_RECALL_LIMIT} per owner; skips and
+   * tokenless writers are included because they are real appends.
+   */
+  const scopeWritten = new Map<string | undefined, ScopeWrittenSettlement[]>()
   /**
    * The number of positions the last recall reconcile visited — a
    * HEADLESS-TEST HOOK pinning the frozen plan's O(100) bound (never read by
@@ -279,6 +300,10 @@ export function createHistoryRecallScope(): HistoryRecallScope {
     const appendsBefore = scopeAppends.get(settlement.owner) ?? 0
     if (settlement.outcome === 'written') {
       scopeAppends.set(settlement.owner, appendsBefore + 1)
+      const written = scopeWritten.get(settlement.owner) ?? []
+      written.push({ writeId: settlement.writeId, text: settlement.text })
+      if (written.length > INPUT_RECALL_LIMIT) written.shift()
+      scopeWritten.set(settlement.owner, written)
     }
     if (settlement.token !== undefined && scopeOccurrences.has(settlement.token)) {
       scopeSettled.set(settlement.token, {
@@ -306,10 +331,41 @@ export function createHistoryRecallScope(): HistoryRecallScope {
    *   sessionless boot seed passes no owner: it only seeds the recall pool and
    *   leaves the scope open (boot is not a published Session).
    */
-  const reset = (entries: readonly string[], owner?: string): void => {
+  const reset = (entries: readonly string[], owner?: string, writeIds?: readonly (string | undefined)[]): void => {
+    if (writeIds !== undefined && writeIds.length !== entries.length) {
+      throw new Error('history recall reset: writeIds must stay positionally aligned with entries')
+    }
+    let seedEntries = entries
+    if (owner !== undefined && writeIds !== undefined) {
+      // Deterministic prefix reconstruction (the cold cross-cwd seed): the open
+      // scope's own successful appends ARE the newest rows, in true writer
+      // append order — never a `ts` guess. Remove those exact rows from the
+      // disk baseline by (writeId, text), then prepend the reversed append
+      // order: the existing reconcile below then sees the prefix it always
+      // assumed.
+      const written = scopeWritten.get(owner) ?? []
+      const writtenText = new Map<string, string>()
+      for (const item of written) {
+        if (item.writeId === undefined) {
+          throw new Error('history recall reset: a written settlement of the open scope carries no writeId')
+        }
+        writtenText.set(item.writeId, item.text)
+      }
+      const baseline: string[] = []
+      for (let index = 0; index < entries.length; index += 1) {
+        const writeId = writeIds[index]
+        // Only the SAME append is removed: a forged/reused id with different
+        // text is a different row and stays in the baseline.
+        if (writeId !== undefined && writtenText.get(writeId) === entries[index]) continue
+        baseline.push(entries[index]!)
+      }
+      const normalized = [...written].reverse().map(item => item.text)
+      normalized.push(...baseline)
+      seedEntries = normalized.slice(0, INPUT_RECALL_LIMIT)
+    }
     snapshot.length = 0
     if (owner === undefined) {
-      appendSnapshot(entries)
+      appendSnapshot(seedEntries)
       return
     }
     // The settlements THIS Session's rows produced, in append order, plus the
@@ -327,7 +383,7 @@ export function createHistoryRecallScope(): HistoryRecallScope {
     // the retained queue's: the snapshot's newest covered rows are this
     // window's appends in reverse, whether or not their settlements survived
     // the cap.
-    const covered = Math.min(scopeAppends.get(owner) ?? 0, entries.length)
+    const covered = Math.min(scopeAppends.get(owner) ?? 0, seedEntries.length)
     // Occurrence token → rank (0 = newest), built ONCE: every lookup below is a
     // map read, so the reconstruction stays linear in the scope and the window.
     const ranks = new Map<number, number>()
@@ -348,7 +404,7 @@ export function createHistoryRecallScope(): HistoryRecallScope {
         // Writes older than the recall window have no row in the projection at
         // all (exactly like the baseline snapshot).
         if (writeSeen > covered) continue
-        windowTexts.push(entries[writeSeen - 1]!)
+        windowTexts.push(seedEntries[writeSeen - 1]!)
       } else {
         if (rank === undefined) continue
         windowTexts.push(scopeInputs[rank]!.text)
@@ -361,7 +417,7 @@ export function createHistoryRecallScope(): HistoryRecallScope {
     // disk order, with no occurrence association (their own facts stay in the
     // map).
     for (let row = retainedWrites; row < covered; row += 1) {
-      windowTexts.push(entries[row]!)
+      windowTexts.push(seedEntries[row]!)
       windowRanks.push(undefined)
       windowRows.push(true)
     }
@@ -428,12 +484,13 @@ export function createHistoryRecallScope(): HistoryRecallScope {
       next += 1
     }
     emitEvictedSkips(covered)
-    appendSnapshot([...merged, ...entries.slice(covered)])
+    appendSnapshot([...merged, ...seedEntries.slice(covered)])
     scopeInputs.length = 0
     scopeSettlements.length = 0
     scopeSettled.clear()
     scopeOccurrences.clear()
     scopeAppends.clear()
+    scopeWritten.clear()
     scopeOpen = false
     scopeOwner = owner
   }
@@ -457,6 +514,7 @@ export function createHistoryRecallScope(): HistoryRecallScope {
       scopeSettled.clear()
       scopeOccurrences.clear()
       scopeAppends.clear()
+      scopeWritten.clear()
     }
     // The OUTGOING recall pool never survives into the newly published owner.
     // This seam runs AFTER the publication committed (never in the

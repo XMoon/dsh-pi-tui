@@ -295,3 +295,85 @@ test('the snapshot is a defensive copy: a caller cannot mutate the projection', 
   first[0] = 'clobbered'
   assert.deepEqual(scope.snapshot(), ['a', 'b'], 'the kernel owns its snapshot, not the caller')
 })
+
+// ---------------------------------------------------------------------------
+// Cold cross-cwd seed provenance (writeId): the deterministic prefix is the
+// writer's true append order — never a `ts` guess.
+// ---------------------------------------------------------------------------
+
+test('R05: the cold seed prefix follows the real write order even when stored ts is reversed', () => {
+  const scope = createHistoryRecallScope()
+  scope.reset(['anchor'], 'A')
+  scope.begin('B')
+  // Submission order is irrelevant; the SETTLE order is the writer's append
+  // order. `b` is appended first, `a` second (so `a` is truly newer), while the
+  // persisted ts says the opposite (ts is captured before the async write).
+  scope.settle({ owner: 'B', outcome: 'written', text: 'b', writeId: 'w-b' })
+  scope.settle({ owner: 'B', outcome: 'written', text: 'a', writeId: 'w-a' })
+  // Disk seed in ts order: b newer, a older.
+  scope.reset(['b', 'a'], 'B', ['w-b', 'w-a'])
+  assert.deepEqual(scope.snapshot(), ['a', 'b'],
+    'the open scope appends (a last) lead the recall; each row appears exactly once')
+})
+
+test('R06: skip, tokenless write and a later same-text write interleave at their real append positions', () => {
+  const scope = createHistoryRecallScope()
+  scope.reset(['anchor'], 'A')
+  scope.begin('B')
+  const firstA = scope.rememberAccepted('a')
+  scope.settle({ token: firstA, owner: 'B', outcome: 'skipped', text: 'a' })
+  // A tokenless writer (steer) appends z between the two Enters.
+  scope.settle({ owner: 'B', outcome: 'written', text: 'z', writeId: 'w-z' })
+  const secondA = scope.rememberAccepted('a')
+  scope.settle({ token: secondA, owner: 'B', outcome: 'written', text: 'a', writeId: 'w-a' })
+  scope.rememberAccepted('p') // still unsettled when the reseed lands
+  scope.reset(['a', 'z'], 'B', ['w-a', 'w-z'])
+  assert.deepEqual(scope.snapshot(), ['p', 'a', 'z', 'a'],
+    'p stays newest, the written a precedes z, and the skipped a keeps its settlement rank')
+})
+
+test('R07: 150 window writes keep the newest 100 real appends; an evicted early SKIP keeps its boundary', () => {
+  const scope = createHistoryRecallScope()
+  scope.reset(['anchor'], 'A')
+  scope.begin('B')
+  const early = scope.rememberAccepted('early')
+  scope.settle({ token: early, owner: 'B', outcome: 'skipped', text: 'early' })
+  for (let index = 0; index < 150; index += 1) {
+    scope.settle({ owner: 'B', outcome: 'written', text: `row${index}`, writeId: `w${index}` })
+  }
+  const entries = Array.from({ length: 150 }, (_, index) => `row${149 - index}`)
+  const writeIds = Array.from({ length: 150 }, (_, index) => `w${149 - index}`)
+  scope.reset(entries, 'B', writeIds)
+  assert.equal(scope.snapshot().length, INPUT_RECALL_LIMIT, 'the recall window stays capped at 100')
+  assert.equal(scope.snapshot()[0], 'row149', 'the newest real append leads')
+  assert.equal(scope.snapshot().at(-1), 'row50', 'the window is the newest 100 real writes')
+  assert.ok(!scope.snapshot().includes('early'),
+    'a skip older than the whole 100-write window is outside the recall projection')
+})
+
+test('R13: a forged/reused writeId with different text never cancels the real current append', () => {
+  const scope = createHistoryRecallScope()
+  scope.reset(['anchor'], 'A')
+  scope.begin('B')
+  const token = scope.rememberAccepted('a')
+  scope.settle({ token, owner: 'B', outcome: 'written', text: 'a', writeId: 'w1' })
+  // The disk seed carries a non-authoritative row that reuses the id with a
+  // different body; only the exact (id, text) pair of the real append is
+  // removed from the baseline.
+  scope.reset(['a', 'forged'], 'B', ['w1', 'w1'])
+  assert.deepEqual(scope.snapshot(), ['a', 'forged'],
+    'the real append leads, the forged row survives and nothing is cancelled')
+})
+
+test('writeIds must stay positionally aligned with entries', () => {
+  const scope = createHistoryRecallScope()
+  scope.begin('B')
+  assert.throws(() => scope.reset(['a', 'b'], 'B', ['w1']), /positionally aligned/)
+})
+
+test('a written settlement without a writeId fails the provenance commit loudly', () => {
+  const scope = createHistoryRecallScope()
+  scope.begin('B')
+  scope.settle({ owner: 'B', outcome: 'written', text: 'a' })
+  assert.throws(() => scope.reset(['a'], 'B', [undefined]), /carries no writeId/)
+})

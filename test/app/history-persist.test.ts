@@ -356,3 +356,20 @@ test('persistHistoryRecord skips empty, consecutive repeats and attachment-beari
   assert.equal(records.length, 1)
   assert.equal(records[0]?.content, 'hello')
 })
+
+test('persistHistoryRecord writes the optional writeId into the v2 row', (t) => {
+  const life = testLifecycle(t)
+  const home = tempHome(life)
+  const file = historyFilePath(home, '/work/a')
+  const written = persistHistoryRecord({
+    content: 'with id',
+    cwd: '/work/a',
+    sessionId: 'ses_a',
+    ts: 1,
+    lastContent: undefined,
+    writeId: 'w-1',
+    file,
+  })
+  assert.equal(written, true)
+  assert.equal(loadHistoryRecords(file)[0]?.writeId, 'w-1')
+})

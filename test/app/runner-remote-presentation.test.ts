@@ -80,6 +80,7 @@ import { TUI_STARTUP_SERVICE } from '../../src/startup.ts'
 import { createRemoteApplicationRuntime } from '../support/m3-inprocess/application-runtime.ts'
 import { testPromptSerializer, waitFor } from '../support/remote-application-fixture.ts'
 import { appendHistoryRecord, historyFilePath, loadHistoryRecords } from '../../src/client/history/store.ts'
+import { FileHistorySearchSource } from '../../src/client/history/search.ts'
 import { dshHome } from '../../src/runtime/process/diagnostics.ts'
 import { testLifecycle, type TestLifecycle } from '../support/temp-lifecycle.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
@@ -619,6 +620,27 @@ test('the resumed Remote startup keeps input accepted while its hydration read i
   let releaseRead!: () => void
   const readGate = new Promise<void>(resolve => { releaseRead = resolve })
   let gated = false
+  let historyReadEntered = false
+  let releaseHistoryRead!: () => void
+  const historyReadGate = new Promise<void>(resolve => { releaseHistoryRead = resolve })
+  let historyGated = false
+  const realHistoryRead = FileHistorySearchSource.prototype.readSessionRecall
+  FileHistorySearchSource.prototype.readSessionRecall = async function gatedHistoryRead(
+    this: FileHistorySearchSource,
+    sessionId: string,
+    signal?: AbortSignal,
+  ) {
+    if (historyGated) return realHistoryRead.call(this, sessionId, signal)
+    historyGated = true
+    // The REAL cold read completes first (its snapshot is exactly what
+    // production would carry); the gate then holds its RESULT so the terminal
+    // keeps accepting input while the hydration continuation is still pending.
+    const captured = await realHistoryRead.call(this, sessionId, signal)
+    historyReadEntered = true
+    await historyReadGate
+    return captured
+  }
+  life.defer(() => { FileHistorySearchSource.prototype.readSessionRecall = realHistoryRead })
   const fixture = await mountRemoteRunner(life, {
     presetId: hostPreset,
     resumeSessionId: mainId,
@@ -685,12 +707,16 @@ test('the resumed Remote startup keeps input accepted while its hydration read i
   await waitFor('the first submission persisted under the resumed Session', () =>
     ownersOf('first remote prompt').includes(mainId), 20_000)
 
-  // Release the hydration and accept the second submission in the SAME
-  // synchronous stack: its persistence continuation is queued BEHIND the
-  // released hydration continuation.
+  // Release the transport read; the hydration then starts its COLD HISTORY
+  // read, whose completed snapshot this test holds so the window stays open.
   releaseRead()
+  await waitFor('the held cold history read to be entered', () => historyReadEntered, 20_000)
+  // Accept the second submission while the history snapshot (captured before
+  // it) is still parked: its persistence continuation is queued behind the
+  // released hydration continuation.
   editor.setDraft('pending remote prompt')
   editor.submitDraft()
+  releaseHistoryRead()
   await waitFor('the resumed hydration committed', () => commits.length > 0, 20_000)
   // The reseed that commits while the second submission's row is still absent
   // from the file: its snapshot carries the persisted submission only …
@@ -723,6 +749,8 @@ test('the resumed Remote startup keeps input accepted while its hydration read i
   } finally {
     // Never leave the startup hydration parked, whatever failed above.
     releaseRead()
+    releaseHistoryRead()
+    FileHistorySearchSource.prototype.readSessionRecall = realHistoryRead
   }
 })
 

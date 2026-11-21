@@ -1994,6 +1994,18 @@ export function applyRunnerWithRuntime(
       initialSkills = resolution.skills
       surfaceNotice = resolution.notice
     }
+    // Ctrl+R input-history search AND the cold cross-cwd session-recall
+    // reader: ONE Client-local FileHistorySearchSource instance per
+    // composition. It is constructed here (before the presentation owner) so
+    // the SAME object backs both the History panel source and the editor
+    // hydration seed; never a second reader authority.
+    const historySearchSource = new FileHistorySearchSource({
+      dshHome: dshHome(process.env),
+      // A RESOLVER, not a snapshot: the all-scope search must see the newest
+      // known cwds (sessions created/switched after startup).
+      knownCwds: () => history.knownCwds(),
+      diagnostics: event => diag.warn('history source diagnostic', { ...event }),
+    })
     // A5b-1: the live-session presentation owner (main transcript/stats folds,
     // the main presentation target, the generation reset and the ONE cold
     // hydration path) is constructed here, where its folds used to live.
@@ -2009,6 +2021,7 @@ export function applyRunnerWithRuntime(
       // share it).
       summaryKeys: toolSummaryKeys,
       isCleanedUp: () => cleanedUp,
+      lifecycleSignal: lifecycleController.signal,
       refreshStatusCheap: () => status.refresh(),
       folds: { title: (events) => foldSessionTitle(events)?.title },
       direct: {
@@ -2039,6 +2052,20 @@ export function applyRunnerWithRuntime(
         currentCwd: () => status.sessionCwd(),
         records: (cwd) => history.records(cwd),
         setLastContent: (content) => history.setLastContent(content),
+        readSessionRecall: (sessionId, signal) => historySearchSource.readSessionRecall(sessionId, signal),
+      },
+      // The exact ownership fence for the asynchronous cold recall read. The
+      // generation is captured before the read and re-checked after it; on the
+      // Remote branch the transport token adds the Connection/binding identity.
+      currentness: {
+        captureGeneration: () => ownership.generation(),
+        isStillCurrent: (sessionId, generation) =>
+          ownership.currentSessionId() === sessionId && ownership.generation() === generation,
+        ...(remoteSources === undefined ? {} : {
+          captureTransportToken: (sessionId) => remoteSources.sessionFacts.captureTransportToken(sessionId),
+          isTransportTokenCurrent: (sessionId, token) =>
+            remoteSources.sessionFacts.isTransportTokenCurrent(sessionId, token),
+        }),
       },
       commands: { register: () => command.register({ snapshot: initialSnapshot, skills: initialSkills }) },
       submission: { clearPending: () => submission.clearPending() },
@@ -4337,15 +4364,11 @@ export function applyRunnerWithRuntime(
       // write path) — never a deep settings read per render.
       iconStyle: iconStyleOf(tuiSettings?.get().iconStyle),
       displayState,
-      // Ctrl+R input-history search: the runner owns the IO (the file-backed
-      // source + the known-cwd identity map), the surface owns the panel
-      // lifecycle (plan §27 — TuiApp never touches the filesystem).
-      historySearchSource: new FileHistorySearchSource({
-        dshHome: dshHome(process.env),
-        // A RESOLVER, not a snapshot: the all-scope search must see the
-        // newest known cwds (sessions created/switched after startup).
-        knownCwds: () => history.knownCwds(),
-      }),
+      // Ctrl+R input-history search: the runner owns the IO (the ONE
+      // file-backed source + the known-cwd identity map), the surface owns the
+      // panel lifecycle (plan §27 — TuiApp never touches the filesystem). The
+      // SAME source instance also backs the cold session-recall reader above.
+      historySearchSource,
       // The durable-image read (plan M8/M10): history images resolve through
       // `ctx.attachments.readImage` only — never the draft store. The read
       // callback is a late-bound service access (AGENTS.md: never a bare
