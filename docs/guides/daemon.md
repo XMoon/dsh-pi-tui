@@ -59,6 +59,34 @@ provenance, not an ownership requirement. `status` reports
 `compatibility=other-build` when the observed build differs from the installed
 profile.
 
+## Control the official Web frontend from the CLI
+
+A running daemon Host can serve the official Web frontend. The headless CLI
+inspects and controls that SAME Host without opening the TUI:
+
+~~~sh
+dsh --profile pi-tui daemon start
+dsh --profile pi-tui web enable
+dsh --profile pi-tui web url
+~~~
+
+`web status` prints `web=enabled`, `web=disabled`, `web=changing` or
+`web=unavailable`; `web disable` withdraws the Web frontend again; `web open`
+asks the default browser opener on the machine that runs the CLI to open the
+authenticated URL. `web enable` never starts a Host: if the Host is not
+running, every `web` command fails with `HOST_NOT_RUNNING` and asks you to run
+`daemon start` first. An older Host build that predates the headless route is
+reported as `WEB_CLI_UNAVAILABLE`; restart the Host from the current install to
+adopt it.
+
+The URL printed by `web url` contains a live Host launch token: treat it as a
+temporary credential. It is printed only by that explicit command and is never
+written to status output, logs or diagnostics. The product does not offer
+automatic expiry, revocation or a short link, and it never modifies the
+`127.0.0.1` address. To use it from another machine, set up your own SSH local
+port forward to the Host machine and open the forwarded `127.0.0.1` URL there;
+the token remains sensitive either way.
+
 ## Read the raw qualification records
 
 `daemon logs` normally shows concise Host production lines (ready, startup or

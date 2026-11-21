@@ -690,6 +690,19 @@ is no "short-lived URL", no Client-synthesized token, no cookie or pairing
 mechanism and no Session deep-link scheme: the page opens the official Web home
 and the user chooses a session inside it.
 
+The headless `dsh --profile pi-tui web` commands are a SECOND, short-lived
+transport adapter over that SAME Host service: one private Owner-only HTTP route
+on the official Connection (`/api/pi-tui.web-control`, GET status and the three
+write/read operations) exists only while the Host is published. Its `url`
+operation is the one deliberate token-output exception: the CLI prints the raw
+Host-returned URL on stdout for the user's explicit `web url` action; `web
+status`, `enable` and `disable` never receive or print the URL. The adapter
+holds no status, token, persisted flag or mutation queue of its own, does not
+change the Typert Web RPC descriptors or `local/2`, and all writes still flow
+through the ONE `PiTuiWebAccess.setEnabled()` serialization and the live Loader
+rows. A Host build without the private route answers `404`, which the CLI
+reports as unsupported (`WEB_CLI_UNAVAILABLE`) instead of inventing a state.
+
 Activation is per Host lifetime, and the NEXT cold boot is a PROFILE preference:
 the base-profile row `pi-tui-web-preferences` owns the durable boolean
 `autoStart`, written through the ordinary revision-checked Settings/ConfigEditor
