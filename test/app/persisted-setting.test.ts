@@ -49,6 +49,8 @@ class FakeConfig implements ExtensionConfigsConfig {
   /** Simulate a Host/Connection replacement between mutation settle and the
    *  consumer's final readback. */
   generationAfterMutation: object | undefined
+  /** Simulate the official Split JSON RPC carrier, which serializes -0 as 0. */
+  jsonRoundTripMutations = false
   readonly mutations: { packageName: string; ops: readonly ExtensionConfigDataOp[]; revision: number }[] = []
   mutation: 'accepted' | 'conflict' | 'rejected' | 'outcome-unconfirmed' = 'accepted'
   readKind: 'ready' | 'stale' | 'unavailable' | 'unreadable' = 'ready'
@@ -80,7 +82,9 @@ class FakeConfig implements ExtensionConfigsConfig {
     const user = structuredClone(this.user) as Record<string, unknown>
     const op = ops[0]!
     if (op.op === 'set') {
-      user[op.path[0]!] = op.value
+      user[op.path[0]!] = this.jsonRoundTripMutations
+        ? JSON.parse(JSON.stringify(op.value)) as unknown
+        : op.value
     } else {
       // Official ConfigEditor: unset restores the inherited effective value;
       // a sibling USER override keeps the leaf present, otherwise it deletes.
@@ -196,6 +200,37 @@ test('persisted commit sends exactly ONE CAS mutation and verifies the authorita
   const reset = await commitPersistedSetting(recordValue, owner, 'inherit', config, config.revision, config.generation)
   assert.deepEqual(reset, { outcome: 'verified' })
   assert.deepEqual(config.mutations[1]?.ops, [{ op: 'unset', path: ['label'] }])
+})
+
+test('persisted current/commit use JSON scalar equality for signed zero', async () => {
+  const config = new FakeConfig()
+  config.jsonRoundTripMutations = true
+  config.inherited = { label: 'alpha' }
+  config.effective = { label: 0 }
+  config.user = { label: -0 }
+  const zeroRecord: PersistedSettingRecord = {
+    ...record(),
+    id: 'zero',
+    currentValue: '-0',
+    persisted: {
+      path: ['label'],
+      choices: [
+        { id: 'zero', op: 'set', value: -0 },
+        { id: 'inherit', op: 'unset' },
+      ],
+    },
+  }
+  const read = readPersistedSetting(zeroRecord, '@r8-pr1-fixture/a', config)
+  assert.equal(read.mode, 'ready')
+  if (read.mode !== 'ready') return
+  assert.equal(read.candidateId, 'zero', 'the official RPC carrier normalizes -0 to 0; both are the same JSON scalar')
+  const owner = { packageName: '@r8-pr1-fixture/a', entryId: 'pi-tui-client-a', registrationToken: 3 }
+  assert.deepEqual(
+    await commitPersistedSetting(zeroRecord, owner, 'zero', config, read.revision, read.generation),
+    { outcome: 'verified' },
+  )
+  assert.equal(config.mutations.length, 1)
+  assert.equal((config.user as Record<string, unknown>).label, 0)
 })
 
 test('persisted commit never verifies a second readback from a replaced Host generation', async () => {

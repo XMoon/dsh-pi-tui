@@ -61,7 +61,8 @@ export type PersistedSettingRead =
       readonly userFieldPresent: boolean
       readonly revision: number
       readonly generation: object
-      /** The author choice id matching the current USER field, when one exists. */
+      /** The author choice id matching the authoritative EFFECTIVE value
+       *  (or the inherited-equal `unset` choice), when one exists. */
       readonly candidateId?: string
       readonly overriddenDisplay: 'Yes' | 'No'
       readonly runtimeValue: string
@@ -93,10 +94,13 @@ function readOwnField(root: unknown, path: readonly string[]): FieldRead {
   return { present: true, value: current }
 }
 
-/** JSON-scalar equality for the declared choice contract. */
+/** JSON-scalar equality for the declared choice contract. The Split RPC
+ *  carrier serializes JSON (`-0` becomes `0`), so numeric equality follows JSON
+ *  scalar equivalence rather than `Object.is`; finite-number admission has
+ *  already excluded NaN/Infinity. */
 function sameScalar(left: unknown, right: TuiPersistedScalar): boolean {
   if (right === null) return left === null
-  if (typeof right === 'number') return typeof left === 'number' && Object.is(left, right)
+  if (typeof right === 'number') return typeof left === 'number' && left === right
   return typeof left === typeof right && left === right
 }
 

@@ -321,3 +321,62 @@ test('the real official SettingsForms sub-path unset restores inherited effectiv
   assert.equal(afterReset.overriddenDisplay, 'No')
   assert.equal(afterReset.candidateId, 'inherit', 'the authoritative effective fact selects the Reset candidate')
 })
+
+test('a signed-zero choice survives the real generated Remote JSON path and reads as current/verified', async t => {
+  const life = testLifecycle(t)
+  const host = await createRemoteApplicationHostFixture(life, 'extension-config-pr4-signed-zero')
+  const plane = await mountExtensionConfigPlane(host.ctx, join(host.workRoot, 'extension-plane'))
+  const hostRuntime = await createRemoteHostRuntime(host.ctx)
+  const client = await createRemoteClientRuntime({ carrier: hostRuntime.carrier })
+  const assembled = await createRemoteBackendRuntime({
+    runtime: client,
+    promptSerializer: testPromptSerializer,
+    fetch: hostRuntime.carrier.fetch,
+  })
+  t.after(async () => {
+    assembled.dispose()
+    await client.dispose()
+    await hostRuntime.dispose()
+    await host.dispose()
+  })
+  const config = assembled.backend.config
+  const { readPersistedSetting, commitPersistedSetting } = await import('../../src/app/client-extensions/persisted-setting.ts')
+  type Record = import('../../src/app/client-extensions/persisted-setting.ts').PersistedSettingRecord
+  const initial = config.extensionConfigs.read(PACKAGE_A)
+  assert.equal(initial.kind, 'ready')
+  if (initial.kind !== 'ready') return
+  assert.deepEqual(await config.extensionConfigs.mutate(PACKAGE_A, [
+    { op: 'set', path: ['label'], value: 0 },
+  ], initial.revision, initial.generation), { kind: 'accepted' })
+  const zeroRecord: Record = {
+    id: 'signed-zero',
+    owner: '10:fixture-a',
+    registrationToken: 1,
+    mode: 'persisted',
+    currentValue: '0',
+    persisted: {
+      path: ['label'],
+      choices: [
+        { id: 'zero', op: 'set', value: -0 },
+        { id: 'inherit', op: 'unset' },
+      ],
+    },
+  }
+  const opened = readPersistedSetting(zeroRecord, PACKAGE_A, config.extensionConfigs)
+  assert.equal(opened.mode, 'ready')
+  if (opened.mode !== 'ready') return
+  assert.equal(opened.candidateId, 'zero', 'the real Remote JSON carrier normalizes -0 to 0')
+  const owner = { packageName: PACKAGE_A, entryId: 'entry-a', registrationToken: 1 }
+  assert.deepEqual(
+    await commitPersistedSetting(zeroRecord, owner, 'zero', config.extensionConfigs, opened.revision, opened.generation),
+    { outcome: 'verified' },
+  )
+  const after = readPersistedSetting(zeroRecord, PACKAGE_A, config.extensionConfigs)
+  assert.equal(after.mode, 'ready')
+  if (after.mode !== 'ready') return
+  assert.equal(after.candidateId, 'zero')
+  assert.equal(after.effective, 0)
+  // The official Host plane received the JSON-normalized numeric zero.
+  const hostRow = plane.settings.describe().find(row => row.ns === NS_A)
+  assert.notEqual(hostRow, undefined)
+})
