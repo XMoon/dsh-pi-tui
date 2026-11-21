@@ -236,6 +236,13 @@ export const HOST_ONLY_PATCH = `# M4-B1 Host-only profile overlay: production Ho
       name: '@deepseek-ai/dsh-session-log-export'
       inject: [commands, connection]
 
+    # One process-global provider registration for the existing Cordis inspect
+    # registry. Never put this row in the Web toggle roster or mount a second
+    # runner: the registry rejects a duplicate provider id.
+    - id: split-host-cordis-inspect-providers
+      name: '@deepseek-ai/dsh-tool-cordis/host'
+      inject: [cordisInspect, tools]
+
     # The package's ONE built-in Host Runtime row: the private contribution plus
     # the private business services. Business features are NOT separate Loader
     # rows or package subpaths. The sandbox policy/provider are resolved PER
