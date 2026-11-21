@@ -330,15 +330,24 @@ test('`/tasks` renders the REAL Remote descendant tree and the child row opens t
   submit(app, '/tasks')
   await waitFor('the full Task Center rendered the tree', () => viewport().includes(LABEL_A), 20_000)
   // Every direct child is a rendered `subagent · <label>` row with the durable
-  // mode as its non-truncatable suffix; the nested C is disclosed under A.
-  const collapsed = viewport()
-  assert.match(collapsed, /subagent · child A m3-5-pr2-child-a · continuable/u,
-    `the direct continuable child A row must render:\n${collapsed}`)
-  assert.match(collapsed, /subagent · child B m3-5-pr2-child-b · one-shot/u,
-    `the direct one-shot child B row must render:\n${collapsed}`)
-  assert.equal(collapsed.includes(LABEL_C), false,
-    'the nested child C is behind the parent row disclosure until A is expanded')
-  // Expand A: the nested row appears BETWEEN A and B (stable DFS pre-order).
+  // mode as its non-truncatable suffix; Tracked discloses the nested C by
+  // default.
+  const tracked = viewport()
+  assert.match(tracked, /subagent · child A m3-5-pr2-child-a · continuable/u,
+    `the direct continuable child A row must render:\n${tracked}`)
+  assert.match(tracked, /subagent · child B m3-5-pr2-child-b · one-shot/u,
+    `the direct one-shot child B row must render:\n${tracked}`)
+  const trackedIndexA = lineIndexOf(tracked, LABEL_A)
+  const trackedIndexC = lineIndexOf(tracked, LABEL_C)
+  const trackedIndexB = lineIndexOf(tracked, LABEL_B)
+  assert.ok(trackedIndexA >= 0 && trackedIndexC >= 0 && trackedIndexB >= 0,
+    `all three rows must render by default:\n${tracked}`)
+  assert.ok(trackedIndexA < trackedIndexC && trackedIndexC < trackedIndexB,
+    `the default tree must keep stable DFS pre-order A, C, B (got ${trackedIndexA}, ${trackedIndexC}, ${trackedIndexB}):\n${tracked}`)
+  // Collapse then expand A: the explicit tree gesture still owns the
+  // disclosure and leaves the selection on A for the open below.
+  fixture.vt.sendInput('\x1b[D')
+  await waitFor('the nested child collapsed', () => !viewport().includes(LABEL_C), 10_000)
   fixture.vt.sendInput('\x1b[C')
   await waitFor('the nested child disclosed', () => viewport().includes(LABEL_C), 10_000)
   const expanded = viewport()
@@ -631,11 +640,9 @@ test('one-shot B and nested C are READ-ONLY from the root surface (no interactiv
   }
 
   await openReadOnly(LABEL_B, /viewing subagent: child B m3-5-pr2-child-b — one-shot · read-only · Esc returns/u, CHILD_B_ID, 'child B pending echo')
-  // The nested C needs A expanded first (the same disclosure gesture).
+  // The nested C is disclosed by default in Tracked; move from A to C.
   submit(app, '/tasks')
   await waitFor('the task browser rendered again', () => viewport().includes(LABEL_A), 20_000)
-  fixture.vt.sendInput('\x1b[C')
-  await waitFor('the nested row disclosed', () => viewport().includes(LABEL_C), 10_000)
   fixture.vt.sendInput('\x1b[B')
   await new Promise(resolve => setTimeout(resolve, 60))
   await waitFor('the nested row selected', () => /child C m3-5-pr2-child-c · mode\s+continuable/u.test(viewport()), 5_000)

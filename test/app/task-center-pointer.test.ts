@@ -14,6 +14,7 @@ import { TuiApp } from '../../src/tui-app.ts'
 import { createTaskRuntime, type TaskSurfaceSource } from '../../src/app/surface/task-runtime.ts'
 import { pituiTaskCenterPresentation } from '../../src/app/surface/task-presentation-pitui.ts'
 import { pituiDisplaySeam } from '../../src/app/surface/display-seam-pitui.ts'
+import type { TaskSubagentEntry } from '../../src/runtime/task-read-port.ts'
 import type { SessionSubject } from '../../src/app/session/subject.ts'
 import { createDiag } from '../../src/runtime/process/diagnostics.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
@@ -26,7 +27,10 @@ async function flush(rounds = 8): Promise<void> {
   for (let index = 0; index < rounds; index += 1) await new Promise<void>(resolve => setTimeout(resolve, 0))
 }
 
-function taskSource(subject: SessionSubject): TaskSurfaceSource {
+function taskSource(
+  subject: SessionSubject,
+  descendants: readonly TaskSubagentEntry[] = [],
+): TaskSurfaceSource {
   return {
     sessionId: () => 'sess-main',
     captureSubject: () => subject,
@@ -44,8 +48,13 @@ function taskSource(subject: SessionSubject): TaskSurfaceSource {
     taskRead: {
       currentKey: () => 'g1:sess-main',
       currentSessionId: () => 'sess-main',
-      readTask: async () => ({ parentSessionId: 'sess-main', parentAvailable: true, descendants: [], jobs: [] }),
-      activityOf: () => 'running',
+      readTask: async () => ({ parentSessionId: 'sess-main', parentAvailable: true, descendants, jobs: [] }),
+      // The fixture catalog is settled unless its own entry declares a live
+      // activity; the root session (not a descendant) keeps its running fact.
+      activityOf: (childId) => {
+        const entry = descendants.find(candidate => candidate.id === childId)
+        return entry?.kind === 'child' ? entry.activity : 'running'
+      },
     },
     teamBoard: {
       read: () => ({
@@ -62,7 +71,7 @@ function taskSource(subject: SessionSubject): TaskSurfaceSource {
 }
 
 /** The REAL fullscreen Task Center over a real TuiApp + VirtualTerminal. */
-async function startTasks(): Promise<{
+async function startTasks(descendants: readonly TaskSubagentEntry[] = []): Promise<{
   vt: VirtualTerminal
   app: TuiApp
   tasks: ReturnType<typeof createTaskRuntime>
@@ -80,7 +89,7 @@ async function startTasks(): Promise<{
     attention: { rows: () => [], reconcile: () => {}, publish: () => {}, reopen: () => false },
     publishActivity: () => {},
   })
-  tasks.attachTasks(taskSource(subject), { diag: createDiag({ filePath: undefined, stderrLevel: 'off' }), isCleanedUp: () => false })
+  tasks.attachTasks(taskSource(subject, descendants), { diag: createDiag({ filePath: undefined, stderrLevel: 'off' }), isCleanedUp: () => false })
   await flush()
   app.setFullscreen(true)
   await vt.waitForRender()
@@ -142,5 +151,26 @@ test('real Fullscreen SGR clicks close the Work and Team Task Center through Clo
   const closedTeam = vt.getViewport().join('\n')
   assert.ok(!closedTeam.includes('Ship it') && !closedTeam.includes('Members') && !closedTeam.includes('[Team]'),
     `the Team close span dismisses the Task Center:\n${closedTeam}`)
+  app.stop()
+})
+
+test('real Fullscreen Tracked Work paints every retained settled Subagent branch in pre-order', async () => {
+  const descendants: TaskSubagentEntry[] = [
+    { kind: 'child', id: 'p', label: 'parent', mode: 'continuable', activity: 'inactive', hasChildren: true, parentId: '', depth: 1 },
+    { kind: 'child', id: 'c', label: 'child', mode: 'one-shot', activity: 'inactive', hasChildren: true, parentId: 'p', depth: 2 },
+    { kind: 'child', id: 'leaf', label: 'nested leaf', mode: 'one-shot', activity: 'inactive', hasChildren: false, parentId: 'c', depth: 3 },
+  ]
+  const { vt, app } = await startTasks(descendants)
+  const viewport = vt.getViewport()
+  const joined = viewport.join('\n')
+  assert.ok(joined.includes('── Subagents / transcripts ──'), `the subagents group is painted:\n${joined}`)
+  assert.ok(!joined.includes('── Jobs'), `no Jobs group exists without Job rows:\n${joined}`)
+  const parentIndex = viewport.findIndex(line => line.includes('subagent · parent'))
+  const childIndex = viewport.findIndex(line => line.includes('subagent · child'))
+  const leafIndex = viewport.findIndex(line => line.includes('subagent · nested leaf'))
+  assert.ok(parentIndex >= 0 && childIndex > parentIndex && leafIndex > childIndex,
+    `the settled tree paints in catalog pre-order:\n${joined}`)
+  assert.ok(viewport[parentIndex]!.includes('· continuable'), `the parent keeps its mode suffix:\n${viewport[parentIndex]}`)
+  assert.ok(viewport[childIndex]!.includes('· one-shot'), `the nested child keeps its mode suffix:\n${viewport[childIndex]}`)
   app.stop()
 })
