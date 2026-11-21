@@ -69,6 +69,14 @@ export const RELEASE_PHASES = ['release-context', 'release-metadata', 'release-p
 export const SPLIT_PROCESS_PHASE = 'split-process'
 
 /**
+ * The npm-only Fresh Profile proof. It runs on EVERY npm-mode run (PR, branch,
+ * dispatch, tag) and is a hard requirement before qualification because the
+ * single-package distribution contract must be proven on each candidate.
+ * Source Mode has no npm Profile to install and is the only legitimate skip.
+ */
+export const FRESH_PROFILE_PHASE = 'fresh-profile'
+
+/**
  * The status each MODE-DEPENDENT job (other than split-process) must show.
  *
  * `success` and `skipped` are both "expected"; what is forbidden is the WRONG
@@ -78,10 +86,12 @@ export const MODE_STATUS = {
   npm: {
     'prepare-dsh-source': 'skipped',
     'client-family-compat': 'success',
+    'fresh-profile': 'success',
   },
   source: {
     'prepare-dsh-source': 'success',
     'client-family-compat': 'skipped',
+    'fresh-profile': 'skipped',
   },
 }
 

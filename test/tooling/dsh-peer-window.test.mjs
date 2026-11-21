@@ -28,7 +28,7 @@ const dshPeerEntries = Object.entries(packageJson.peerDependencies ?? {})
 test('all DSH runtime peers use the published npm lower bound', () => {
   assert.ok(dshPeerEntries.length > 0, 'the bundle must declare DSH runtime peers')
   // The 0.2.2-rc.3 adaptation lifts the whole peer policy onto the 0.2.2-rc.3
-  // floor: the 0.5.7 candidate line is qualified against that exact published
+  // floor: the current release line is qualified against that published
   // family and no longer claims 0.2.2-rc.2 or 0.2.2-rc.1 (npm semver excludes a
   // lower prerelease of the same tuple). The window stays open-ended above
   // 0.2.2-rc.3; only the lower bound moved.

@@ -907,6 +907,143 @@ jobs:
           retention-days: 3
 
   # ---------------------------------------------------------------------------
+  # THE FRESH-PROFILE INSTALLATION GATE, as its own job.
+  #
+  # This is the SECOND, DIFFERENT proof from the preseed Split smoke: the
+  # existing lane starts after the Profile already declares the three Client
+  # platform packages; this job takes the raw candidate artifact and installs
+  # the TUI package exactly ONCE into a brand-new isolated Profile where the
+  # Client Shell's BUNDLED Store closure must carry the official /client
+  # factories. It runs on every npm-mode run (PR, branch, dispatch, tag).
+  #
+  # PR1 controlled condition: the isolated TEST-OWNED profile records
+  # `allowBuilds.koffi: false` before install; the report says
+  # CONTROLLED_KOFFI=YES and never claims a pristine user first install. PR2
+  # removes that condition and re-qualifies through this SAME job id.
+  # ---------------------------------------------------------------------------
+  fresh-profile:
+    name: Fresh-profile ${{ matrix.os }} dsh ${{ matrix.dsh }}
+    needs:
+      - dsh-context
+      - candidate
+    if: ${{ always() && needs.dsh-context.result == 'success' && needs.candidate.result == 'success' && needs.dsh-context.outputs.mode == 'npm' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            dsh: 0.2.2-rc.3
+          - os: ubuntu-24.04
+            dsh: 0.2.2-rc.4
+          - os: ubuntu-24.04
+            dsh: 0.2.2-rc.5
+          - os: macos-15
+            dsh: 0.2.2-rc.5
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    env:
+      DSH_MODE: ${{ needs.dsh-context.outputs.mode }}
+      DSH_TARGET: ${{ matrix.dsh }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Setup pnpm and Node.js
+        uses: pnpm/setup@v2
+        with:
+          runtime: node@24
+          cache: true
+          install: false
+
+      - name: Prepare npm dependency environment
+        run: |
+          set -euo pipefail
+          printf 'registry=https://registry.npmjs.org/\n' > "$RUNNER_TEMP/dsh-npmrc"
+          {
+            echo 'NPM_CONFIG_REGISTRY=https://registry.npmjs.org/'
+            echo 'npm_config_registry=https://registry.npmjs.org/'
+            echo "NPM_CONFIG_USERCONFIG=$RUNNER_TEMP/dsh-npmrc"
+            echo "npm_config_userconfig=$RUNNER_TEMP/dsh-npmrc"
+            echo 'PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN=false'
+            echo 'PNPM_CONFIG_MANAGE_PACKAGE_MANAGER_VERSIONS=false'
+          } >> "$GITHUB_ENV"
+          NPM_CONFIG_REGISTRY=https://registry.npmjs.org/ \
+            npm_config_registry=https://registry.npmjs.org/ \
+            NPM_CONFIG_USERCONFIG="$RUNNER_TEMP/dsh-npmrc" \
+            npm_config_userconfig="$RUNNER_TEMP/dsh-npmrc" \
+            PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN=false \
+            PNPM_CONFIG_MANAGE_PACKAGE_MANAGER_VERSIONS=false \
+            pnpm install --frozen-lockfile
+
+      - name: Install tmux for the real PTY driver
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            sudo apt-get update
+            sudo apt-get install -y tmux
+          else
+            command -v tmux >/dev/null 2>&1 || brew install tmux
+          fi
+
+      - name: Download the CI candidate artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: dsh-pi-tui-candidate
+          path: candidate
+
+      - name: Resolve and prove the candidate SHA before the gate
+        id: candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          TARBALLS=(candidate/xmoon76-dsh-pi-tui-*.tgz)
+          if [ "${#TARBALLS[@]}" -ne 1 ]; then
+            echo "Expected exactly one downloaded tarball, found ${#TARBALLS[@]}" >&2
+            exit 1
+          fi
+          ACTUAL="$(node -e "const c=require('node:crypto'),f=require('node:fs');process.stdout.write(c.createHash('sha256').update(f.readFileSync(process.argv[1])).digest('hex'))" "${TARBALLS[0]}")"
+          if [ "$ACTUAL" != "${{ needs.candidate.outputs.sha256 }}" ]; then
+            echo "the downloaded tarball is $ACTUAL, not the produced ${{ needs.candidate.outputs.sha256 }}" >&2
+            exit 1
+          fi
+          if [ "$(basename "${TARBALLS[0]}")" != "${{ needs.candidate.outputs.tarball }}" ]; then
+            echo "the downloaded tarball is $(basename "${TARBALLS[0]}")" >&2
+            exit 1
+          fi
+          echo "CANDIDATE=${TARBALLS[0]}" >> "$GITHUB_ENV"
+          echo "the fresh-profile candidate is the produced CI artifact ($ACTUAL)"
+
+      - name: Run the Fresh Profile installation gate
+        env:
+          FRESH_PROFILE_REPORT: ${{ runner.temp }}/dsh-pi-tui-fresh-profile/failure.json
+        run: pnpm smoke:fresh-profile -- "$CANDIDATE" --dsh "$DSH_TARGET"
+
+      - name: Re-prove the candidate was not replaced during the gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          ACTUAL="$(node -e "const c=require('node:crypto'),f=require('node:fs');process.stdout.write(c.createHash('sha256').update(f.readFileSync(process.argv[1])).digest('hex'))" "$CANDIDATE")"
+          if [ "$ACTUAL" != "${{ needs.candidate.outputs.sha256 }}" ]; then
+            echo "the candidate changed during the fresh-profile gate: $ACTUAL, not ${{ needs.candidate.outputs.sha256 }}" >&2
+            exit 1
+          fi
+
+      - name: Upload sanitized Fresh Profile failure report
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fresh-profile-failure-${{ matrix.os }}-${{ matrix.dsh }}
+          path: ${{ runner.temp }}/dsh-pi-tui-fresh-profile/failure.json
+          if-no-files-found: ignore
+          overwrite: true
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
   # THE QUALIFICATION: every gate that makes the tarball a candidate, run
   # against the SAME tarball, after the tests and the typecheck have passed.
   #
@@ -1223,6 +1360,7 @@ jobs:
       - aggregate
       - candidate
       - qualify
+      - fresh-profile
       - split-process
       - source-checks
       - client-family-compat
@@ -1283,6 +1421,7 @@ jobs:
             --phase "aggregate=${{ needs.aggregate.result }}" \
             --phase "candidate=${{ needs.candidate.result }}" \
             --phase "qualify=${{ needs.qualify.result }}" \
+            --phase "fresh-profile=${{ needs['fresh-profile'].result }}" \
             --phase "split-process=${{ needs['split-process'].result }}" \
             --phase "source-checks=${{ needs['source-checks'].result }}" \
             --phase "compat-smoke=${{ needs['compat-smoke'].result }}" \
@@ -1347,6 +1486,7 @@ jobs:
       - aggregate
       - candidate
       - qualify
+      - fresh-profile
       - split-process
       - qualified
       - source-checks
@@ -1407,6 +1547,7 @@ jobs:
             --phase "aggregate=${{ needs.aggregate.result }}" \
             --phase "candidate=${{ needs.candidate.result }}" \
             --phase "qualify=${{ needs.qualify.result }}" \
+            --phase "fresh-profile=${{ needs['fresh-profile'].result }}" \
             --phase "split-process=${{ needs['split-process'].result }}" \
             --phase "source-checks=${{ needs['source-checks'].result }}" \
             --phase "compat-smoke=${{ needs['compat-smoke'].result }}" \
@@ -2012,13 +2153,14 @@ jobs:
   publish:
     name: Publish to npm
 
-    if: ${{ always() && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') && needs.dsh-context.result == 'success' && needs.release-context.result == 'success' && needs.source-checks.result == 'success' && needs.qualified.result == 'success' && needs.client-family-compat.result == 'success' && needs.compat-smoke.result == 'success' && needs.official-preset-assembly.result == 'success' && needs.runtime-boundary.result == 'success' && needs.security-audit.result == 'success' && needs.release-metadata.result == 'success' && needs.release-packed-check.result == 'success' && needs.dsh-context.outputs.mode == 'npm' }}
+    if: ${{ always() && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') && needs.dsh-context.result == 'success' && needs.release-context.result == 'success' && needs.source-checks.result == 'success' && needs.fresh-profile.result == 'success' && needs.qualified.result == 'success' && needs.client-family-compat.result == 'success' && needs.compat-smoke.result == 'success' && needs.official-preset-assembly.result == 'success' && needs.runtime-boundary.result == 'success' && needs.security-audit.result == 'success' && needs.release-metadata.result == 'success' && needs.release-packed-check.result == 'success' && needs.dsh-context.outputs.mode == 'npm' }}
 
     needs:
       - dsh-context
       - client-family-compat
       - release-context
       - source-checks
+      - fresh-profile
       - qualified
       - compat-smoke
       - official-preset-assembly
