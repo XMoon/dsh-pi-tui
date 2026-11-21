@@ -9,8 +9,11 @@
  * @module split-process/web-helpers
  */
 
+import { readFileSync } from 'node:fs'
 import { request as httpRequest } from 'node:http'
+import { join } from 'node:path'
 import { setTimeout as sleepTimer } from 'node:timers/promises'
+import { parse as parseYaml } from 'yaml'
 
 import {
   redactWebQualificationText,
@@ -28,87 +31,76 @@ function assert(condition, message) {
 }
 
 /**
- * M5-W PR-A + S5-PR5: the official Web rows the Host-only overlay declares, in order.
- *
- * The isolated qualification re-reads the LIVE overlay patch the running Host
- * wrote and compares it against this FROZEN list, so a dropped, renamed,
- * reordered or re-enabled row cannot be auto-copied into a green result. Kept
- * as data (not derived from the source) on purpose: generating it would only
- * mirror whatever the implementation currently says.
+ * The minimal independent id -> package facts used to spot-check the packed
+ * official Web graph. This is deliberately not a second full roster: the
+ * generated bundle patch and the production table own that list.
  */
-export const PR_A_WEB_ROWS = [
+export const CORE_WEB_ROW_PACKAGES = [
   { id: 'web-runtime', name: '@deepseek-ai/dsh-web-app' },
   { id: 'modules', name: '@deepseek-ai/dsh-client-modules' },
   { id: 'client-hmr', name: '@deepseek-ai/dsh-client-hmr' },
   { id: 'cordis-client-runner', name: '@deepseek-ai/dsh-cordis-client-runner' },
   { id: 'open-in-app', name: '@deepseek-ai/dsh-host-open-in-app' },
-  { id: 'ui-file-actions', name: '@deepseek-ai/dsh-client-ui-file-actions' },
-  { id: 'ui-context-menu', name: '@deepseek-ai/dsh-client-ui-context-menu' },
-  { id: 'ui-open-in-app', name: '@deepseek-ai/dsh-client-ui-open-in-app' },
   { id: 'session-reference', name: '@deepseek-ai/dsh-session-reference' },
-  { id: 'ui-settings-account', name: '@deepseek-ai/dsh-client-ui-settings-account' },
-  { id: 'ui-account-notifications', name: '@deepseek-ai/dsh-client-ui-account-notifications' },
-  { id: 'ui-theme', name: '@deepseek-ai/dsh-client-ui-theme' },
-  { id: 'locale', name: '@deepseek-ai/dsh-client-locale' },
-  { id: 'shortcuts', name: '@deepseek-ai/dsh-client-shortcuts' },
-  { id: 'ui-shortcuts', name: '@deepseek-ai/dsh-client-ui-shortcuts' },
-  { id: 'ui-layout', name: '@deepseek-ai/dsh-client-ui-layout' },
-  { id: 'ui-renderer', name: '@deepseek-ai/dsh-client-ui-renderer' },
-  { id: 'ui-session', name: '@deepseek-ai/dsh-client-ui-session' },
-  { id: 'resources', name: '@deepseek-ai/dsh-client-resources' },
-  { id: 'ui-sidebar', name: '@deepseek-ai/dsh-client-ui-sidebar' },
-  { id: 'ui-sidebar-right', name: '@deepseek-ai/dsh-client-ui-sidebar-right' },
-  { id: 'office-kit', name: '@deepseek-ai/dsh-office-kit' },
-  { id: 'skill-office', name: '@deepseek-ai/dsh-skill-office' },
-  { id: 'ui-sidebar-documentpreview', name: '@deepseek-ai/dsh-client-ui-sidebar-documentpreview' },
-  { id: 'ui-sidebar-terminal', name: '@deepseek-ai/dsh-client-ui-sidebar-terminal' },
-  { id: 'ui-sidebar-files', name: '@deepseek-ai/dsh-client-ui-sidebar-files' },
-  { id: 'ui-settings', name: '@deepseek-ai/dsh-client-ui-settings' },
-  { id: 'ui-settings-general', name: '@deepseek-ai/dsh-client-ui-settings-general' },
-  { id: 'ui-settings-models', name: '@deepseek-ai/dsh-client-ui-settings-models' },
   { id: 'plugin-inventory', name: '@deepseek-ai/dsh-host-plugin-inventory' },
-  { id: 'ui-plugin-manager', name: '@deepseek-ai/dsh-client-ui-plugin-manager' },
-  { id: 'ui-settings-plugin-inventory', name: '@deepseek-ai/dsh-client-ui-settings-plugin-inventory' },
-  { id: 'ui-conversation', name: '@deepseek-ai/dsh-client-ui-conversation' },
-  { id: 'ui-approval', name: '@deepseek-ai/dsh-client-ui-approval' },
-  { id: 'message-quotes', name: '@deepseek-ai/dsh-message-quotes' },
-  { id: 'ui-chat', name: '@deepseek-ai/dsh-client-ui-chat' },
-  { id: 'ui-brand-official', name: '@deepseek-ai/dsh-client-ui-brand-official' },
-  { id: 'ui-attachment', name: '@deepseek-ai/dsh-client-ui-attachment' },
-  { id: 'ui-file-drag', name: '@deepseek-ai/dsh-client-ui-file-drag' },
-  { id: 'ui-tool', name: '@deepseek-ai/dsh-client-ui-tool' },
-  { id: 'ui-cordis', name: '@deepseek-ai/dsh-client-ui-cordis' },
+  { id: 'message-feedback', name: '@deepseek-ai/dsh-message-feedback' },
   { id: 'workspace-changes', name: '@deepseek-ai/dsh-workspace-changes' },
   { id: 'ui-deliverables', name: '@deepseek-ai/dsh-client-ui-deliverables' },
-  { id: 'ui-workspace', name: '@deepseek-ai/dsh-client-ui-workspace' },
-  { id: 'ui-workflow-run', name: '@deepseek-ai/dsh-client-ui-workflow-run' },
-  { id: 'ui-input-trigger', name: '@deepseek-ai/dsh-client-ui-input-trigger' },
-  { id: 'ui-commands', name: '@deepseek-ai/dsh-client-ui-commands' },
-  { id: 'ui-skill', name: '@deepseek-ai/dsh-client-ui-skill' },
-  { id: 'ui-agent-team', name: '@deepseek-ai/dsh-client-ui-agent-team' },
-  { id: 'ui-subagent', name: '@deepseek-ai/dsh-client-ui-subagent' },
-  { id: 'ui-reference', name: '@deepseek-ai/dsh-client-ui-reference' },
-  { id: 'ui-secret-mask', name: '@deepseek-ai/dsh-client-ui-secret-mask' },
-  { id: 'ui-jobs', name: '@deepseek-ai/dsh-client-ui-jobs' },
-  { id: 'ui-schedule', name: '@deepseek-ai/dsh-client-ui-schedule' },
-  { id: 'ui-goal', name: '@deepseek-ai/dsh-client-ui-goal' },
-  { id: 'message-feedback', name: '@deepseek-ai/dsh-message-feedback' },
-  { id: 'ui-message-feedback', name: '@deepseek-ai/dsh-client-ui-message-feedback' },
-  { id: 'ui-model-selection', name: '@deepseek-ai/dsh-client-ui-model-selection' },
-  { id: 'ui-permission', name: '@deepseek-ai/dsh-client-ui-permission-presets' },
-  { id: 'ui-agent-preset', name: '@deepseek-ai/dsh-client-ui-agent-preset' },
-  { id: 'entry-customization', name: '@deepseek-ai/dsh-client-ui-entry-customization' },
-  { id: 'ui-settings-session-log', name: '@deepseek-ai/dsh-client-ui-settings-session-log' },
-  { id: 'ui-settings-plugins', name: '@deepseek-ai/dsh-client-ui-settings-plugins' },
-  { id: 'ui-settings-shell', name: '@deepseek-ai/dsh-client-ui-settings-shell' },
-  { id: 'ui-settings-agent-loop', name: '@deepseek-ai/dsh-client-ui-settings-agent-loop' },
-  { id: 'ui-settings-subagent', name: '@deepseek-ai/dsh-client-ui-settings-subagent' },
-  { id: 'ui-settings-web-search', name: '@deepseek-ai/dsh-client-ui-settings-web-search' },
-  { id: 'ui-plan', name: '@deepseek-ai/dsh-client-ui-plan' },
-  { id: 'ui-user-questions', name: '@deepseek-ai/dsh-client-ui-user-questions' },
-  { id: 'ui-trajectory', name: '@deepseek-ai/dsh-client-ui-trajectory' },
   { id: 'terminal-controller', name: '@deepseek-ai/dsh-api-terminal-controller' },
+  { id: 'ui-context-menu', name: '@deepseek-ai/dsh-client-ui-context-menu' },
+  { id: 'ui-file-drag', name: '@deepseek-ai/dsh-client-ui-file-drag' },
 ]
+
+/**
+ * Read the Web Loader rows the INSTALLED candidate package declares in its
+ * generated bundle patch. This answers only "what does this packed package
+ * declare", never "what is currently active": callers must read the live Host
+ * status separately. No checkout fallback and no caching are allowed here.
+ *
+ * @param profilePackage - the installed `@xmoon76/dsh-pi-tui` package root.
+ */
+export function readDeclaredWebRows(profilePackage) {
+  const patchPath = join(profilePackage, 'generated', 'web-access', 'cordis.patch.yml')
+  let entries
+  try {
+    entries = parseYaml(readFileSync(patchPath, 'utf8'), {
+      // office-kit's official `!!js` output-directory macro stays its verbatim
+      // expression text; the generated layer owns that fixed fragment.
+      customTags: [{ tag: 'tag:yaml.org,2002:js', resolve: value => value }],
+    })
+  } catch (error) {
+    throw new SplitSmokeAssertionError(`the installed candidate has no readable Web declaration at ${patchPath}: ${error.message}`)
+  }
+  assert(Array.isArray(entries), `${patchPath}: the Web declaration must be a YAML sequence`)
+  const groups = entries.filter(entry => entry !== null && typeof entry === 'object' && Array.isArray(entry.insert))
+  assert(groups.length === 1, `${patchPath}: expected exactly ONE Web insert group, found ${groups.length}`)
+  const rows = groups[0].insert
+  assert(rows.length > 0, `${patchPath}: the Web insert group is empty`)
+  const ids = new Set()
+  return rows.map(row => {
+    assert(row !== null && typeof row === 'object', `${patchPath}: every Web row must be an object`)
+    assert(typeof row.id === 'string' && row.id !== '', `${patchPath}: a Web row has no id`)
+    assert(typeof row.name === 'string' && row.name !== '', `${patchPath}: the "${row.id}" Web row has no package name`)
+    assert(typeof row.disabled === 'boolean', `${patchPath}: the "${row.id}" Web row has no boolean disabled flag`)
+    assert(!ids.has(row.id), `${patchPath}: the Web row id "${row.id}" is declared twice`)
+    ids.add(row.id)
+    if (row.inject !== undefined) {
+      assert(Array.isArray(row.inject) && row.inject.every(value => typeof value === 'string'),
+        `${patchPath}: the "${row.id}" Web row has an invalid inject list`)
+    }
+    if (row.config !== undefined) {
+      assert(row.config !== null && typeof row.config === 'object' && !Array.isArray(row.config),
+        `${patchPath}: the "${row.id}" Web row has an invalid config`)
+    }
+    return {
+      id: row.id,
+      name: row.name,
+      disabled: row.disabled,
+      ...(row.inject === undefined ? {} : { inject: row.inject }),
+      ...(row.config === undefined ? {} : { config: row.config }),
+    }
+  })
+}
 
 /**
  * The official Web UI's first-run preview-notice version (ownership:

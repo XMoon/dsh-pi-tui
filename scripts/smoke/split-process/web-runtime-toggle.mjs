@@ -49,12 +49,12 @@ import {
 import {
   PR_A_CLIENT_MODULES_PACKAGE,
   PR_A_SINGLETON_PACKAGES,
-  PR_A_WEB_ROWS,
   PR_A_WEB_RUNTIME_ID,
   PR_A_WELCOME_NOTICE_VERSION,
   assertWebIndexQualified,
   browserDriverExitBounded,
   openSseFrames,
+  readDeclaredWebRows,
   readHostWebIndex,
   redactWebQualificationText,
   sseProbe,
@@ -69,7 +69,11 @@ function assert(condition, message) {
 
 export async function runWebRuntimeToggle(context) {
   const { EntryProcess, SurfaceEntryProcess, workDir, dshHome, base, entries, tarball, candidateSha256, targetDshVersion, trace, mode } = context
-  const { env, anchor } = context.installation
+  const { env, anchor, profilePackage } = context.installation
+  // Read the installed candidate's CURRENT declaration once, before any Host
+  // of this case starts. Live ACTIVE/absent state is always read separately
+  // from `hostStatus()`; a declaration is never treated as a mounted fiber.
+  const declaredWebRows = readDeclaredWebRows(profilePackage)
   const requireBrowser = mode === 'selected' || process.env.SPLIT_PROCESS_REQUIRE_WEB_BROWSER === '1'
   let webScopeSuffix
   let statusSequence = 0
@@ -90,8 +94,8 @@ export async function runWebRuntimeToggle(context) {
   const rowUids = ready => Object.fromEntries((ready.entries ?? [])
     .filter(entry => typeof entry.fiberUid === 'number')
     .map(entry => [entry.id, entry.fiberUid]))
-  /** `id -> Loader state label` for the frozen Web roster. */
-  const webStates = ready => new Map(PR_A_WEB_ROWS.map(row => [row.id, {
+  /** `id -> Loader state label` for the installed Web declaration. */
+  const webStates = ready => new Map(declaredWebRows.map(row => [row.id, {
     state: (ready.entries ?? []).find(entry => entry.id === row.id)?.state,
     present: (ready.entries ?? []).some(entry => entry.id === row.id),
   }.state]))
@@ -364,7 +368,7 @@ export async function runWebRuntimeToggle(context) {
       record => record.sessionOpen === true && typeof record.openSessionId === 'string',
       'PB-01 TUI Session')).openSessionId
     trace('t73-web-default-off', {
-      webRowsDeclared: PR_A_WEB_ROWS.length,
+      webRowsDeclared: declaredWebRows.length,
       webRowsLive: 0,
       rootStatus: offHttp.root,
       pluginStatus: offHttp.plugin,
