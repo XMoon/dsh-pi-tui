@@ -37,6 +37,7 @@ import {
   surfaceScrollOps,
   surfaceTexts,
   sendAction,
+  sendPickerAction,
   sendSelect,
 } from '../support/tsp-picker-wire.ts'
 
@@ -239,9 +240,10 @@ test('Enter opens ONE temporary screen on the SAME Session and shows the current
   const h = await mount(t)
   await openHub(h, [
     row('job:j1', { label: 'integration build', status: 'running', startedAt: 2_000 }),
-    row('job:j2', { label: 'unit tests', status: 'failed', active: false, detail: 'one assertion failed' }),
+    row('job:j2', { label: 'unit tests', status: 'running', detail: 'one assertion failed' }),
   ])
-  await waitUntil('the failed row is selected', () => pickerProps(h.pane, HUB).selected === 'job:j2')
+  sendSelect(h.pane, 'job:j2', pickerNode(h.pane, HUB)!.id)
+  await waitUntil('the second active row is selected', () => pickerProps(h.pane, HUB).selected === 'job:j2')
   const surfacesBefore = h.session.surfaces.length
   const reader = await enterReader(h)
 
@@ -257,7 +259,7 @@ test('Enter opens ONE temporary screen on the SAME Session and shows the current
   const content = readerTexts(h, reader)
   assert.equal(content[0], '← Work', 'the document leads with the navigation row')
   assert.ok(content.includes('unit tests'), 'the current row label is shown')
-  assert.ok(content.includes('Job · failed'), 'the real status word is shown')
+  assert.ok(content.includes('Job · running'), 'the real status word is shown')
   assert.ok(content.includes('Stable ID job:j2'), 'the stable row id is shown')
   assert.ok(content.includes('one assertion failed'), 'the row detail is shown')
   assert.deepEqual(h.selects, [], 'opening the Reader never runs the business row router')
@@ -413,7 +415,7 @@ test('the Hub paints the read action only while a Reader can really be admitted,
 
 test('the Reader starts once and a background status update repaints the SAME document identity without a new start', async (t) => {
   const h = await mount(t)
-  const handle = h.open([row('job:j1', { label: 'build', status: 'running' })])
+  const handle = h.open([row('agent:child', { label: 'build agent', status: 'running', source: 'subagent', mode: 'one-shot', suffix: 'one-shot' })])
   const reader = await enterReader(h)
   assert.deepEqual(readerScrolls(h, reader).map(entry => entry.to), ['start'], 'exactly ONE start scroll')
   assert.deepEqual(surfaceFocusOps(h.pane, reader), ['main'], 'exactly ONE initial focus')
@@ -422,9 +424,9 @@ test('the Reader starts once and a background status update repaints the SAME do
   const closeFramesBefore = h.pane.closeFrames()
   const frameCountBefore = surfaceFrames(h.pane, reader).length
   // A background TaskRuntime commit: the SAME row value, a new truthful status.
-  handle.setItems([row('job:j1', { label: 'build', status: 'failed', active: false, detail: 'exit code 2' })])
+  handle.setItems([row('agent:child', { label: 'build agent', status: 'failed', source: 'subagent', mode: 'one-shot', suffix: 'one-shot', detail: 'exit code 2' })])
   await waitUntil('the document repaints the new status', () =>
-    readerTexts(h, reader).includes('Job · failed'))
+    readerTexts(h, reader).includes('Subagent · failed'))
 
   const idsAfter = surfaceNodes(h.pane, reader).map(node => node.id)
   assert.deepEqual(idsAfter.filter(id => idsBefore.includes(id)), idsBefore,
@@ -461,6 +463,51 @@ test('a removed selected row retires the Reader and normalizes the Hub selection
   assert.equal(pickerProps(h.pane, HUB).selected, 'job:j2', 'the Hub normalized to the surviving row')
   assert.equal(openedSurfaces(h).filter(entry => entry.mode === 'screen').length, screensOpened,
     'NO successor Reader was opened automatically')
+})
+
+// ── PR3: the history disclosure across the Reader handover ──────────────────
+
+test('a retained-Job reading returns to the SAME expanded history and a pre-Reader history token is rejected', async (t) => {
+  const h = await mount(t)
+  const handle = h.open([
+    row('job:j1', { label: 'build', status: 'running' }),
+    row('job:j2', { label: 'old lint', status: 'failed', active: false, detail: 'exit code 2' }),
+  ])
+  await waitUntil('the active Job is selected', () => pickerProps(h.pane, HUB).selected === 'job:j1')
+  const staleHistoryAction = String(((pickerProps(h.pane, HUB).actions ?? []) as Array<Record<string, unknown>>)
+    .find(action => String(action.id).startsWith('jobs-history#'))!.id)
+  sendPickerAction(h.pane, 'jobs-history', HUB)
+  await waitUntil('the history is expanded and its first row selected', () =>
+    pickerProps(h.pane, HUB).selected === 'job:j2' && ((pickerProps(h.pane, HUB).items ?? []) as unknown[]).length === 2)
+  h.pane.key('old')
+  await waitUntil('the search keeps the retained row visible', () => pickerProps(h.pane, HUB).query === 'old')
+  const reader = await enterReader(h)
+  const content = readerTexts(h, reader)
+  assert.ok(content.includes('old lint'), 'the Reader reads the retained Job, never its neighbour')
+  assert.ok(content.includes('Job · failed'), 'the Reader carries the real terminal status')
+
+  h.pane.key('')
+  await waitUntil('the Reader closes back to the same Hub', () => h.pane.closedSurfaceIds().includes(reader))
+  await waitUntil('the Hub restores the same query and expanded history', () =>
+    pickerProps(h.pane, HUB).query === 'old' && pickerProps(h.pane, HUB).selected === 'job:j2')
+  assert.equal(((pickerProps(h.pane, HUB).items ?? []) as unknown[]).length, 1,
+    'the non-empty query keeps the search result view, not the manual expansion')
+  sendAction(h.pane, staleHistoryAction, undefined, pickerNode(h.pane, HUB)!.id)
+  await new Promise(resolve => setTimeout(resolve, 150)) // reason: bounded negative window for a rejected stale history token
+  assert.equal(pickerProps(h.pane, HUB).query, 'old', 'a pre-Reader history token never mutates the current query')
+  h.pane.key('\x7f'.repeat(3))
+  await waitUntil('clearing the query restores the expanded disclosure state', () =>
+    pickerProps(h.pane, HUB).query === '' && ((pickerProps(h.pane, HUB).items ?? []) as unknown[]).length === 2)
+
+  // The selected retained Job leaving the roster retires the Reader through the
+  // existing currentness path, never repainting another Job as its successor.
+  const screensBeforeSecond = h.pane.openSurfaces().filter(entry => entry.mode === 'screen').length
+  const secondReader = await enterReader(h)
+  handle.setItems([row('job:j1', { label: 'build', status: 'running' })])
+  await waitUntil('the vanished retained target closes its own reading', () => h.pane.closedSurfaceIds().includes(secondReader))
+  assert.equal(pickerProps(h.pane, HUB).selected, 'job:j1', 'the Hub falls back to a real visible active Job')
+  assert.equal(h.pane.openSurfaces().filter(entry => entry.mode === 'screen').length, screensBeforeSecond + 1,
+    'no successor Reader is opened for a removed history target')
 })
 
 // ── R16: a modal preempts the Reader and never accepts a hidden answer ──────

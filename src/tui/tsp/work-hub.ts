@@ -26,7 +26,7 @@
 
 import { View, span, ui, type Key, type Node, type TspEvent } from '@stencil-hq/tern'
 import type { PickerAction, PickerGroup, PickerItem, PickerProps } from '@stencil-hq/tern'
-import type { TaskPanelItem } from '../../app/surface/task-presentation.ts'
+import { isTaskItemActive, type TaskPanelItem } from '../../app/surface/task-presentation.ts'
 import type {
   TaskBrowserPresentationHandle,
   TaskBrowserPresentationOpen,
@@ -58,13 +58,26 @@ const CLOSE_ACTION_ID = 'close'
  * open a newer row.
  */
 const DETAILS_ACTION_ID = 'details'
+/**
+ * The native job-history disclosure action's BASE id. Like `details`, the real
+ * id carries the frame revision (`jobs-history#<rev>`) so an action painted by an
+ * older frame can never toggle a newer panel.
+ */
+const HISTORY_ACTION_ID = 'jobs-history'
+/**
+ * The native Picker `keys` tooltip token for the fixed local history chord.
+ * TSP owns no keymap action for this chord (it is dispatched from the raw SDK
+ * key stream, the same category as the TSP continued-inspection label), so the
+ * token is composed here instead of copied from a remappable label.
+ */
+const HISTORY_ACTION_KEY = ['alt', 'j'].join('+')
 /** The truthful Picker message when the pane lacks the Reader's capabilities. */
 const DETAILS_UNAVAILABLE = 'Work details unavailable in this pane.'
 
 type WorkHubZone = 'list' | 'actions'
 type WorkHubRefresh = 'loading' | 'ready' | 'stale'
-/** The ONE native action the action zone can hold. */
-type WorkHubAction = 'close' | 'details'
+/** The native actions the action zone can hold. */
+type WorkHubAction = 'close' | 'history' | 'details'
 /**
  * Why the native Read action is (or is not) painted. The three states are
  * distinct FACTS, not one boolean: a pane that cannot present a Reader at all is
@@ -86,6 +99,8 @@ interface WorkHubPanel {
   query: string
   cursor: number
   zone: WorkHubZone
+  /** The panel-local manual disclosure of retained terminal Jobs. */
+  historyExpanded: boolean
   refresh: WorkHubRefresh
   refreshError: string | undefined
   /** The one focused native action of the `actions` zone (local cursor only). */
@@ -110,6 +125,7 @@ interface WorkHubGroups {
 type WorkHubIntent =
   | { readonly kind: 'consume' }
   | { readonly kind: 'close' }
+  | { readonly kind: 'toggle-history' }
   | { readonly kind: 'details'; readonly targetValue: string }
   | { readonly kind: 'zone'; readonly zone: WorkHubZone }
   | { readonly kind: 'select'; readonly value: string }
@@ -169,15 +185,44 @@ function isFailureStatus(status: string): boolean {
   return FAILURE_STATUSES.has(status)
 }
 
+/** The panel's active Jobs (the SAME `isTaskItemActive` authority every renderer uses). */
+function activeJobs(panel: WorkHubPanel): readonly TaskPanelItem[] {
+  return panel.items.filter(item => item.source === 'job' && isTaskItemActive(item))
+}
+
+/** The panel's retained terminal Jobs (the ONE history candidate set). */
+function historyJobs(panel: WorkHubPanel): readonly TaskPanelItem[] {
+  return panel.items.filter(item => item.source === 'job' && !isTaskItemActive(item))
+}
+
+/** Whether the manual disclosure action has a real candidate on this frame. */
+function historyAvailable(panel: WorkHubPanel): boolean {
+  return panel.query.trim() === '' && historyJobs(panel).length > 0
+}
+
+/** The action label for the current history candidate set. */
+function historyLabel(panel: WorkHubPanel): string {
+  const count = historyJobs(panel).length
+  if (panel.historyExpanded) return `Hide ${count} past jobs`
+  return activeJobs(panel).length > 0 ? `Show ${count} past jobs` : `Show ${count} jobs`
+}
+
 /**
  * The panel-local row projection: the input order is preserved (the runtime
  * already committed the stable pre-order), a query filters only the local
  * rows, and the group derivation never re-sorts or duplicates a row.
+ *
+ * A non-empty query always searches the FULL current roster (including the
+ * retained terminal Jobs the collapsed view hides); an empty query applies the
+ * manual disclosure. The query itself never mutates the manual state.
  */
 function visibleRows(panel: WorkHubPanel): readonly TaskPanelItem[] {
   const query = panel.query.trim().toLocaleLowerCase()
-  if (query === '') return panel.items
-  return panel.items.filter(item => [
+  const candidates = query === '' && !panel.historyExpanded
+    ? panel.items.filter(item => item.source !== 'job' || isTaskItemActive(item))
+    : panel.items
+  if (query === '') return candidates
+  return candidates.filter(item => [
     item.label,
     item.status,
     item.detail,
@@ -308,23 +353,50 @@ function workHubInspector(row: TaskPanelItem | undefined): Node {
   )
 }
 
-function subtitleText(groups: WorkHubGroups): string | undefined {
+/**
+ * The status subtitle from the FULL committed roster, never from the locally
+ * collapsed view: a retained failed Job stays a real status fact while hidden,
+ * and the hidden count states only that the manual view is collapsed.
+ */
+function subtitleText(panel: WorkHubPanel): string | undefined {
+  const groups = groupsOf(panel.items)
   const work = [...groups.subagents, ...groups.jobs]
   const running = work.filter(item => item.active === true || item.status === 'running' || item.status === 'stopping').length
   const failed = work.filter(item => isFailureStatus(item.status)).length
+  const hidden = !panel.historyExpanded && panel.query.trim() === '' ? historyJobs(panel).length : 0
   const parts: string[] = []
   if (groups.attention.length > 0) parts.push(`${groups.attention.length} attention`)
   if (running > 0) parts.push(`${running} running`)
   if (failed > 0) parts.push(`${failed} failed`)
+  if (hidden > 0) parts.push(`${hidden} retained Jobs hidden`)
   return parts.length === 0 ? undefined : parts.join(' · ')
+}
+
+/**
+ * The action the action zone's Enter really runs, normalized to the actions
+ * that currently exist. A stale preference never survives as a ghost.
+ */
+function normalizeActionFocus(
+  focus: WorkHubAction,
+  history: boolean,
+  details: boolean,
+): WorkHubAction {
+  if (focus === 'close') return 'close'
+  if (focus === 'history' && history) return 'history'
+  if (focus === 'details' && details) return 'details'
+  if (details) return 'details'
+  if (history) return 'history'
+  return 'close'
 }
 
 /**
  * The ONE layer node: one native picker plus the optional Inspector child.
  *
- * The native actions are `Close` plus — ONLY while a current visible row can
- * be read and the renderer negotiated the Reader's capabilities — the primary
- * `View details` whose id carries this frame's revision. A pane that cannot
+ * The native actions are `Close`, the job-history `Show/Hide` disclosure
+ * (only while the current empty-query roster has a retained terminal Job), and
+ * — ONLY while a current visible row can be read and the renderer negotiated
+ * the Reader's capabilities — the primary `View details`. Revision-tokened
+ * action ids keep an older frame from acting on a newer one. A pane that cannot
  * present the Reader paints the truthful unavailability message instead of a
  * button that would do nothing.
  */
@@ -356,18 +428,28 @@ function hubLayer(panel: WorkHubPanel, wide: boolean, admission: WorkHubDetailsA
     : panel.refresh === 'stale'
       ? `Could not refresh tasks; showing last known entries.${panel.refreshError === undefined ? '' : ` ${sanitizeTerminalText(panel.refreshError)}`}`
       : undefined
-  const subtitle = subtitleText(groups)
+  const subtitle = subtitleText(panel)
   const detailsAvailable = admission === 'available' && selectedRow !== undefined
-  // The focused action is the one a keyboard Enter would run: the local
-  // `details` preference falls back to `close` whenever details cannot open.
+  const history = historyAvailable(panel)
+  // The focused action is the one a keyboard Enter would run: a stored
+  // `details`/`history` preference falls back to the actions that really exist.
   const focused: WorkHubAction | undefined = panel.zone !== 'actions'
     ? undefined
-    : detailsAvailable && panel.actionFocus === 'details' ? 'details' : 'close'
+    : normalizeActionFocus(panel.actionFocus, history, detailsAvailable)
   const actions: PickerAction[] = [{
     id: CLOSE_ACTION_ID,
     label: focused === 'close' ? 'Close [Enter]' : 'Close',
     keys: ['escape'],
   }]
+  if (history) {
+    actions.push({
+      id: `${HISTORY_ACTION_ID}#${panel.revision}`,
+      label: focused === 'history' ? `${historyLabel(panel)} [Enter]` : historyLabel(panel),
+      keys: [HISTORY_ACTION_KEY],
+      ...(detailsAvailable ? {} : { primary: true }),
+      on: panel.historyExpanded,
+    })
+  }
   if (detailsAvailable) {
     actions.push({
       id: `${DETAILS_ACTION_ID}#${panel.revision}`,
@@ -375,6 +457,11 @@ function hubLayer(panel: WorkHubPanel, wide: boolean, admission: WorkHubDetailsA
       primary: true,
     })
   }
+  // A collapsed view with only retained terminal Jobs is a real history-only
+  // frame: it states there is no ACTIVE Job instead of claiming the roster is
+  // empty. Loading/stale keep their own truthful state/message above.
+  const historyOnly = panel.query.trim() === '' && !panel.historyExpanded
+    && rows.length === 0 && historyJobs(panel).length > 0
   const props: PickerProps & { readonly key: string } = {
     key: `work-hub-picker-${panel.serial}`,
     title: 'Work Hub',
@@ -389,7 +476,9 @@ function hubLayer(panel: WorkHubPanel, wide: boolean, admission: WorkHubDetailsA
     focus: panel.zone === 'list' ? 'list' : undefined,
     state: panel.refresh === 'loading' ? 'loading' : panel.refresh === 'stale' ? 'error' : 'ready',
     ...(message === undefined ? {} : { message }),
-    empty: panel.query.trim() === '' ? 'No tasks are available for this session.' : 'No work matches this search.',
+    empty: historyOnly
+      ? 'No active Jobs in this view.'
+      : panel.query.trim() === '' ? 'No tasks are available for this session.' : 'No work matches this search.',
     total: rows.length,
     items: rows.map(pickerItem),
     order,
@@ -502,16 +591,21 @@ export class TspWorkHub {
       query: '',
       cursor: 0,
       zone: 'list',
+      historyExpanded: false,
       refresh: options.loading ? 'loading' : 'ready',
       refreshError: undefined,
-      // The primary read action is the initial action-zone focus whenever this
-      // pane can really present the Reader; otherwise dismissal is the only one.
-      actionFocus: this.detailsAdmissionOf() === 'available' ? 'details' : 'close',
+      actionFocus: 'close',
       onSelect,
       onClose,
       options,
     }
     panel.selected = chooseInitial(visibleRows(panel))
+    // The primary read action is the initial action-zone focus whenever this
+    // pane can really present the Reader; a history-only frame focuses its one
+    // real action; otherwise dismissal is the only one.
+    panel.actionFocus = this.detailsAdmissionOf() === 'available' && panel.selected !== undefined
+      ? 'details'
+      : historyJobs(panel).length > 0 ? 'history' : 'close'
     this.panel = panel
     this.change(panel)
     return {
@@ -524,12 +618,28 @@ export class TspWorkHub {
   private setItems(panel: WorkHubPanel, items: readonly TaskPanelItem[]): void {
     if (this.current() !== panel) return
     const oldVisible = visibleRows(panel)
+    const oldSelected = panel.selected
     panel.items = [...items]
     // Rows arriving end the loading display, but NEVER clear a stale refresh
     // error: only the coordinator's own `setRefreshState('ready')` proves a
     // successful refresh (a runtime commit is not a catalog success).
     if (panel.refresh === 'loading') panel.refresh = 'ready'
-    panel.selected = normalizeSelection(panel.selected, oldVisible, visibleRows(panel))
+    // The manual disclosure is per-open state: the last retained terminal Job
+    // disappearing resets it, while a refresh that still has candidates keeps it.
+    if (historyJobs(panel).length === 0) panel.historyExpanded = false
+    const newVisible = visibleRows(panel)
+    const oldRow = oldSelected === undefined ? undefined : oldVisible.find(row => row.value === oldSelected)
+    if (oldSelected !== undefined && !newVisible.some(row => row.value === oldSelected)) {
+      // An ACTIVE Job turning terminal while collapsed leaves the visible set.
+      // Prefer another still-visible ACTIVE Job before the ordinary neighbour
+      // normalization; an expanded frame keeps the row and enters no branch.
+      const firstActive = newVisible.find(row => row.source === 'job' && isTaskItemActive(row))
+      panel.selected = oldRow?.source === 'job' && firstActive !== undefined
+        ? firstActive.value
+        : normalizeSelection(oldSelected, oldVisible, newVisible)
+    } else {
+      panel.selected = normalizeSelection(oldSelected, oldVisible, newVisible)
+    }
     this.change(panel)
   }
 
@@ -655,12 +765,17 @@ export class TspWorkHub {
     if (key.name === 'escape') return { kind: 'close' }
     // A pane too narrow for an honest pivot keeps only the close gesture.
     if (this.tooNarrow()) return { kind: 'consume' }
+    // `Alt+J` is the exact keyboard twin of the native disclosure action. A
+    // plain `j` stays query text below; a non-matching chord never types.
+    if (key.alt === true && key.name === 'j' && key.ctrl !== true && key.meta !== true && key.shift !== true) {
+      return historyAvailable(panel) ? { kind: 'toggle-history' } : { kind: 'consume' }
+    }
     // Two zones, one ring: Tab and Shift+Tab are the same inverse transition.
     if (key.name === 'tab') return { kind: 'zone', zone: panel.zone === 'list' ? 'actions' : 'list' }
     if (panel.zone === 'actions') {
       if (key.name === 'enter') return { kind: 'activate-action' }
       if (key.name === 'up' || key.name === 'down' || key.name === 'left' || key.name === 'right') {
-        if (!this.detailsAvailable(panel)) return { kind: 'consume' }
+        if (this.actionRing(panel).length <= 1) return { kind: 'consume' }
         return { kind: 'action-focus', delta: key.name === 'up' || key.name === 'left' ? -1 : 1 }
       }
       const edited = editQuery(panel, key)
@@ -701,6 +816,9 @@ export class TspWorkHub {
       case 'close':
         this.userClose(panel)
         return
+      case 'toggle-history':
+        this.toggleJobHistory(panel)
+        return
       case 'details': {
         // Re-resolve through the ONE current-row resolver AND re-read the
         // renderer capability at admission: a resolution from an older
@@ -737,29 +855,73 @@ export class TspWorkHub {
         return
       }
       case 'action-focus': {
-        if (!this.detailsAvailable(panel)) return
-        panel.actionFocus = panel.actionFocus === 'details' ? 'close' : 'details'
+        const ring = this.actionRing(panel)
+        if (ring.length <= 1) return
+        const current = ring.indexOf(this.focusedAction(panel))
+        panel.actionFocus = ring[(current + intent.delta + ring.length) % ring.length]!
         this.change(panel)
         return
       }
       case 'activate-action': {
         if (panel.zone !== 'actions') return
-        if (this.focusedAction(panel) === 'details') {
-          if (this.detailsAdmissionOf() !== 'available') return
-          const current = this.resolveDetails(panel.serial, panel.selected)
-          if (current === undefined) return
-          this.onViewDetails({ panelSerial: panel.serial, targetValue: current.value })
-          return
+        switch (this.focusedAction(panel)) {
+          case 'history':
+            this.toggleJobHistory(panel)
+            return
+          case 'details': {
+            if (this.detailsAdmissionOf() !== 'available') return
+            const current = this.resolveDetails(panel.serial, panel.selected)
+            if (current === undefined) return
+            this.onViewDetails({ panelSerial: panel.serial, targetValue: current.value })
+            return
+          }
+          case 'close':
+            this.userClose(panel)
+            return
         }
-        this.userClose(panel)
-        return
       }
     }
   }
 
+  /** The actions that really exist on this frame, in the fixed bar order. */
+  private actionRing(panel: WorkHubPanel): WorkHubAction[] {
+    const ring: WorkHubAction[] = ['close']
+    if (historyAvailable(panel)) ring.push('history')
+    if (this.detailsAvailable(panel)) ring.push('details')
+    return ring
+  }
+
   /** The action the action zone's Enter would run, normalized to what exists. */
   private focusedAction(panel: WorkHubPanel): WorkHubAction {
-    return panel.actionFocus === 'details' && this.detailsAvailable(panel) ? 'details' : 'close'
+    return normalizeActionFocus(panel.actionFocus, historyAvailable(panel), this.detailsAvailable(panel))
+  }
+
+  /**
+   * The ONE local disclosure transition. It changes only the panel's manual
+   * boolean and the selection; it never reads a source, never touches the
+   * business row router and never acknowledges failure attention.
+   */
+  private toggleJobHistory(panel: WorkHubPanel): void {
+    if (!this.canInteract() || this.current() !== panel) return
+    if (!historyAvailable(panel)) return
+    const oldVisible = visibleRows(panel)
+    const oldSelected = panel.selected
+    panel.historyExpanded = !panel.historyExpanded
+    const newVisible = visibleRows(panel)
+    if (panel.historyExpanded) {
+      // Open: select the first REAL retained Job, never a group or a type.
+      panel.selected = newVisible.find(row => row.source === 'job' && !isTaskItemActive(row))?.value
+    } else if (oldSelected !== undefined && newVisible.some(row => row.value === oldSelected)) {
+      // Hide: a still-visible selection survives untouched.
+      panel.selected = oldSelected
+    } else {
+      // Hide: a hidden history selection moves to the first visible ACTIVE Job,
+      // then to the ordinary neighbour rule.
+      const firstActive = newVisible.find(row => row.source === 'job' && isTaskItemActive(row))
+      panel.selected = firstActive?.value ?? normalizeSelection(oldSelected, oldVisible, newVisible)
+    }
+    panel.zone = 'list'
+    this.change(panel)
   }
 
   private eventIntent(panel: WorkHubPanel, event: TspEvent, target: WorkHubTarget): WorkHubIntent | undefined {
@@ -784,6 +946,11 @@ export class TspWorkHub {
     if (event.ev !== 'action') return undefined
     // `Close` is idempotent dismissal, so it carries no token.
     if (event.act === CLOSE_ACTION_ID) return { kind: 'close' }
+    // The history toggle carries the frame revision that painted it and must
+    // still have a real candidate on the current panel.
+    if (event.act === `${HISTORY_ACTION_ID}#${target.revision}`) {
+      return historyAvailable(panel) ? { kind: 'toggle-history' } : undefined
+    }
     // `View details` carries the frame revision that painted it, and must name
     // the frame this event's registered picker target belongs to.
     if (event.act === `${DETAILS_ACTION_ID}#${target.revision}`) {

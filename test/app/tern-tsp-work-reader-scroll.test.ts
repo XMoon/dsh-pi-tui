@@ -202,8 +202,9 @@ test('PageDown/PageUp/Up/Down/Home/End each send the exact native scroll on the 
 
 test('a resize while the reading is mid-scroll keeps the document identity and never resets the anchor', async (t) => {
   const h = await mount(t)
+  const resizeId = 'agent:long-scroll-target'
   const handle = h.open([
-    row(LONG_ID, { label: LONG_LABEL, detail: LONG_DETAIL, startedAt: 1_700_000_000_000, status: 'running' }),
+    row(resizeId, { label: LONG_LABEL, detail: LONG_DETAIL, source: 'subagent', mode: 'one-shot', suffix: 'one-shot', status: 'running' }),
   ])
   await waitUntil('the Hub is mounted', () => pickerNode(h.pane, HUB) !== undefined)
   h.pane.key('\r')
@@ -231,9 +232,9 @@ test('a resize while the reading is mid-scroll keeps the document identity and n
   for (const cols of [90, 72, 120]) h.pane.event({ ev: 'resize', sf: reader, cols })
   // A background commit makes the resulting frame observable (a pure resize
   // may diff to no ops, which is the SDK's own no-op).
-  handle.setItems([row(LONG_ID, { label: LONG_LABEL, detail: LONG_DETAIL, startedAt: 1_700_000_000_000, status: 'failed', active: false })])
+  handle.setItems([row(resizeId, { label: LONG_LABEL, detail: LONG_DETAIL, source: 'subagent', mode: 'one-shot', suffix: 'one-shot', status: 'failed', active: false })])
   await waitUntil('the post-resize document is committed', () =>
-    surfaceFrames(h.pane, reader).length > framesBefore && surfaceTexts(h.pane, reader).includes('Job · failed'))
+    surfaceFrames(h.pane, reader).length > framesBefore && surfaceTexts(h.pane, reader).includes('Subagent · failed'))
 
   assert.deepEqual(scrollTargets(h, reader), ['start', 'page-down', 'page-down'],
     'a mid-read resize asks for NO further scroll (no reset, no start)')

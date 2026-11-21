@@ -54,6 +54,8 @@ const hubItems = (pane: TspPane): Array<Record<string, unknown>> =>
   (hubProps(pane).items ?? []) as Array<Record<string, unknown>>
 const hubOrder = (pane: TspPane): Array<string | PickerGroup> => (hubProps(pane).order ?? []) as Array<string | PickerGroup>
 const pickers = (pane: TspPane): WireNode[] => layerNodes(pane, HUB).filter(node => node.k === 'picker')
+const actionIds = (pane: TspPane): string[] =>
+  ((hubProps(pane).actions ?? []) as Array<Record<string, unknown>>).map(action => String(action.id).replace(/#\d+$/u, ''))
 
 /** One wire text node's complete text (plain text and spans alike). */
 function nodeText(node: WireNode): string {
@@ -208,34 +210,39 @@ async function waitForSinglePicker(pane: TspPane): Promise<void> {
 
 // ── A1-T01: stable group order and identity ────────────────────────────────
 
-test('rows keep the attention → subagent pre-order → flat jobs order with stable IDs', async (t) => {
+test('rows keep the attention → subagent pre-order → active-Jobs order with stable IDs, while retained Jobs stay hidden', async (t) => {
   const h = await mount(t)
   const items: TaskPanelItem[] = [
     row('question:sess-a:call-a', { label: 'Choose deployment region', status: 'awaiting answer', source: 'question', group: 'Needs attention', canStop: false, active: false }),
     row('agent:child-1', { label: 'subagent · inspect pool', status: 'inactive', source: 'subagent', type: 'subagent', mode: 'one-shot', suffix: 'one-shot', depth: 1, active: false }),
     row('agent:child-2', { label: 'subagent · check saturation', status: 'running', source: 'subagent', type: 'subagent', mode: 'one-shot', suffix: 'one-shot', parentId: 'agent:child-1', depth: 2 }),
+    row('agent:child-3', { label: 'subagent · verify depth', status: 'inactive', source: 'subagent', type: 'subagent', mode: 'one-shot', suffix: 'one-shot', parentId: 'agent:child-2', depth: 3, treePrefix: '  │ └ ', active: false }),
     row('agent:external-1', { label: 'external · remote run', status: 'External', source: 'subagent', type: 'subagent', mode: 'external', suffix: 'external', depth: 1, active: false }),
     row('job:j1', { label: 'build', status: 'running' }),
     row('job:j2', { label: 'test', status: 'failed', active: false, attention: true }),
   ]
   h.open(items)
   await waitForSinglePicker(h.pane)
-  const order = hubOrder(h.pane)
-  assert.deepEqual(order, [
+  assert.deepEqual(hubOrder(h.pane), [
     { group: 'work-attention', label: 'Needs attention', count: 1 },
     'question:sess-a:call-a',
-    { group: 'work-subagents', label: 'Work · Subagents', count: 3 },
+    { group: 'work-subagents', label: 'Work · Subagents', count: 4 },
     'agent:child-1',
     'agent:child-2',
+    'agent:child-3',
     'agent:external-1',
-    { group: 'work-jobs', label: 'Work · Jobs', count: 2 },
+    { group: 'work-jobs', label: 'Work · Jobs', count: 1 },
     'job:j1',
-    'job:j2',
-  ], 'the groups and the input order are preserved verbatim')
-  assert.deepEqual(hubItems(h.pane).map(item => item.id), items.map(item => item.value),
-    'every row keeps its stable identity in input order')
-  assert.equal(new Set(hubItems(h.pane).map(item => item.id)).size, items.length, 'IDs are unique')
+  ], 'the default view keeps every non-Job row and only active Jobs, in input order')
+  assert.deepEqual(hubItems(h.pane).map(item => item.id),
+    ['question:sess-a:call-a', 'agent:child-1', 'agent:child-2', 'agent:child-3', 'agent:external-1', 'job:j1'],
+    'the collapsed history is absent from items, not merely hidden by CSS')
+  assert.equal(new Set(hubItems(h.pane).map(item => item.id)).size, 6, 'IDs are unique')
   assert.equal(hubProps(h.pane).selected, 'question:sess-a:call-a', 'the attention-first initial selection')
+  assert.equal(hubProps(h.pane).subtitle, '1 attention · 2 running · 1 failed · 1 retained Jobs hidden',
+    'the status facts come from the FULL roster, including the folded failure')
+  assert.deepEqual((hubProps(h.pane).actions as Array<Record<string, unknown>>).map(action => String(action.id).replace(/#\d+$/u, '')),
+    ['close', 'jobs-history', 'details'], 'the native action bar offers Close, Show and View details')
 })
 
 // ── A1-T02: the empty state still carries a working Close ──────────────────
@@ -272,7 +279,7 @@ test('a loading Hub publishes an EMPTY roster with state loading, so an empty it
 
 // ── A1-T03/T04/T05: the frozen attention-first selection ladder ─────────────
 
-test('initial selection is attention-first, then failed work, then the first work row', async (t) => {
+test('initial selection is attention-first, then visible failed work, then the first work row', async (t) => {
   const h = await mount(t)
   h.open([
     row('agent:child-1', { label: 'subagent · idle', status: 'inactive', source: 'subagent', mode: 'one-shot', suffix: 'one-shot', active: false }),
@@ -284,8 +291,11 @@ test('initial selection is attention-first, then failed work, then the first wor
     row('job:j1', { label: 'build', status: 'running' }),
     row('job:j2', { label: 'test', status: 'failed', active: false, attention: true }),
     row('agent:child-1', { label: 'subagent · later', status: 'running', source: 'subagent', mode: 'continuable', suffix: 'continuable' }),
+    row('agent:failed', { label: 'subagent · failed review', status: 'failed', source: 'subagent', mode: 'one-shot', suffix: 'one-shot', active: false }),
   ])
-  await waitUntil('no Question: the attention work row wins', () => hubProps(h.pane).selected === 'job:j2')
+  await waitUntil('no Question: a visible failed work row wins over the hidden failed Job',
+    () => hubProps(h.pane).selected === 'agent:failed')
+  assert.ok(!hubItems(h.pane).some(item => item.id === 'job:j2'), 'the failed Job is not a visible initial selection')
 
   h.open([row('job:j1', { label: 'build', status: 'running' })])
   await waitUntil('no attention: the first work row wins', () => hubProps(h.pane).selected === 'job:j1')
@@ -299,25 +309,45 @@ test('a native select changes only the local selection and the Inspector', async
     row('job:j1', { label: 'build' }),
     row('job:j2', { label: 'test', status: 'failed', active: false, attention: true }),
   ])
-  await waitUntil('the failed work row is initially selected', () => hubProps(h.pane).selected === 'job:j2')
-  sendSelect(h.pane, 'job:j1', pickerNode(h.pane, HUB)!.id)
-  await waitUntil('the select updates the local selection', () => hubProps(h.pane).selected === 'job:j1')
-  assert.ok(inspectorText(h.pane).includes('build'), `the Inspector follows the selection:\n${inspectorText(h.pane)}`)
+  await waitUntil('the first active Job is initially selected', () => hubProps(h.pane).selected === 'job:j1')
+  sendPickerAction(h.pane, 'jobs-history', HUB)
+  await waitUntil('the retained Job is revealed by the native action', () => hubItems(h.pane).some(item => item.id === 'job:j2'))
+  sendSelect(h.pane, 'job:j2', pickerNode(h.pane, HUB)!.id)
+  await waitUntil('the select updates the local selection', () => hubProps(h.pane).selected === 'job:j2')
+  assert.ok(inspectorText(h.pane).includes('test'), `the Inspector follows the selection:\n${inspectorText(h.pane)}`)
   assert.deepEqual(h.selects, [], 'a native select never runs the business selection router')
   assert.equal(h.closes.length, 0)
 })
 
-test('a status tick keeps the panel serial and selection while updating the row', async (t) => {
+test('an active Job turning terminal while collapsed leaves the visible set without a phantom selection', async (t) => {
   const h = await mount(t)
-  const items = [row('job:j1', { label: 'build', status: 'running' })]
-  h.open(items)
+  h.open([row('job:j1', { label: 'build', status: 'running' })])
   await waitForSinglePicker(h.pane)
   const before = pickerNode(h.pane, HUB)!.id
   assert.equal(hubProps(h.pane).selected, 'job:j1')
   h.opens[0]!.setItems([row('job:j1', { label: 'build', status: 'inactive', active: false })])
-  await waitUntil('the status word updates', () => String(hubItems(h.pane)[0]?.detail ?? '').includes('inactive'))
+  await waitUntil('the collapsed history hides the terminal Job', () => hubItems(h.pane).length === 0)
   assert.equal(pickerNode(h.pane, HUB)!.id, before, 'the panel/picker identity is stable')
-  assert.equal(hubProps(h.pane).selected, 'job:j1', 'a status tick never steals the selection')
+  assert.equal(hubProps(h.pane).selected ?? undefined, undefined, 'no invisible row stays selected')
+  assert.equal(hubProps(h.pane).empty, 'No active Jobs in this view.', 'the frame states the real active-empty view')
+  assert.deepEqual((hubProps(h.pane).actions as Array<Record<string, unknown>>).map(action => String(action.id).replace(/#\d+$/u, '')),
+    ['close', 'jobs-history'], 'Show is the only real browse action left')
+  assert.equal((hubProps(h.pane).actions as Array<Record<string, unknown>>)[1]!.primary, true,
+    'without a readable row the history action is the primary action')
+})
+
+test('a status tick keeps an expanded history panel identity and selection', async (t) => {
+  const h = await mount(t)
+  h.open([row('job:j1', { label: 'build', status: 'running' }), row('job:j2', { label: 'old', status: 'completed', active: false })])
+  await waitForSinglePicker(h.pane)
+  sendPickerAction(h.pane, 'jobs-history', HUB)
+  await waitUntil('the history is expanded and its first row selected', () => hubProps(h.pane).selected === 'job:j2')
+  const before = pickerNode(h.pane, HUB)!.id
+  h.opens[0]!.setItems([row('job:j1', { label: 'build', status: 'inactive', active: false }), row('job:j2', { label: 'old', status: 'completed', active: false })])
+  await waitUntil('the visible status words update', () => JSON.stringify(hubItems(h.pane)).includes('inactive'))
+  assert.equal(pickerNode(h.pane, HUB)!.id, before, 'the panel/picker identity is stable')
+  assert.equal(hubProps(h.pane).selected, 'job:j2', 'an expanded terminal selection is retained across the refresh')
+  assert.deepEqual(hubItems(h.pane).map(item => item.id), ['job:j1', 'job:j2'], 'the expanded history keeps both rows visible')
 })
 
 test('a removed selected row falls to its successor, then to its predecessor', async (t) => {
@@ -361,6 +391,154 @@ test('hostile label bytes are sanitized on the wire while the stable ID is untou
   assert.ok(!wire.includes('\\u001b]52'), 'no raw control introducer reaches the wire')
   assert.ok(wire.includes('echo ok'), 'the readable label content survives')
   assert.equal(hubItems(h.pane)[0]!.id, 'job:hostile', 'the row ID is never display-sanitized')
+})
+
+// ── PR3: retained-Job disclosure (the native Work Hub contract) ─────────────
+
+test('a Job whose type is subagent still hides when terminal, while a real failed subagent stays visible', async (t) => {
+  const h = await mount(t)
+  h.open([
+    row('job:sub', { label: 'job that reports a subagent type', status: 'completed', type: 'subagent', active: false }),
+    row('agent:failed', { label: 'real failed subagent', status: 'failed', source: 'subagent', mode: 'one-shot', suffix: 'one-shot', active: false }),
+  ])
+  await waitForSinglePicker(h.pane)
+  assert.deepEqual(hubItems(h.pane).map(item => item.id), ['agent:failed'],
+    'the job is classified by source (not its type), and a non-Job failure is never hidden')
+  assert.deepEqual(actionIds(h.pane), ['close', 'jobs-history', 'details'],
+    'the hidden terminal Job still contributes the disclosure action')
+})
+
+test('a history-only roster paints no Jobs group and no phantom row, with an honest empty and Show as the primary action', async (t) => {
+  const h = await mount(t)
+  h.open([
+    row('job:old', { label: 'old lint', status: 'completed', active: false }),
+    row('job:bad', { label: 'old deploy', status: 'failed', active: false, attention: true }),
+  ])
+  await waitForSinglePicker(h.pane)
+  assert.equal(hubProps(h.pane).total, 0)
+  assert.deepEqual(hubItems(h.pane), [])
+  assert.deepEqual(hubOrder(h.pane), [])
+  assert.equal(hubProps(h.pane).empty, 'No active Jobs in this view.')
+  assert.equal(hubProps(h.pane).subtitle, '1 failed · 2 retained Jobs hidden')
+  assert.deepEqual(actionIds(h.pane), ['close', 'jobs-history'])
+  assert.equal((hubProps(h.pane).actions as Array<Record<string, unknown>>)[1]!.primary, true,
+    'the only real browse action is primary when nothing is readable')
+  assert.deepEqual(h.exposed, [], 'opening the hub already acknowledges nothing')
+
+  sendPickerAction(h.pane, 'jobs-history', HUB)
+  await waitUntil('the retained Jobs become the only visible rows', () => hubItems(h.pane).length === 2)
+  assert.deepEqual(hubItems(h.pane).map(item => item.id), ['job:old', 'job:bad'])
+  assert.deepEqual(hubOrder(h.pane), [
+    { group: 'work-jobs', label: 'Work · Jobs', count: 2 },
+    'job:old',
+    'job:bad',
+  ], 'the Jobs group is created only from real visible rows')
+  assert.equal(hubProps(h.pane).selected, 'job:old', 'the first history row becomes the real selection')
+  assert.deepEqual(actionIds(h.pane), ['close', 'jobs-history', 'details'])
+  assert.equal((hubProps(h.pane).actions as Array<Record<string, unknown>>)[2]!.primary, true,
+    'View details is primary again once a row can be read')
+  assert.deepEqual(h.exposed, [], 'the disclosure never fakes a viewport acknowledgement')
+})
+
+test('plain j is always query text, and the search reaches a retained failed Job without changing the manual disclosure', async (t) => {
+  const h = await mount(t)
+  h.open([
+    row('job:j1', { label: 'build', status: 'running' }),
+    row('job:j2', { label: 'old lint', status: 'completed', active: false }),
+    row('job:j3', { label: 'deploy', status: 'failed', active: false }),
+  ])
+  await waitUntil('the active Job is initially selected', () => hubProps(h.pane).selected === 'job:j1')
+  h.pane.key('failed')
+  await waitUntil('the query reaches the hidden failed Job', () => JSON.stringify(hubItems(h.pane)).includes('job:j3') && hubProps(h.pane).query === 'failed')
+  assert.deepEqual(hubItems(h.pane).map(item => item.id), ['job:j3'], 'the search corpus is the full roster')
+  assert.deepEqual(actionIds(h.pane), ['close', 'details'], 'a non-empty query paints no history action')
+  h.pane.key('\x7f'.repeat(6))
+  await waitUntil('the query is cleared', () => hubProps(h.pane).query === '')
+  assert.deepEqual(hubItems(h.pane).map(item => item.id), ['job:j1'],
+    'clearing the query restores the manual collapsed view')
+  assert.equal(hubProps(h.pane).selected ?? undefined, undefined,
+    'a selection that only existed under the query is cleared rather than kept as a hidden target')
+  assert.deepEqual(actionIds(h.pane), ['close', 'jobs-history'])
+  h.pane.key('\u001b[B')
+  await waitUntil('the user can select the real visible row again', () => hubProps(h.pane).selected === 'job:j1')
+  assert.deepEqual(actionIds(h.pane), ['close', 'jobs-history', 'details'])
+})
+
+test('Alt+J and the native action share one local toggle, while a modless j remains query text', async (t) => {
+  const h = await mount(t)
+  h.open([row('job:j1', { label: 'build', status: 'running' }), row('job:j2', { label: 'old lint', status: 'completed', active: false })])
+  await waitUntil('the active Job is selected', () => hubProps(h.pane).selected === 'job:j1')
+  h.pane.key('j')
+  await waitUntil('a plain j edits the query', () => hubProps(h.pane).query === 'j')
+  assert.deepEqual(hubItems(h.pane).map(item => item.id), ['job:j1', 'job:j2'],
+    'the query matched the stable ids without expanding the manual history')
+  h.pane.key('\x7f')
+  await waitUntil('the query is cleared', () => hubProps(h.pane).query === '')
+  h.pane.key('\x1bj')
+  await waitUntil('Alt+J expands the history', () => hubProps(h.pane).selected === 'job:j2' && hubItems(h.pane).length === 2)
+  assert.equal(hubProps(h.pane).query, '', 'Alt+J never writes query text')
+  h.pane.key('\x1bj')
+  await waitUntil('Alt+J hides the history again', () => hubProps(h.pane).selected === 'job:j1' && hubItems(h.pane).length === 1)
+  assert.deepEqual(h.selects, [], 'the local toggle never runs the business selection router')
+  assert.deepEqual(h.stops, [])
+})
+
+test('the action zone ring follows the real action list across Close, history and details', async (t) => {
+  const h = await mount(t)
+  h.open([row('job:j1', { label: 'build', status: 'running' }), row('job:j2', { label: 'old lint', status: 'completed', active: false })])
+  await waitUntil('the active Job is selected', () => hubProps(h.pane).selected === 'job:j1')
+  h.pane.key('\t')
+  await waitUntil('Tab focuses the readable primary action', () => JSON.stringify(hubProps(h.pane).actions).includes('View details [Enter]'))
+  h.pane.key('\u001b[D')
+  await waitUntil('left moves to the history action', () => JSON.stringify(hubProps(h.pane).actions).includes('Show 1 past jobs [Enter]'))
+  h.pane.key('\u001b[D')
+  await waitUntil('left again reaches Close', () => JSON.stringify(hubProps(h.pane).actions).includes('Close [Enter]'))
+  h.pane.key('\u001b[C')
+  h.pane.key('\u001b[C')
+  await waitUntil('right returns to View details through the history action', () => JSON.stringify(hubProps(h.pane).actions).includes('View details [Enter]'))
+  h.pane.key('\u001b[D')
+  h.pane.key('\r')
+  await waitUntil('Enter on the focused history action toggles the disclosure', () => hubItems(h.pane).length === 2 && hubProps(h.pane).selected === 'job:j2')
+  assert.deepEqual(h.selects, [], 'an action-zone Enter is the local disclosure, never a business select')
+})
+
+test('a stale or bare history action never toggles the current panel; the current revision does', async (t) => {
+  const h = await mount(t)
+  h.open([row('job:j1', { label: 'build', status: 'running' }), row('job:j2', { label: 'old lint', status: 'completed', active: false })])
+  await waitUntil('the active Job is selected', () => hubProps(h.pane).selected === 'job:j1')
+  const pickerId = pickerNode(h.pane, HUB)!.id
+  const historyAction = (hubProps(h.pane).actions as Array<Record<string, unknown>>).find(action => String(action.id).startsWith('jobs-history#'))!
+  const currentId = String(historyAction.id)
+  sendAction(h.pane, currentId.replace(/\d+$/u, '0'), undefined, pickerId)
+  sendAction(h.pane, 'jobs-history', undefined, pickerId)
+  await waitUntil('the stale and bare ids change nothing', () => hubItems(h.pane).length === 1)
+  assert.equal(hubProps(h.pane).selected, 'job:j1')
+  sendAction(h.pane, currentId, undefined, pickerId)
+  await waitUntil('the exact current token toggles', () => hubItems(h.pane).length === 2)
+  assert.deepEqual(h.selects, [], 'no history token reaches the business router')
+})
+
+test('the manual disclosure survives candidate refreshes, resets when the last terminal Job disappears, and never crosses a new panel', async (t) => {
+  const h = await mount(t)
+  const handle = h.open([row('job:j1', { label: 'build', status: 'running' }), row('job:j2', { label: 'old lint', status: 'completed', active: false })])
+  await waitUntil('the active Job is selected', () => hubProps(h.pane).selected === 'job:j1')
+  sendPickerAction(h.pane, 'jobs-history', HUB)
+  await waitUntil('the history is expanded', () => hubItems(h.pane).length === 2)
+  handle.setItems([
+    row('job:j1', { label: 'build', status: 'running' }),
+    row('job:j2', { label: 'old lint', status: 'completed', active: false }),
+    row('job:j3', { label: 'older deploy', status: 'failed', active: false }),
+  ])
+  await waitUntil('a refreshed candidate set keeps the manual expansion', () => hubItems(h.pane).length === 3 && hubProps(h.pane).selected === 'job:j2')
+  assert.deepEqual(actionIds(h.pane), ['close', 'jobs-history', 'details'])
+  handle.setItems([row('job:j1', { label: 'build', status: 'running' })])
+  await waitUntil('the last terminal Job resets the expansion', () => hubItems(h.pane).length === 1)
+  assert.equal(hubProps(h.pane).selected, 'job:j1')
+  assert.deepEqual(actionIds(h.pane), ['close', 'details'], 'with no candidate the disclosure action disappears')
+  h.open([row('job:j1', { label: 'build', status: 'running' }), row('job:j2', { label: 'old lint', status: 'completed', active: false })])
+  await waitUntil('a new panel starts collapsed with its own history candidate',
+    () => hubItems(h.pane).length === 1 && actionIds(h.pane).includes('jobs-history'))
+  assert.deepEqual(hubItems(h.pane).map(item => item.id), ['job:j1'], 'the new panel resets the manual expansion')
 })
 
 // ── A2: the local Read intent, never a fabricated lifecycle verb ───────────
