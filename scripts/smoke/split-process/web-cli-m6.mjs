@@ -89,8 +89,14 @@ function readLaunch(dshHome, instanceId) {
   return JSON.parse(readFileSync(path.launchPath, 'utf8'))
 }
 
-function fetchStatus(url, init) {
-  return fetch(url, { redirect: 'manual', cache: 'no-store', ...init })
+async function fetchStatus(url, init) {
+  try {
+    return await fetch(url, { redirect: 'manual', cache: 'no-store', ...init })
+  } catch (error) {
+    const cause = error !== null && typeof error === 'object' ? error.cause : undefined
+    const code = cause !== null && typeof cause === 'object' && typeof cause.code === 'string' ? cause.code : undefined
+    throw new SplitSmokeAssertionError(`HTTP request failed during the Web CLI case${code === undefined ? '' : ` (${code})`}`)
+  }
 }
 
 function setCookiePair(response) {
