@@ -771,8 +771,11 @@ export async function runF2AccountComposition(context) {
     assert(requests.includes('GET /auth-api/v0/users/current'), 'the Host did not query the independent official profile endpoint')
     assert(requests.includes('GET /api/v0/users/get_user_summary'), 'the Host did not query the independent official balance endpoint')
     await waitForAccountFrame(clientB, 'M6 Account', 'F2 live Client received detached Host profile', trace)
-    assert((await sanitizedFrame(clientB)).includes('12.50 CNY'),
-      'the Account page did not paint the independent Host wallet balance')
+    // The profile and balance are independent Host reads; the balance may
+    // settle on a later frame than the profile (especially on a slow Linux
+    // host). Wait for the exact painted value instead of sampling the frame
+    // once and turning a real render delay into a false failure.
+    await waitForAccountFrame(clientB, '12.50 CNY', 'F2 live Client painted the independent Host wallet balance', trace, 30_000)
 
     const storedGeneration = lastSurfaceStatus(clientB)
     assert(storedGeneration?.transport === 'connected' && typeof storedGeneration.generationId === 'number',
