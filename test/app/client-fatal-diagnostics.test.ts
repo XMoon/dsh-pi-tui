@@ -169,6 +169,16 @@ test('AggregateError cleanup branches are flattened into the four real cause slo
   assert.equal((capped.text.match(/cause\[\d+\]\.name:/gu) ?? []).length, 4)
   assert.match(capped.text, /branch-3/u)
   assert.doesNotMatch(capped.text, /branch-4/u)
+
+  const shared = new Error('shared branch')
+  const sharedPreview = clientFatalErrorDetails(new AggregateError(Array(8).fill(shared), 'shared aggregate'), 'client-runtime')
+  assert.equal((sharedPreview.text.match(/cause\[\d+\]\.name:/gu) ?? []).length, 1)
+  assert.match(sharedPreview.text, /<circular cause>/u)
+
+  const aggregateWithCause = new AggregateError([new Error('aggregate branch')], 'aggregate', { cause: new Error('aggregate own cause') })
+  const withOwnCause = clientFatalErrorDetails(new Error('root', { cause: aggregateWithCause }), 'client-runtime')
+  assert.match(withOwnCause.text, /aggregate branch/u)
+  assert.match(withOwnCause.text, /aggregate own cause/u)
 })
 
 test('a short write is retried to completion and a zero write is an IO failure', () => {

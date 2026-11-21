@@ -185,10 +185,13 @@ function aggregateBranches(value: unknown): unknown[] {
   }
 }
 
-/** The direct cause branches of one ordinary error layer. */
+/** The direct cause branches of one error layer, including an AggregateError's
+ *  own standard `.cause` alongside its `.errors` branches. */
 function causeBranches(value: unknown): unknown[] {
   if (isAggregateErrorLike(value)) {
     const branches = aggregateBranches(value)
+    const cause = readField(value, 'cause')
+    if (cause !== undefined) branches.push(cause)
     if (branches.length > 0) return branches
   }
   const cause = readField(value, 'cause')
@@ -218,26 +221,28 @@ function appendErrorFields(lines: string[], error: unknown, depth: number): void
 function appendCauseChain(lines: string[], root: unknown): void {
   const seen = new Set<unknown>()
   let count = 0
+  let circular = false
   const visit = (value: unknown): void => {
     if (value === undefined || count >= MAX_CAUSE_DEPTH) return
     if (seen.has(value)) {
-      lines.push(`cause[${count + 1}].name: <circular cause>`)
+      // A shared/circular reference must not consume a cause slot or emit a
+      // cause[n] field; it is reported once as a note after the real chain.
+      circular = true
       return
     }
     seen.add(value)
-    if (isAggregateErrorLike(value)) {
-      const branches = aggregateBranches(value)
-      if (branches.length > 0) {
-        for (const branch of branches) visit(branch)
-        return
-      }
+    const branches = causeBranches(value)
+    if (isAggregateErrorLike(value) && branches.length > 0) {
+      for (const branch of branches) visit(branch)
+      return
     }
     count += 1
     appendErrorFields(lines, value, count)
     if (count >= MAX_CAUSE_DEPTH) return
-    for (const child of causeBranches(value)) visit(child)
+    for (const child of branches) visit(child)
   }
   for (const child of causeBranches(root)) visit(child)
+  if (circular) lines.push('cause: <circular cause>')
 }
 
 /** Bound the whole document to the frozen 32 KiB contract. */
