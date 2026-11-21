@@ -220,3 +220,82 @@ test('Regular/Main keeps no application Question pointer route', async () => {
   assert.equal(lines.join('\n'), before, 'a Regular wheel has no application route')
   assert.equal(app.fullscreenScrollForTest(), undefined, 'Regular has no alt-screen transcript')
 })
+
+test('a focused overlay above the Question owns the pointer plane and keeps the covered body inert', async () => {
+  const { vt, app } = startApp()
+  app.setTranscript(Array.from({ length: 40 }, (_, index) => ({
+    kind: 'user' as const,
+    turn: index + 1,
+    text: `TRANSCRIPT-LINE-${index}`,
+  })))
+  app.setFullscreen(true)
+  await view(vt)
+  wheel(vt, 'up', { x: 10, y: 5 })
+  await view(vt)
+  const transcriptBefore = app.fullscreenScrollForTest()
+  assert.ok(transcriptBefore !== undefined && transcriptBefore.scrollTop > 0)
+
+  const question = app.askQuestions([{
+    id: 'q1', question: 'LONG-QUESTION?', detail: LONG_DETAIL, options: [{ label: 'ALPHA' }],
+  }])
+  question.catch(() => {})
+  let lines = await view(vt)
+  assert.ok(lines.join('\n').includes('detail-00'), 'precondition: the question body is at its top')
+  const overlay = app.showAdvancedInteractiveOverlay({
+    render: () => ({ kind: 'text' as const, spans: [{ text: 'OVERLAY-COVER' }] }),
+  }, { width: 30, maxHeight: 5 })
+  overlay.focus()
+  lines = await view(vt)
+  assert.ok(lines.join('\n').includes('OVERLAY-COVER'), 'the explicit overlay must paint above the Question')
+  const cell = cellOf(lines, 'OVERLAY-COVER')
+  const before = lines.join('\n')
+  wheel(vt, 'down', cell)
+  lines = await view(vt)
+  assert.equal(lines.join('\n'), before,
+    'a wheel on the focused overlay plane must not scroll the covered question body')
+  assert.equal(app.fullscreenScrollForTest()!.scrollTop, transcriptBefore.scrollTop,
+    'the overlay wheel must not leak into the background transcript')
+
+  overlay.close()
+  lines = await view(vt)
+  const bounds = frameBounds(lines)
+  assert.ok(bounds !== undefined)
+  wheel(vt, 'down', { x: 10, y: bounds.top + 4 })
+  lines = await view(vt)
+  assert.ok(lines.join('\n').includes('↑ 1 up'),
+    'after the overlay closes, the question body owns the wheel again')
+})
+
+test('a real wheel scroll invalidates a pending tab or action press', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  await view(vt)
+  const question = app.askQuestions([
+    { id: 'q1', question: 'LONG-FIRST?', detail: LONG_DETAIL, options: [{ label: 'ALPHA' }] },
+    { id: 'q2', question: 'SECOND?', options: [{ label: 'BETA' }] },
+  ])
+  question.catch(() => {})
+  let lines = await view(vt)
+  const bounds = frameBounds(lines)
+  assert.ok(bounds !== undefined)
+  const bodyCell = { x: 10, y: bounds.top + 4 }
+  // A pending tab press cannot complete after the body really scrolled.
+  const q2 = cellOf(lines, 'Q2')
+  press(vt, q2)
+  wheel(vt, 'down', bodyCell)
+  await view(vt)
+  release(vt, q2)
+  lines = await view(vt)
+  const currentTab = (): number =>
+    (app as unknown as { activeQuestions: { flow: { draftSnapshot(): { tab: number } } } })
+      .activeQuestions.flow.draftSnapshot().tab
+  assert.equal(currentTab(), 0, 'a tab pressed before a real wheel scroll must not navigate on release')
+  // A pending action press cannot complete either.
+  const skip = cellOf(lines, 'Skip')
+  press(vt, skip)
+  wheel(vt, 'down', bodyCell)
+  await view(vt)
+  release(vt, skip)
+  lines = await view(vt)
+  assert.equal(currentTab(), 0, 'an action pressed before a real wheel scroll must not run on release')
+})

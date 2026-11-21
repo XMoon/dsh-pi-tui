@@ -313,14 +313,17 @@ Fullscreen Question pointer handling uses the same semantic boundary:
   when both fit; otherwise it keeps the current page first and paints no
   partial hit. Regular/Main and the official plan-review branch expose no
   generic stage-tab pointer route.
-- the ordinary Question body owns the Fullscreen wheel: a wheel over its
+- the ordinary Question body owns the Fullscreen wheel while that flow is the
+  visible seat owner AND holds the physical input seat: a wheel over its
   last-painted body scrollport moves only that body by the configured line
-  step (never a page step), and a real scroll cancels the pending cursor
-  follow instead of snapping back. The tab row, action bar, frame chrome,
-  borders and the area outside the frame are inert while the Question is the
-  visible seat owner and must never scroll the transcript or a hidden
-  Approval. PlanReview keeps its own reading path and enters no generic
-  Question wheel route; Regular/Main has no application wheel route.
+  step (never a page step), and a real scroll revokes an in-flight tab/action
+  press and cancels the pending cursor follow instead of snapping back. The
+  tab row, action bar, frame chrome, borders and the area outside the frame
+  are inert while the Question owns the input seat and must never scroll the
+  transcript or a hidden Approval. A focused managed overlay explicitly raised
+  above the Question keeps its own pointer plane. PlanReview keeps its own
+  reading path and enters no generic Question wheel route; Regular/Main has no
+  application wheel route.
 - the action bar keeps required keyboard guidance in the same row as muted,
   lower-priority hints: list selection/choice/toggle, edit cursor, scroll/expand,
   and only an eligible Split browse hint. `Esc` always names the real state

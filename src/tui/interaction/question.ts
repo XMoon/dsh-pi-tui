@@ -1033,6 +1033,11 @@ export class QuestionFlow implements Component, Focusable {
     const next = Math.max(0, Math.min(this.bodyScroll + deltaLines, maxScroll))
     if (next === this.bodyScroll) return false
     this.bodyScroll = next
+    // A real scroll invalidates any in-flight click gesture: the host
+    // consumes the wheel before the alt screen can retire it, so the
+    // press/release identity must be dropped HERE or a release could still
+    // activate a tab/action that was pressed before the viewport moved.
+    this.mousePressGesture = undefined
     // A wheel move is the user's explicit viewport command: never let the
     // next render's cursor-follow snap the body back to the highlighted row.
     this.pendingCursorScroll = false

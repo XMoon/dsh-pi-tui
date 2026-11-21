@@ -3345,22 +3345,33 @@ test('overflow keeps the current page and Review visible, with complete-label hi
   })), () => {}, () => {})
   many.setMaxRows(24)
   many.setMouseActionsEnabled(true)
-  const lines = render(many, 44)
-  const row = tabRowIndex(lines)
-  const painted = lines[row]!
-  assert.ok(painted.includes('Q1') && painted.includes('Review'),
-    `the current page and Review must be visible:\n${painted}`)
-  assert.ok(!painted.includes('Q12'), 'omitted question tabs must not paint')
-  const hits = (many as unknown as {
-    paintedTabHits: Array<{ targetTab: number; startCol: number; endCol: number }>
-  }).paintedTabHits
-  assert.ok(hits.some(hit => hit.targetTab === 12), 'Review must be a hit target')
-  for (const hit of hits) {
-    const label = painted.slice(hit.startCol, hit.endCol)
-    assert.match(label, /^[✓○] (Q\d+|Review)$/u,
-      `a hit must cover one complete painted tab label, saw ${JSON.stringify(label)}`)
-    assert.ok(hit.endCol <= visibleWidth(painted), 'a hit may never exceed the painted width')
+  // The typical overflow widths keep the current page + Review and expose
+  // only complete-label hits; the widest terminal paints the untouched strip.
+  for (const width of [44, 72, 80]) {
+    const lines = render(many, width)
+    const row = tabRowIndex(lines)
+    const painted = lines[row]!
+    assert.ok(painted.includes('Q1') && painted.includes('Review'),
+      `the current page and Review must be visible at ${width}:\n${painted}`)
+    assert.ok(!painted.includes('Q12'), `omitted question tabs must not paint at ${width}`)
+    const hits = (many as unknown as {
+      paintedTabHits: Array<{ targetTab: number; startCol: number; endCol: number }>
+    }).paintedTabHits
+    assert.ok(hits.some(hit => hit.targetTab === 12), `Review must be a hit target at ${width}`)
+    for (const hit of hits) {
+      const label = painted.slice(hit.startCol, hit.endCol)
+      assert.match(label, /^[✓○] (Q\d+|Review)$/u,
+        `a hit must cover one complete painted tab label at ${width}, saw ${JSON.stringify(label)}`)
+      assert.ok(hit.endCol <= visibleWidth(painted), `a hit may never exceed the painted width at ${width}`)
+    }
   }
+  const wide = render(many, 120)
+  const wideRow = tabRowIndex(wide)
+  assert.ok(wide[wideRow]!.includes('Q12') && wide[wideRow]!.includes('Review'),
+    `the complete strip must fit at 120:\n${wide[wideRow]}`)
+  assert.equal((many as unknown as { paintedTabHits: unknown[] }).paintedTabHits.length, 13,
+    'every complete tab is a target when the whole strip fits')
+  render(many, 44)
   clickTab(many, 'Q5')
   assert.equal(many.draftSnapshot().tab, 4, 'a visible overflow-window tab is clickable')
   clickTab(many, 'Review')
@@ -3389,7 +3400,7 @@ test('very narrow terminals keep the current tab before Review and never expose 
   assert.equal(tinyHits.length, 0, 'a clipped tab paints no hit')
 })
 
-test('a tab press cannot complete on another target, a resize, or a repainted status row', () => {
+test('a tab press cannot complete on another target or a resize', () => {
   const make = (): QuestionFlow => {
     const f = new QuestionFlow([
       { id: 'q1', question: 'FIRST?', options: [{ label: 'A' }] },
@@ -3420,6 +3431,41 @@ test('a tab press cannot complete on another target, a resize, or a repainted st
   render(resized, 72)
   resized.completeMouseClick(resizePress, row, x)
   assert.equal(resized.draftSnapshot().tab, 0, 'a width change must invalidate the tab press')
+})
+
+test('a status row appearing or disappearing between press and release invalidates the tab press', () => {
+  const make = (): QuestionFlow => {
+    const f = new QuestionFlow([
+      { id: 'q1', question: 'FIRST?', options: [{ label: 'A' }] },
+      { id: 'q2', question: 'SECOND?', options: [{ label: 'B' }] },
+    ], () => {}, () => {})
+    f.setMaxRows(24)
+    f.setMouseActionsEnabled(true)
+    return f
+  }
+  // Status row APPEARS after the press: the strip moves down one row.
+  const appeared = make()
+  let lines = render(appeared, 100)
+  let row = tabRowIndex(lines)
+  let x = lines[row]!.indexOf('Q2')
+  const appearPress = appeared.beginMousePress(row, x)
+  assert.ok(appearPress !== undefined)
+  appeared.setStatus({ text: 'Waiting for the response…' })
+  render(appeared, 100)
+  appeared.completeMouseClick(appearPress, row, x)
+  assert.equal(appeared.draftSnapshot().tab, 0, 'a status row appearing must invalidate the tab press')
+  // Status row DISAPPEARS after the press: the strip moves back up.
+  const disappeared = make()
+  disappeared.setStatus({ text: 'Waiting for the response…' })
+  lines = render(disappeared, 100)
+  row = tabRowIndex(lines)
+  x = lines[row]!.indexOf('Q2')
+  const disappearPress = disappeared.beginMousePress(row, x)
+  assert.ok(disappearPress !== undefined)
+  disappeared.setStatus(undefined)
+  render(disappeared, 100)
+  disappeared.completeMouseClick(disappearPress, row, x)
+  assert.equal(disappeared.draftSnapshot().tab, 0, 'a status row disappearing must invalidate the tab press')
 })
 
 test('PlanReview and Regular rendering expose no stage-tab pointer targets', () => {
@@ -3540,21 +3586,27 @@ test('a status row above the tabs shifts the wheel scrollport together with the 
     'the recorded range already includes the status shift')
 })
 
-test('a real wheel scroll does not snap back to the cursor on the next render', () => {
+test('a real wheel scroll cancels a pending cursor-follow before the next render', () => {
   const f = makeFlow([{
     id: 'q1',
     question: 'Pick',
     options: Array.from({ length: 10 }, (_, i) => ({ label: `Option ${i + 1}`, description: 'd'.repeat(200) })),
   }], 12)
   render(f, 100)
-  for (let i = 0; i < 8; i += 1) f.handleInput('\x1b[B') // move the cursor deep into the page
+  const geometry = f as unknown as WheelGeometry & { pendingCursorScroll: boolean }
+  assert.equal(f.wheelBy(5, geometry.lastScrollportStart), true)
   render(f, 100)
-  const geometry = f as unknown as WheelGeometry
-  assert.ok(geometry.bodyScroll > 0, 'the cursor follow scrolled the body first')
+  assert.ok(geometry.bodyScroll > 0, 'the wheel established a real body scroll')
+  // Move the cursor WITHOUT rendering: the pending-follow flag is live when
+  // the wheel arrives, which is the state the production host sees.
+  for (let i = 0; i < 8; i += 1) f.handleInput('\x1b[B')
+  assert.equal(geometry.pendingCursorScroll, true, 'the cursor move armed a pending follow')
   assert.equal(f.wheelBy(-2, geometry.lastScrollportStart), true)
+  assert.equal(geometry.pendingCursorScroll, false, 'the real wheel scroll must cancel the pending follow')
   const afterWheel = geometry.bodyScroll
   render(f, 100)
-  assert.equal(geometry.bodyScroll, afterWheel, 'the next frame must not snap back to the cursor')
+  assert.equal(geometry.bodyScroll, afterWheel,
+    'the next frame must not snap back to the cursor after a real wheel scroll')
 })
 
 test('option clicks still resolve against the painted rows after a wheel scroll', () => {

@@ -16476,9 +16476,11 @@ export class TuiApp {
     if (state.flow.isPlanReviewFlow()) return undefined
     const frame = state.frame
     if (frame === undefined) return undefined
-    // Only the CURRENT seat occupant may scroll: a hidden Question behind a
-    // newer blocker must leave the wheel to that blocker's own route.
-    if (this.seatFallbackComponent() !== frame) return undefined
+    // Only the CURRENT seat occupant may scroll, and only while it really
+    // holds the physical input seat: a focused managed overlay raised above
+    // the modal owns its own pointer plane, so the Question must not swallow
+    // its wheel (the fork's overlay dispatch handles it).
+    if (this.seatFallbackComponent() !== frame || !this.ownsPhysicalKeyboard(frame)) return undefined
     this.clearExitConfirmation()
     // A frame that has not rendered at the current terminal size has no
     // authoritative body geometry: consume the wheel here so it can never
