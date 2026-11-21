@@ -51,6 +51,17 @@ function assertSafePrefix(prefix: string): void {
 }
 
 /**
+ * Create one test-owned temp directory without binding removal to a
+ * node:test TestContext. External lifecycle owners (for example the S0
+ * Supervisor process) use this same validated creation seam and own removal
+ * themselves.
+ */
+export function createTestTempDir(prefix: string, baseDirectory = tmpdir()): string {
+  assertSafePrefix(prefix)
+  return mkdtempSync(join(baseDirectory, prefix))
+}
+
+/**
  * Bind a disposer stack to one test: when the test finishes — whether it
  * passed, failed an assertion, or threw — every `defer` runs in reverse
  * registration order, then every `tempDir` root is removed in reverse
@@ -89,8 +100,7 @@ export function testLifecycle(t: TestContext): TestLifecycle {
   })
   return {
     tempDir(prefix, baseDirectory = tmpdir()) {
-      assertSafePrefix(prefix)
-      const dir = mkdtempSync(join(baseDirectory, prefix))
+      const dir = createTestTempDir(prefix, baseDirectory)
       tempDirs.push(dir)
       return dir
     },
