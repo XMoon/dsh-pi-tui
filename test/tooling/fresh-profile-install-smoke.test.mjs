@@ -98,4 +98,6 @@ test('the bundled Client chunk must contain the Store and no external Store clos
   assert.deepEqual(facts.storeChunk, 'client-bootstrap.mjs')
   writeFileSync(join(dist, 'client-bootstrap.mjs'), 'import "zustand/vanilla";\nexport const createSnapshotStore = 1; export const defineStore = 1;\n')
   assert.throws(() => assertBundledClientChunk(profile), /external Store/u)
+  writeFileSync(join(dist, 'client-bootstrap.mjs'), 'const z = require("zustand/vanilla");\nexport const createSnapshotStore = 1; export const defineStore = 1;\n')
+  assert.throws(() => assertBundledClientChunk(profile), /external Store/u)
 })
