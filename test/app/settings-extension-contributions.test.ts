@@ -921,9 +921,9 @@ test('a persisted extension setting reads Host facts and commits through ONE CAS
     await h.key('\r')
     assert.match(h.view(), /Host profile · effective: alpha/u)
     assert.match(h.view(), /Inherited: alpha/u)
+    assert.match(h.view(), /USER field: set alpha/u)
     // The remaining persisted facts live in the same scrollable Detail body.
     await h.key('\u001b[6~')
-    assert.match(h.view(), /USER field: set alpha/u)
     assert.match(h.view(), /Differs from inherited: No/u)
     assert.match(h.view(), /Runtime in this Client: alpha/u)
     await h.key('\u001b[5~')
