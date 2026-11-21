@@ -916,6 +916,44 @@ test('Host command: executes EXACTLY ONCE through HostCommandPort', async (t) =>
     'exactly ONE command/run row — the Host command is never auto-retried or double-dispatched')
 })
 
+test('a live Remote Host /compact and /plan are visible candidates in the real editor', async (t) => {
+  const life = testLifecycle(t)
+  const mainId = 'm6-4-pr4-compact-plan-display'
+  const fixture = await mountRunner(life, {
+    resumeSessionId: mainId,
+    hostCommands: [
+      {
+        name: 'compact',
+        description: 'Compact the conversation from the Host',
+        input: { hint: '[instructions]' },
+        handler: () => ({ kind: 'success', text: 'compacted' }),
+      },
+      {
+        name: 'plan',
+        description: 'Toggle plan mode from the Host',
+        handler: () => ({ kind: 'success', text: 'plan toggled' }),
+      },
+    ],
+  })
+  await settle(120)
+  typeInEditor(fixture.vt, '/comp')
+  await waitForCompletionRow(fixture, 'compact', 'the Host /compact candidate paints in the live editor')
+  const compactPopup = completionRowsBelowComposer(fixture.vt).join('\n')
+  assert.match(compactPopup, /Compact the conversation from the Host/u,
+    'the live /compact row carries the Host description')
+  assert.match(compactPopup, /\[instructions\]/u,
+    'the live /compact row carries the Host argument hint')
+  assert.equal(fixture.hostCommandRuns(mainId), 0, 'typing /comp never executes /compact')
+
+  fixture.app().setDraft('')
+  typeInEditor(fixture.vt, '/pla')
+  await waitForCompletionRow(fixture, 'plan', 'the Host /plan candidate paints in the live editor')
+  const planPopup = completionRowsBelowComposer(fixture.vt).join('\n')
+  assert.match(planPopup, /Toggle plan mode from the Host/u,
+    'the live /plan row carries the Host description')
+  assert.equal(fixture.hostCommandRuns(mainId), 0, 'typing /pla never executes /plan')
+})
+
 test('the Remote command catalogue routes Host /sessions to its real Host sink', async (t) => {
   const life = testLifecycle(t)
   const mainId = 'b1-b-remote-sessions-command'
