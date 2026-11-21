@@ -52,8 +52,11 @@ const CURRENT_CLIENT_STATUS_LABEL: Readonly<Record<CurrentClientPluginStatus, st
  *
  * Rules (R8-E PR-4):
  * - the bundle name is matched exactly against the observation package name;
- * - no observation means the package is not opted in / not selected / not
- *   installed — never an error and never a Client ACTIVE claim;
+ * - a selected, installed bundle with NO observation is `UNAVAILABLE` / not
+ *   yet observed, never a fabricated `NOT_OPTED_IN`; only a successful
+ *   discovery's explicit `not-opted-in` phase proves that negative fact;
+ * - a Host-unselected bundle without an observation remains `NOT_SELECTED`;
+ *   an uninstalled bundle remains `UNAVAILABLE`;
  * - an observation wins over the Host flags: a Host-selected package can
  *   still be ERROR/RELOAD_REQUIRED in this Client;
  * - contribution counts and the Host `enabled` flag never produce ACTIVE.
@@ -82,7 +85,11 @@ export function classifyCurrentClientPluginStatus(
       }
     }
     return enabled
-      ? { status: 'NOT_OPTED_IN', label: CURRENT_CLIENT_STATUS_LABEL.NOT_OPTED_IN }
+      ? {
+          status: 'UNAVAILABLE',
+          label: CURRENT_CLIENT_STATUS_LABEL.UNAVAILABLE,
+          reason: 'the CURRENT Client has not observed this package yet',
+        }
       : { status: 'NOT_SELECTED', label: CURRENT_CLIENT_STATUS_LABEL.NOT_SELECTED }
   }
   const base = {

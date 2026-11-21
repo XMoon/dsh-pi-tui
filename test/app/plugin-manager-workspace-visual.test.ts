@@ -796,4 +796,22 @@ test('the SAME Detail paints Host installed/selected and CURRENT Client status s
   assert.match(harness.view(), /Client reason\s+apply failed/u)
   assert.match(harness.view(), /Client:err/u, 'the real List pane follows the same observation revision')
   assert.match(harness.view(), /Host profile\s+Selected/u, 'a Client error never rewrites the Host selection')
+
+  // A present but EMPTY observation source is the initial inventory-read-failed
+  // shape, not a proven negative opt-in.
+  observations = []
+  revision += 1
+  for (const listener of [...listeners]) listener()
+  await harness.waitForFrame()
+  assert.match(harness.view(), /This Client \.\/tui\s+Unavailable/u)
+  assert.match(harness.view(), /Client reason[\s]+the CURRENT Client has not observed[\s]+this package yet/u)
+  assert.match(harness.view(), /Host profile\s+Selected/u)
+
+  // Only a successful discovery outcome may paint the negative opt-in fact.
+  observations = [{ packageName: '@r8/a', phase: 'not-opted-in' }]
+  revision += 1
+  for (const listener of [...listeners]) listener()
+  await harness.waitForFrame()
+  assert.match(harness.view(), /This Client \.\/tui\s+Not opted in/u)
+  assert.doesNotMatch(harness.view(), /Client reason\s+the CURRENT Client has not observed/u)
 })

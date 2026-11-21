@@ -1155,12 +1155,22 @@ test('one bundle Detail states Host installed/selected AND the CURRENT Client st
   assert.equal(errorFacts.find(entry => entry.label === 'Host profile')?.value, 'Selected', 'a Client error never rewrites the Host selection')
 
   const plain = buildPluginManagerModel(snapshot([bundle({ name: '@r8/plain', enabled: true, installed: true })], []), new Map())
-  const notOptedIn = buildPluginDetailView(cardByName(plain, '@r8/plain')!, [], [])
-  assert.equal(
-    notOptedIn.groups.flatMap(group => group.facts).find(entry => entry.label === 'This Client ./tui')?.value,
-    'Not opted in',
-    'an ordinary DSH plugin is not presented as a Host or Client error',
-  )
+  const plainCard = cardByName(plain, '@r8/plain')!
+  // A successful discovery's explicit not-opted-in phase is the ONLY source of
+  // the negative "Not opted in" statement.
+  const notOptedIn = buildPluginDetailView(plainCard, [], [{ packageName: '@r8/plain', phase: 'not-opted-in' }])
+  const notOptedInFacts = notOptedIn.groups.flatMap(group => group.facts)
+  assert.equal(notOptedInFacts.find(entry => entry.label === 'This Client ./tui')?.value, 'Not opted in')
+  assert.equal(notOptedInFacts.some(entry => entry.label === 'Client reason'), false)
+  // No observation is a missing Client authority fact, not a negative opt-in.
+  // This is the real initial-inventory-read-failed shape: Host selected, Client
+  // source present and empty.
+  const unobserved = buildPluginDetailView(plainCard, [], [])
+  const unobservedFacts = unobserved.groups.flatMap(group => group.facts)
+  assert.equal(unobservedFacts.find(entry => entry.label === 'This Client ./tui')?.value, 'Unavailable')
+  assert.equal(unobservedFacts.find(entry => entry.label === 'Client reason')?.value,
+    'the CURRENT Client has not observed this package yet')
+  assert.equal(unobservedFacts.find(entry => entry.label === 'Host profile')?.value, 'Selected')
 
   // Without a Client observation source the same Detail paints no invented
   // Client facts at all.

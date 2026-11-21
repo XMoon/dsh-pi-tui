@@ -589,8 +589,10 @@ export interface AutocompleteHandle {
 export type TuiPersistedScalar = string | number | boolean | null
 
 /** One author-declared mutation of a persisted extension setting. `set`
- *  writes the scalar at `persisted.path`; `unset` removes the USER field at
- *  that path so the inherited value applies. */
+ *  writes the scalar at `persisted.path`; `unset` restores the inherited
+ *  effective value at that path. The official Host may materialize and keep
+ *  the USER field when a sibling override remains; USER-field presence is a
+ *  displayed fact, never the success predicate. */
 export type TuiPersistedChoice =
   | { readonly id: string; readonly label?: string; readonly op: 'set'; readonly value: TuiPersistedScalar }
   | { readonly id: string; readonly label?: string; readonly op: 'unset' }

@@ -94,7 +94,10 @@ independent fact: `Host package` (Installed / Not installed), `Host profile`
 (Selected / Not selected) and `This Client ./tui` (Active / Pending / Error /
 Reload required / Unavailable / Not opted in / Not selected), with a
 `Client reason` only when a real non-normal reason exists. A normal Host plugin
-with no PiTui opt-in is `Not opted in`, never a Host or Client error. A Client
+with an explicit successful discovery outcome of `not-opted-in` is `Not opted
+in`, never a Host or Client error. A missing observation is a missing Client
+authority fact, not a negative opt-in: a selected, installed bundle with no
+observation is `Unavailable` with a not-yet-observed reason. A Client
 `Error`/`Reload required` never rewrites the Host selection, and a wide list
 may paint a secondary `Client:` signal that narrow widths drop; the Detail
 keeps both facts verbatim. The Client status is read from this Client's live

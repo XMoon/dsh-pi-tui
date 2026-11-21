@@ -45,8 +45,14 @@ test('classifies the CURRENT Client ./tui status without deriving it from Host e
   assert.equal(classifyCurrentClientPluginStatus('@r8/a', true, true, [{ ...active[0]!, phase: 'error', reason: 'apply failed' }]).status, 'ERROR')
   assert.equal(classifyCurrentClientPluginStatus('@r8/a', true, true, [{ ...active[0]!, phase: 'reload-required' }]).status, 'RELOAD_REQUIRED')
   assert.equal(classifyCurrentClientPluginStatus('@r8/a', true, true, [{ ...active[0]!, phase: 'pending' }]).status, 'PENDING')
-  // No observation: a normal Host plugin is NOT opted in, never an error.
-  assert.equal(classifyCurrentClientPluginStatus('@r8/plain', true, true, []).status, 'NOT_OPTED_IN')
+  // No observation is a missing Client fact, never a fabricated negative
+  // opt-in for a selected bundle.
+  assert.deepEqual(classifyCurrentClientPluginStatus('@r8/plain', true, true, []), {
+    status: 'UNAVAILABLE',
+    label: 'Unavailable',
+    reason: 'the CURRENT Client has not observed this package yet',
+  })
+  assert.equal(classifyCurrentClientPluginStatus('@r8/plain', true, true, [{ packageName: '@r8/plain', phase: 'not-opted-in' }]).status, 'NOT_OPTED_IN')
   assert.equal(classifyCurrentClientPluginStatus('@r8/plain', true, false, []).status, 'NOT_SELECTED')
   assert.equal(classifyCurrentClientPluginStatus('@r8/missing', false, true, []).status, 'UNAVAILABLE')
   // Two live observations for one bundle name are unavailable, not a guess.
