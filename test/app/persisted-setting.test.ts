@@ -135,6 +135,27 @@ test('persisted read projects EFFECTIVE/INHERITED/USER leaves without fabricatin
   assert.equal(userRead.candidateId, 'omega')
   assert.equal(userRead.overriddenDisplay, 'Yes')
 
+  // A USER value is not the effective authority. An external higher-precedence
+  // override must leave every declared choice unselected even when the USER
+  // field still carries a declared value.
+  config.user = { label: 'omega' }
+  config.effective = { label: 'gamma' }
+  const externalWithUser = readPersistedSetting(record(), '@r8-pr1-fixture/a', config)
+  assert.equal(externalWithUser.mode, 'ready')
+  if (externalWithUser.mode !== 'ready') return
+  assert.equal(externalWithUser.effective, 'gamma')
+  assert.equal(externalWithUser.user, 'omega')
+  assert.equal(externalWithUser.candidateId, undefined)
+  assert.equal(externalWithUser.overriddenDisplay, 'Yes')
+
+  config.user = {}
+  const externalWithoutUser = readPersistedSetting(record(), '@r8-pr1-fixture/a', config)
+  assert.equal(externalWithoutUser.mode, 'ready')
+  if (externalWithoutUser.mode !== 'ready') return
+  assert.equal(externalWithoutUser.effective, 'gamma')
+  assert.equal(externalWithoutUser.userFieldPresent, false)
+  assert.equal(externalWithoutUser.candidateId, undefined)
+
   config.readKind = 'stale'
   assert.deepEqual(readPersistedSetting(record(), '@r8-pr1-fixture/a', config), { mode: 'stale', reason: 'not current' })
 })

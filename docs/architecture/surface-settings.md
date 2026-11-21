@@ -95,10 +95,15 @@ specialist-page contract below).
   `Not saved · Host Config changed; refresh and review`; an unconfirmed
   dispatch paints an unknown outcome and is never retried automatically. A
   verified Host save is independent from this Client applying the new Config.
-  Reset stages the official field `unset`: the authoritative EFFECTIVE value
-  must return to the inherited value. The USER own field may remain present
-  when another sibling override keeps the USER config alive; the Detail shows
-  that literal USER state rather than claiming the field vanished.
+  The Choice `[current]` candidate is derived from the authoritative EFFECTIVE
+  value only: a declared `set` matching it, or the `unset` choice when
+  EFFECTIVE equals INHERITED. A matching USER value alone never marks
+  `[current]`; an out-of-choices external effective value keeps every option
+  unselected and shows the existing out-of-choices warning. Reset stages the
+  official field `unset`: the authoritative EFFECTIVE value must return to the
+  inherited value. The USER own field may remain present when another sibling
+  override keeps the USER config alive; the Detail shows that literal USER
+  state rather than claiming the field vanished.
 
 - Every category shares ONE root row plan: header, optional metadata, at most
   one top rule, optional app notice, optional pane header, body, and the single

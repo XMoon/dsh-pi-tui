@@ -926,6 +926,25 @@ test('a persisted extension setting reads Host facts and commits through ONE CAS
     assert.match(h.view(), /Host profile · effective: alpha/u)
     assert.match(h.view(), /Inherited: alpha/u)
     assert.match(h.view(), /USER field: set alpha/u)
+    // A higher-precedence external effective override cannot leave a declared
+    // USER value painted as `[current]`; the existing out-of-choices warning
+    // must appear instead.
+    await h.key('\u001b') // back to Rows so explicit refresh is admitted
+    const configValue = h.extensionConfig.values.get('@r8-pr1-fixture/a')!
+    configValue.effective = { label: 'gamma' }
+    configValue.user = { label: 'omega' }
+    await h.key('r')
+    await h.vt.waitForRender()
+    assert.match(h.view(), /Current value is not in selectable/u)
+    await h.key('\r')
+    await h.vt.waitForRender()
+    assert.doesNotMatch(h.view(), /\[current\]/u, 'an out-of-choices effective value has no current candidate')
+    await h.key('\u001b')
+    configValue.effective = { label: 'alpha' }
+    configValue.user = { label: 'alpha' }
+    await h.key('r')
+    await h.vt.waitForRender()
+    await h.key('\r') // Detail + native Choice again
     // The remaining persisted facts live in the same scrollable Detail body.
     await h.key('\u001b[6~')
     assert.match(h.view(), /Differs from inherited: No/u)

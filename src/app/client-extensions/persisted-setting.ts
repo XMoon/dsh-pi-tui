@@ -172,16 +172,16 @@ export function readPersistedSetting(
     effective.present ? effective.value : undefined,
     inherited.present ? inherited.value : undefined,
   )
-  // The official Host `unset` restores the inherited EFFECTIVE value; when a
-  // sibling USER override remains, the USER leaf itself may stay present. The
-  // candidate therefore follows the authoritative effective fact first.
+  // `current` answers ONE question: does a declared choice match the
+  // authoritative EFFECTIVE result? The official Host `unset` restores the
+  // inherited EFFECTIVE value; when a sibling USER override remains, the USER
+  // leaf itself may stay present but is not a candidate authority. A USER-only
+  // match (or an out-of-choices external effective override) must stay
+  // unselected so the Detail can show its out-of-choices warning.
   const unsetChoice = record.persisted.choices.find(choice => choice.op === 'unset')
   const candidateId = overridden === 'No' && unsetChoice !== undefined
     ? unsetChoice.id
     : record.persisted.choices.find(choice => choice.op === 'set' && sameScalar(effective.value, choice.value))?.id
-      ?? (user.present
-        ? record.persisted.choices.find(choice => choice.op === 'set' && sameScalar(user.value, choice.value))?.id
-        : unsetChoice?.id)
   return {
     mode: 'ready',
     effective: effective.present ? effective.value : undefined,
