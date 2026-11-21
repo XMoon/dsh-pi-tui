@@ -370,18 +370,20 @@ function main() {
     const files = walkFiles(extracted)
     const has = (path) => files.includes(path)
     check('exports entry dist/extension/advanced.mjs', has('dist/extension/advanced.mjs'))
-    const publishedBundle = Array.isArray(pkg.dsh?.bundle?.patch) && pkg.dsh.bundle.patch.length > 0
-    check('published bundle carries the internal Host/Client process entries',
-      !publishedBundle || (has('dist/local-client.mjs') && has('dist/local-host.mjs')),
-      `local-client=${String(has('dist/local-client.mjs'))} local-host=${String(has('dist/local-host.mjs'))}`)
-    if (files.includes('dist/local-client.mjs')) {
+    const fixture = process.env.TARBALL_SMOKE_FIXTURE === '1'
+    if (fixture) {
+      checks.push('skip published entry and Client Store checks — explicit synthetic fixture')
+    } else {
+      check('published bundle carries the internal Host/Client process entries',
+        has('dist/local-client.mjs') && has('dist/local-host.mjs'),
+        `local-client=${String(has('dist/local-client.mjs'))} local-host=${String(has('dist/local-host.mjs'))}`)
       // The Client platform Store closure must be REAL build output, not a
       // manifest promise: one reachable Client chunk carries the official Store
       // implementation and no dist module keeps a runtime external import of the
       // three packages. Everything else DSH stays external.
       const distMjs = files.filter(name => name.startsWith('dist/') && name.endsWith('.mjs'))
-      const specifiersOf = text => [...text.matchAll(/(?:from\s*["']([^"']+)["']|import\(\s*["']([^"']+)["']\s*\)|import\s*["']([^"']+)["'])/gu)]
-        .map(match => match[1] ?? match[2] ?? match[3])
+      const specifiersOf = text => [...text.matchAll(/(?:from\s*["']([^"']+)["']|import\(\s*["']([^"']+)["']\s*\)|import\s*["']([^"']+)["']|require\(\s*["']([^"']+)["']\s*\))/gu)]
+        .map(match => match[1] ?? match[2] ?? match[3] ?? match[4])
       const storeClosureNames = ['@deepseek-ai/dsh-client-store', 'zustand', 'immer']
       const externalStoreImports = []
       const storeChunks = []
@@ -412,10 +414,8 @@ function main() {
         check('the Client entry reaches the bundled Store chunk',
           storeChunks.length === 1 && clientEntryText.includes(`./${basename(storeChunks[0])}`), storeChunks[0] ?? '(none)')
       } else {
-        checks.push('skip Client-entry Store reachability — fixture has no dist/local-client.mjs')
+        checks.push('skip Client-entry Store reachability — synthetic fixture has no dist/local-client.mjs')
       }
-    } else {
-      checks.push('skip Client platform Store checks — synthetic fixture has no dist/local-client.mjs')
     }
     check('exports entry dist/extension/unstable.mjs', has('dist/extension/unstable.mjs'))
     check('types dist/extension/advanced.d.mts', has('dist/extension/advanced.d.mts'))

@@ -277,12 +277,13 @@ const STORE_PROBE_SOURCE = `
 import { registerHooks } from 'node:module'
 import { writeFileSync } from 'node:fs'
 const resultPath = process.env.FRESH_PROFILE_STORE_PROBE
-const tracked = new Set(['@deepseek-ai/dsh-client-store', 'zustand', 'immer'])
-const state = { storeRequests: 0, storeInjected: false, storeIdentityStable: true, firstStore: null, resolutions: [] }
+const storePackages = ['@deepseek-ai/dsh-client-store', 'zustand', 'immer']
+const isStoreClosure = specifier => storePackages.some(name => specifier === name || specifier.startsWith(name + '/'))
+const state = { storeRequests: 0, storeClosureRequests: 0, externalStoreRequests: 0, storeInjected: false, storeIdentityStable: true, firstStore: null, resolutions: [] }
 registerHooks({
   resolve(specifier, context, nextResolve) {
     const result = nextResolve(specifier, context)
-    if (tracked.has(specifier) || specifier.startsWith('@deepseek-ai/dsh-')) {
+    if (isStoreClosure(specifier) || specifier.startsWith('@deepseek-ai/dsh-')) {
       state.resolutions.push({ specifier, url: result.url })
     }
     return result
@@ -308,6 +309,10 @@ Object.defineProperty = function (target, property, descriptor) {
               ...registration,
               factory: requireModule => registration.factory(specifier => {
                 const value = requireModule(specifier)
+                if (isStoreClosure(specifier)) {
+                  state.storeClosureRequests += 1
+                  if (specifier !== '@deepseek-ai/dsh-client-store') state.externalStoreRequests += 1
+                }
                 if (specifier === '@deepseek-ai/dsh-client-store') {
                   state.storeRequests += 1
                   state.storeInjected = true
@@ -360,8 +365,8 @@ export function assertBundledClientChunk(profilePackage) {
       assert(storeChunk === undefined, `the Store implementation lives in more than one chunk: ${storeChunk}, ${file}`, 'BUNDLED_CLOSURE_INVALID')
       storeChunk = file
     }
-    const external = [...text.matchAll(/(?:from\s*["']([^"']+)["']|import\(\s*["']([^"']+)["']\s*\)|import\s*["']([^"']+)["'])/gu)]
-      .map(match => match[1] ?? match[2] ?? match[3])
+    const external = [...text.matchAll(/(?:from\s*["']([^"']+)["']|import\(\s*["']([^"']+)["']\s*\)|import\s*["']([^"']+)["']|require\(\s*["']([^"']+)["']\s*\))/gu)]
+      .map(match => match[1] ?? match[2] ?? match[3] ?? match[4])
       .filter(specifier => STORE_PACKAGES.some(name => specifier === name || specifier.startsWith(`${name}/`)))
     assert(external.length === 0, `${file} still has an external Store/Zustand/Immer import: ${external.join(', ')}`, 'BUNDLED_CLOSURE_INVALID')
   }
@@ -417,10 +422,13 @@ async function internalDomainEvidence({ workDir, profileDir, harnessDir, profile
     assert(probe?.storeInjected === true, 'no official /client bundle requested the platform store', 'STORE_IDENTITY_MISSING')
     assert(probe?.storeIdentityStable === true, 'the platform store was not ONE stable namespace', 'STORE_DUPLICATE_INSTANCE')
     const externalStore = (probe?.resolutions ?? []).filter(entry => STORE_PACKAGES.some(name => entry.specifier === name || entry.specifier.startsWith(`${name}/`)))
+    assert(probe?.externalStoreRequests === 0, `the Client requested Store closure through the platform loader: ${String(probe?.externalStoreRequests)}`, 'STORE_ROOT_OUTSIDE_PROFILE')
     assert(externalStore.length === 0, `the Client resolved Store closure externally: ${externalStore.map(entry => entry.specifier).join(', ')}`, 'STORE_ROOT_OUTSIDE_PROFILE')
     return {
       loadOrder: order,
       storeRequests: probe.storeRequests,
+      storeClosureRequests: probe.storeClosureRequests,
+      externalStoreRequests: probe.externalStoreRequests,
       storeIdentityStable: true,
       externalStoreResolutions: 0,
     }

@@ -264,8 +264,8 @@ export function assertBundledClientClosure(packageRoot, label) {
       assert(storeChunk === undefined, `${label}: the Store implementation is split across chunks ${storeChunk}, ${file}`)
       storeChunk = file
     }
-    const external = [...text.matchAll(/(?:from\s*["']([^"']+)["']|import\(\s*["']([^"']+)["']\s*\)|import\s*["']([^"']+)["'])/gu)]
-      .map(match => match[1] ?? match[2] ?? match[3])
+    const external = [...text.matchAll(/(?:from\s*["']([^"']+)["']|import\(\s*["']([^"']+)["']\s*\)|import\s*["']([^"']+)["']|require\(\s*["']([^"']+)["']\s*\))/gu)]
+      .map(match => match[1] ?? match[2] ?? match[3] ?? match[4])
       .filter(specifier => ['@deepseek-ai/dsh-client-store', 'zustand', 'immer'].some(name => specifier === name || specifier.startsWith(`${name}/`)))
     assert(external.length === 0, `${label}: ${file} still imports the Store closure externally: ${external.join(', ')}`)
   }

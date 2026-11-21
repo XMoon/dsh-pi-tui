@@ -216,6 +216,7 @@ function smokeEnvironment(fixture, registry = 'http://127.0.0.1:9/') {
     // `scripts/tarball-smoke.mjs` with the ambient environment against the
     // real registry, and `pnpm audit --prod --audit-level high` is a
     // separate command that keeps the full advisory gate.
+    TARBALL_SMOKE_FIXTURE: '1',
     NPM_CONFIG_AUDIT: 'false',
     npm_config_audit: 'false',
     XDG_DATA_HOME: join(fixture.root, 'xdg-data'),
