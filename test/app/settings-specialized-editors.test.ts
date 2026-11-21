@@ -1212,9 +1212,15 @@ test('/keybindings conflicts: pointer mode span → Action detail → save → v
 
 test('/keybindings conflicts: a failed Action write stays readable and exitable after a one-row resize', async () => {
   const fixture = createDirectSettingsFixture({ footer: 'default' })
+  let failReplace!: () => void
+  let signalStarted!: () => void
+  const writeStarted = new Promise<void>(resolve => { signalStarted = resolve })
   const settings: TuiSettingsLike = {
     get: () => fixture.settings.get(),
-    replace: () => { throw new Error('save failed on the host') },
+    replace: () => new Promise<void>((_resolve, reject) => {
+      failReplace = () => reject(new Error('save failed on the host'))
+      signalStarted()
+    }),
   }
   const h = setup({ columns: 120, rows: 40, settings, fixture })
   h.app.keybindingsManager().setUserConfiguration(parseUserKeybindings({
@@ -1225,21 +1231,31 @@ test('/keybindings conflicts: a failed Action write stays readable and exitable 
   await frames(h.vt)
   await press(h.vt, '\r') // Submit draft detail
   assert.match(h.view(), /Action ID: app\.input\.submit/u)
-  await press(h.vt, 'r') // failing reset write
-  await flushOwnedTurns()
+  await press(h.vt, 'r') // start the failing reset write; it stays pending
+  await writeStarted
+  h.vt.resize(120, 5) // the grant shrinks WHILE the write is pending
   await frames(h.vt, 2)
-  h.vt.resize(120, 5)
+  failReplace() // settlement arrives on the one-row grant
+  await flushOwnedTurns()
   await frames(h.vt, 2)
   const view = h.vt.getViewport().map(stripTerminalSequences)
   const last = view[view.length - 1] ?? ''
-  assert.match(last, /save failed on the host/u, `the one-row settlement stays visible:
-${view.join('\n')}`)
+  assert.match(last, /save failed on the host/u, `the one-row settlement stays visible:\n${view.join('\n')}`)
   assert.match(last, /Back \[Esc\]/u, 'the one-row settlement keeps the only exit affordance')
-  h.vt.sendInput(`\x1b[<0;${last.indexOf('Back [Esc]') + 1};${view.length}M`)
+  const lease = (h.app as unknown as { workspaceLease?: object }).workspaceLease
+  const back = last.indexOf('Back [Esc]')
+  h.vt.sendInput(`\x1b[<0;${back + 1};${view.length}M`)
   await frames(h.vt)
-  h.vt.sendInput(`\x1b[<0;${last.indexOf('Back [Esc]') + 1};${view.length}m`)
+  h.vt.sendInput(`\x1b[<0;${back + 1};${view.length}m`)
   await frames(h.vt)
-  assert.match(h.view(), /Settings · Input & Terminal/u, 'the visible Back leaves the Action detail without losing the lease')
+  assert.match(h.view(), /Settings · Input & Terminal · Keyboard shortcuts…/u,
+    'the visible Back leaves the Action detail for the Keyboard shortcuts page')
+  assert.doesNotMatch(h.view(), /Action ID: app\.input\.submit/u)
+  h.vt.resize(120, 40) // restore the grant to read the list state that was retained
+  await frames(h.vt, 2)
+  assert.match(h.view(), /View: All · \[Conflicts/u, 'the conflicts view is retained after the detail exit')
+  assert.equal((h.app as unknown as { workspaceLease?: object }).workspaceLease, lease,
+    'the one-row exit never replaces the Settings lease')
   h.app.dispose()
   startedApps.delete(h.app)
 })

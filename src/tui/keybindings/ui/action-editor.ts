@@ -323,9 +323,17 @@ export class ActionEditorPanel implements Component {
       this.paintedBarSpansValue = []
       const escape = 'Back [Esc]'
       const escapeWidth = visibleWidth(escape)
-      if (safeWidth < escapeWidth + 3) {
+      if (safeWidth < escapeWidth) {
         this.paintedEscapeSpanValue = undefined
         return [color.error(truncateToWidth(this.message, safeWidth))]
+      }
+      if (safeWidth < escapeWidth + 3) {
+        // Whole-segment degradation: keep the complete exit affordance and a
+        // one-cell failure marker when there is room, never a half token.
+        const marker = safeWidth >= escapeWidth + 2 ? '! ' : ''
+        const startCol = visibleWidth(marker)
+        this.paintedEscapeSpanValue = { startCol, endCol: startCol + escapeWidth }
+        return [truncateToWidth(`${marker === '' ? '' : color.error(marker)}${paintActionSpan(escape, 'secondary')}`, safeWidth)]
       }
       const message = truncateToWidth(this.message, safeWidth - escapeWidth - 3)
       const startCol = visibleWidth(message) + 3

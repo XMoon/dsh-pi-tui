@@ -2353,6 +2353,11 @@ test('action editor: a one-row grant paints the failed settlement before unlocki
     assert.match(frame, /Back \[Esc\]/u, 'the one-row frame still exposes its ONE exit affordance')
     assert.ok(editor.paintedEscapeSpan() !== undefined, 'the visible Back span is a real pointer target')
     assert.doesNotMatch(frame, /Saving…/u)
+    for (const narrow of [10, 11, 12]) {
+      const narrowFrame = plain(editor.render(narrow).join('\n'))
+      assert.match(narrowFrame, /Back \[Esc\]/u, `the full exit segment survives a ${narrow}-column one-row grant`)
+      assert.ok(editor.paintedEscapeSpan() !== undefined, `the ${narrow}-column Back span is a real pointer target`)
+    }
   } finally {
     editor.dispose()
     manager.dispose()
