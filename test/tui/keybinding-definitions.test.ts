@@ -7,6 +7,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { APP_KEYBINDINGS, NON_CONFIGURABLE_ACTIONS, PROTECTED_HOST_ACTIONS, VIEWER_BLOCKED_PARENT_ACTIONS } from '../../src/tui/keybindings/definitions.ts'
+import { componentKeymap } from '../../src/tui/keybindings/component-keymap.ts'
 import { isValidKeyId } from '../../src/tui/keybindings/config.ts'
 import { scopesOverlap } from '../../src/tui/keybindings/conflicts.ts'
 import type { AppKeybindingId } from '../../src/tui/keybindings/types.ts'
@@ -130,8 +131,7 @@ test('viewer-blocked parent actions are all defined and configurable', () => {
   assert.ok(VIEWER_BLOCKED_PARENT_ACTIONS.has('app.tasks.open'))
 })
 
-test('non-configurable actions are the focused-component set plus the reserved session/model tier', () => {
-  for (const action of NON_CONFIGURABLE_ACTIONS) {
+test('non-configurable actions are the focused-component set plus the reserved session/model tier', () => {  for (const action of NON_CONFIGURABLE_ACTIONS) {
     assert.ok(action.startsWith('question.') || action.startsWith('tasks.')
       || action.startsWith('app.transcript.search.')
       // The split Client's forwarded Question/Approval seat is a focused
@@ -150,4 +150,14 @@ test('non-configurable actions are the focused-component set plus the reserved s
       assert.equal(definition.availability, 'reserved', `"${action}" must be availability:reserved`)
     }
   }
+})
+
+test('tasks.jobs.toggleHistory is the ONE focused, non-configurable j disclosure action', () => {
+  const definition = APP_KEYBINDINGS['tasks.jobs.toggleHistory']
+  assert.equal(definition.id, 'tasks.jobs.toggleHistory')
+  assert.deepEqual(definition.defaultKeys, ['j'])
+  assert.equal(definition.scope, 'tasks')
+  assert.equal(definition.configurable, false)
+  assert.ok(NON_CONFIGURABLE_ACTIONS.has('tasks.jobs.toggleHistory'))
+  assert.equal(componentKeymap.keyHint('tasks.jobs.toggleHistory'), 'J', 'the panel control derives its key badge from the one keymap')
 })

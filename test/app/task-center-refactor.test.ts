@@ -117,6 +117,7 @@ test('acknowledge scope is the VIEWPORT, not the whole projection (PR review M1)
   const panel = new TaskBrowserPanel(failures, 8, {
     mode: 'full', enableSearch: true, header: 'Tasks',
   }, () => {}, () => {}, () => {})
+  panel.handleInput('j') // explicit history disclosure: terminal Jobs are hidden by default
   assert.equal(panel.visibleItems().length, 20,
     'the projection holds every failure')
   assert.equal(panel.viewportItems().length, 8, 'the viewport renders only maxVisible rows')
@@ -140,6 +141,7 @@ test('scrolling new attention rows into view exposes them exactly once (PR revie
     mode: 'full', enableSearch: true, header: 'Tasks',
     onViewportExpose: ids => exposed.push(...ids),
   }, () => {}, () => {}, () => {})
+  panel.handleInput('j') // explicit history disclosure: terminal Jobs are hidden by default
   // First render: the top of the viewport is exposed.
   panel.render(80)
   assert.deepEqual(exposed, Array.from({ length: 8 }, (_, i) => `job:f${i}`))
@@ -173,6 +175,7 @@ test('a STABLE id re-entering failure is exposed again (P2 edge: id reuse)', () 
     mode: 'full', enableSearch: true, header: 'Tasks',
     onViewportExpose: ids => exposed.push(...ids),
   }, () => {}, () => {}, () => {})
+  panel.handleInput('j') // explicit history disclosure: terminal Jobs are hidden by default
   panel.render(80)
   assert.deepEqual(exposed, ['job:j1'], 'first failure is exposed once')
   // The job leaves the failure set (e.g. it is retried and now runs).
@@ -183,6 +186,7 @@ test('a STABLE id re-entering failure is exposed again (P2 edge: id reuse)', () 
   panel.setItems([
     { ...job('job:j1'), status: 'failed', active: false, attention: true },
   ])
+  panel.handleInput('j') // no terminal Job survived the running refresh: re-open history
   panel.render(80)
   assert.deepEqual(exposed, ['job:j1', 'job:j1'],
     'the second failure of the same id must be exposed again (the runtime treats it as new)')
@@ -293,6 +297,7 @@ test('Full Task Center: N / Shift+N / T have no effect (removed actions)', () =>
     [{ ...job('job:done', 'completed') }, job('job:r1'), job('job:r2')], 10,
     { mode: 'full', enableSearch: true, header: 'Tasks' },
     () => {}, () => {}, () => {})
+  panel.handleInput('j') // the settled row is hidden by default: open its history group
   assert.equal(panel.getViewState().selectedId, 'job:done')
   panel.handleInput('n')
   assert.equal(panel.getViewState().selectedId, 'job:done', 'N must not jump to running rows')

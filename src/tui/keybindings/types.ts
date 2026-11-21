@@ -106,6 +106,7 @@ export type AppKeybindingId =
   | 'tasks.tab.next'
   | 'tasks.tab.previous'
   | 'tasks.type.filter'
+  | 'tasks.jobs.toggleHistory'
   | 'tasks.tree.expand'
   | 'tasks.tree.collapse'
   | 'tasks.stop'

@@ -200,6 +200,14 @@ pages, and the open type list consumes them without leaving the list. These
 keys are scope `tasks`, `configurable: false`, and never alter the global Host
 keymap or `app.tasks.open`.
 
+`tasks.jobs.toggleHistory` (`j`) is the ONE fixed action for the Full Work
+Tracked terminal-Job history disclosure. It acts only while the Work page is in
+`[TRACKED]` scope, no search editor is open, the type-filter list is closed and
+no Stop is pending; in Work search mode `j` is query text, and on the Team page,
+in the type list, during a pending Stop or in the Active scope it has no Work
+effect. It has no `app.*` alias and no TSP route; the painted Show/Hide control
+is the pointer equivalent of the same action.
+
 ## Key decisions
 
 1. **One canonical physical-key identity.** Every key spelling collapses

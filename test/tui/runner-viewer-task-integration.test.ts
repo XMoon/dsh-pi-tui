@@ -836,6 +836,8 @@ test('a Job detail opened from /tasks keeps its parent mounted and live-refreshe
   await settle()
   await vt.waitForRender()
   assert.equal(app.overlayGraphState().handles, 1, 'Esc must close only the Job detail')
+  input('j') // the retained terminal record is collapsed by default: open its history
+  await vt.waitForRender()
   assert.ok(view().includes('completed'),
     `the restored parent must show the live-refreshed job status:\n${view()}`)
 
@@ -1046,6 +1048,10 @@ test('Task Center membership follows the registry: settlement retains, removal d
   const app = probe.apps.at(-1)
   assert.ok(app, 'the production runner must create a TuiApp')
   const view = (): string => vt.getViewport().map(line => line.replace(/\x1b\[[0-9;]*m/g, '')).join('\n')
+  const input = (data: string): void => {
+    const tui = (app as unknown as { tui: { handleTerminalInput(data: string): void } }).tui
+    tui.handleTerminalInput(data)
+  }
   const tasksHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('tasks')
   assert.ok(tasksHandler, 'the real runner must register /tasks')
 
@@ -1057,10 +1063,13 @@ test('Task Center membership follows the registry: settlement retains, removal d
   assert.ok(view().includes('build'), `the running job row must be visible:\n${view()}`)
 
   // Retained settlement: the registry keeps the terminal record (a
-  // handed-out background job) — the row must STAY and show completed.
+  // handed-out background job) — the row must STAY and show completed once
+  // its (default-collapsed) history group is opened.
   jobs.setEntries([{ id: 'bash-1', kind: 'bash', label: 'build', status: 'completed', startedAt: 1 }])
   jobs.emit('settled')
   await settle()
+  await vt.waitForRender()
+  input('j')
   await vt.waitForRender()
   const settledView = view()
   assert.ok(settledView.includes('build'), `a retained settlement must keep the row:\n${settledView}`)

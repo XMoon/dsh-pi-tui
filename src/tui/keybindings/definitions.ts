@@ -492,6 +492,14 @@ export const APP_KEYBINDINGS: Record<AppKeybindingId, AppKeybindingDefinition> =
     scope: 'tasks',
     configurable: false,
   },
+  'tasks.jobs.toggleHistory': {
+    id: 'tasks.jobs.toggleHistory',
+    defaultKeys: ['j'],
+    description: 'Show or hide tracked past Jobs',
+    category: 'Tasks',
+    scope: 'tasks',
+    configurable: false,
+  },
   'tasks.tree.expand': {
     id: 'tasks.tree.expand',
     defaultKeys: ['right'],

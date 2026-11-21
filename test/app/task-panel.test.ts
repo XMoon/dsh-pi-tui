@@ -366,7 +366,9 @@ test('Full Tracked Subagent disclosure responds to Left/Right and survives live 
     { value: 'agent:old', label: 'subagent · old', status: 'inactive', group: 'subagents', source: 'subagent', type: 'subagent', active: false, parentId: 'agent:parent', depth: 2, hasChildren: true, suffix: 'continuable' },
     { value: 'agent:leaf', label: 'subagent · leaf', status: 'inactive', group: 'subagents', source: 'subagent', type: 'subagent', active: false, parentId: 'agent:old', depth: 3, suffix: 'one-shot' },
     { value: 'agent:live', label: 'subagent · live', status: 'running', group: 'subagents', source: 'subagent', type: 'subagent', active: true, parentId: 'agent:parent', depth: 2, suffix: 'one-shot' },
-    { value: 'job:build', label: 'bash · build', status: 'completed', group: 'jobs', source: 'job', type: 'bash' },
+    // A generic row (no `source`) keeps this disclosure test focused on the
+    // Subagent tree; Job-source terminal rows are covered by the jobs tests.
+    { value: 'job:build', label: 'bash · build', status: 'completed', group: 'jobs', type: 'bash' },
   ]
   const { panel } = makePanel(items, { maxVisible: 10 })
   assert.deepEqual(panel.visibleItems().map(item => item.value),
@@ -2365,4 +2367,430 @@ test('B2: Regular/Main keeps its keyboard-only bar and no exit target', () => {
   panel.handleMouse(mouse('click', col, hintRow, 100, 24))
   assert.equal(closes.length, 0)
   panel.dispose()
+})
+
+// ── Full Tracked terminal-Job history disclosure (PR2) ────────────────────
+
+/** A Job-source row: the only rows that participate in the history disclosure. */
+function jobItem(overrides: Partial<TaskPanelItem> = {}): TaskPanelItem {
+  return {
+    value: 'job:build',
+    label: 'bash · build',
+    status: 'running',
+    active: true,
+    source: 'job',
+    type: 'bash',
+    group: 'jobs',
+    canStop: true,
+    startedAt: Date.now(),
+    ...overrides,
+  }
+}
+
+test('job history: default hides terminal Jobs; j shows them and selects the first history row', () => {
+  const { panel, rendered } = makePanel([
+    jobItem({ value: 'job:live', label: 'bash · live', status: 'running' }),
+    jobItem({ value: 'job:old', label: 'bash · old', status: 'completed', active: false, canStop: false }),
+  ])
+  const collapsed = rendered().map(strip).join('\n')
+  assert.ok(collapsed.includes('▸ Show 1 past jobs [J]'), `the fixed Show entry must sit above the list:\n${collapsed}`)
+  assert.ok(!collapsed.includes('▾ Hide'), 'a collapsed history never advertises Hide')
+  assert.ok(!collapsed.includes('bash · old'), 'a terminal Job row is hidden by default')
+  assert.deepEqual(panel.visibleItems().map(item => item.value), ['job:live'])
+
+  panel.handleInput('j')
+  assert.deepEqual(panel.visibleItems().map(item => item.value), ['job:live', 'job:old'])
+  assert.equal(panel.getViewState().selectedId, 'job:old', 'expanding selects the FIRST history Job')
+  const expanded = rendered().map(strip).join('\n')
+  assert.ok(expanded.includes('▾ Hide 1 past jobs [J]'), `the expanded entry flips its verb:\n${expanded}`)
+  assert.ok(expanded.includes('bash · old'))
+
+  panel.handleInput('j')
+  assert.ok(!rendered().map(strip).join('\n').includes('bash · old'))
+  assert.equal(panel.getViewState().selectedId, 'job:live', 'collapsing returns the cursor to a visible row')
+})
+
+test('job history: only terminal Jobs paint Show + the honest empty message, never a phantom group', () => {
+  const { panel, rendered } = makePanel([
+    jobItem({ value: 'job:a', label: 'bash · failed build', status: 'failed', active: false, attention: true, canStop: false }),
+  ])
+  const collapsed = rendered().map(strip).join('\n')
+  assert.ok(collapsed.includes('▸ Show 1 jobs [J]'), 'the no-active wording drops "past"')
+  assert.ok(collapsed.includes('!1 unreviewed'), 'the hidden failure attention is surfaced')
+  assert.ok(collapsed.includes('No active tasks in this view'), 'the view states the truth instead of a no-match lie')
+  assert.ok(!collapsed.includes('── jobs ──'), 'no empty Jobs header is fabricated')
+  assert.ok(!collapsed.includes('bash · failed build'))
+
+  panel.handleInput('j')
+  const expanded = rendered().map(strip).join('\n')
+  assert.ok(expanded.includes('── jobs ──'), 'the Jobs group appears only when its rows are visible')
+  assert.ok(expanded.includes('bash · failed build'))
+
+  const none = makePanel([])
+  const noneView = none.rendered().map(strip).join('\n')
+  assert.ok(!noneView.includes('jobs [J]') && !noneView.includes('Hide'), 'no candidates → no history control')
+  none.panel.handleInput('j')
+  assert.deepEqual(none.panel.visibleItems(), [], 'j is a no-op without terminal Job candidates')
+  assert.equal(none.panel.getViewState().selectedId, null)
+})
+
+test('a running Job settling to terminal is hidden, cancels its pending Stop and yields the active Job', () => {
+  const { panel, rendered } = makePanel([
+    jobItem({ value: 'job:a', label: 'bash · first', status: 'running' }),
+    jobItem({ value: 'job:b', label: 'bash · second', status: 'running' }),
+  ])
+  panel.handleInput('s')
+  assert.ok(rendered().map(strip).join('\n').includes('Confirm stop [Y]'), 'precondition — Stop is armed')
+
+  panel.setItems([
+    jobItem({ value: 'job:a', label: 'bash · first', status: 'completed', active: false, canStop: false }),
+    jobItem({ value: 'job:b', label: 'bash · second', status: 'running' }),
+  ])
+  assert.equal(panel.getViewState().selectedId, 'job:b', 'the first still-visible ACTIVE Job takes the cursor')
+  assert.ok(!rendered().map(strip).join('\n').includes('Confirm stop'), 'a settled target must clear the pending confirmation')
+  assert.deepEqual(panel.visibleItems().map(item => item.value), ['job:b'])
+})
+
+test('a terminal Job that disappears without an active Job falls back to the nearest visible row', () => {
+  const { panel } = makePanel([
+    jobItem({ value: 'job:a', label: 'bash · settle me', status: 'running' }),
+    { value: 'agent:child', label: 'subagent · child', status: 'inactive', active: false, source: 'subagent', type: 'subagent', group: 'subagents' },
+  ])
+  assert.equal(panel.getViewState().selectedId, 'job:a')
+  panel.handleInput('s')
+  panel.setItems([
+    jobItem({ value: 'job:a', label: 'bash · settle me', status: 'completed', active: false, canStop: false }),
+    { value: 'agent:child', label: 'subagent · child', status: 'inactive', active: false, source: 'subagent', type: 'subagent', group: 'subagents' },
+  ])
+  assert.equal(panel.getViewState().selectedId, 'agent:child', 'the nearest visible non-Job row is selected')
+  assert.ok(!panel.visibleItems().some(item => item.value === 'job:a'))
+})
+
+test('job history state survives refreshes, scope/type/Tab/resize and resets only with the terminal roster', () => {
+  const active = jobItem({ value: 'job:live', label: 'bash · live', status: 'running' })
+  const oldBash = jobItem({ value: 'job:old-bash', label: 'bash · old', status: 'completed', active: false, canStop: false })
+  const oldPwsh = jobItem({ value: 'job:old-pwsh', label: 'pwsh · old', status: 'failed', active: false, canStop: false, type: 'pwsh' })
+  const child: TaskPanelItem = { value: 'agent:child', label: 'subagent · child', status: 'inactive', active: false, source: 'subagent', type: 'subagent', group: 'subagents' }
+  const { panel, rendered } = makePanel([active, oldBash, oldPwsh, child], { team: readyTeam([teamTask()]) })
+  panel.handleInput('j')
+  assert.ok(rendered().map(strip).join('\n').includes('▾ Hide 2 past jobs [J]'))
+
+  // setItems: the manual expansion survives and a NEW terminal row joins it.
+  panel.setItems([
+    active,
+    oldBash,
+    oldPwsh,
+    jobItem({ value: 'job:new', label: 'bash · new', status: 'completed', active: false, canStop: false }),
+    child,
+  ])
+  assert.ok(rendered().map(strip).join('\n').includes('▾ Hide 3 past jobs [J]'), 'a refresh never collapses the manual disclosure')
+
+  // a: Active hides the control but keeps the flag; back to Tracked restores it.
+  panel.handleInput('a')
+  const activeView = rendered().map(strip).join('\n')
+  assert.ok(!activeView.includes('Hide 3 past jobs') && !activeView.includes('Show 3 past jobs'))
+  panel.handleInput('a')
+  assert.ok(rendered().map(strip).join('\n').includes('▾ Hide 3 past jobs [J]'))
+
+  // f: the control counts the CURRENT type candidates; the flag survives.
+  openTypeList(panel); panel.handleInput(DOWN); panel.handleInput('\r') // bash
+  assert.ok(rendered().map(strip).join('\n').includes('▾ Hide 2 past jobs [J]'),
+    'the bash filter counts only bash terminal candidates')
+  openTypeList(panel); panel.handleInput(UP); panel.handleInput(UP); panel.handleInput('\r') // All
+  assert.ok(rendered().map(strip).join('\n').includes('▾ Hide 3 past jobs [J]'))
+
+  // Tab Work→Team→Work keeps the Work disclosure and selection.
+  panel.handleInput('\t')
+  assert.ok(rendered().map(strip).join('\n').includes('[Team]'))
+  panel.handleInput('\t')
+  assert.ok(rendered().map(strip).join('\n').includes('▾ Hide 3 past jobs [J]'))
+
+  // A resize repaint (live row budget) keeps the state.
+  panel.setMaxRows(8)
+  assert.ok(panel.render(100).map(strip).join('\n').includes('▾ Hide 3 past jobs [J]'))
+
+  // Completely losing the terminal roster resets the flag; a later terminal
+  // row starts from the default collapsed state.
+  panel.setItems([active, child])
+  assert.ok(!rendered().map(strip).join('\n').includes('Hide'))
+  panel.setItems([active, oldBash, child])
+  assert.ok(rendered().map(strip).join('\n').includes('▸ Show 1 past jobs [J]'),
+    'a new terminal row starts collapsed after the roster emptied')
+
+  // A new browser instance always starts collapsed.
+  const fresh = makePanel([active, oldBash])
+  assert.ok(fresh.rendered().map(strip).join('\n').includes('▸ Show 1 past jobs [J]'))
+  assert.ok(!fresh.rendered().map(strip).join('\n').includes('▾ Hide'))
+})
+
+test('search owns j as query text and finds collapsed terminal Jobs; clearing restores the manual state', () => {
+  const { panel, rendered } = makePanel([
+    jobItem({ value: 'job:live', label: 'bash · live', status: 'running' }),
+    jobItem({ value: 'job:failed', label: 'bash · failed lint', status: 'failed', active: false, attention: true, canStop: false }),
+    jobItem({ value: 'job:done', label: 'pwsh · completed deploy', status: 'completed', active: false, canStop: false, type: 'pwsh' }),
+  ], { enableSearch: true })
+  const initial = rendered().map(strip).join('\n')
+  assert.ok(initial.includes('▸ Show 2 past jobs [J]') && initial.includes('!1 unreviewed'))
+
+  panel.handleInput('/')
+  panel.handleInput('j')
+  assert.equal(panel.getFilter(), 'j', 'search-mode j is query text, never a disclosure toggle')
+  panel.handleInput('\x7f') // Backspace
+  for (const key of 'failed') panel.handleInput(key)
+  assert.ok(panel.visibleItems().some(item => item.value === 'job:failed'), 'search reaches a hidden terminal Job')
+  assert.ok(rendered().map(strip).join('\n').includes('bash · failed lint'))
+  assert.ok(!rendered().map(strip).join('\n').includes('Show 2 past jobs'), 'search owns the row: no Show/Hide control')
+
+  panel.handleInput('\x1b') // exit search with the query kept
+  assert.ok(panel.visibleItems().some(item => item.value === 'job:failed'), 'the kept query keeps the search result visible')
+  panel.handleInput('/')
+  for (let i = 0; i < 'failed'.length; i += 1) panel.handleInput('\x7f')
+  panel.handleInput('\x1b') // exit search, query now empty
+  const restored = rendered().map(strip).join('\n')
+  assert.ok(restored.includes('▸ Show 2 past jobs [J]'), 'clearing the query restores the previous collapsed choice')
+  assert.ok(!restored.includes('bash · failed lint'))
+})
+
+test('j is inert on Team, in the type list, during a pending Stop and after switching to Active', () => {
+  const items = [
+    jobItem({ value: 'job:live', label: 'bash · live', status: 'running' }),
+    jobItem({ value: 'job:old', label: 'bash · old', status: 'completed', active: false, canStop: false }),
+  ]
+  const { panel, rendered } = makePanel(items, { team: readyTeam([teamTask()]) })
+  // Team page
+  panel.handleInput('\t')
+  panel.handleInput('j')
+  assert.ok(rendered().map(strip).join('\n').includes('[Team]'), 'j never leaves/affects the Team page')
+  panel.handleInput('\t')
+  // Type filter list
+  openTypeList(panel)
+  panel.handleInput('j')
+  assert.ok(rendered().map(strip).join('\n').includes('Type filter'), 'j stays inert while the type list owns input')
+  panel.handleInput('\x1b')
+  // Pending Stop
+  panel.handleInput('s')
+  panel.handleInput('j')
+  assert.ok(rendered().map(strip).join('\n').includes('Confirm stop [Y]'), 'j never dismisses a pending Stop')
+  panel.handleInput('\x1b')
+  // Active scope
+  panel.handleInput('a')
+  panel.handleInput('j')
+  assert.ok(!rendered().map(strip).join('\n').includes('Hide 1 past jobs'), 'j is inert in Active scope')
+})
+
+test('hidden failure attention is acknowledged only when the Job row is actually painted', () => {
+  const exposed: string[] = []
+  const panel = new TaskBrowserPanel(
+    [
+      jobItem({ value: 'job:live', label: 'bash · live', status: 'running' }),
+      jobItem({ value: 'job:f1', label: 'bash · failed one', status: 'failed', active: false, attention: true, canStop: false }),
+      jobItem({ value: 'job:f2', label: 'bash · failed two', status: 'failed', active: false, attention: true, canStop: false }),
+    ],
+    10,
+    { mode: 'full', header: 'tasks', onViewportExpose: ids => exposed.push(...ids) },
+    () => {}, () => {}, () => {},
+  )
+  panel.render(100)
+  assert.deepEqual(exposed, [], 'the collapsed Show row (even with !N) never acknowledges a failure')
+  const collapsed = panel.render(100).map(strip).join('\n')
+  assert.ok(collapsed.includes('!2 unreviewed'))
+  panel.handleInput('j')
+  panel.render(100)
+  assert.deepEqual(exposed, ['job:f1', 'job:f2'], 'expanded painted rows acknowledge exactly once')
+  panel.render(100)
+  assert.deepEqual(exposed, ['job:f1', 'job:f2'], 'a repaint never re-acknowledges')
+  panel.dispose()
+})
+
+test('type-filtered empty-with-history: Show stays reachable and disappears with the roster', () => {
+  const { panel, rendered } = makePanel([
+    jobItem({ value: 'job:old', label: 'bash · old build', status: 'completed', active: false, canStop: false }),
+    { value: 'agent:child', label: 'subagent · child', status: 'inactive', active: false, source: 'subagent', type: 'subagent', group: 'subagents' },
+  ])
+  openTypeList(panel); panel.handleInput(DOWN); panel.handleInput('\r') // bash
+  const filtered = rendered().map(strip).join('\n')
+  assert.ok(filtered.includes('▸ Show 1 jobs [J]'), 'the filtered history remains reachable')
+  assert.ok(filtered.includes('No active tasks in this view'))
+  assert.ok(!filtered.includes('── jobs ──') && !filtered.includes('bash · old build'), 'no phantom row or group header')
+
+  panel.handleInput('j')
+  assert.ok(rendered().map(strip).join('\n').includes('bash · old build'))
+  panel.setItems([])
+  const gone = rendered().map(strip).join('\n')
+  assert.ok(!gone.includes('jobs [J]') && !gone.includes('── jobs ──'), 'the control and group disappear with the roster')
+})
+
+test('job-history mouse: complete label only, press→repaint→release toggles once, item row opens', () => {
+  const selected: string[] = []
+  const panel = new TaskBrowserPanel(
+    [
+      jobItem({ value: 'job:live', label: 'bash · live', status: 'running' }),
+      jobItem({ value: 'job:old', label: 'bash · old', status: 'completed', active: false, canStop: false }),
+    ],
+    10,
+    { mode: 'full', header: 'tasks', mouseActionsEnabled: () => true, interactionCurrent: () => true },
+    value => { selected.push(value) },
+    () => {}, () => {},
+  )
+  const frame = panel.render(100).map(strip)
+  const controlRow = frame.findIndex(line => line.includes('Show 1 past jobs [J]'))
+  assert.ok(controlRow >= 0)
+  const controlCol = frame[controlRow]!.indexOf('Show')
+  // A release without a press is inert.
+  assert.equal(panel.handleMouse(mouse('click', controlCol, controlRow, 100, 24)), undefined)
+  // The suffix is outside the complete action label: inert.
+  const suffixCol = frame[controlRow]!.indexOf('!1 unreviewed')
+  assert.equal(panel.handleMouse(mouse('press', suffixCol, controlRow, 100, 24)), undefined)
+  // Real press → repaint → release toggles exactly once.
+  assert.ok(panel.handleMouse(mouse('press', controlCol, controlRow, 100, 24))?.handled)
+  panel.render(100)
+  assert.ok(panel.handleMouse(mouse('click', controlCol, controlRow, 100, 24))?.handled)
+  assert.deepEqual(panel.visibleItems().map(item => item.value), ['job:live', 'job:old'])
+  // Wheel on the control row never toggles.
+  const expandedFrame = panel.render(100).map(strip)
+  const hideRow = expandedFrame.findIndex(line => line.includes('Hide 1 past jobs [J]'))
+  const hideCol = expandedFrame[hideRow]!.indexOf('Hide')
+  panel.handleMouse(mouse('wheel', hideCol, hideRow, 100, 24, -1, 'none'))
+  assert.deepEqual(panel.visibleItems().map(item => item.value), ['job:live', 'job:old'])
+  // Clicking the history Job row goes through the ONE existing select sink.
+  const rowIndex = expandedFrame.findIndex(line => line.includes('bash · old'))
+  const rowCol = expandedFrame[rowIndex]!.indexOf('bash · old')
+  assert.ok(panel.handleMouse(mouse('press', rowCol, rowIndex, 100, 24))?.handled)
+  assert.ok(panel.handleMouse(mouse('click', rowCol, rowIndex, 100, 24))?.handled)
+  assert.deepEqual(selected, ['job:old'])
+  panel.dispose()
+})
+
+test('stale job-history gestures never toggle after content/state/owner changes', () => {
+  const make = (interactionCurrent: () => boolean = () => true, mouseActionsEnabled = true): TaskBrowserPanel =>
+    new TaskBrowserPanel(
+      [
+        jobItem({ value: 'job:live', label: 'bash · live', status: 'running' }),
+        jobItem({ value: 'job:old', label: 'bash · old', status: 'completed', active: false, canStop: false }),
+      ],
+      10,
+      { mode: 'full', header: 'tasks', mouseActionsEnabled: () => mouseActionsEnabled, interactionCurrent },
+      () => {}, () => {}, () => {},
+    )
+  const control = (panel: TaskBrowserPanel, verb = 'Show'): { x: number; row: number } => {
+    const frame = panel.render(100).map(strip)
+    const row = frame.findIndex(line => line.includes(`${verb} 1 past jobs [J]`))
+    assert.ok(row >= 0, `control missing:\n${frame.join('\n')}`)
+    return { x: frame[row]!.indexOf(verb), row }
+  }
+
+  // Content replaced with the same candidate count: setItems invalidates.
+  {
+    const panel = make()
+    const { x, row } = control(panel)
+    assert.ok(panel.handleMouse(mouse('press', x, row, 100, 24))?.handled)
+    panel.setItems([
+      jobItem({ value: 'job:live', label: 'bash · live', status: 'running' }),
+      jobItem({ value: 'job:old', label: 'bash · replaced old', status: 'completed', active: false, canStop: false }),
+    ])
+    panel.render(100)
+    panel.handleMouse(mouse('click', x, row, 100, 24))
+    assert.ok(!panel.visibleItems().some(item => item.label.includes('replaced old')))
+    panel.dispose()
+  }
+  // Keyboard input between press and release invalidates.
+  {
+    const panel = make()
+    const { x, row } = control(panel)
+    assert.ok(panel.handleMouse(mouse('press', x, row, 100, 24))?.handled)
+    panel.handleInput('a')
+    panel.handleInput('a')
+    panel.render(100)
+    panel.handleMouse(mouse('click', x, row, 100, 24))
+    assert.ok(!panel.visibleItems().some(item => item.value === 'job:old'))
+    panel.dispose()
+  }
+  // Resize between press and release invalidates by grant.
+  {
+    const panel = make()
+    const { x, row } = control(panel)
+    assert.ok(panel.handleMouse(mouse('press', x, row, 100, 24))?.handled)
+    panel.handleMouse(mouse('click', x, row, 120, 30))
+    assert.ok(!panel.visibleItems().some(item => item.value === 'job:old'))
+    panel.dispose()
+  }
+  // invalidate() revokes the armed frame.
+  {
+    const panel = make()
+    const { x, row } = control(panel)
+    assert.ok(panel.handleMouse(mouse('press', x, row, 100, 24))?.handled)
+    panel.invalidate()
+    panel.render(100)
+    panel.handleMouse(mouse('click', x, row, 100, 24))
+    assert.ok(!panel.visibleItems().some(item => item.value === 'job:old'))
+    panel.dispose()
+  }
+  // A stale owner fence or non-fullscreen surface never arms a press.
+  {
+    const stale = make(() => false)
+    const { x, row } = control(stale)
+    assert.equal(stale.handleMouse(mouse('press', x, row, 100, 24)), undefined)
+    stale.dispose()
+    const regular = make(() => true, false)
+    const point = control(regular)
+    assert.equal(regular.handleMouse(mouse('press', point.x, point.row, 100, 24)), undefined)
+    regular.handleInput('j')
+    assert.ok(regular.visibleItems().some(item => item.value === 'job:old'), 'keyboard j still works in Regular/Main')
+    regular.dispose()
+  }
+})
+
+test('job-history row budget stays within the grant across the frozen size matrix', () => {
+  const history: TaskPanelItem[] = Array.from({ length: 14 }, (_, index) => jobItem({
+    value: `job:old-${index}`,
+    label: `bash · ${index === 3 ? '构建 🚀 long job label ' : ''}old job ${index}`,
+    status: index % 3 === 0 ? 'failed' : 'completed',
+    active: false,
+    attention: index % 3 === 0,
+    canStop: false,
+  }))
+  const live = jobItem({ value: 'job:live', label: 'bash · 正在运行 live', status: 'running' })
+  for (const [width, height] of [[200, 50], [120, 40], [100, 40], [80, 24], [80, 10], [72, 24], [44, 20]] as const) {
+    const { panel } = makePanel([live, ...history], { interactionCurrent: () => true })
+    panel.setMaxRows(height)
+    const lines = panel.render(width).map(strip)
+    assert.ok(lines.length <= height, `${width}x${height}: render overflowed (${lines.length})`)
+    assert.ok(lines.at(-1)?.includes('Esc'), `${width}x${height}: the safe exit must stay on the last row:\n${lines.join('\n')}`)
+    const selectedId = panel.getViewState().selectedId
+    assert.ok(panel.viewportItems().some(item => item.value === selectedId),
+      `${width}x${height}: the selected row must be in the painted viewport`)
+    panel.dispose()
+  }
+  // A 1–3 row empty grant keeps the safe exit and the history control, and j
+  // still toggles even when the control itself had to yield.
+  const empty = makePanel(history, { interactionCurrent: () => true })
+  for (const rows of [3, 2]) {
+    empty.panel.setMaxRows(rows)
+    const lines = empty.panel.render(80).map(strip)
+    assert.ok(lines.length <= rows, `${rows}-row empty grant overflowed (${lines.length})`)
+    assert.ok(lines.join('\n').includes('Esc'), 'the exit survives')
+    assert.ok(lines.join('\n').includes('Show'), 'the history control survives above the message')
+  }
+  empty.panel.setMaxRows(1)
+  const one = empty.panel.render(80).map(strip)
+  assert.equal(one.length, 1)
+  assert.ok(one[0]!.includes('Esc'), 'a 1-row grant keeps the exit')
+  empty.panel.handleInput('j')
+  assert.equal(empty.panel.visibleItems().length, 14, 'j still expands without a painted control')
+  empty.panel.dispose()
+})
+
+test('the header stays the honest roster count when history is hidden', () => {
+  const { panel, rendered } = makePanel([
+    jobItem({ value: 'job:live', label: 'bash · live', status: 'running' }),
+    jobItem({ value: 'job:done', label: 'bash · done', status: 'completed', active: false, canStop: false }),
+    jobItem({ value: 'job:failed', label: 'bash · failed', status: 'failed', active: false, canStop: false }),
+  ])
+  const collapsed = rendered().map(strip).join('\n')
+  assert.ok(collapsed.includes('1 active'), 'the running Job still counts as active')
+  assert.ok(collapsed.includes('1 done') && collapsed.includes('1 failed'), 'roster outcomes are not hidden by presentation')
+  assert.ok(collapsed.includes('1/3 shown'), 'the header distinguishes visible rows from roster size')
+  assert.ok(collapsed.includes('[TRACKED]') && !collapsed.includes('[ACTIVE]'))
+  panel.handleInput('j')
+  assert.ok(rendered().map(strip).join('\n').includes('3/3 shown'), 'expanding updates only the shown count')
 })

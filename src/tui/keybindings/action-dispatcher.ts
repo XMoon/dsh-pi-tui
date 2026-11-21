@@ -179,6 +179,7 @@ export class AppActionDispatcher {
       case 'tasks.tab.next':
       case 'tasks.tab.previous':
       case 'tasks.type.filter':
+      case 'tasks.jobs.toggleHistory':
       case 'tasks.tree.expand':
       case 'tasks.tree.collapse':
       case 'tasks.stop':

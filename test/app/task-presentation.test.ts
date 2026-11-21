@@ -156,3 +156,59 @@ test('Active+search worst case stays fast: every branch matches the query (PR re
   assert.equal(projection.rows.length, depth, 'the matching lineage stays complete')
   assert.ok(elapsed < 500, `worst-case search expected linear-ish, took ${elapsed.toFixed(1)}ms`)
 })
+
+// ── Full Tracked terminal-Job disclosure projection ────────────────────────
+
+const jobStatusRows: TaskPanelItem[] = [
+  { value: 'job:running', label: 'running', status: 'running', active: true, source: 'job', type: 'bash' },
+  { value: 'job:stopping', label: 'stopping', status: 'stopping', active: true, source: 'job', type: 'bash' },
+  { value: 'job:completed', label: 'completed', status: 'completed', active: false, source: 'job', type: 'bash' },
+  { value: 'job:failed', label: 'failed', status: 'failed', active: false, source: 'job', type: 'bash' },
+  { value: 'job:timed-out', label: 'timed out', status: 'timed_out', active: false, source: 'job', type: 'bash' },
+  { value: 'job:lost', label: 'lost', status: 'lost', active: false, source: 'job', type: 'bash' },
+]
+
+test('hideInactiveJobs keeps only running/stopping Job rows without reordering', () => {
+  const items: TaskPanelItem[] = [
+    ...jobStatusRows,
+    { value: 'agent:root', label: 'root', status: 'inactive', active: false, source: 'subagent', type: 'subagent', depth: 1, hasChildren: true },
+    { value: 'agent:child', label: 'child', status: 'inactive', active: false, source: 'subagent', type: 'subagent', parentId: 'agent:root', depth: 2 },
+    { value: 'question:q1', label: 'answer me', status: 'Awaiting answer', source: 'question' },
+  ]
+  const hidden = projectTaskItems(items, options({ hideInactiveJobs: true }))
+  assert.deepEqual(hidden.rows.map(row => row.value),
+    ['job:running', 'job:stopping', 'agent:root', 'agent:child', 'question:q1'])
+  const all = projectTaskItems(items, options({ hideInactiveJobs: false }))
+  assert.deepEqual(all.rows.map(row => row.value),
+    ['job:running', 'job:stopping', 'job:completed', 'job:failed', 'job:timed-out', 'job:lost', 'agent:root', 'agent:child', 'question:q1'])
+  assert.deepEqual(projectTaskItems(items, options()).rows.map(row => row.value),
+    all.rows.map(row => row.value), 'the option defaults to false')
+})
+
+test('hideInactiveJobs does not change the Active projection or type/query matching', () => {
+  const active = projectTaskItems(jobStatusRows, options({ scope: 'active', hideInactiveJobs: true }))
+  assert.deepEqual(active.rows.map(row => row.value), ['job:running', 'job:stopping'])
+  assert.deepEqual(projectTaskItems(jobStatusRows, options({ scope: 'active' })).rows.map(row => row.value),
+    ['job:running', 'job:stopping'])
+  const typed = projectTaskItems(jobStatusRows, options({ typeFilter: 'bash', hideInactiveJobs: true }))
+  assert.deepEqual(typed.rows.map(row => row.value), ['job:running', 'job:stopping'])
+  const queried = projectTaskItems(jobStatusRows, options({ query: 'failed', hideInactiveJobs: false }))
+  assert.deepEqual(queried.rows.map(row => row.value), ['job:failed'],
+    'the search caller opts OUT of hiding so a terminal Job is matchable')
+  assert.equal(queried.matchedIds.has('job:failed'), true)
+  const hiddenQuery = projectTaskItems(jobStatusRows, options({ query: 'failed', hideInactiveJobs: true }))
+  assert.deepEqual(hiddenQuery.rows.map(row => row.value), [],
+    'the opt-in alone never filters search membership; the panel decides by clearing it for a query')
+})
+
+test('a Job whose kind is subagent stays source job and is never mixed into the Subagent tree', () => {
+  const items: TaskPanelItem[] = [
+    { value: 'job:subagent-bg', label: 'subagent job · bg', status: 'completed', active: false, source: 'job', type: 'subagent' },
+    { value: 'agent:live', label: 'live child', status: 'inactive', active: false, source: 'subagent', type: 'subagent' },
+  ]
+  const projection = projectTaskItems(items, options({ hideInactiveJobs: true }))
+  assert.deepEqual(projection.rows.map(row => row.value), ['agent:live'])
+  const byType = projectTaskItems(items, options({ typeFilter: 'subagent', hideInactiveJobs: false }))
+  assert.deepEqual(byType.rows.map(row => row.value), ['job:subagent-bg', 'agent:live'],
+    'the real Job kind matches the type filter; source stays independent')
+})

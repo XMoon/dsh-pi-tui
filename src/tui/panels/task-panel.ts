@@ -64,6 +64,16 @@ type TaskMouseHit =
   | { kind: 'item'; value: string; index: number; listWidth?: number }
   | { kind: 'actions'; actions: readonly TaskMouseActionHit[] }
   | { kind: 'tab'; spans: readonly TabSpan[] }
+  | {
+      /** The Work history disclosure chrome row: only the painted action label
+       *  is a target; the informational `!N unreviewed` suffix is not. */
+      kind: 'job-history'
+      startCol: number
+      endCol: number
+      expanded: boolean
+      count: number
+      unreviewed: number
+    }
   | { kind: 'inert' }
 
 /** One painted tab label's column range and the page it switches to. */
@@ -84,6 +94,7 @@ type Fr2Gesture =
   | { readonly kind: 'tab'; readonly target: 'work' | 'team'; readonly startCol: number; readonly endCol: number; readonly row: number; readonly width: number; readonly height: number }
   | { readonly kind: 'team-row'; readonly value: string; readonly row: number; readonly width: number; readonly height: number }
   | { readonly kind: 'filter'; readonly token: string; readonly chosen: string | null; readonly row: number; readonly width: number; readonly height: number }
+  | { readonly kind: 'job-history'; readonly startCol: number; readonly endCol: number; readonly expanded: boolean; readonly count: number; readonly row: number; readonly width: number; readonly height: number }
 
 /** One selectable Team page row (Root/member or shared task). Section headers
  *  are derived from kind transitions during render and are never selectable. */
@@ -226,6 +237,11 @@ export class TaskBrowserPanel implements Component, Focusable {
   private loading: boolean
   private refreshError: string | undefined
   private preferredValue: string | undefined
+  /** Full Tracked presentation: the user opened the terminal-Job history. */
+  private jobHistoryExpanded = false
+  /** The captured job-history disclosure press (same last-painted gesture
+   *  identity contract as the FR2 tab/team/filter gestures). */
+  private jobHistoryPressed: Fr2Gesture | undefined
 
   // ── FR2: Work/Team pages + Work type-filter list ──────────────────────────
   /** The active page. Both pages share the ONE physical panel/overlay. */
@@ -328,19 +344,23 @@ export class TaskBrowserPanel implements Component, Focusable {
   /** Derive the item window from the current chrome and row budget. */
   private recomputeVisibleBudget(): void {
     const prefix = (this.options.header === undefined ? 0 : 2) + (this.searchMode ? 2 : 0)
+    const history = this.historyControlVisible() ? 1 : 0
     const trailing = 2 // blank separator + navigation hint
     const refreshLine = this.refreshError !== undefined ? 1 : 0
     const group = this.filtered.some(item => item.group !== undefined) ? 1 : 0
     const budget = this.maxRows === Number.POSITIVE_INFINITY
       ? this.configuredMaxVisible
-      : this.maxRows - prefix - trailing - refreshLine - group
+      : this.maxRows - prefix - history - trailing - refreshLine - group
     this.maxVisible = Math.max(1, Math.min(this.configuredMaxVisible, budget))
   }
 
   /** Replace rows while preserving the selected identity where possible. */
   setItems(items: readonly TaskPanelItem[], preferredValue?: string): void {
     this.mousePressedAction = undefined
+    this.jobHistoryPressed = undefined
     const previousValue = this.filtered[this.selected]?.value
+    const previousIndex = this.selected
+    const previousSource = this.filtered[this.selected]?.source
     this.items = [...items]
     this.loading = false
     // Forget exposures whose row left the attention set: a STABLE id can
@@ -359,18 +379,44 @@ export class TaskBrowserPanel implements Component, Focusable {
     if (preferredValue !== undefined) this.preferredValue = preferredValue
     this.rebuildTypeCycle()
     if (this.activeType !== null && !this.typeOrder.includes(this.activeType)) this.activeType = null
+    // The manual history disclosure is meaningful only while the authority
+    // still lists a terminal Job (a type filter hiding all of them does NOT
+    // clear it — switching the filter back restores the same manual state).
+    if (!this.items.some(item => item.source === 'job' && !isTaskItemActive(item))) {
+      this.jobHistoryExpanded = false
+    }
     this.reproject(false)
     if (this.pendingStopValue !== undefined && !this.canStop(this.items.find(item => item.value === this.pendingStopValue))) {
       this.pendingStopValue = undefined
     }
-    if (this.selectionTouched && previousValue !== undefined) {
-      const index = this.filtered.findIndex(item => item.value === previousValue)
-      if (index !== -1) {
-        this.selected = index
-        this.ensureVisible()
+    // Identity-first restoration: a still-visible row keeps the cursor. A Job
+    // the new projection hid (terminal transition / history collapse) falls
+    // back to the first visible ACTIVE Job, then to the nearest projected
+    // index; a non-Job row keeps the original preference behavior.
+    const keptIndex = previousValue === undefined ? -1 : this.filtered.findIndex(item => item.value === previousValue)
+    if (this.selectionTouched && keptIndex !== -1) {
+      this.selected = keptIndex
+      this.ensureVisible()
+      this.cancelPendingStopIfSelectionMoved()
+      return
+    }
+    if (!this.selectionTouched) {
+      this.selectPreferred()
+      // An untouched cursor follows the caller's preferred row while it is
+      // visible; otherwise the Job-transition fallback below applies.
+      if (this.preferredValue !== undefined && this.filtered.some(item => item.value === this.preferredValue)) {
         this.cancelPendingStopIfSelectionMoved()
         return
       }
+    }
+    if (previousSource === 'job') {
+      const activeJobIndex = this.filtered.findIndex(item => item.source === 'job' && isTaskItemActive(item))
+      this.selected = activeJobIndex !== -1
+        ? activeJobIndex
+        : Math.max(0, Math.min(previousIndex, this.filtered.length - 1))
+      this.ensureVisible()
+      this.cancelPendingStopIfSelectionMoved()
+      return
     }
     if (!this.selectionTouched) this.selectPreferred()
     this.cancelPendingStopIfSelectionMoved()
@@ -389,6 +435,7 @@ export class TaskBrowserPanel implements Component, Focusable {
   /** Set the async refresh state without discarding cached rows. */
   setRefreshState(state: 'loading' | 'ready' | 'stale', error?: string): void {
     this.mousePressedAction = undefined
+    this.jobHistoryPressed = undefined
     this.loading = state === 'loading'
     this.refreshError = state === 'stale' ? error ?? 'Refresh failed' : undefined
     if (state === 'ready') this.loading = false
@@ -498,6 +545,116 @@ export class TaskBrowserPanel implements Component, Focusable {
     return this.filtered.length
   }
 
+  /** Terminal Job rows after the CURRENT Work type filter. Derived from the
+   *  current authoritative rows on demand — never cached as a second roster. */
+  private jobHistoryCandidates(): TaskPanelItem[] {
+    return this.items.filter(item => item.source === 'job'
+      && !isTaskItemActive(item)
+      && (this.activeType === null || item.type === this.activeType))
+  }
+
+  /** Active Job rows after the CURRENT Work type filter. */
+  private activeJobCount(): number {
+    return this.items.filter(item => item.source === 'job'
+      && isTaskItemActive(item)
+      && (this.activeType === null || item.type === this.activeType)).length
+  }
+
+  /** Whether the Work history disclosure is paintable/actionable: Full Work
+   *  Tracked, no search editing or non-empty query, no pending Stop, no type
+   *  list, and at least one terminal Job candidate. */
+  private historyControlVisible(): boolean {
+    return !this.disposed
+      && this.pageView === 'work'
+      && !this.filterOpen
+      && this.scope === 'all'
+      && !this.searchMode
+      && this.pendingStopValue === undefined
+      && this.getFilter().trim() === ''
+      && this.jobHistoryCandidates().length > 0
+  }
+
+  /** The ONE Work history disclosure chrome row. Only the complete painted
+   *  action label is a pointer target; the `!N unreviewed` suffix is
+   *  informational and never the click span. */
+  private historyControl(width: number): { line: string; hit: TaskMouseHit } | undefined {
+    if (!this.historyControlVisible()) return undefined
+    const candidates = this.jobHistoryCandidates()
+    const count = candidates.length
+    const unreviewed = candidates.filter(item => item.attention === true).length
+    const expanded = this.jobHistoryExpanded
+    const verb = expanded
+      ? `Hide ${count} past jobs`
+      : this.activeJobCount() > 0 ? `Show ${count} past jobs` : `Show ${count} jobs`
+    const key = componentKeymap.keyHint('tasks.jobs.toggleHistory')
+    const glyph = expanded ? '▾' : '▸'
+    const actionPlain = `${glyph} ${verb} [${key}]`
+    const actionStyled = `${color.textMuted(glyph)} ${color.text(verb)} ${color.textMuted(`[${key}]`)}`
+    const suffixPlain = unreviewed > 0 ? ` · !${unreviewed} unreviewed` : ''
+    const suffixStyled = unreviewed > 0
+      ? `${color.textMuted(' · ')}${color.error(`!${unreviewed} unreviewed`)}`
+      : ''
+    const actionWidth = visibleWidth(actionPlain)
+    if (actionWidth > width) {
+      // A truncated action label is honest text but an inert target: the
+      // pointer may only hit the COMPLETE painted Show/Hide label.
+      return { line: truncateToWidth(`${actionStyled}${suffixStyled}`, width, '…'), hit: { kind: 'inert' } }
+    }
+    let line = actionStyled
+    if (suffixPlain !== '') {
+      const remaining = width - actionWidth
+      if (remaining > 0) line += truncateToWidth(suffixStyled, remaining, '…')
+    }
+    return {
+      line,
+      hit: { kind: 'job-history', startCol: 0, endCol: actionWidth, expanded, count, unreviewed },
+    }
+  }
+
+  /** The ONE toggle shared by `j` and the painted control. It changes only
+   *  the panel-local disclosure, re-projects, restores a legal selection and
+   *  requests a repaint — never a roster/ack/Stop mutation. */
+  private toggleJobHistory(): void {
+    if (!this.historyControlVisible()) return
+    const candidates = this.jobHistoryCandidates()
+    if (candidates.length === 0) return
+    const previousValue = this.filtered[this.selected]?.value
+    const previousIndex = this.selected
+    this.jobHistoryExpanded = !this.jobHistoryExpanded
+    this.selectionTouched = true
+    this.reproject(false)
+    if (this.jobHistoryExpanded) {
+      const firstHistory = this.filtered.findIndex(item => item.source === 'job' && !isTaskItemActive(item))
+      if (firstHistory !== -1) {
+        this.selected = firstHistory
+        this.ensureVisible()
+      }
+    } else {
+      const keptIndex = previousValue === undefined ? -1 : this.filtered.findIndex(item => item.value === previousValue)
+      if (keptIndex !== -1) {
+        this.selected = keptIndex
+      } else {
+        const activeJobIndex = this.filtered.findIndex(item => item.source === 'job' && isTaskItemActive(item))
+        this.selected = activeJobIndex !== -1
+          ? activeJobIndex
+          : Math.max(0, Math.min(previousIndex, this.filtered.length - 1))
+      }
+      this.ensureVisible()
+    }
+    this.cancelPendingStopIfSelectionMoved()
+    this.requestRender()
+  }
+
+  /** The live identity of one job-history hit: the same candidates, the same
+   *  expanded state, the same complete label span. */
+  private jobHistoryControlCurrent(hit: { readonly expanded: boolean; readonly count: number }): boolean {
+    if (!this.historyControlVisible()) return false
+    if (this.options.mouseActionsEnabled?.() !== true) return false
+    if (this.interactionCurrent?.() !== true) return false
+    return this.jobHistoryCandidates().length === hit.count
+      && this.jobHistoryExpanded === hit.expanded
+  }
+
   private rebuildTypeCycle(): void {
     const seen: string[] = []
     for (const item of this.items) {
@@ -516,6 +673,9 @@ export class TaskBrowserPanel implements Component, Focusable {
       collapsedIds: this.collapsedIds,
       autoExpandRunning: true,
       includeAttentionInActive: false,
+      hideInactiveJobs: this.scope === 'all'
+        && !this.jobHistoryExpanded
+        && query.trim() === '',
     })
     this.filtered = [...projection.rows]
     // The projection changed the row set: re-derive the live item budget
@@ -1101,18 +1261,23 @@ export class TaskBrowserPanel implements Component, Focusable {
     const item = this.selectedItem()
     if (!this.canStop(item)) return
     this.pendingStopValue = item!.value
+    // The pending state hides the history control; re-derive the window
+    // budget so its row is returned to the task list in the same frame.
+    this.recomputeVisibleBudget()
     this.requestRender()
   }
 
   private clearPendingStop(): void {
     if (this.pendingStopValue === undefined) return
     this.pendingStopValue = undefined
+    this.recomputeVisibleBudget()
     this.requestRender()
   }
 
   private confirmStop(): void {
     const value = this.pendingStopValue
     this.pendingStopValue = undefined
+    this.recomputeVisibleBudget()
     if (value === undefined) return
     const item = this.items.find(candidate => candidate.value === value)
     if (!this.canStop(item)) return
@@ -1160,6 +1325,7 @@ export class TaskBrowserPanel implements Component, Focusable {
   handleInput(data: string): void {
     this.mousePressedValue = undefined
     this.mousePressedAction = undefined
+    this.jobHistoryPressed = undefined
     // B4-B: the modal Quick mode is retired — the on-demand Task Quick
     // accessory replaced it. This panel is the Full Task Center only, and
     // the Full state machine below is the only keyboard surface.
@@ -1227,6 +1393,13 @@ export class TaskBrowserPanel implements Component, Focusable {
 
     if (componentKeymap.matches(data, 'tasks.search.enter')) {
       this.enterSearchMode()
+      return
+    }
+    // Full Work Tracked only, after the four owning states above: `j` toggles
+    // the panel-local terminal-Job history disclosure. In search mode the
+    // same printable remains query text.
+    if (componentKeymap.matches(data, 'tasks.jobs.toggleHistory')) {
+      this.toggleJobHistory()
       return
     }
     if (componentKeymap.matches(data, 'tasks.tab.next')) { this.switchPage('next'); return }
@@ -1390,11 +1563,13 @@ export class TaskBrowserPanel implements Component, Focusable {
     const pressedSelectionOnly = this.mousePressedSelectionOnly
     const pressedAction = this.mousePressedAction
     const fr2Pressed = this.fr2Pressed
+    const jobHistoryPressed = this.jobHistoryPressed
     if (event.type === 'click' || (event.type === 'press' && event.button === 'left') || event.type === 'wheel') {
       this.mousePressedValue = undefined
       this.mousePressedSelectionOnly = false
       this.mousePressedAction = undefined
       this.fr2Pressed = undefined
+      this.jobHistoryPressed = undefined
     }
     if (event.type === 'click' && pressedSelectionOnly) return { handled: true }
     if (this.disposed) return undefined
@@ -1408,6 +1583,7 @@ export class TaskBrowserPanel implements Component, Focusable {
     // The pinned Action Bar is shared by every state: its complete painted
     // spans are resolved before the page-specific item handling (a Team/filter
     // page paints no `tab`/`item` hit on the hint row anyway).
+    if (hit.kind === 'job-history') return this.handleJobHistoryMouse(event, hit, jobHistoryPressed)
     if (hit.kind === 'actions') {
       if (event.button !== 'left' || (event.type !== 'press' && event.type !== 'click')) return undefined
       const target = hit.actions.find(action => event.x >= action.startCol && event.x < action.endCol)
@@ -1542,7 +1718,44 @@ export class TaskBrowserPanel implements Component, Focusable {
     }
     if (pressed.kind === 'team-row' && current.kind === 'team-row') return pressed.value === current.value
     if (pressed.kind === 'filter' && current.kind === 'filter') return pressed.token === current.token
+    if (pressed.kind === 'job-history' && current.kind === 'job-history') {
+      return pressed.startCol === current.startCol
+        && pressed.endCol === current.endCol
+        && pressed.expanded === current.expanded
+        && pressed.count === current.count
+    }
     return false
+  }
+
+  /** One Work history disclosure gesture: press only locks the last-painted
+   *  identity; the matching release runs the SAME `toggleJobHistory()` as the
+   *  keyboard. Wheel stays inert on this chrome row. */
+  private handleJobHistoryMouse(
+    event: TuiMouseEvent,
+    hit: Extract<TaskMouseHit, { kind: 'job-history' }>,
+    pressed: Fr2Gesture | undefined,
+  ): TuiMouseEventResult | undefined {
+    if (event.type === 'wheel') return undefined
+    if (event.button !== 'left' || (event.type !== 'press' && event.type !== 'click')) return undefined
+    if (event.x < hit.startCol || event.x >= hit.endCol) return undefined
+    if (!this.jobHistoryControlCurrent(hit)) return undefined
+    const current: Fr2Gesture = {
+      kind: 'job-history',
+      startCol: hit.startCol,
+      endCol: hit.endCol,
+      expanded: hit.expanded,
+      count: hit.count,
+      row: event.y,
+      width: event.width,
+      height: event.height,
+    }
+    if (event.type === 'press') {
+      this.jobHistoryPressed = current
+      return { handled: true, focus: true }
+    }
+    if (pressed === undefined || !this.sameFr2Gesture(pressed, current)) return undefined
+    this.toggleJobHistory()
+    return { handled: true }
   }
 
   private handleFilterMouse(event: TuiMouseEvent, hit: TaskMouseHit, pressed: Fr2Gesture | undefined): TuiMouseEventResult | undefined {
@@ -1663,6 +1876,7 @@ export class TaskBrowserPanel implements Component, Focusable {
     this.mousePressedValue = undefined
     this.mousePressedSelectionOnly = false
     this.mousePressedAction = undefined
+    this.jobHistoryPressed = undefined
     if (this.tickTimer !== undefined) clearInterval(this.tickTimer)
     this.tickTimer = undefined
     this.marquee.dispose()
@@ -1685,6 +1899,7 @@ export class TaskBrowserPanel implements Component, Focusable {
     this.mousePressedSelectionOnly = false
     this.mousePressedAction = undefined
     this.fr2Pressed = undefined
+    this.jobHistoryPressed = undefined
     this.hitMap = []
     this.searchInput.invalidate()
     this.teamSearchInput.invalidate()
@@ -1735,9 +1950,15 @@ export class TaskBrowserPanel implements Component, Focusable {
       const stripped = searchLine.startsWith('> ') ? searchLine.slice(2) : searchLine
       return searchEmpty ? ' / search…' : ` ${stripped}`
     })()
+    const historyControl = this.historyControl(safeWidth)
 
     if (headerText !== undefined) {
       push(color.textStrong(headerText), this.workTabHit())
+    }
+    if (historyControl !== undefined) {
+      push(historyControl.line, historyControl.hit)
+    }
+    if (headerText !== undefined) {
       push('', { kind: 'inert' })
     }
 
@@ -1769,15 +1990,32 @@ export class TaskBrowserPanel implements Component, Focusable {
       // refresh-error banner (a long dynamic message must never wrap into
       // extra terminal rows, and must never carry an escape sequence).
       const noMatchText = this.refreshError === undefined
-        ? truncateToWidth(sanitizedPhysicalLine(this.options.noMatchText ?? 'No matching tasks'), safeWidth, '…')
+        ? truncateToWidth(sanitizedPhysicalLine(historyControl !== undefined
+          ? 'No active tasks in this view'
+          : this.options.noMatchText ?? 'No matching tasks'), safeWidth, '…')
         : 'Could not load tasks'
+      this.lastRenderedStart = 0
+      this.lastRenderedCount = 0
+      this.hasRenderedViewport = true
+      if (historyControl !== undefined) {
+        // The ONLY empty-with-history projection: the truth is "nothing is
+        // active", never "nothing here". The control keeps the hidden roster
+        // reachable; no fake task row and no phantom group header.
+        const result = this.renderEmptyWithHistory(
+          headerText,
+          historyControl,
+          noMatchText,
+          this.refreshError === undefined ? undefined : refreshErrorLine,
+          hintLine,
+          hint.hit,
+        )
+        this.hitMap = result.hits
+        return result.lines
+      }
       push(color.textDim(noMatchText), { kind: 'inert' })
       if (this.refreshError !== undefined) push(color.textMuted(refreshErrorLine!), { kind: 'inert' })
       push('', { kind: 'inert' })
       push(hintLine, hint.hit)
-      this.lastRenderedStart = 0
-      this.lastRenderedCount = 0
-      this.hasRenderedViewport = true
       const result = this.finalizeEmpty(lines, hits)
       this.hitMap = result.hits
       return result.lines
@@ -1880,12 +2118,12 @@ export class TaskBrowserPanel implements Component, Focusable {
     }
 
     // Very short grants: true semantic degradation — search input
-    // (searchMode) > selected main > hint > header > group > detail >
-    // indicator > blank spacers. The selected main row is never squeezed
-    // out by decorative blanks or the header (this path does not keep the
-    // chrome prefix unconditionally). The final layout is decided BEFORE
-    // the exposure ack: an extreme grant can drop the selected row
-    // entirely (a 1-row grant + search mode paints only the search
+    // (searchMode) > selected main > hint > history control > header >
+    // group > detail > indicator > blank spacers. The selected main row is
+    // never squeezed out by decorative blanks or the header (this path does
+    // not keep the chrome prefix unconditionally). The final layout is
+    // decided BEFORE the exposure ack: an extreme grant can drop the selected
+    // row entirely (a 1-row grant + search mode paints only the search
     // input), and only rows the FINAL layout actually paints may be
     // acknowledged.
     const entries = this.windowEntries(start, itemCount, listWidth)
@@ -1899,6 +2137,7 @@ export class TaskBrowserPanel implements Component, Focusable {
       limit,
       hintLine,
       hint.hit,
+      historyControl,
     )
     this.lastRenderedStart = degraded.paintsSelectedMain ? start : 0
     this.lastRenderedCount = degraded.paintsSelectedMain ? 1 : 0
@@ -1909,12 +2148,12 @@ export class TaskBrowserPanel implements Component, Focusable {
   }
 
   /** True semantic degradation for very short grants. The declared
-   * priority (search input > selected main > hint > header > group >
-   * detail > indicator) is enforced by INCLUSION — the chrome prefix is
-   * rebuilt from the hoisted texts and only kept when it fits after the
-   * mandatory content, so the selected main row cannot lose to two
-   * decorative blanks + the header. Returns whether the selected main row
-   * is actually painted, so the callers ack only what the user saw. */
+   * priority (search input > selected main > hint > history control >
+   * header > group > detail > indicator) is enforced by INCLUSION — the
+   * chrome prefix is rebuilt from the hoisted texts and only kept when it
+   * fits after the mandatory content, so the selected main row cannot lose
+   * to two decorative blanks + the header. Returns whether the selected main
+   * row is actually painted, so the callers ack only what the user saw. */
   private degradedFallback(
     selectedEntry: { group: string | undefined; main: string; details: string[] } | undefined,
     searchRowText: string,
@@ -1924,6 +2163,7 @@ export class TaskBrowserPanel implements Component, Focusable {
     limit: number,
     hintLine: string,
     hintHit: TaskMouseHit,
+    historyControl: { line: string; hit: TaskMouseHit } | undefined,
   ): { lines: string[]; hits: TaskMouseHit[]; paintsSelectedMain: boolean } {
     const mainRow = selectedEntry?.main
     const groupRow = selectedEntry !== undefined && selectedEntry.group !== undefined
@@ -1951,7 +2191,10 @@ export class TaskBrowserPanel implements Component, Focusable {
     }
     const hintIncluded = content.length + 1 <= limit
     let used = content.length + (hintIncluded ? 1 : 0)
-    // Optional chrome (priority 4-7) fills the leftover rows.
+    // Optional chrome (priority 4-7) fills the leftover rows. The history
+    // control outranks the decorative header/group/detail rows.
+    let historyShown = false
+    if (historyControl !== undefined && used + 1 <= limit) { historyShown = true; used += 1 }
     let headerShown = false
     if (headerText !== undefined && used + 1 <= limit) { headerShown = true; used += 1 }
     let groupShown = false
@@ -1975,6 +2218,10 @@ export class TaskBrowserPanel implements Component, Focusable {
     if (searchShown !== '') {
       out.push(searchShown)
       outHits.push({ kind: 'search' })
+    }
+    if (historyShown) {
+      out.push(historyControl!.line)
+      outHits.push(historyControl!.hit)
     }
     if (groupShown) {
       out.push(groupRow!)
@@ -2031,6 +2278,44 @@ export class TaskBrowserPanel implements Component, Focusable {
       entries.push({ group: item.group, main, details, selected: index === this.selected })
     }
     return entries
+  }
+
+  /** Empty-with-history is its own honest projection: the roster still holds
+   *  terminal Jobs, but nothing is active. Safety/content order under a very
+   *  short grant is hint (the exit) > history control > message > refresh >
+   *  header > blank; the result never keeps an orphan clickable hit. */
+  private renderEmptyWithHistory(
+    headerText: string | undefined,
+    historyControl: { line: string; hit: TaskMouseHit },
+    message: string,
+    refreshErrorLine: string | undefined,
+    hintLine: string,
+    hintHit: TaskMouseHit,
+  ): { lines: string[]; hits: TaskMouseHit[] } {
+    const entries: Array<{ line: string; hit: TaskMouseHit; priority: number }> = []
+    if (headerText !== undefined) {
+      entries.push({ line: color.textStrong(headerText), hit: this.workTabHit(), priority: 10 })
+    }
+    entries.push({ line: historyControl.line, hit: historyControl.hit, priority: 500 })
+    entries.push({ line: color.textDim(message), hit: { kind: 'inert' }, priority: 100 })
+    if (refreshErrorLine !== undefined) {
+      entries.push({ line: color.textMuted(refreshErrorLine), hit: { kind: 'inert' }, priority: 90 })
+    }
+    entries.push({ line: '', hit: { kind: 'inert' }, priority: 0 })
+    entries.push({ line: hintLine, hit: hintHit, priority: 1000 })
+    if (!Number.isFinite(this.maxRows)) {
+      return { lines: entries.map(entry => entry.line), hits: entries.map(entry => entry.hit) }
+    }
+    const limit = Math.max(1, Math.floor(this.maxRows))
+    const kept = [...entries]
+    while (kept.length > limit) {
+      let lowest = 0
+      for (let index = 1; index < kept.length; index += 1) {
+        if (kept[index]!.priority < kept[lowest]!.priority) lowest = index
+      }
+      kept.splice(lowest, 1)
+    }
+    return { lines: kept.map(entry => entry.line), hits: kept.map(entry => entry.hit) }
   }
 
   /** Finalize the empty/no-match assembly against the live grant

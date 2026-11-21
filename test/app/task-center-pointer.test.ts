@@ -15,6 +15,8 @@ import { createTaskRuntime, type TaskSurfaceSource } from '../../src/app/surface
 import { pituiTaskCenterPresentation } from '../../src/app/surface/task-presentation-pitui.ts'
 import { pituiDisplaySeam } from '../../src/app/surface/display-seam-pitui.ts'
 import type { TaskSubagentEntry } from '../../src/runtime/task-read-port.ts'
+import type { TaskBrowserJobInput } from '../../src/domain/task/browser.ts'
+import type { JobObservedSnapshot } from '../../src/runtime/job-observation-port.ts'
 import type { SessionSubject } from '../../src/app/session/subject.ts'
 import { createDiag } from '../../src/runtime/process/diagnostics.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
@@ -70,8 +72,56 @@ function taskSource(
   }
 }
 
+/** A REAL Job roster feed (mutable) + the external Job-observation recorder. */
+function jobRosterSource(
+  subject: SessionSubject,
+  roster: { rows: TaskBrowserJobInput[]; listeners: Array<(event: { type: string }) => void> },
+): {
+  source: TaskSurfaceSource
+  observation: { opens: string[]; closes: string[] }
+} {
+  const observation = { opens: [] as string[], closes: [] as string[] }
+  const base = taskSource(subject)
+  const snapshot = (job: TaskBrowserJobInput): JobObservedSnapshot => ({
+    jobId: job.id,
+    kind: job.kind,
+    label: job.label,
+    status: job.status,
+    detail: job.detail,
+    text: `retained output for ${job.id}`,
+    gapBefore: false,
+    settled: job.status === 'completed' || job.status === 'failed' || job.status === 'timed_out' || job.status === 'lost',
+  })
+  return {
+    observation,
+    source: {
+      ...base,
+      jobs: {
+        list: () => roster.rows,
+        subscribe: listener => { roster.listeners.push(listener); return () => {} },
+      },
+      taskRead: {
+        ...base.taskRead!,
+        readTask: async () => ({ parentSessionId: 'sess-main', parentAvailable: true, descendants: [], jobs: roster.rows }),
+      },
+      jobObservation: {
+        open: (_sessionId, jobId, listener) => {
+          observation.opens.push(jobId)
+          const job = roster.rows.find(row => row.id === jobId)
+          if (job !== undefined) listener(snapshot(job))
+          return () => { observation.closes.push(jobId) }
+        },
+        stop: async () => ({ kind: 'requested' as const }),
+      },
+    },
+  }
+}
+
 /** The REAL fullscreen Task Center over a real TuiApp + VirtualTerminal. */
-async function startTasks(descendants: readonly TaskSubagentEntry[] = []): Promise<{
+async function startTasks(
+  descendants: readonly TaskSubagentEntry[] = [],
+  sourceOverride?: TaskSurfaceSource,
+): Promise<{
   vt: VirtualTerminal
   app: TuiApp
   tasks: ReturnType<typeof createTaskRuntime>
@@ -89,7 +139,7 @@ async function startTasks(descendants: readonly TaskSubagentEntry[] = []): Promi
     attention: { rows: () => [], reconcile: () => {}, publish: () => {}, reopen: () => false },
     publishActivity: () => {},
   })
-  tasks.attachTasks(taskSource(subject, descendants), { diag: createDiag({ filePath: undefined, stderrLevel: 'off' }), isCleanedUp: () => false })
+  tasks.attachTasks(sourceOverride ?? taskSource(subject, descendants), { diag: createDiag({ filePath: undefined, stderrLevel: 'off' }), isCleanedUp: () => false })
   await flush()
   app.setFullscreen(true)
   await vt.waitForRender()
@@ -172,5 +222,86 @@ test('real Fullscreen Tracked Work paints every retained settled Subagent branch
     `the settled tree paints in catalog pre-order:\n${joined}`)
   assert.ok(viewport[parentIndex]!.includes('· continuable'), `the parent keeps its mode suffix:\n${viewport[parentIndex]}`)
   assert.ok(viewport[childIndex]!.includes('· one-shot'), `the nested child keeps its mode suffix:\n${viewport[childIndex]}`)
+  app.stop()
+})
+
+// ── Real Fullscreen Job-history disclosure journey ────────────────────────
+
+test('real Fullscreen job history: Show → history Job → Job Workspace → back → Hide → Close', async () => {
+  const roster = {
+    rows: [
+      { id: 'job-1', kind: 'bash', label: 'bash · build', status: 'running', startedAt: 1 },
+      { id: 'job-2', kind: 'bash', label: 'bash · lint', status: 'completed', startedAt: 2, finishedAt: 3 },
+      { id: 'job-3', kind: 'bash', label: 'bash · failed', status: 'failed', startedAt: 4, finishedAt: 5 },
+    ] as TaskBrowserJobInput[],
+    listeners: [] as Array<(event: { type: string }) => void>,
+  }
+  const { source, observation } = jobRosterSource({} as SessionSubject, roster)
+  const { vt, app } = await startTasks([], source)
+
+  const collapsed = vt.getViewport().join('\n')
+  assert.ok(collapsed.includes('Show 2 past jobs [J]'), `the fixed Show entry must paint:\n${collapsed}`)
+  assert.ok(!collapsed.includes('bash · lint') && !collapsed.includes('bash · failed'),
+    'terminal Job rows are NOT painted by default')
+  assert.ok(collapsed.includes('!1 unreviewed'), 'the collapsed control surfaces unacknowledged failure attention')
+
+  await clickText(vt, 'Show 2 past jobs')
+  const expanded = vt.getViewport().join('\n')
+  assert.ok(expanded.includes('Hide 2 past jobs [J]'), `the real SGR release expands history:\n${expanded}`)
+  assert.ok(expanded.includes('bash · lint') && expanded.includes('bash · failed'))
+
+  await clickText(vt, 'bash · failed')
+  await flush(2)
+  const jobFrame = vt.getViewport().join('\n')
+  assert.ok(jobFrame.includes('Job · job-3 · bash'), `clicking the history row opens the existing Job Workspace:\n${jobFrame}`)
+  assert.deepEqual(observation.opens, ['job-3'])
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  const back = vt.getViewport().join('\n')
+  assert.ok(back.includes('Hide 2 past jobs [J]'), `Esc returns to the SAME expanded browser:\n${back}`)
+  assert.ok(back.includes('bash · lint') && back.includes('bash · failed'))
+
+  await clickText(vt, 'Hide 2 past jobs')
+  const hidden = vt.getViewport().join('\n')
+  assert.ok(hidden.includes('Show 2 past jobs [J]'), `the real Hide span collapses history:\n${hidden}`)
+  assert.ok(!hidden.includes('bash · lint') && !hidden.includes('bash · failed'))
+  await clickText(vt, 'Close [Esc]')
+  assert.ok(!vt.getViewport().join('\n').includes('[TRACKED]'), 'the painted Close span dismisses the browser')
+  assert.deepEqual(observation.closes, ['job-3'], 'the Job observer is released exactly once')
+  app.stop()
+})
+
+test('real Fullscreen failure attention stays pending until the expanded Job row is physically painted', async () => {
+  const roster = {
+    rows: [
+      { id: 'job-1', kind: 'bash', label: 'bash · build', status: 'running', startedAt: 1 },
+    ] as TaskBrowserJobInput[],
+    listeners: [] as Array<(event: { type: string }) => void>,
+  }
+  const { source } = jobRosterSource({} as SessionSubject, roster)
+  const { vt, app, tasks } = await startTasks([], source)
+  assert.ok(!vt.getViewport().join('\n').includes('bash · failed'))
+
+  roster.rows.push({ id: 'job-2', kind: 'bash', label: 'bash · failed', status: 'failed', startedAt: 2, finishedAt: 3 })
+  for (const listener of roster.listeners) listener({ type: 'changed' })
+  await flush(12)
+  await vt.waitForRender()
+  const pending = vt.getViewport().join('\n')
+  assert.ok(pending.includes('Show 1 past jobs [J]') && pending.includes('!1 unreviewed'),
+    `the failure is summarised on the control:\n${pending}`)
+  assert.ok(pending.includes('! 1 failed'), 'the footer failure summary is still armed before any row is painted')
+
+  await clickText(vt, 'Show 1 past jobs')
+  await flush(4)
+  await vt.waitForRender()
+  const painted = vt.getViewport().join('\n')
+  assert.ok(painted.includes('bash · failed'), 'the expanded row is painted')
+  assert.ok(!painted.includes('!1 unreviewed'), 'the physically painted row is acknowledged exactly once')
+  assert.ok(!painted.includes('! 1 failed'), 'the footer summary drops only after the row is really visible')
+
+  // Session replacement must not leak the old failure id into the new session.
+  tasks.resetTasks()
+  await flush(4)
+  assert.deepEqual(tasks.globalRows(), [], 'a reset drops the old roster/attention rows')
   app.stop()
 })
