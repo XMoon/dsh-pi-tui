@@ -88,6 +88,7 @@ import { runAcpPo3bCancelApproval } from '../smoke/split-process/acp-po3b-cancel
 import { runAcpPo4aContentInput } from '../smoke/split-process/acp-po4a-content-input.mjs'
 import { runAcpPo4cContentOutput } from '../smoke/split-process/acp-po4c-content-output.mjs'
 import { runAcpSdkContentInteroperability } from '../smoke/split-process/acp-sdk-content-interoperability.mjs'
+import { runAcpScopedMcpB0 } from '../smoke/split-process/acp-scoped-mcp-b0.mjs'
 import {
   runDaemonControlConcurrentControls,
   runDaemonControlInflightStop,
@@ -620,6 +621,14 @@ const CASE_REGISTRY = Object.freeze([
     id: 'acp.sdk-content-interoperability',
     title: 'an independent standard ACP v1 SDK client consumes real split Host input, Markdown, image and tool output across two sequential scenes with exact turns, verified stored content and a closed View that leaves the TUI Session live',
     run: runAcpSdkContentInteroperability,
+  }),
+  Object.freeze({
+    suite: 'acp',
+    defaultLane: false,
+    id: 'acp.scoped-mcp-b0',
+    title: 'one live Host Agent mounts the official Agent-scoped MCP client, a real model turn executes its stdio tool, another Agent never sees it, and a real ACP close defers retirement until the in-flight TUI result settles',
+    platforms: LINUX_DARWIN,
+    run: runAcpScopedMcpB0,
   }),
 ])
 
