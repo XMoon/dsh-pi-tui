@@ -35,6 +35,7 @@ import { waitUntil } from '../support/tsp-runner-harness.ts'
 import {
   pickerNode,
   pickerProps,
+  sendPickerAction,
   surfaceNodes,
   surfaceScrollOps,
   surfaceTexts,
@@ -378,7 +379,11 @@ test('a real Job row reaches the temporary Reader with its own facts and no busi
   const composition = await compose(t, DESCENDANTS)
   // The Task Runtime read commits into the Hub; its READY frame is the only one
   // whose roster means anything (the loading frame carries an empty list).
-  await waitForHub(composition, 'a real Job row reaches the Reader', 'job:job-2')
+  await waitForHub(composition, 'the real active Job reaches the Hub', 'job:job-1')
+  // The failed Job is retained history under PR3: reveal it through the SAME
+  // native disclosure the user gets, then select its real row.
+  sendPickerAction(composition.pane, 'jobs-history', HUB)
+  await waitForHub(composition, 'a real retained Job row reaches the Reader', 'job:job-2')
   const ids = hubItemIds(composition)
   assert.ok(ids.includes('job:job-2'), `the real projected Job row is present: ${ids.join(',')}`)
   await selectRow(composition, 'job:job-2')
@@ -470,6 +475,10 @@ test('a real parked Question row is read as human attention and offers no answer
 test('a real background Job update repaints the open Reader without a new reading', async (t) => {
   const composition = await compose(t, DESCENDANTS)
   await waitForHub(composition, 'the first reading of a background Job', 'job:job-1')
+  // Keep the terminal history expanded so the background status change keeps
+  // the row in the visible projection while the Reader is open.
+  sendPickerAction(composition.pane, 'jobs-history', HUB)
+  await waitForHub(composition, 'the retained history is expanded', 'job:job-2')
   await selectRow(composition, 'job:job-1')
   const reader = await enterReader(composition)
   assert.ok(surfaceTexts(composition.pane, reader).includes('Job · running'))
@@ -529,8 +538,12 @@ test('Mouse PR4 L6: a click on the visible Tasks badge runs the registered /task
   await waitForHub(composition, 'the real click opened the Hub', 'job:job-1')
   assert.equal(composition.entryCalls.length, 1, 'the UI entry ran exactly once')
   assert.equal(composition.openAdmissions.length, 1, 'the registered handler ran its Session admission exactly once')
+  assert.deepEqual(hubItemIds(composition).filter(id => id.startsWith('job:')), ['job:job-1'],
+    'the default Hub view folds the retained failed Job')
+  sendPickerAction(composition.pane, 'jobs-history', HUB)
+  await waitForHub(composition, 'the disclosure reveals the retained Job', 'job:job-2')
   assert.deepEqual(hubItemIds(composition).filter(id => id.startsWith('job:')), ['job:job-1', 'job:job-2'],
-    'the Hub shows the SAME Task Runtime roster — no second source')
+    'the SAME Task Runtime roster is revealed by the native disclosure — no second source')
 
   // While the Hub owns the seat the background badge must stay inert: a second
   // action on the committed id is dropped, never a nested browser open.

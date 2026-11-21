@@ -32,7 +32,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { createDirectTspFixture, waitFor, waitForInputDelivery, type DirectTspFixture } from '../support/direct-tsp-fixture.ts'
-import { pickerNode, pickerProps, surfaceNodes, surfaceTexts, wireNodes } from '../support/tsp-picker-wire.ts'
+import { pickerNode, pickerProps, sendPickerAction, surfaceNodes, surfaceTexts, wireNodes } from '../support/tsp-picker-wire.ts'
 
 const HUB = 'work-hub-'
 const PARENT = 'a3-parent-session'
@@ -118,6 +118,12 @@ function hubIds(fixture: DirectTspFixture): string[] {
   return items.map(item => item.id)
 }
 
+/** The Hub's native action ids, without their frame token. */
+function hubActionIds(fixture: DirectTspFixture): string[] {
+  const actions = (pickerProps(fixture.pane, HUB).actions ?? []) as Array<{ readonly id: string }>
+  return actions.map(action => String(action.id).replace(/#\d+$/u, ''))
+}
+
 /** One picker layer's published facts, as a diagnostic string. */
 function pickerFrame(fixture: DirectTspFixture, prefix: string): string {
   const props = pickerProps(fixture.pane, prefix)
@@ -197,7 +203,11 @@ async function appenderOf(fixture: DirectTspFixture, sessionId: string): Promise
  * The child Session header (parent/origin/depth) is created by the fixture
  * through the official persistence seam, so the identity is a real Session.
  */
-async function seedTaskFacts(fixture: DirectTspFixture): Promise<{ readonly jobId: string }> {
+async function seedTaskFacts(fixture: DirectTspFixture): Promise<{
+  readonly runningJobId: string
+  readonly completedJobId: string
+  readonly failedJobId: string
+}> {
   await liveSession(fixture, PARENT)
   const parent = await appenderOf(fixture, PARENT)
   parent('subagent/catalog', {
@@ -210,16 +220,33 @@ async function seedTaskFacts(fixture: DirectTspFixture): Promise<{ readonly jobI
   const jobs = fixture.ctx.get('jobs') as unknown as {
     start(spec: unknown): string
   }
-  const jobId = jobs.start({
+  // One genuinely ACTIVE Job and the two retained terminal Jobs this PR folds.
+  // The running producer settles only when the registry's own teardown cancels
+  // it, so the test's own Session disposal does not hang.
+  let settleRunning: ((outcome: { status: 'killed' }) => void) | undefined
+  const runningDone = new Promise<{ status: 'killed' }>(resolve => { settleRunning = resolve })
+  const runningJobId = jobs.start({
     kind: 'bash',
     label: 'A3 integration build',
     owner: SessionId(PARENT),
     run: () => ({
-      cancel: () => {},
-      done: Promise.resolve({ status: 'failed', detail: 'exit code 3' }),
+      cancel: () => { settleRunning?.({ status: 'killed' }) },
+      done: runningDone,
     }),
   })
-  return { jobId }
+  const completedJobId = jobs.start({
+    kind: 'bash',
+    label: 'A3 completed lint',
+    owner: SessionId(PARENT),
+    run: () => ({ cancel: () => {}, done: Promise.resolve({ status: 'completed' }) }),
+  })
+  const failedJobId = jobs.start({
+    kind: 'bash',
+    label: 'A3 failed deploy',
+    owner: SessionId(PARENT),
+    run: () => ({ cancel: () => {}, done: Promise.resolve({ status: 'failed', detail: 'exit code 3' }) }),
+  })
+  return { runningJobId, completedJobId, failedJobId }
 }
 
 // ── E01: the registered `/tasks` really opens the Work Hub ──────────────────
@@ -241,15 +268,33 @@ test('/tasks from the real editor reaches the ONE TaskRuntime and mounts the nat
     startup: { sessionId: PARENT },
   })
   try {
-    const { jobId } = await seedTaskFacts(fixture)
+    const { runningJobId, completedJobId, failedJobId } = await seedTaskFacts(fixture)
     await submitLine(fixture, '/tasks')
     await waitFor('the native Work Hub to mount from the real /tasks entry',
       () => pickerNode(fixture.pane, HUB) !== undefined, 25_000)
     // The rows are the REAL Task Runtime projection of the facts above: one
-    // descendant from the durable catalog and one Job from the official
-    // registry. Nothing here injects a panel item.
-    await waitFor('both real rows to reach the Hub', () =>
-      hubIds(fixture).includes(`agent:${CHILD}`) && hubIds(fixture).includes(`job:${jobId}`), 25_000)
+    // descendant from the durable catalog and one ACTIVE Job from the official
+    // registry; the two terminal Jobs stay behind the manual disclosure.
+    await waitFor('the real descendant and active Job reach the Hub', () =>
+      hubIds(fixture).includes(`agent:${CHILD}`) && hubIds(fixture).includes(`job:${runningJobId}`), 25_000)
+    assert.deepEqual(hubIds(fixture), [`agent:${CHILD}`, `job:${runningJobId}`],
+      'the default view is the exact active projection, with no terminal Job row')
+    assert.deepEqual(hubActionIds(fixture), ['close', 'jobs-history', 'details'],
+      'the native bar exposes the fold and the read action')
+    const hiddenSubtitle = String(pickerProps(fixture.pane, HUB).subtitle ?? '')
+    assert.ok(hiddenSubtitle.includes('1 failed') && hiddenSubtitle.includes('2 retained Jobs hidden'),
+      `the full-roster status facts stay truthful while folded: ${hiddenSubtitle}`)
+    // The disclosure is the REAL native action event, not a direct presenter call.
+    sendPickerAction(fixture.pane, 'jobs-history', HUB)
+    await waitFor('the retained terminal Jobs are revealed by the native action',
+      () => hubIds(fixture).includes(`job:${completedJobId}`) && hubIds(fixture).includes(`job:${failedJobId}`), 25_000)
+    assert.deepEqual(hubIds(fixture).slice(0, 2), [`agent:${CHILD}`, `job:${runningJobId}`],
+      'the expanded view keeps the active projection at its head')
+    assert.deepEqual([...hubIds(fixture).slice(2)].sort(),
+      [`job:${completedJobId}`, `job:${failedJobId}`].sort(),
+      'both real terminal Jobs appear once the disclosure is open')
+    const expandedSubtitle = String(pickerProps(fixture.pane, HUB).subtitle ?? '')
+    assert.ok(!expandedSubtitle.includes('retained Jobs hidden'), `an expanded view claims no hidden count: ${expandedSubtitle}`)
     // The OLD placeholder must never appear: this command reached the opener.
     assert.ok(!fixture.pane.output.text().includes('Work Hub is not available in this renderer yet.'),
       'the capable pane never shows the unavailable placeholder')
@@ -311,11 +356,11 @@ test('Enter opens ONE Reader for the current row and Back returns to the same Hu
     startup: { sessionId: PARENT },
   })
   try {
-    const { jobId } = await seedTaskFacts(fixture)
+    const { runningJobId } = await seedTaskFacts(fixture)
     await submitLine(fixture, '/tasks')
     await waitFor('the native Work Hub to mount', () => pickerNode(fixture.pane, HUB) !== undefined, 25_000)
-    await waitFor('the real Job row reaches the Hub', () => hubIds(fixture).includes(`job:${jobId}`), 25_000)
-    const target = `job:${jobId}`
+    await waitFor('the real active Job row reaches the Hub', () => hubIds(fixture).includes(`job:${runningJobId}`), 25_000)
+    const target = `job:${runningJobId}`
     // Drive the SDK's own SELECT shape for the target row, then prove the Hub
     // really holds that selection before Enter (never an assumed default row).
     fixture.pane.event({
@@ -507,7 +552,7 @@ test('reading every real row never stops a Job, interrupts a subagent or calls o
     startup: { sessionId: PARENT },
   })
   try {
-    const { jobId } = await seedTaskFacts(fixture)
+    const { runningJobId } = await seedTaskFacts(fixture)
     // The REAL business sink: the official Job registry's own `kill`. A Stop
     // from the Hub would have to reach it (the Direct observation port calls
     // `registry.kill`); the recorder is the production method itself.
@@ -521,10 +566,10 @@ test('reading every real row never stops a Job, interrupts a subagent or calls o
     try {
       await submitLine(fixture, '/tasks')
       await waitFor('both real rows reach the Hub', () =>
-        hubIds(fixture).includes(`job:${jobId}`) && hubIds(fixture).includes(`agent:${CHILD}`), 25_000)
+        hubIds(fixture).includes(`job:${runningJobId}`) && hubIds(fixture).includes(`agent:${CHILD}`), 25_000)
 
       // Read BOTH rows through the production Reader and return each time.
-      for (const target of [`job:${jobId}`, `agent:${CHILD}`]) {
+      for (const target of [`job:${runningJobId}`, `agent:${CHILD}`]) {
         fixture.pane.event({
           ev: 'select',
           sf: fixture.pane.frames().at(-1)!.sf,
@@ -694,8 +739,18 @@ test('switching Session A→B through the real Browser leaves B with only B rows
       owner: SessionId(A),
       run: () => ({ cancel: () => {}, done: Promise.resolve({ status: 'running' }) }),
     })
+    const jobAOld = jobs.start({
+      kind: 'bash',
+      label: 'A-only completed lint',
+      owner: SessionId(A),
+      run: () => ({ cancel: () => {}, done: Promise.resolve({ status: 'completed' }) }),
+    })
     await submitLine(fixture, '/tasks')
     await waitFor('A\'s Hub shows A\'s real Job', () => hubIds(fixture).includes(`job:${jobA}`), 25_000)
+    // Expand A's retained history: the manual choice is per-open and must not
+    // survive the Session switch.
+    sendPickerAction(fixture.pane, 'jobs-history', HUB)
+    await waitFor('A\'s retained Job is revealed', () => hubIds(fixture).includes(`job:${jobAOld}`), 25_000)
     // Close the Hub so the composer is editable again, then switch through the
     // PRODUCTION Session Browser (`/sessions` → select B → Resume).
     fixture.pane.key('\u001b')
@@ -766,12 +821,19 @@ test('switching Session A→B through the real Browser leaves B with only B rows
       owner: SessionId(B),
       run: () => ({ cancel: () => {}, done: Promise.resolve({ status: 'running' }) }),
     })
+    const jobBOld = jobs.start({
+      kind: 'bash',
+      label: 'B-only completed lint',
+      owner: SessionId(B),
+      run: () => ({ cancel: () => {}, done: Promise.resolve({ status: 'completed' }) }),
+    })
     await submitLine(fixture, '/tasks')
     await waitFor('B\'s OWN Job reaches the Hub', () => hubIds(fixture).includes(`job:${jobB}`), 25_000)
     const idsB = hubIds(fixture)
     assert.ok(idsB.includes(`job:${jobB}`), `B's own Job is listed (got ${idsB.join(',')})`)
     assert.ok(!idsB.includes(`job:${jobA}`), `A's Job never appears in B's Hub (got ${idsB.join(',')})`)
-    assert.deepEqual(idsB, [`job:${jobB}`], 'B lists exactly B\'s own work')
+    assert.ok(!idsB.includes(`job:${jobBOld}`), 'B starts with its own retained Job folded, never A\'s expanded choice')
+    assert.deepEqual(idsB, [`job:${jobB}`], 'B lists exactly B\'s active work')
     assert.equal(screens(fixture), 0, 'the switch left no Reader Screen behind')
   } finally {
     // reason: fixture teardown — waits for the real SDK to release the tty and
