@@ -299,3 +299,57 @@ test('a real wheel scroll invalidates a pending tab or action press', async () =
   lines = await view(vt)
   assert.equal(currentTab(), 0, 'an action pressed before a real wheel scroll must not run on release')
 })
+
+test('pointer Back and Cancel follow the existing Esc ladder without submitting or leaking the seat', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  await view(vt)
+  let outcome: 'pending' | 'resolved' | 'rejected' = 'pending'
+  const question = app.askQuestions([
+    { id: 'q1', question: 'FIRST-QUESTION?', options: [{ label: 'ALPHA' }] },
+    { id: 'q2', question: 'SECOND-QUESTION?', options: [{ label: 'BETA' }] },
+  ]).then(
+    (answers) => { outcome = 'resolved'; return answers },
+    (error: unknown) => { outcome = 'rejected'; throw error },
+  )
+  question.catch(() => {})
+  let lines = await view(vt)
+  click(vt, cellOf(lines, 'Q2'))
+  lines = await view(vt)
+  assert.ok(lines.join('\n').includes('SECOND-QUESTION?'), 'precondition: Q2 is current')
+  click(vt, cellOf(lines, 'Back'))
+  lines = await view(vt)
+  assert.ok(lines.join('\n').includes('FIRST-QUESTION?'), 'the painted Back span returns to Q1')
+  assert.equal(outcome, 'pending', 'Back never submits or cancels')
+  click(vt, cellOf(lines, 'Cancel'))
+  await view(vt)
+  assert.equal(outcome, 'rejected', 'the painted Cancel span runs the existing cancel path')
+  assert.equal(app.focusedComponentForTest(), app.seatEditorForTest().component,
+    'the editor seat is restored after a pointer cancel')
+})
+
+test('pointer Leave edit exits only the text edit and keeps the flow alive', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  await view(vt)
+  let outcome: 'pending' | 'resolved' | 'rejected' = 'pending'
+  const question = app.askQuestions([
+    { id: 'q1', question: 'TYPE-ANYTHING?', options: [] },
+  ]).then(
+    (answers) => { outcome = 'resolved'; return answers },
+    (error: unknown) => { outcome = 'rejected'; throw error },
+  )
+  question.catch(() => {})
+  let lines = await view(vt)
+  assert.ok(lines.join('\n').includes('Leave edit'), 'precondition: the edit action bar is painted')
+  click(vt, cellOf(lines, 'Leave edit'))
+  lines = await view(vt)
+  assert.ok(lines.join('\n').includes('TYPE-ANYTHING?'), 'Leave edit keeps the question visible')
+  assert.ok(lines.join('\n').includes('Edit'), 'the navigation-layer Edit action is painted')
+  assert.equal(outcome, 'pending', 'Leave edit must never cancel the flow')
+  click(vt, cellOf(lines, 'Cancel'))
+  await view(vt)
+  assert.equal(outcome, 'rejected', 'the later Cancel still cancels exactly once')
+  assert.equal(app.focusedComponentForTest(), app.seatEditorForTest().component,
+    'the editor seat is restored after leaving the edit and cancelling')
+})
