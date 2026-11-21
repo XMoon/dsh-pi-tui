@@ -9,25 +9,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Daemon mode (Linux / macOS).** Direct remains the default. An independent Host keeps Agent work running after a TUI disconnects; multiple TUIs, the official Web frontend and ACP clients can access and work with the same Host Session.
-- **Web and ACP frontends.** Enable or disable the official Web UI on a running Daemon Host using the `dsh --profile pi-tui web` commands. Enable local ACP v1 with `/acp` to connect external clients to existing sessions.
-- **Agent Team and Task Center.** Switch Agent Team in `/model`. `/tasks` now shows Work / Team views, nested Subagents and expandable Job history, with improved Plan Review and Goal display.
-- **Plugins and MCP settings.** Manage MCP servers in Settings; third-party plugins gain client-local `./tui` loading and per-plugin saved configuration.
-- **Sessions and files.** Improved Workspace / Session browsing and recovery, plus file completion, uploads, Host Shell and slash commands from Daemon clients.
+- **Daemon mode (Linux/macOS).** Direct remains the default. An independent Host keeps Agent work alive when a TUI disconnects; multiple TUIs, the official Web frontend and local ACP clients can connect to the same Host and view the same Session.
+- **Daemon and frontend controls.** Profile-scoped `daemon status/start/stop/restart/logs`, with optional Linux systemd user-service or macOS LaunchAgent installation. Headless `web status/enable/disable/url/open` manages the running Host; `/acp` controls an optional local ACP listener for compatible clients.
+- **Agent Team mode.** `/model` now displays an independent Agent Team toggle alongside separate model and Reasoning Effort controls, with confirmation before disabling a Team with recorded activity.
+- **Work / Team Task Center.** `/tasks` gains Work and Team pages. Work shows current tasks and activity; the Root Session's Team page shows shared Team tasks and members. Each page supports navigation and search, with a type filter in Work. The Team page is read-only.
+- **Clearer Subagent and Job lists.** Tracked Subagent trees expand by default at every level and can still be collapsed manually. Active Jobs remain in view while completed history stays behind a Show/Hide action (`j` in the fullscreen Task Center, `Alt+J` in the TSP Work Hub).
+- **Expanded Settings.** Stage and save Subagent model/limit choices, Agent Loop parallel-tool limits and Shell execution limits. Web Search/Fetch, ACP autostart and Session-log upload settings follow the actual Host configuration with save/reset controls.
+- **MCP and extensions.** Browse, probe, restart and configure MCP servers in Settings. Third-party packages gain Client-local `./tui` entrypoints, per-package configuration and persistent settings, with Host-installed status distinguished from current Client activation.
+- **Workspace and Session navigation.** Session Browser is organized by Workspace folders. New `--session [id-or-query]` and `-c/--continue` launch options join improved sessionless Workspace selection, `@file` completion and Host directory browsing.
+- **Queue and Host tools.** Manage pending prompts with `/queue` and a Dock shortcut; Daemon clients gain Host Shell, command-generated file delivery and official file uploads. Host Skills lists refresh when Workspace skills change.
+- **Transcript reading and images.** More complete Full/Focus/Compact views, `Ctrl+F` visible-view search and `Ctrl+Shift+F` full-transcript search; improved tool/workflow disclosure, message copying, SVG/image previews and narrow layouts. The optional TSP renderer also gains native transcript and Task interactions.
+- **macOS Computer Use settings.** Settings → Tools exposes Computer Use capabilities, OS permissions and application grants, with relevant request and management actions.
 
 ### Changed
 
-- **Exit and updates.** In Daemon mode, `/exit` / `/quit` detach only the current TUI, with explicit choices when work is active. Update the TUI under the same DSH runtime, then use `daemon restart` to adopt the new Host build.
-- **Terminal experience.** Improved prompt submission and queueing, session search, mouse and wheel interactions, image/SVG previews and TSP transcript reading.
+- **Exit behavior matches Daemon semantics.** `/exit` and `/quit` disconnect the current Daemon Client by default instead of stopping the Host. Active work prompts for a clear keep-working or stop choice; busy `Ctrl+C` cancels the current work.
+- **Plan, Goal and task feedback.** Plan Review can open the relevant plan content before deciding; Goal Dock adapts to terminal width; Task, Subagent and tool status is easier to locate in the transcript.
+- **Submission and interaction.** Drafts clear only after the Host accepts them, and input can be queued during Compact. Fullscreen Tasks, History, Images, Settings and Questions have more complete mouse, wheel and back-navigation controls.
+- **Direct/Daemon parity.** Better Remote Provider and account status, approvals, Web settings, Host command completion, Session resume and working-directory behavior.
 
 ### Fixed
 
-- Resolved Direct / Remote differences involving Session creation, model and reasoning-effort persistence, Provider login and settings status.
-- Fixed `Ctrl+R` Session history recall across working directories, Host command completion, and focus/layout glitches from dialogs and transient notices.
+- Fixed `Submitting…` / `Queued…` notices persisting after an accepted prompt and lost queued input during Compact.
+- Fixed Session ownership and completion around `/new`, plus sessionless defaults not carrying saved model or Reasoning Effort into a new Session.
+- Fixed `Ctrl+R` Current Session history changing with the working directory; improved completion ordering, ignored-file matches and Remote Host command candidates.
+- Fixed terminal flicker and erased scrollback when off-screen content updates, plus Kitty images painting over dialogs.
+- Fixed broken clicks and wheel paths in Question header tabs, Tasks, History, Images and Settings. Transient Footer notices no longer shift the Composer layout.
+- Fixed macOS Daemon connection/startup races, cross-build Host management and Herdr Session recovery issues.
 
 ### Install and upgrade
 
-Version 0.5.7 requires **Node.js ≥24.9.0** and **DSH ≥0.2.2-rc.3**; the recommended pairing is **DSH 0.2.2-rc.5**:
+Version 0.5.7 requires **Node.js ≥24.9.0** and **DSH ≥0.2.2-rc.3**. The recommended pairing is **DSH 0.2.2-rc.5**:
 
 ~~~sh
 npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty @deepseek-ai/dsh@0.2.2-rc.5
@@ -35,7 +47,9 @@ dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.5.7
 dsh --profile pi-tui
 ~~~
 
-Upgrading from 0.5.6 also changes the DSH runtime: finish in-flight work, stop the previous Host and back up Session data before installing the new pair. Previous pairings: `@deepseek-ai/dsh@0.2.2-rc.1` + `@xmoon76/dsh-pi-tui@0.5.6`; `@deepseek-ai/dsh@0.2.1-rc.5` + `@xmoon76/dsh-pi-tui@0.5.5`.
+Upgrading from 0.5.6 also changes the DSH runtime. Finish in-flight work, stop the previous Host and back up Session/Profile data before installing the new pair. A running Daemon Host requires an explicit `daemon restart` to adopt a newly installed TUI build.
+
+Previous pairings: `@deepseek-ai/dsh@0.2.2-rc.1` + `@xmoon76/dsh-pi-tui@0.5.6`; `@deepseek-ai/dsh@0.2.1-rc.5` + `@xmoon76/dsh-pi-tui@0.5.5`.
 
 ## [0.5.6] - 2026-11-08
 

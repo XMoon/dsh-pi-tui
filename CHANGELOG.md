@@ -9,25 +9,37 @@
 
 ### 新增
 
-- **Daemon 模式（Linux / macOS）**：除默认 Direct 模式外，现可使用独立 Host。TUI 退出后，Agent 任务仍可继续运行；多个 TUI、官方 Web 和 ACP 客户端可连接同一个 Host，访问并操作同一会话。
-- **Web 与 ACP 多入口**：在运行中的 Daemon Host 上启停官方 Web，支持 `dsh --profile pi-tui web` 命令；本地 ACP v1 可通过 `/acp` 开启，供外部客户端连接已有会话。
-- **Agent Team 与任务中心**：在 `/model` 中切换 Agent Team；`/tasks` 增加 Work / Team 视图、Subagent 层级和可展开的 Job 历史，改善 Plan Review 与 Goal 展示。
-- **插件与 MCP 设置**：可在设置中管理 MCP Server；第三方插件支持客户端 `./tui` 加载和按插件保存配置。
-- **会话与文件操作**：改进 Workspace / Session 浏览和恢复；增强 Daemon 客户端的文件补全、附件上传、Host Shell 与斜杠命令支持。
+- **Daemon 模式（Linux/macOS）**：除默认 Direct 模式外，可运行独立 Host。关闭或断开 TUI 不会终止 Host 中的 Agent 工作；多个 TUI、官方 Web 和本地 ACP 客户端可连接同一个 Host，查看同一 Session。
+- **Daemon 与多端管理**：新增按 Profile 管理的 `daemon status/start/stop/restart/logs`，可选安装 Linux systemd 用户服务或 macOS LaunchAgent；新增无 TUI 的 `web status/enable/disable/url/open`，直接管理运行中的 Host。`/acp` 可开启或关闭本地 ACP 接口，供兼容客户端接入。
+- **Agent Team 模式**：`/model` 增加独立的 Agent Team 开关，并将模型、Reasoning Effort 和 Team 设置分区展示；关闭已有活动记录的 Team 时提供确认。
+- **Work / Team 任务中心**：`/tasks` 增加 Work、Team 双页面。Work 展示当前任务与执行情况；Root Session 的 Team 页面可查看团队任务和成员。支持页面切换、搜索及任务类型筛选；Team 页面以查看为主。
+- **更清晰的 Subagent 和 Job 展示**：已跟踪的 Subagent 树默认逐层展开，仍可手动折叠；运行中的 Job 优先显示，已结束的 Job 收入可展开的历史（完整任务中心按 `j`，TSP Work Hub 按 `Alt+J`），减少长历史对当前工作的干扰。
+- **更多可视化设置**：增加 Subagent 模型与限制的分项编辑、Agent Loop 并行工具数和 Shell 执行限制；Web Search/Fetch、ACP 自动启动、Session 日志上传等设置使用 Host 实际配置并支持保存与重置。
+- **MCP 与第三方插件**：Settings 可查看、探测、重启、配置 MCP Server；支持第三方插件的 Client-local `./tui` 扩展入口、每包独立设置及持久化配置，并区分 Host 已安装与当前 Client 已加载状态。
+- **Workspace / Session 操作**：Session Browser 改为按 Workspace 分组，支持目录展开和浏览；新增 `--session [id-or-query]`、`-c/--continue` 启动入口，改进无会话时的 Workspace 选择、`@file` 补全和 Host 目录浏览。
+- **输入队列与 Host 工具**：`/queue` 可查看、修改或删除待发送输入，Dock 增加快捷入口；Daemon 客户端补齐 Host Shell、命令产生的文件和正式附件上传，Skills 列表可随 Host Workspace 文件变化刷新。
+- **转录阅读与图像**：新增更完整的 Full/Focus/Compact 阅读方式、`Ctrl+F` 当前视图搜索与 `Ctrl+Shift+F` 全文搜索；改善工具/工作流卡片展开、消息复制、SVG/图片预览和窄屏显示。可选 TSP 渲染器获得原生转录及任务卡片交互。
+- **macOS Computer Use 设置**：在 Settings → Tools 中查看 Computer Use 能力、系统授权和应用许可，并可执行相关授权与管理操作。
 
 ### 改进
 
-- **退出与升级体验**：Daemon 下 `/exit` / `/quit` 只断开当前 TUI；进行中的任务有明确的退出选择。同一 DSH 运行时下可更新 TUI，再通过 `daemon restart` 切换 Host 到新版本。
-- **终端交互**：改进输入提交与队列、会话搜索、鼠标和滚轮操作、图像/SVG 预览，以及 TSP 转录阅读体验。
+- **退出操作更符合 Daemon 语义**：`/exit`、`/quit` 在 Daemon 下默认断开当前 Client，而非关闭 Host；任务进行中提供保留工作或停止工作的明确选择。忙碌时的 `Ctrl+C` 优先取消当前工作。
+- **Plan、Goal 与任务反馈**：Plan Review 可以直接跳转查看对应计划内容后再决策；Goal Dock 会随终端宽度展示目标；任务、Subagent 和工具执行状态更容易在转录中定位。
+- **发送与交互体验**：输入草稿在 Host 接受后才清除；Compact 期间可以正常排队。完善全屏任务、历史、图片、设置和 Question 面板的鼠标点击、滚轮及返回操作。
+- **Direct/Daemon 功能一致性**：改进 Remote 端的 Provider/账号信息、授权状态、Web 设置、Host 命令补全、Session 恢复以及不同工作目录下的操作体验。
 
 ### 修复
 
-- 修复部分 Remote / Direct 不一致问题，包括 Session 创建、模型与 Reasoning Effort 保存、Provider 登录及设置状态。
-- 修复跨工作目录的 `Ctrl+R` 会话历史召回、Host 命令补全，以及部分弹窗、提示引起的焦点与界面抖动问题。
+- 修复已接收输入后 `Submitting…` / `Queued…` 提示可能一直停留，以及 Compact 期间队列输入丢失的问题。
+- 修复 `/new` 附近提交命令的 Session 归属/结束时序，以及无会话状态下默认模型或 Reasoning Effort 保存后未带入新会话的问题。
+- 修复 `Ctrl+R` 的 Current Session 历史随工作目录变化而不准确的问题；改进文件补全排序、被忽略文件匹配和 Remote Host 命令候选。
+- 修复终端更新屏幕外内容时可能闪烁、清空滚动历史，以及 Kitty 图片遮挡弹窗的问题。
+- 修复部分 Question 标题切换、任务/历史面板、鼠标滚轮、图片与设置页面的点击失效；Footer 临时提示不再挤动 Composer 布局。
+- 修复 Daemon 在 macOS 上的部分连接/启动竞态、跨版本 Host 管理和 Herdr 会话恢复问题。
 
 ### 安装与升级
 
-0.5.7 需要 **Node.js ≥24.9.0**、**DSH ≥0.2.2-rc.3**，推荐配对 **DSH 0.2.2-rc.5**：
+0.5.7 需要 **Node.js ≥24.9.0** 和 **DSH ≥0.2.2-rc.3**，推荐使用 **DSH 0.2.2-rc.5**：
 
 ~~~sh
 npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty @deepseek-ai/dsh@0.2.2-rc.5
@@ -35,7 +47,9 @@ dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.5.7
 dsh --profile pi-tui
 ~~~
 
-从 0.5.6 升级涉及 DSH 运行时更换：先完成正在运行的任务、停止旧 Host 并备份会话数据，再安装新配对。旧版配对：`@deepseek-ai/dsh@0.2.2-rc.1` + `@xmoon76/dsh-pi-tui@0.5.6`；`@deepseek-ai/dsh@0.2.1-rc.5` + `@xmoon76/dsh-pi-tui@0.5.5`。
+从 0.5.6 升级需要同时更换 DSH Runtime。先结束运行中的任务、停止旧 Host 并备份 Session/Profile 数据，再安装新版配对；仅更新 TUI 后，已运行的 Daemon Host 需要显式 `daemon restart` 才会使用新代码。
+
+历史配对：`@deepseek-ai/dsh@0.2.2-rc.1` + `@xmoon76/dsh-pi-tui@0.5.6`；`@deepseek-ai/dsh@0.2.1-rc.5` + `@xmoon76/dsh-pi-tui@0.5.5`。
 
 ## [0.5.6] - 2026-11-08
 
