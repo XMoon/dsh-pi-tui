@@ -158,8 +158,7 @@ release date `YYYY-MM-DD`:
    promotion path it is usually already reserved in Phase A, so this step is
    a consistency confirmation, not a fresh edit.
 2. Update `src/dsh-compat-matrix.json`, the single source for the DSH/TUI
-   pairing shared by `src/startup.ts`, the release tooling and the
-   installation-doc gate. When the shipped DSH target changes, update `current`
+   pairing shared by `src/startup.ts` and the release tooling. When the shipped DSH target changes, update `current`
    (`since`, `requires`, `upgradeDsh`, `upgradeCommand`, `guidance`) and append
    or adjust the `matrix` row for the new DSH line (`dshFrom`, `tui`, and the
    covered `versions`); a row without `tui` means no released TUI supports that
@@ -244,11 +243,11 @@ package version, or installation guidance is incomplete; do not bypass it.
 The repository has ONE local release gate:
 
 ```sh
-pnpm verify:release
+mise run verify:release
 ```
 
 It runs the fork typecheck/tests, the benchmark typecheck, the tmux and
-tooling suites, the installation-doc / pi-divergence / naming /
+tooling suites, the compatibility / pi-divergence / naming /
 session-event / boundary / architecture / production-reads / keybinding
 gates, the production dependency audit, and finally `pnpm pack:release`.
 The pi component compatibility contract runs inside the release product
@@ -327,8 +326,12 @@ For CI-equivalent dependency resolution, especially after dependency changes,
 run the frozen install before the verification gate:
 
 ```sh
-pnpm install --frozen-lockfile
+mise install --locked
+mise run setup
 ```
+
+For an npm-mode worktree, `mise run setup` performs the frozen pnpm install.
+Source Mode requires the separate `source:bootstrap` procedure.
 
 After the gate, verify that the package and lockfile are correct:
 

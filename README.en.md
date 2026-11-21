@@ -1,1057 +1,160 @@
 # dsh-pi-tui
 
-[简体中文](README.md) | English
+English | [简体中文](README.md)
 
 [![npm](https://img.shields.io/npm/v/@xmoon76/dsh-pi-tui.svg)](https://www.npmjs.com/package/@xmoon76/dsh-pi-tui)
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-A Pi-style terminal frontend for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness).
+**A terminal frontend for DeepSeek Harness. One Host, with TUI, Web and ACP clients accessing the same Agent Session.**
 
-`dsh-pi-tui` is installed as an independent dsh bundle inside a profile. It provides terminal interaction for streaming conversations, tool calls, session management, subagents, history search, shell commands, approvals, and settings. Models, tools, Sessions, permissions, Skills, Plan, Goal, and Subagent runtime behavior are still provided by DeepSeek Harness.
+**Direct** remains the default, ready-to-use mode. Starting in **0.5.7**, Linux/macOS users can explicitly choose a **Daemon**: an independent local Host retains sessions and ongoing work as terminal Clients disconnect and reconnect. Other TUIs, the official Web frontend and an opt-in local ACP client can access sessions belonging to that same Host.
+
+[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) remains the authority for the Agent Loop, models, tools, persistence, permissions and concurrent writes. `dsh-pi-tui` is a third-party frontend, not a second Agent Runtime.
 
 ![dsh-pi-tui](docs/dsh-pi-tui.png)
+
+![Direct TUI and a daemon Host shared by TUI, Web and ACP clients](docs/dsh-pi-tui-shared-session.svg)
+
+> **Shared Sessions, not shared terminal screens.** Multiple TUI clients can view the same Session; Web and ACP use the Host's official Session/Agent capabilities. Prompt admission, approvals, cancellation and writes remain subject to Host permission and concurrency rules. ACP permits at most one ACP View per Session at a time (without limiting TUI Views), and ACP v1 is a bounded protocol subset. Daemon access is **local, same-OS-user** functionality, not a public TCP remote service.
 
 ## Install into a DSH profile
 
 ### Stable / latest
 
-Stable releases are recommended for ordinary users. Install DSH first, then add
-the TUI to the `pi-tui` profile:
+**0.5.7 is the current stable release (npm `@latest`).** The recommended DSH pairing is **0.2.2-rc.5**. Install DeepSeek Harness first, then the TUI bundle into the `pi-tui` profile:
 
-```sh
-npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty @deepseek-ai/dsh@latest
+~~~sh
+npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty @deepseek-ai/dsh@0.2.2-rc.5
 dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@latest
 dsh --profile pi-tui
-```
+~~~
 
-### Exact version pairing (published stable 0.5.6)
+### Exact version pairing (0.5.7)
 
-This release requires DSH `>=0.2.2-rc.1`, targets `0.2.2-rc.1` for exact validation, and requires Node.js `>=24.9.0`. Finish Agent turns and exit the old TUI/Host normally before installing or upgrading; hot upgrade is not supported.
+**0.5.7 requires Node.js ≥24.9.0 and DSH ≥0.2.2-rc.3. DSH 0.2.2-rc.5 is recommended** (the exact qualification target for this release). For a reproducible installation, pin both package versions:
 
-```sh
-npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty @deepseek-ai/dsh@0.2.2-rc.1
-dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.5.6
-dsh --profile pi-tui
-```
-
-### Candidate preview (0.5.7 × 0.2.2-rc.5, unpublished)
-
-This checkout carries the unpublished `0.5.7` candidate, validated against DSH `0.2.2-rc.5`: the runtime minimum is `>=0.2.2-rc.3` and the exact validation target is `0.2.2-rc.5` (incompatible with `0.2.2-rc.2` and earlier; on Hosts older than rc.5 the automatic web-search routing decision may differ), and Node.js `>=24.9.0` is required. `0.5.7` is not published to npm yet, so no install-form `dsh plugin add ...@0.5.7` command is offered; build this checkout and validate that preview pairing with `pnpm compat:dsh:npm`. Finish Agent turns and exit the old TUI/Host normally before installing or upgrading DSH; hot upgrade is not supported.
-
-```sh
+~~~sh
 npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty @deepseek-ai/dsh@0.2.2-rc.5
-pnpm compat:dsh:npm
-```
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.5.7
+dsh --profile pi-tui
+~~~
+
+| TUI | DSH | Status |
+|---|---|---|
+| `0.5.7` | `>=0.2.2-rc.3`; recommended `0.2.2-rc.5` | **Current latest** |
+| `0.5.6` | `0.2.2-rc.1` | Previous release |
+
+**Upgrade precaution:** Before changing the DSH Runtime, finish in-flight Turns/Jobs, stop the previous Host and back up Profiles, Sessions and required data. Cross-DSH schema downgrade in place is not guaranteed. Do not pair 0.5.7 with rc.2 or earlier. See the [compatibility guide](docs/guides/dsh-compatibility.md) for historical pairs and recovery.
 
 ### Next / npm line (validation)
 
-Preview installation uses the DSH `alpha` channel and the TUI `next` channel.
-The DSH native install scripts must be explicitly allowed:
+The TUI `@next` channel and DSH `@alpha` channel are independent moving pointers. Verify their actual published versions and peer/engine ranges before combining them:
 
-```sh
+~~~sh
 npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty @deepseek-ai/dsh@alpha
 dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@next
 dsh --profile pi-tui
-```
-
-> **Next/alpha are independent moving pointers, not a guaranteed installable DSH/TUI pair.** Check the actual published versions and their peer/engines ranges before installing; do not mix incompatible DSH families. Use the pinned commands above for the exact 0.5.6 pairing. To qualify this checkout, run `pnpm compat:dsh:npm`.
-
-Use the isolated npm driver (it installs the exact DSH version declared by this
-checkout and exercises the full build/test/package path):
-
-```sh
-pnpm compat:dsh:npm
-```
-
-See the [compatibility guide](docs/guides/dsh-compatibility.md) for the stable minimum,
-next compatibility range, and fallback paths.
-
-### Requirements
-
-* DeepSeek Harness
-* Node.js `>=24.9.0`
-
-### DSH/TUI version pairing (important)
-
-| TUI package line | Official DSH tags for the pairing | Notes |
-|---|---|---|
-| `0.5.6` (stable / `@latest`) | `dsh-v0.2.2-rc.1` | Published stable release; minimum and exact validation target DSH is `0.2.2-rc.1`, Node.js `>=24.9.0`; incompatible with `0.2.1-rc.*` |
-| `0.5.7` (candidate preview, unpublished) | `dsh-v0.2.2-rc.5` (from `0.2.2-rc.3`) | This checkout's candidate; minimum DSH is `0.2.2-rc.3`, exact validation target `0.2.2-rc.5`, Node.js `>=24.9.0`; incompatible with `0.2.2-rc.2` and earlier |
-| `0.5.5` (previous stable) | `dsh-v0.2.1-rc.2`, `dsh-v0.2.1-rc.3`, `dsh-v0.2.1-rc.4`, `dsh-v0.2.1-rc.5` | Previous stable release; minimum DSH version `0.2.1-rc.2` |
-| `0.5.4` (stable, previous) | `dsh-v0.2.1-rc.2`, `dsh-v0.2.1-rc.3`, `dsh-v0.2.1-rc.4` | Previous stable line; the minimum DSH version is 0.2.1-rc.2, and it passes the official preset assembly on all three DSH versions |
-| `0.5.3` (stable, previous) | `dsh-v0.2.1-rc.2`, `dsh-v0.2.1-rc.3`, `dsh-v0.2.1-rc.4` | Previous stable line; the minimum DSH version is 0.2.1-rc.2, and it passes the official preset assembly on all three DSH versions |
-| `0.5.1` (stable, previous) | `dsh-v0.2.0-rc.2` | Previous stable line; both the minimum and the exact validation target are the 0.2.0-rc.2 family |
-| `0.5.2-rc.1` (published next-channel preview) | `dsh-v0.2.0-rc.2` | Previous next preview: published to the npm `next` dist-tag on 2026-10-17; its whole peer floor stays `>=0.2.0-rc.2`, so it does not cover 0.2.1-rc.2 |
-| `dsh-v0.2.1-rc.1` (no paired TUI) | none | No released TUI in this matrix claims that intermediate release; never reuse `0.5.5` for it |
-| `dsh-v0.2.2-rc.2` (no paired TUI) | none | No published or candidate TUI in this matrix claims that intermediate release; never reuse `0.5.6` for it |
-| `0.5.0` (stable, previous) | `dsh-v0.1.7-rc.2`, `dsh-v0.2.0-rc.1` | Previous stable; 0.1.7-rc.2 minimum, exact validation target 0.2.0-rc.1 |
-| `0.4.9` (stable, previous) | `dsh-v0.1.7-rc.2` | Previous stable; the compatible TUI for a 0.1.7-rc.2 runtime |
-| `0.4.8` (stable, previous) | `dsh-v0.1.7-rc.1` | Previous stable; the compatible TUI for a 0.1.7-rc.1 runtime |
-| `0.4.6` (stable, previous) | `dsh-v0.1.5-rc.1`, `dsh-v0.1.5-rc.2` | Previous stable; the compatible TUI for a 0.1.5 runtime |
-| `0.4.7-alpha.2` (next, previous) | `dsh-v0.1.6-alpha.2` | Previous next line; the compatible TUI for a 0.1.6-alpha.2 runtime |
-
-Do not mix the stable and `@next` prerelease lines. `0.5.6` is the published stable release (`@latest`): it requires DSH `>=0.2.2-rc.1` and is not compatible with `0.2.1-rc.*`; `0.5.7` is the unpublished candidate with a minimum DSH of `0.2.2-rc.3` and an exact validation target of `0.2.2-rc.5`. Before upgrading, let turns and background work finish, exit the old TUI/Host normally, and back up the Profile/patch, raw Session logs, Workspace and necessary Host resources or credential references. Hot upgrade is not supported. Data written under 0.2.2 semantics is not guaranteed readable by rc5 in place; restore a backup to a separate directory and use the matching old DSH/TUI pair to roll back. Historical pairings are in the table above. See the [compatibility guide](docs/guides/dsh-compatibility.md) for matching and diagnosis, and the [next branch README](https://github.com/XMoon/dsh-pi-tui/blob/next/README.md) for its integration status.
-
-New agent sessions use the official roster's selected preset id. A custom DSH
-preset literally named `code` is valid and remains `code` when it exists in the
-current roster. DSH V3 migration owns historical session `code -> ptc`
-conversion, while the current projection preserves a legal custom `code`. An
-omitted legacy settings default is never aliased: with no matching declaration
-in the current roster it is simply an invalid preference.
-
-### Profile management
-
-Update the installed TUI:
-
-```sh
-dsh plugin --profile pi-tui -- update @xmoon76/dsh-pi-tui
-```
-
-List installed plugins:
-
-```sh
-dsh plugin --profile pi-tui -- list
-```
-
-Remove the plugin:
-
-```sh
-dsh plugin --profile pi-tui -- remove @xmoon76/dsh-pi-tui
-```
-
-Start and navigate Sessions:
-
-```sh
-dsh --profile pi-tui                       # ordinary start, no Session
-dsh --profile pi-tui --session             # open the Session Browser on Browse All
-dsh --profile pi-tui --session mysql       # open the same Browser searching for a keyword
-dsh --profile pi-tui --session <full-id>   # open a canonical full id directly; other values match/search in the Browser
-dsh --profile pi-tui --continue            # continue the latest Session in this Host Workspace
-```
-
-A bare or whitespace-only `--session` opens Browse All. **Only a canonical full id** (`session-`/`session_` plus 32 hex characters) resumes before the surface mounts, and it needs no roster read. Every other non-blank value opens the same Browser immediately: once the official roster lands, it matches an exact listed id first, then a unique prefix of at least four hex characters, and uses the existing guarded Resume; a keyword, an ambiguity or a miss stays one global search. The first `Esc` restores the browse list and the second returns to the sessionless Welcome. The Browser stays live, editable and closable while the roster is loading; a user edit cancels the pending CLI auto-match. `-c, --continue` selects only inside the Host-confirmed Workspace, through the intersection of official membership and the main Session roster, keeping the roster order (the baseline and roster must come from the same Host/Connection generation); an unconfirmed Workspace or no readable history keeps the surface sessionless with one notice, never guesses another Workspace and creates no Session. `--session` and `-c` are mutually exclusive; `--preset` keeps its existing blank-Session rule.
-
-### Daemon (Linux / macOS, opt-in)
-
-For quick setup, Client detach versus Host shutdown, and safe control commands, see the [daemon user guide](docs/guides/daemon.md). The details below cover upgrade and ACP behavior.
-
-The candidate release offers a local Linux and macOS daemon backend. **Direct (the in-process TUI) stays the default.** Nothing changes in an existing installation until the user opts in explicitly:
-
-- **Selection**: set `DSH_PI_TUI_BACKEND=daemon` for this launch, or save `Daemon` in `/settings → General → Backend` (the official Profile Config entry `tui-startup.backend`). Precedence is `DSH_PI_TUI_BACKEND` > saved Profile config > `direct`; an illegal value, an empty string or a non-Linux/macOS platform exits nonzero and never silently falls back to Direct. The choice applies only to the next cold launch and never hot-switches the running process or restarts a Host.
-- **Optional service install and exit confirm**: after `/settings → General → Backend` saves `Daemon` and it reads back Verified, the same settings screen offers a one-time optional service install (`Not now` performs zero management IO; one explicit `Install service` runs exactly one authenticated, profile-scoped install that never starts, enables or migrates a running Host). When a running Daemon Client saves `Direct` and it verifies, its exit gains one dangerous-action confirm: the default `Leave daemon Host running and exit` (the ordinary detach, no Host stop), the explicit `Stop daemon Host and exit` (exactly one authenticated `daemon stop` for that Profile after the terminal restore, interrupting every connected Client/Session/Job), or `Stay in the TUI`. An ordinary exit or detach never stops a Host.
-- **Management commands** (they operate on the current `--profile` only):
-
-  ```sh
-  dsh --profile pi-tui daemon status
-  dsh --profile pi-tui daemon start
-  dsh --profile pi-tui daemon stop
-  dsh --profile pi-tui daemon restart
-  dsh --profile pi-tui daemon logs --lines 200
-  dsh --profile pi-tui daemon install
-  dsh --profile pi-tui daemon uninstall
-  ```
-
-- **Headless Web control** (operates on the running same-Profile Host and never starts a Host): `web status|enable|disable|url|open`. `web url` prints exactly one official launch-token URL; treat it as a temporary credential. `web open` only asks the local browser opener and never claims a page loaded.
-
-  ```sh
-  dsh --profile pi-tui web enable
-  dsh --profile pi-tui web url
-  ```
-
-**The basic daemon is an independent local process.** When no service definition is explicitly installed for this Profile, a public daemon cold start launches the independent Host directly and queries no user manager. On Linux, `daemon install` only creates/verifies the current Profile's systemd `--user` unit; on macOS it only creates/verifies this Profile's user-level LaunchAgent plist in `~/Library/LaunchAgents` (the `gui/<uid>` domain). Neither starts, enables or restarts a running Host. The macOS LaunchAgent defaults to `RunAtLoad=false` and `KeepAlive=false`: explicit installation is neither login startup nor crash auto-restart; use `daemon start` (or one explicit daemon cold start) for supervision and `daemon stop` to stop it. `daemon uninstall` removes only this Profile's service definition; on macOS it boots out the job only when that exact plist loaded it AND the authenticated Host record proves the process identity, and it never stops an independent Host; without that proof a running/starting job is not guessed at by stop/restart/uninstall, and only a not-running, PID-less definition is safe to remove. The launch command, environment and runtime directives in a service definition belong to the user and the owning manager, and the product never redraws user content; `daemon start`/`restart` execute the user's configuration and only update recognized product-generated legacy launch fields during an explicit start/restart, preserving comments, user keys and customized arguments. `status` is a pure read: with no service definition it calls no manager; neither systemd `ActiveState=active` nor launchd `state=running` means Ready — readiness remains the authenticated Cookie, Host identity echo and a fresh kernel identity (Linux starttime / macOS schema 2). `daemon logs` reads the systemd journal, macOS's two separately labelled `launchd.stdout.log`/`launchd.stderr.log`, or this Profile's `host.log` under the currently verified ownership; after the launchd job is unloaded — including when the plist was removed but launchd streams are retained — there is no provable current source, so `daemon logs` returns `LOG_SOURCE_UNAVAILABLE` instead of guessing between the retained launchd streams and an older `host.log`; only when those launchd streams are also absent does it fall back to `host.log`; read retained files directly if needed. A management command never automatically restarts, stops or rescues a Host. `stop`/`restart` interrupt in-flight work of the current Session/Turn; unsettled writes are not replayed automatically, while `install` never causes that interruption.
-
-**Same DSH runtime, same Profile — a PiTui package update**: package updates belong to the official plugin command, and PiTui never stops a running old Host because of a normal install:
-
-```sh
-dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@<version>
-```
-
-A compatible new Client can attach to the still-running old Host. When the user needs the new Host static code, run `dsh --profile pi-tui daemon restart` explicitly. `restart` interrupts the current Host's in-flight Session/Turn/Job and starts the new Host only after the old Host's kernel identity is proven gone. Recognized product-generated legacy launch fields in the Linux systemd unit / macOS LaunchAgent are updated in place only during an explicit start or restart; every other byte, comment and user configuration is preserved. A user-custom launch command is executed as written, so the running Host may keep reporting `compatibility=other-build`. Historical build metadata never requires `daemon uninstall` before a restart.
-
-**Different DSH runtime / published old pairing**: do not hot upgrade. Finish in-flight work, exit the old TUI/Host, and back up the Profile and data first; then install a supported DSH/TUI pair per the release notes and the [compatibility guide](docs/guides/dsh-compatibility.md) and cold start. No in-place downgrade across DSH data schemas is promised. Detailed operational steps are in the [daemon user guide](docs/guides/daemon.md).
-
-If you edited the unit/plist/symlink/drop-in yourself: the service definition belongs to the current Profile and its content belongs to the user and the owning manager. The product never redraws user files and only updates recognized product-generated legacy launch fields during an explicit start/restart. If an old launch command, environment or drop-in prevents the new Host from authenticating, the command reports the real failure and you adjust it through normal systemd/launchd operations. Do not read the update flow as zero-downtime, automatic rollback or arbitrary in-place data downgrade.
-
-### Integrating a local ACP client (Linux / macOS)
-
-ACP v1 is an optional **Host-owned Unix socket** endpoint for local clients running as the same OS user; it is not TCP/HTTP or a second Host. This capability is supported starting with **0.5.7**.
-
-**Enable in TUI Settings.** Open `/settings → General → Start ACP automatically` and save the enabled preference to start ACP automatically on the **next Host cold boot**. To enable the ACP listener on the **currently running Host**, open `/settings → Tools → ACP Server` and switch it on. These controls are independent: saving the startup preference does not toggle the running listener, and a runtime toggle does not change the next-start preference. ACP is off by default.
-
-In a Split Client you can also type `/acp` to see the live listener state and enable or disable it immediately: it needs no existing Session and creates none, never changes the next-start preference and opens no browser. The Direct backend has no such runtime control (it answers an explicit refusal); headless endpoint discovery uses `daemon status` below.
-
-**Headless (no TUI required).** In the installed `pi-tui` Profile's **user** `cordis.patch.yml` (normally `<DSH_HOME>/profiles/pi-tui/cordis.patch.yml`), add this row or update the existing row with the same `id`. Keep other entries intact and do not edit the patch bundled inside the npm package:
-
-```yaml
-- id: pi-tui-acp-preferences
-  config:
-    autoStart: true
-```
-
-After saving the configuration above, use the public management commands to start the Host on a headless machine or restart an existing Host to apply the preference:
-
-```sh
-dsh --profile pi-tui daemon start      # if no Host is running
-dsh --profile pi-tui daemon restart    # if the Host runs and the preference changed
-```
-
-The basic daemon does not need `daemon install`; `restart` interrupts in-flight Turns/Jobs. `daemon status` reports the authenticated Host's listener as `acp=enabled|disabled|unavailable`, and prints `acp-socket` only when `acp=enabled`. `host=ready` **does not by itself prove ACP is listening**, and `acp=unavailable` means the state could not be proven (for example, no Host, a transition in flight or a failed read) — never treat it as disabled. Still verify a real socket connection and successful ACP `initialize`; inspect `dsh --profile pi-tui daemon logs --lines 200` on failure.
-
-**Endpoint discovery.** `scopeId` is SHA256 of `dsh-pi-tui/local-scope/1`, decimal UID and Profile `realpath`, separated by NUL bytes. Linux uses `<DSH_HOME>/run/dsh-pi-tui/<scopeId>/acp.sock`; macOS uses `/private/tmp/dpt-<uid>-<first 40 hex characters of scopeId>/acp.sock`. The socket has mode `0600` and newly created private directories are `0700`.
-
-The following official SDK example assumes the default `~/.dsh/profiles/pi-tui` layout. For custom locations, set `DSH_HOME` or the **example-only** `ACP_PROFILE_DIR` to the directories actually resolved by DSH. Install `@agentclientprotocol/sdk@1.4.0` in a separate Node.js (>=24.9.0) client project, save the code as `acp-client.mjs` and run `node acp-client.mjs`; the Host also needs a working model/provider configuration:
-
-```js
-// acp-client.mjs — run from an independent Node.js client project
-import { createHash } from 'node:crypto'
-import { realpathSync } from 'node:fs'
-import { connect } from 'node:net'
-import { homedir } from 'node:os'
-import { join } from 'node:path'
-import { Readable, Writable } from 'node:stream'
-import * as acp from '@agentclientprotocol/sdk'
-
-const home = realpathSync(process.env.DSH_HOME ?? join(homedir(), '.dsh'))
-const profile = realpathSync(process.env.ACP_PROFILE_DIR ?? join(home, 'profiles', 'pi-tui'))
-const uid = process.getuid()
-const id = createHash('sha256')
-  .update(['dsh-pi-tui/local-scope/1', String(uid), profile].join('\0'))
-  .digest('hex')
-const path = process.platform === 'darwin'
-  ? join('/private/tmp', 'dpt-' + uid + '-' + id.slice(0, 40), 'acp.sock')
-  : join(home, 'run', 'dsh-pi-tui', id, 'acp.sock')
-
-const socket = connect(path)
-await new Promise((resolve, reject) => {
-  socket.once('connect', resolve)
-  socket.once('error', reject)
-})
-const app = acp.client({ name: 'local-acp-example' })
-  .onNotification(acp.methods.client.session.update, ({ params }) => {
-    console.log(JSON.stringify(params.update))
-  })
-const connection = app.connect(acp.ndJsonStream(Writable.toWeb(socket), Readable.toWeb(socket)))
-try {
-  await connection.agent.request(acp.methods.agent.initialize, {
-    protocolVersion: acp.PROTOCOL_VERSION, clientCapabilities: {},
-  })
-  const { sessionId } = await connection.agent.request(acp.methods.agent.session.new, {
-    cwd: process.cwd(), mcpServers: [],
-  })
-  try {
-    const result = await connection.agent.request(acp.methods.agent.session.prompt, {
-      sessionId, prompt: [{ type: 'text', text: 'Hello' }],
-    })
-    console.log('stopReason:', result.stopReason)
-  } finally {
-    await connection.agent.request(acp.methods.agent.session.close, { sessionId })
-  }
-} finally {
-  connection.close()
-  socket.destroy()
-}
-```
-
-For an existing Session, replace `session.new` with `acp.methods.agent.session.resume`, passing `{ sessionId, cwd }`. Each ACP connection owns at most one Session View, and a Session allows at most one ACP View at a time; TUI clients are unaffected. `session/close` **only detaches** the View; it neither deletes the Session nor disposes the shared Agent. Host shutdown retires the listener, and an owned stale socket is safely reclaimed on the next start.
-
-The default maximum is **4** connections, configurable in the Host startup environment with `DSH_PI_TUI_ACP_MAX_CONNECTIONS=1..16`. Available operations include `initialize`, `session/new|resume|prompt|cancel|close`, standard text, `resource_link`, capability-negotiated prompt images and committed Assistant/Tool content. `session/list`, `session/load`, `session/set_config_option`, ACP-side MCP Server registration and dedicated file/artifact transfer are unsupported; `resource_link` never causes the Host to fetch a URI. For protocol errors inspect JSON-RPC `data.code` for `LOCAL_ACP_*`. See the [Host ACP contract](docs/architecture/host-acp.md) for the complete semantics.
-
+~~~
 
 ## Features
 
-### Conversation and tools
+### Two modes, one DSH Session authority
 
-* Streaming Markdown output
-* Collapsible Thinking blocks
-* Tool Call cards with running / success / failure state
-* Collapsible Tool / System details
-* Full-text Transcript search
-* Folding for long Session history
-* Context, token, model, and runtime status
-* Full-screen Settings workspace: About status, Models / Account, Agent and dynamic Extensions
-* Approval and `ask_user_question` dialogs
-* Images: terminal-capability admission, JPEG/WebP previews, draft images and a read-only viewer
-* Chart/SVG tools, `present_visual` publication and inline final-answer rendering
-* Delivered-files tail and the `/deliverables` browser
-* Experimental TSP renderer: native tool cards, Work Hub, images and published figures
-* Host-wide Scheduled Task management in PiTui Direct
-* Plugin Manager: inspect and update third-party Registry bundles marked updatable by the Host
-* Agent guidance for file links, image references and `present` deliveries
-* Plan Review
-* Todo / Goal status
-* Human-readable terminal window titles
-* Bounded long-session windows with stable paging and live-follow position
-* Long user prompts collapse to head + marker + tail; `Ctrl+O` expands and collapses them in regular mode and in fullscreen outside Focus
-* No duplicate ghost Tool Cards after compaction / pruning
+| | Direct (default) | Daemon (opt-in from 0.5.7) |
+|---|---|---|
+| Launch | `dsh --profile pi-tui` | `DSH_PI_TUI_BACKEND=daemon dsh --profile pi-tui` |
+| Process | TUI and Host in one process | Independent Host; TUI is a detachable Client |
+| Frontends | Current in-process terminal surface | Multiple TUIs + official Web + optional local ACP on one Host/Session |
+| Exit | Ends the Direct application | Normally detaches only the Client; does not stop Host |
+| Service | No separate management | Optional Linux systemd --user / macOS LaunchAgent |
 
-`Ctrl+O` controls Tool and System details and expands/collapses long user prompts in regular mode and in fullscreen outside Focus — in fullscreen Focus it bulk-expands the recent Thought roots or collapses them all, while long user prompts are expanded by clicking the marker (or by a search hit) and collapsed with `Ctrl+O`. `Alt+T` controls Thinking separately.
+You can also save `Daemon` under `/settings → General → Backend` for the **next cold launch**. `DSH_PI_TUI_BACKEND` overrides that preference for one launch without saving it. Selecting a backend does not hot-migrate a Host. Installing an OS user service is optional, not a prerequisite. Sessions and Agents remain Host-owned.
 
-Tool approvals appear in the editor seat: the full Reason/Arguments body is readable in a scrollable area (no six-line preview), with `y` to allow once, `n` to reject, `Esc`/`Ctrl+C` to cancel, `c` to copy the raw arguments and `e` to expand. Fullscreen can click the actually painted Allow once / Reject / Cancel actions and wheel the body; regular mode stays keyboard-only. Short viewports show the real compact payload or `Resize to inspect more`, never a cropped decision.
+### Agents, tasks and sessions
 
-### Herdr terminal integration
+- **Agent and tools:** streamed Markdown, Thinking / Tool / Context disclosure, approvals and Questions, model/reasoning-effort selection, Plan, Goal and Todo.
+- **Sessions and workspaces:** `/sessions`, `/new`, `/resume`, `/fork`, `/rewind`, `--session` and `--continue`; browse by workspace and preview before resuming.
+- **Team / Subagent / Job:** toggle Root Agent Team in `/model`; `/tasks` displays Work/Team, nested Subagents and Jobs. Subagents are expanded by default; retained Job history is optionally disclosed.
+- **Input and shell:** `@file` completion, image and file attachments, `Ctrl+V` image paste, `!` / `!!` Host Shell, external editor, customizable Footer.
+- **Reading and search:** `/display` Full / Focus / Compact, Transcript View / Full search, folding, `Ctrl+R` prompt history. Current Session recall spans working-directory changes.
+- **Settings and plugins:** Provider authorization/credentials, approvals, MCP management, Web Search/Fetch, Plugin Manager, dynamic Extension Settings and Client-local `./tui` plugin loading.
+- **Images and delivery:** terminal-gated image/static SVG/charts, `/view-image`, `/deliverables`, `/export`; Kitty, SIXEL and supported iTerm2 paths.
+- **Optional experimental renderer:** `DSH_PI_TUI_RENDERER=tsp` enables a subset of Tern TSP native Transcript/Work Hub interactions; it does not replace every PiTui Settings/Plugins surface.
 
-When `dsh --profile pi-tui` runs inside a Herdr pane (Direct or the internal Split Client), the TUI automatically reports the main Agent's `idle` / `working` / `blocked` state to that pane, so `herdr agent list` and the pane UI recognize `dsh-pi-tui` without configuration. The report reuses the Agent status the TUI already derived: it is independent of the Terminal progress setting, a Client-local flow such as `/login` is never reported as blocked, and exiting withdraws this pane's registration.
+### Useful commands and default keys
 
-In the older Herdr TUI (>= 0.9.2), once a committed canonical full main Session ID exists, Herdr saves the public recovery command and cold-opens that same persisted Session when the named Herdr session restarts. Direct uses `dsh --profile <actual profile> --session <Session ID>`; the public daemon/Split Client uses `env DSH_PI_TUI_BACKEND=daemon dsh --profile <actual profile> --session <Session ID>`, whose first argv is the `env` command on `$PATH`, so a Profile later saved back to Direct can never make recovery open a new Direct Host by mistake. The command carries the Profile actually verified by the Client entry and the committed canonical Session ID. Recovery reuses a still-live Host through that Profile's official local Host discovery/authentication; it does not promise to revive a stopped or corrupted old Host instance, does not restore the old Client's OS PID/TTY or an Agent/Turn still running in it, and does not bypass the DSH SessionWriteLease. With no recoverable canonical Session or a Profile that does not satisfy Herdr's argument rules, no recovery command is provided; Herdr's automatic-restore switch can disable this behavior. Herdr App's OSC 7501 state channel is a different mechanism from the older CLI recovery, and this feature does not claim Session recovery in the newer App. An ordinary terminal or an incomplete Herdr environment starts no extra background process, and an unavailable Herdr never affects the TUI.
+| Command / key | Use |
+|---|---|
+| `/sessions` · `/resume` · `/new` | Find or start sessions |
+| `/model` · `/tasks` · `/plan` · `/goal` | Models, jobs and Agent modes |
+| `/settings` · `/plugins` · `/keybindings` | Configuration and extensions |
+| `/display` · `/export` · `/deliverables` | Reading and exporting |
+| `Ctrl+F` · `Ctrl+Shift+F` | Rendered-view / available Session-history search |
+| `Ctrl+R` · `Ctrl+G` | Prompt history / external editor |
+| `Ctrl+O` · `Alt+T` | Tool/Context and Thinking disclosure |
+| `Ctrl+C` · `Ctrl+D` | Cancel while busy, or follow idle exit confirmation |
+| `!` · `!!` | Host Shell with / without Session persistence |
 
-### Conversation display
+These are default mappings and common entries; `/help` and `/keybindings` show the **effective** keys after customizations. `/transcript` currently uses the official Direct Markdown export; `/export` creates a separate ZIP archive saved on the Client filesystem. `PI_IMAGE_PROTOCOL=none` disables pixel previews, not attachments.
 
-`/display` switches between three presentation presets: `full` (default) is the normal Transcript projection; `focus` groups the current turn's Thinking, Tool Calls, and intermediate replies into a live Thought block; `compact` folds contiguous process into `Activity` spans with Header + `Think:` / `Action:` previews, keeps the session and assistant intermediate output visible in chronological order, renders injected notice / relay / recall entries separately (adjacent environment injections merge into an expandable Context cluster), and expands with a mouse click or `Ctrl+O`. The `Display` row in `/settings` offers the same values and persists the choice; `/focus` remains available as a compatibility command.
+## Daemon quick start (Linux / macOS)
 
-The full process can still be expanded when needed. In fullscreen Focus, Thought roots can be expanded/collapsed in bulk or opened with an individual card click, and the viewport survives switches and resizes. Display presets only change presentation; they do not modify Session events.
+A system service is not required to start a standalone Host. Try one launch:
 
-### Communication policy
+~~~sh
+DSH_PI_TUI_BACKEND=daemon dsh --profile pi-tui
+~~~
 
-`/settings` exposes two independent communication controls. **Progress updates** owns the mid-turn update cadence: `milestones` (default) posts a brief update only when a substantial phase completes, the direction materially changes, or required user input blocks progress — never for a freshly discovered partial finding; `frequent` keeps the user actively informed through longer multi-step work; `off` suppresses progress narration entirely. **Response style** owns the visible answer's density: `default` adds no extra guidance, `concise` is compact and result-first, `explanatory` adds rationale, architecture, and tradeoffs. Changes apply on the next prompt assembly without restarting the agent and are saved across sessions. Focus is a surface capability, not a third preference: while Focus is active the progress section is simply ineffective (progress-only intermediate messages are not generated) and the saved cadence is untouched; the response style stays active in Focus.
+The usual Daemon TUI `/exit` / `/quit` **detaches the Client, not the Host**. When the current Session is working, the TUI offers explicit exit choices. Management commands operate only on the selected Profile:
 
-### Sessions
+~~~sh
+dsh --profile pi-tui daemon status
+dsh --profile pi-tui daemon logs --lines 200
+dsh --profile pi-tui daemon start
+dsh --profile pi-tui daemon stop
+dsh --profile pi-tui daemon restart
+dsh --profile pi-tui daemon install
+dsh --profile pi-tui daemon uninstall
+~~~
 
-Supports persisted DSH Sessions, including:
+`daemon install` only creates/verifies the optional Profile-scoped OS user service definition; it does **not** start, enable or migrate the Host. `daemon stop` and `restart` can interrupt in-flight Turns/Jobs across connected Clients. A manager reporting “running” is not proof of authenticated Host readiness.
 
-* Creating and resuming Sessions
-* Session switching
-* Renaming
-* Forking
-* Rewind
-* Session lineage
-* `/export` — full Session archive (descendants + attachments) saved to a Client-local directory
-* `/transcript` — official DSH Session Markdown in Direct mode, saved to a Client-local directory
+Within the **same DSH Runtime and Profile**, update the installed TUI bundle through official plugin management. The old Host may continue serving existing work; explicitly run `daemon restart` when you want its static code replaced (with an interruption). Same-Profile older service definitions do not require a routine uninstall first. **Changing DSH Runtime** is not a hot upgrade; stop, back up and cold start a supported pair. See the [Daemon guide](docs/guides/daemon.md).
 
-Use:
+## Web, ACP and other clients share the Host Session
 
-```text
-/sessions
-/fork
-/rewind
-/export
-/transcript
-```
+The **official Web frontend** and optional local ACP listener use the same Daemon Host and its official Session/Agent authority. The Web frontend is default-off and can be enabled on a running Host:
 
-In Direct mode, `/transcript` reads official Host Session Markdown and saves a local `.md` file; user messages are blockquotes and process activity may be inside `<details>`. `/export` remains a separate ZIP archive.
+~~~sh
+dsh --profile pi-tui web enable
+dsh --profile pi-tui web url
+dsh --profile pi-tui web status
+~~~
 
-When the Agent is idle and the editor is empty, pressing `Esc` twice quickly also opens Rewind.
+Also available: `web disable` / `web open`. The commands do **not** start a Host or create a Session. The `web url` output contains an authentication token: handle it as a secret. The official Web page lets users select sessions held by that Host.
 
-Rewind creates a new Child Session from a selected historical User Turn and restores that Prompt into the editor. The original Session is unchanged. Ordinary Fork/Rewind Sessions are independent, not parent/child lineage; Session lineage represents Subagents.
+**ACP v1** is a default-off, same-user local Unix-socket interface. `/acp` in a Daemon TUI inspects/toggles the live listener; `/settings → General → Start ACP automatically` controls the next cold Host start. Headless clients can discover a positively verified `acp` status/socket via `daemon status`. ACP supports a bounded `initialize` / `session/new|resume|prompt|cancel|close` subset plus negotiated image input; it does not implement `session/list`, `session/load` or MCP Server configuration over ACP. One ACP connection has at most one Session View and each Session at most one ACP View, with no such restriction on TUI Views. An executable [ACP SDK example and connection procedure](docs/guides/daemon.md#local-acp-v1-sdk-client-example) is in the Daemon guide.
 
-In PiTui, `/sessions`, `/search` and `/resume` open the fullscreen Session Workspace, grouped into Needs attention, Working and Recent. Filter by Current, a Workspace or Unassigned; `Space` opens a read-only Peek and `Enter` switches Sessions. In Direct mode, new Sessions including `/new` use the official Host Workspace. When the main editor owns the keyboard and the draft is strictly empty, two unmodified `←` presses within 600 ms open All workspaces; the first remains ordinary cursor movement.
+When launched inside [Herdr](https://github.com/herdrdev/herdr), the TUI can report Agent status and provide Profile-pinned recovery commands for durable Sessions where the Herdr Client supports them.
 
-### Input history
+## Settings, extensions and development
 
-`Ctrl+R` opens input history search.
+`/settings` is the shared fullscreen Settings workspace; `/plugins`, `/footer` and `/keybindings` open its relevant pages. Host configuration writes use official authoritative readback; a package enabled in the Host is not necessarily an ACTIVE `./tui` extension in the current Client.
 
-Three scopes are available:
+Public extensions have **Stable / Advanced / Unstable** tiers: see the [authoring guide](docs/extensions/authoring.md), [Stable API](docs/extensions/stable.md) and [tier contract](docs/extensions/tiers.md). Version 0.5.7 adds Client-local `./tui` loading and per-package persisted settings, but **does not deliver Forge or a Plugin Marketplace**.
 
-* Current session
-* Current directory
-* All directories
+For development:
 
-History results include the Prompt, working directory, timestamp, and Session information. Selecting an entry restores it to the editor without submitting it.
+~~~sh
+mise install --locked
+mise run setup
+mise run build
+mise run typecheck
+~~~
 
-Regular `↑` / `↓` history recall is still available for recent input.
+Read [AGENTS.md](AGENTS.md), the [development guide](docs/guides/development.md) and [documentation index](docs/README.md). The [release checklist](docs/guides/releasing.md) owns full release verification.
 
-### Subagents and the Task Center
+## Changelog and license
 
-`/tasks` opens the full Task Center, showing the work the current Session's
-Job Registry / Subagent catalog still tracks; the Footer's `↓` opens the
-lightweight Quick Tasks view for the current active work. Selecting a Job opens
-the fullscreen Job workspace: one status row with the Job identity, the themed
-status and the `[GAP]`/`[ERROR]`/`[SETTLED]` facts, followed by the real
-progress/detail, the command summary and the `Output` / `Command` reading tabs.
-Output is the official non-consuming live preview (scrollable, searchable and
-explicitly labelled as a retained tail rather than the full history), and the
-Command page shows and copies the original shell command. It never consumes the
-model's `job_output` cursor and never becomes session history.
-
-Task Center is a live tracked/control projection, not an execution-history
-list. `ACTIVE` / `TRACKED` are presentation scopes: `ACTIVE` shows only the
-currently active items, `TRACKED` shows everything the current authority
-still lists. DSH `0.1.7` temporarily registers a Job while an ordinary
-foreground `bash` / `pwsh` command runs, so it can be observed and stopped
-from the Task Center; if the command finishes inside the foreground wait,
-DSH removes that temporary record and the final result stays in the
-Transcript's tool card. Explicit `run_in_background: true` jobs (and jobs
-promoted to the background after a foreground timeout) remain visible in
-`TRACKED` after completion as long as the Job Registry keeps their record.
-
-`/plugins` is a deep link into `/settings → Plugins`: both take the SAME
-Settings fullscreen lease and the SAME Plugin Manager page — there is no
-separate plugin screen and no Session create/switch. The catalog is grouped as
-TUI & Extensions / Official DSH / Third-party / Experimental (the Experimental
-group is always last). At >=120 columns, and only while the frame can grant six
-real business-body rows, the frame shows
-`Categories | Plugin List | Details`; a shorter frame degrades to the pair or one
-column instead of squeezing the body. At 76-119 columns it shows
-`Categories | List` or `List | Details` depending on the keyboard owner — the pair
-again needs six real business-body rows, otherwise it degrades to one column; below
-76 columns it is one column. Install, dangerous confirmations and Diagnostics
-always take the full width so risk text is never squeezed. Settings paints the
-shared header/metadata/rule/pane header and the single last-row action bar; the
-plugin page contributes only its business body. Search, status filters, provenance/status facts, official catalog installs, enablement and removal are available from the page; third-party Registry Profile bundles marked updatable by the Host can show available versions and be updated after explicit confirmation. The actual Host-reported version, restart requirement and errors are shown verbatim. The `dsh-pi-tui` bundle currently providing the surface is read-only and cannot be updated, disabled or removed from its own screen. The
-category preview and `/plugins` share one page instance and one background
-install request: `Esc` from the List returns to the Settings category and a
-second `Esc` closes the workspace. Press `d` inside the page
-for the read-only **Diagnostics** view: extension contribution health grouped by
-owner (`active/failed/shadowed` with the full `lastError`), live registry counts,
-the actual advertised capabilities, and contributions with no proven Loader-entry
-owner under `Unassociated extension contributions`. `c` copies the selected fact,
-`C` copies everything, `r` rereads and Esc returns. Diagnostics reads only the
-extension ledger; Host package state and install logs stay out of it. `copy`
-still proves emission only, never an OS-clipboard receipt.
-
-The official Experimental bundles (including the rc.3 DeepSeek chat import
-Web-only member) carry a bounded, identity-exact Detail statement of their
-terminal surface and limits/risks (Web-only,
-Host-only, the B04 WEB_ONLY/Host-row-pending boundary accepted by the Owner,
-and the B13/B14 verified one-shot/provider boundaries). That copy never follows
-enablement and never claims a live Host capability PASS. Upgrade guidance is
-derived from Host facts only: shipped bundles upgrade with the DSH installation,
-profile-owned bundles require Remove followed by an explicit later install,
-missing entries use the official on-demand target, and the Current TUI bundle
-is managed outside the screen. There is no in-place update, version picker or
-silent reinstall.
-
-Subagents are shown using their complete lineage, including nested descendants:
-
-```text
-main
-├─ subagent A
-│  └─ subagent B
-└─ subagent C
-```
-
-The browser distinguishes:
-
-* `continuable`
-* `one-shot`
-* running / inactive
-* nested descendants
-* Job Registry rows (including running foreground shell work)
-
-The Footer's `↓` opens Quick Tasks as a lightweight browsing view: it only
-supports arrow navigation, left/right expand/collapse, `Tab` type cycling,
-`Enter` open, and `Esc` close. The bottom “Open Task Center” row opens the full
-Task Center.
-
-The full Task Center additionally offers `A` to toggle Active / Tracked, `/` search,
-`Tab` / `Shift+Tab` to cycle types in both directions, `S` to stop the selected
-task after confirmation, and `R` to refresh/retry. Quick Tasks consumes only the
-whitelist above; every other keystroke is a no-op that never enters search, stop
-confirmation, or management state, so `Esc` always closes it in one layer.
-
-Completed one-shot Subagents remain available for persisted Transcript inspection.
-
-A direct `continuable` Child can be opened in an interactive viewer and sent follow-up messages directly (through DSH's official `subagents.prompt()` human channel — queued in order as the Child's own next turn, with user provenance). The Child has its own Transcript, Draft, and runtime state, without modifying the main Session input.
-
-Deeper nested Subagents are read-only by default.
-
-The official subagent model selection (the DSH `subagent-model-selection`
-setting) can be toggled and its allowlist maintained in `/settings`: once
-enabled, a NEW session's official `subagent` tool may pick the child
-provider/model per call (bounded by the allowlist). The setting is sampled at
-session composition and never rewrites the tools of an already-running
-session.
-
-### Delivered files and `/deliverables`
-
-A final answer's `present` files render as a compact tail: at most four files,
-two rows each (path relative to the current display subject's workspace plus
-description), with `+N more · /deliverables` beyond four. On a fullscreen
-AltScreen, Full, Compact and Focus can click `Browse all` and per-file
-`Details`; a regular split keeps only the command entry.
-
-`/deliverables` opens the delivery panel for the currently displayed session
-(including a viewed child) with Files / Turns / Details: `↑↓` selects, `Enter`
-opens details, `/` filters by filename, full Host path and description, `T`
-switches among Turns with deliveries, `C` copies the raw Host path and `Esc`
-goes back or closes. `Enter Preview` on Details reads one 120-line page of UTF-8
-Host text; binary/document suffixes show that preview is unavailable without
-reading bytes; a file that changes between pages restarts from the beginning.
-Panel text is mouse-selectable, the panel is centered, and a terminal resize
-keeps the current page, filter, cursor and scroll position.
-
-### Shell
-
-The editor supports two Shell modes:
-
-```text
-! git status
-```
-
-Runs the command in the Host environment and submits its output into the current Session.
-
-```text
-!! git status
-```
-
-Runs the command in the Host environment as well; its output stays out of model context (card display only).
-
-`!` / `!!` are editor modes rather than plain text prefixes. The prompt and completion behavior switch together with the active mode.
-
-Shell cards fold to at most three rows by default: the header/status, the command, and one settled outcome row; a running card shows no output preview. `Ctrl+O` expands the retained output — except in fullscreen Focus, where Ctrl+O owns the Thought roots and the shell cards keep their folded state. A settled `!!` card stays at its accepted conversation position; later submissions, Ctrl+S, or new `!`/`!!` runs do not clear it. A Session switch, TUI restart, or Alt+K dismisses it. A committed `!` removes only its own local card; a rejected or indeterminate Session write keeps the card marked `not submitted` / `submission uncertain`, with the reason available when expanded.
-
-### Git commit attribution (optional)
-
-When enabled, dsh-pi-tui instructs the Agent to add the official attribution trailers when it creates Git commits:
-
-```text
-Co-Authored-By: @xmoon76/dsh-pi-tui <dsh-pi-tui@xmoon.org>
-```
-
-It is **off by default**. Three modes are supported:
-
-```text
-off            no attribution guidance (default)
-product        the official Co-Authored-By trailer
-product-model  official trailer + Assisted-By: <provider>/<model>
-```
-
-This is **Agent guidance (a prompt policy), not repository-level enforcement**:
-dsh-pi-tui installs no Git hooks, rewrites no `git commit` command, and probes
-no repository. The `provider`/`model` in `product-model` come straight from
-DSH's official model selection (a model switch takes effect on the next
-request).
-
-Boundaries:
-
-- `!` / `!!` user shell commands and commits from your own terminal are completely untouched;
-- no `prepare-commit-msg` hook is installed and existing hooks are never modified;
-- **not effective under the `minimal` preset**: its persona is a complete system prompt
-  (`complete: true`) that replaces every other section — the same existing behavior for the
-  other TUI guidance (progress updates, response style, focus);
-- no GitHub credentials or API are required; the Author/Committer identity is never modified;
-- a model may in theory ignore or mis-transcribe the instruction — this is the accepted tradeoff: low-intrusion guidance instead of a full Git lifecycle subsystem.
-
-### File references and images
-
-Typing `@` opens workspace file search and completion:
-
-```text
-@src/index.ts
-@"path with spaces/file.ts"
-```
-
-`/attach <path>` is the unified Client-local image/file intake; `/image <path>` keeps its image-only compatibility semantics. Both complete files and directories; paths with spaces, quotes or Windows separators preserve the input dialect, and directories can be expanded further. In terminals with bracketed-paste support, a recognized local absolute image path can be staged as an attachment; sending is blocked while it is read, and a failed read keeps the path text.
-
-Resolvable relative paths are canonicalized before submission.
-
-Clipboard images can be added with `Ctrl+V` and persisted through the DSH Attachment service.
-
-### Models and runtime settings
-
-The TUI uses DSH model and settings services.
-
-Common entry points:
-
-```text
-/model
-/schedule
-/settings
-/status
-/deliverables
-/view-image
-/login
-/permission
-/plan
-/goal
-/compact
-/footer
-/statusline
-```
-
-Model selection, Reasoning Effort, permission presets, Plan, and Goal all keep the corresponding DSH runtime semantics. `/model` candidates come only from the Host catalog: `deepseek-flash` is identified by the exact `(provider, model)` pair (the display name `DeepSeek-V4.1-Flash` is never the ID), and a selection writes the official Session/global default. A deployment catalog that no longer offers the ID shows no invented row.
-
-In PiTui Direct, `/schedule` opens the Host-wide task workspace without a Session. The Host owns its timer; stopping the Host stops background delivery.
-
-`/settings` and `/status` open the same full-screen settings workspace on the
-About home. Wide and medium terminals show a category rail plus the content
-column; narrow terminals (under 76 columns) show About directly. The fixed
-categories are About / Models / Account / Agent / Appearance / Conversation /
-Input & Terminal / Tools / Plugins, with Extensions appended only while the
-extension settings registry has rows. `Tab`/`Shift+Tab` move focus between
-regions, `Right`/`Enter` go one level deeper, `Left`/`Esc`/`Backspace` step
-back, and the outermost back closes the workspace; the Action Bar stays on the
-last row.
-
-About shows the TUI/DSH versions, backend, captured session identity,
-whole-session statistics, TTFB/throughput and Context occupancy; `c` copies the
-selected fact's raw value, `C` copies the full report and `r` refreshes. The old
-`/status` page is gone; extension diagnostics moved to
-`Settings → Plugins → Diagnostics` (`d`).
-
-Models lists the Host provider catalog, API-key presence (not a connectivity
-test), provider details, masked input and clear confirmations, the Add Provider
-wizard and provider-native sign-in; the home lists only configured providers,
-with unconfigured ones in the Add Provider catalog. Account shows sign-in state,
-the browser authorization URL, SSH tunnel guidance, independent wallets, exact
-attempt cancellation, refresh and a confirmed sign-out. `/login` and `/logout`
-open the matching page deep link. DeepSeek Account sign-in uses the official Host
-`host-webserver` loopback `/oauth/callback` on `127.0.0.1:0`; the TUI never
-receives a token or grant, and `--help` opens no port.
-
-Settings edits in place: Appearance (Icon style, Status line mode), Conversation
-(Transcript detail, Thinking detail, Progress updates, Response style, Submit
-while busy, Git attribution), Input & Terminal (Home/End keys, Fullscreen, wheel
-lines, notifications, Terminal progress, Footer layout, Keyboard shortcuts),
-Agent (approval policy, default permission, subagent model allowlist/selection,
-user shell sandbox), Tools (Web Search / Fetch, Visual tools) and Extensions
-(dynamic settings grouped by plugin). Every write needs explicit confirmation
-and reports `Verified` / `Not saved` / `Outcome unknown` from the authoritative
-read-back; `Fullscreen` applies after Settings closes normally. `/footer`,
-`/statusline`, bare `/keybindings` and `/plugins` are deep links into the same
-workspace; the legacy main settings editor and standalone plugin screen are
-gone.
-
-The **Visual tools** switch under `Settings → Tools` (default On) is the
-profile-wide `pi-tui-visual-tools.enabled` and controls `dsh_pi_tui_chart`,
-`dsh_pi_tui_svg` and `present_visual` together. After it is turned off, new
-model requests no longer see the three tools, while historical results remain
-displayable, copyable, searchable and exportable. Direct verifies the Host
-registry state before showing Verified; Remote only reports that the preference
-was saved.
-
-`Settings → Tools → Web Search / Fetch` is a page in the same workspace: search
-and fetch providers, result count, `Share Original Question`, HTTPS endpoint and
-a read-only API-key reference. Each value is written only by an explicit Enter
-confirmation and shows the Host's authoritative read-back. The two APIs are
-separately billed providers; the default Messages/HTTP pair calls no billed API.
-
-`Extensions` groups the live registration rows by owner with `Tab`/`Shift+Tab`
-cycling groups and arrows/Home/End/paging/wheel staying inside the group.
-Entries open native Detail/Choice; only an explicit Confirm writes to the
-running plugin, `Verified` requires a live read-back, and a same-id HMR
-re-registration inherits no old state. Extension settings never write the TUI
-settings document or a Host profile.
-
-### Footer customization
-
-`/footer` opens the Footer editor inside the same full-screen Settings workspace
-(Appearance → Configure footer layout). You can combine builtin status items,
-change their side and order, choose a Style and Tone, edit Prefix/Suffix and
-Importance, and create your own Footer items.
-
-Four item sources are supported:
-
-- **Builtin Item** — Model, Context, Token, Tasks, Git branch, and other built-in status facts;
-- **Custom Text** — a user-created static text item;
-- **Custom Command Item** — a user-created dynamic command output that can be composed with other items;
-- **Extension Item** — a Footer item contributed by a plugin through the Stable Extension API.
-
-On narrow terminals, builtins with compact forms shorten before lower-importance content is dropped. Runtime compaction never rewrites the Style you saved.
-
-A `/footer` Custom Command Item is different from `footer: command`: the former is one dynamic item that can sit next to Model, Context, and other items; the latter hands the whole Footer status surface to one user command.
-
-For the full `/footer` workflow, Custom Text / Command items, YAML reference, security model, and troubleshooting, see:
-
-- [Footer customization guide](docs/guides/footer.md)
-- [Extension API for plugin authors](docs/extensions/stable.md)
-
-`/statusline` is an alias of `/footer`.
-
-### Images
-
-Ctrl+V reads the system clipboard: an image becomes the canonical placeholder `[image #N (WxH)]` with draft thumbnails in one row above the composer (a short window lets the client hide that row, while typing and sending still work and the status line keeps reporting the real draft count); text is inserted at the live caret. `/image` and `/attach` can also add an image or a regular file to the current draft. A placeholder that appears several times shows several positions while the bytes are read and uploaded once.
-
-Images in user messages, assistant messages and tool results are shown inside their own card, in their original order: one identity line (name, pixel size, byte count) plus one image. The PiTUI viewer is described below; in the experimental TSP renderer, viewing and zooming are the Tern client's own affordances (moving between neighbouring images depends on the client's version and capabilities). When an image cannot be read, its format is unsupported, or it exceeds the 16 MiB single-image limit, the card states the identity and the real reason instead of drawing a fabricated image. On a native Kitty terminal, transcript thumbnails, the composer draft card and the fullscreen image viewer all first convert JPEG/WebP to a bounded PNG in the background before painting pixels (WebP uses only its first frame, EXIF orientation is applied, and the longest edge is capped at 768 pixels; the identity row and the viewer keep the original name, dimensions, media type and byte count; the draft card only derives the one last local image it is allowed to show). A collapsed occurrence never starts a conversion; while converting or after a failure only text is shown (a failure reads `Preview unavailable`), and only a body that really painted pixels is clickable. The fullscreen viewer shows that same bounded derivative rather than a full-resolution original; PNG, iTerm2, GIF, narrow and graphics-unsupported terminals keep their existing behavior.
-
-The rightmost three cells of a fullscreen image info row are `[-]`/`[+]`, folding only that image; clicking its body opens the read-only viewer. `/view-image` lists the images of the currently mounted transcript window; `Enter` views one and `Esc back` returns to the same list.
-
-### Image protocol selection
-
-The default is `auto` (Direct/Zellij use Kitty > SIXEL > text; tmux keeps its live U1/Sxl relative priority). Choose a protocol explicitly at startup with the same `PI_IMAGE_PROTOCOL` variable:
-
-```sh
-PI_IMAGE_PROTOCOL=auto    # default; strict local Zellij + Windows Terminal avoids the known startup Kitty false positive
-PI_IMAGE_PROTOCOL=kitty   # only an admitted Kitty transport, otherwise text
-PI_IMAGE_PROTOCOL=sixel   # only an admitted SIXEL transport (Direct needs real DA1; Zellij/tmux keep their own gates), otherwise text
-PI_IMAGE_PROTOCOL=iterm2  # Direct legacy iTerm2 only; multiplexers never pretend to forward it
-PI_IMAGE_PROTOCOL=none    # disable image pixels for every renderer; 0 is equivalent
-```
-
-An explicit value is a protocol **selection**, not a promise for an unsupported terminal: tmux live-client/Sxl/U1 checks, Zellij DA1/version/Screen readiness and DCS ownership still apply. Invalid values fail startup. `none` only disables terminal pixel previews; image attachments, model input and sending are unchanged. The experimental TSP renderer's native images follow the same switch.
-
-### TSP renderer (experimental)
-
-Set `DSH_PI_TUI_RENDERER=tsp` to enable the experimental Tern TSP renderer:
-native tool cards, Preparing rows, PTC child calls, the Work Hub
-(`/tasks`, `/subagents`), image paste and historical images, and native display
-with Copy for published charts/SVGs. The default renderer remains PiTui;
-Settings and Plugins pages that TSP cannot host are refused explicitly.
-
-## Common keys
-
-| Key           | Action                                              |
-| ------------- | --------------------------------------------------- |
-| `Enter`       | Submit input                                        |
-| `Ctrl+Enter`  | Submit with the OPPOSITE busy behavior (steers by default; queues when `busyEnter=steer`) |
-| `Shift+Enter` | Insert newline                                      |
-| `Esc`         | Cancel current interaction / interrupt running work |
-| `Esc Esc`     | Open Rewind while idle                              |
-| `Ctrl+C`      | Cancel once while working; same-key double-press exit while idle (clears the draft first) |
-| `Ctrl+D`      | Same-key double-press exit when empty; forward-delete with draft text |
-| `Ctrl+S`      | Steer queued messages and the draft into the running turn |
-| `Ctrl+T`      | Toggle the todo panel                               |
-| `Ctrl+R`      | Search input history                                |
-| `Ctrl+F`      | Find in the **mounted rendered** Transcript (View)  |
-| `Ctrl+Shift+F` | Find in the available Session semantic history (Full, includes invisible source, reports `Source-only`; `N/M` counts navigable targets; the Remote scope follows the Find box's Loaded/Entire hint) |
-| `Tab` in Find | Switch View / Full and keep the same query           |
-| `Ctrl+End`    | Jump to the latest Transcript output in fullscreen; a clickable `↓ Latest` appears after leaving the live tail |
-| `Ctrl+O`      | Expand / collapse Tool and System details and long user prompts in regular/fullscreen-non-Focus; in fullscreen Focus, bulk-toggle the Thought roots (expand long user prompts by clicking the marker) |
-| `Alt+T`       | Expand / collapse Thinking                          |
-| `Alt+V`       | Select / cycle the current window's published charts or SVGs |
-| `Alt+C`       | Copy the selected chart / SVG                       |
-| `Alt+O`       | Open the selected SVG                               |
-| `Ctrl+G`      | Edit current input in `$VISUAL`/`$EDITOR`           |
-| `Ctrl+V`      | Paste image                                         |
-| `Tab`         | Autocomplete slash commands and file paths          |
-| `@`           | File completion                                     |
-| `!`           | Enter Shell mode                                    |
-| `!!`          | Enter Session-excluded Shell mode                   |
-
-There is ONE Find box: `Ctrl+F` opens View (only the currently mounted rendered rows
-count; hidden links, folded rows and off-window history are not View hits), and
-`Ctrl+Shift+F` opens Full (semantic search over the available Session semantic
-history; Remote covers the loaded snapshot only, exactly as the Find box's
-`Loaded`/`Entire` hint says) with its own independent `N/M`. A Full hit may live in a hidden link destination, a consumed
-Visual marker or a position the current renderer cannot prove: the fourth row then
-says `Source-only · no visible cell` or `Source-only · position unverified`, and a
-safe snippet is only attached for a Host-owned single-text User message or an
-**expanded** Thinking body. Every visible ordinary match is a **yellow
-background block**; the current source-proven occurrence is an **orange block +
-bold**. When the current card cannot prove its exact characters, the card's own
-visible header/anchor is marked orange **without bold** (visible query words on
-that card stay yellow) and the honest `Source-only` classification is kept. One
-card with **no visible query occurrence at all** — a merged run of consecutive
-`read` cards, or a card whose only hits are hidden link destinations — is
-exactly **one** navigation target: one `Enter` leaves it whenever another target
-exists. A card that still has a proving source channel WITH a visible query hit keeps its
-unvisited occurrences as separate targets first, so an exact-capable visible cell
-beside a truncated/unproven sibling is never swallowed; it converges after those
-visits. A card whose query only appears in status-count / header chrome has no
-such hit and stays one target.
-The `N/M` denominator is the number of reachable targets, which can be smaller
-than the raw occurrence count. When it is the only target, repeated Next/Prev
-stay on `1/1` without jitter. When the current card cannot prove its exact
-characters but its BODY really paints the query, the viewport prefers a readable
-body word (a Tool result uses a position-only body region; header chrome and
-status counters are never navigation evidence). That word remains an ordinary
-yellow match and never changes the `Source-only` classification. A target hidden behind the top-right Find box is
-moved out from under it; an
-already-visible hit is never needlessly re-centred. Opening Find from Regular mode
-borrows the fullscreen Transcript for the search and returns afterwards.
-
-Use `/help` inside the TUI for the current command and keybinding list. The table above shows the defaults; after customization, `/help` and `/keybindings` show the effective keys.
-
-### Customizing keybindings
-
-Host shortcuts are semantic actions (`app.*`) resolved through a
-context-aware keymap — the UI (footer hints, `/help`, `/keybindings`)
-always shows the EFFECTIVE keys, so a remap updates every hint. Configure
-them through the in-TUI `/keybindings` panel (it writes the `keybindings`
-field of the `tui-app` plugin's profile-owned configuration — since DSH
-0.1.7 TUI preferences live on the profile Config, not the retired
-`dsh-pi-tui` settings namespace); apply with `/keybindings reload`
-(explicit — a configuration edit takes effect after the reload, no
-restart). Field shape:
-
-```yaml
-keybindings:
-  app.input.steer: ctrl+s          # one key
-  app.permission.cycle: [shift+tab, ctrl+shift+p]   # several keys
-  app.history.search: ctrl+r
-  app.transcript.toggleThinking: false   # disable the action's keys
-  leader: ctrl+x                    # M6: leader sequences
-  bindings:
-    app.tasks.open: <leader>t
-```
-
-- A plain printable key can never be bound to a Host action (it would
-  swallow typing); a bad entry is a warning, never a startup failure
-  (fail-soft).
-- Any user declaration REPLACES the action's builtin default keys:
-  `app.input.steer: ctrl+x` makes Ctrl+X steer and Ctrl+S stop steering;
-  a leader-only `app.todo.toggle: <leader>t` makes Leader T the only
-  toggle trigger (Ctrl+T stops); `['ctrl+z', '<leader>s']` keeps both
-  USER triggers; `false` removes every trigger of the action. Leader
-  completions that the effective editor-owned submit key would consume (for
-  example, `<leader>enter`) are rejected instead of being advertised as dead
-  sequences.
-- `DSH_PI_TUI_SAFE_KEYBINDINGS=1` ignores all user overrides (builtin
-  defaults only). The whole `/keybindings` editor is read-only while safe mode
-  is active, so it cannot save a configuration that is only checked after safe
-  mode is disabled.
-- In the editor, untouched default bindings that are still effective are
-  selectable. `Add shortcut` materializes those surviving defaults plus the new
-  key; shadowed definition defaults remain reference-only, and replacing or
-  removing one surviving default preserves its siblings. Once an action has a
-  user declaration, that declaration still replaces the builtin set as
-  described above.
-- `/help` remains the key-first, read-only help surface; `/keybindings` is the
-  action-first, editable Keyboard Shortcuts Editor: it groups actions by
-  category, searches action IDs/descriptions/current keys/default keys, and
-  marks customized, conflict, Unbound, Disabled, and fixed states. A standalone Leader key row also configures the global leader key.
-- `/settings` has one `Keyboard shortcuts…` entry that opens the same-lease
-  full-screen page and the same persistence controller as bare `/keybindings`
-  (no 88-column overlay).
-- The recorder reads a real terminal key, parses it with `parseKey`, and stores
-  the canonical `KeyId`; known dead, typing-swallowing, terminal-ambiguous, and
-  conflicting shortcuts are rejected before saving. Ordinary recording cancels
-  on `Esc`; the direct Host interrupt recorder uses a short double-press window:
-  one `Esc` cancels and two `Esc` press events assign physical Escape. Key
-  repeats/releases do not count, and there is no single-letter shortcut;
-  physical Escape remains reserved for Host lifecycle paths.
-- Conditional affordances are labeled separately in the editor (for example,
-  `Down (conditional)` for the empty-editor task browser) instead of appearing
-  as ordinary configured shortcuts.
-- `/keybindings conflicts` lists conflicts (same key + overlapping scope + same
-  priority — never silent last-write-wins); `/keybindings reload` re-reads the
-  settings (fail-soft: a bad entry is diagnosed and skipped, a throwing read
-  is an error notice — never a crash; the keymap keeps the last-known-good
-  configuration); `/keybindings reset` clears the overrides through the
-  settings service and rebuilds the running keymap immediately.
-- The subagent viewer blocks PARENT actions by action id, so a remapped
-  parent shortcut stays blocked inside the viewer.
-- Conditional affordances are ADDITIVE: binding `app.tasks.open: ctrl+x`
-  ADDS a trigger — the empty-editor `↓` task-browser affordance still
-  works; only `false` removes every trigger of an action.
-
-
-## Running from source
-
-```sh
-git clone https://github.com/XMoon/dsh-pi-tui
-cd dsh-pi-tui
-
-pnpm install
-pnpm build
-```
-
-Install using `file:`:
-
-```sh
-dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@file:$PWD
-```
-
-`file:` copies the current build output at install time. After changing source, rebuild and add the package again.
-
-For continuous development, use `link:`:
-
-```sh
-dsh plugin --profile pi-tui-dev -- add @xmoon76/dsh-pi-tui@link:$PWD
-dsh --profile pi-tui-dev
-```
-
-After that, rebuilding is enough:
-
-```sh
-pnpm build
-```
-
-The development profile continues to point at the working tree.
-
-## DeepSeek Harness integration
-
-`dsh-pi-tui` implements the terminal interaction layer only.
-
-The following capabilities are provided by DeepSeek Harness:
-
-* Agent Loop
-* LLM / Provider
-* Session Persistence
-* Tools
-* Skills
-* Approval
-* Permission Presets
-* Plan Mode
-* Goal
-* Jobs
-* Subagents
-* Credentials
-* Settings
-
-The TUI therefore does not maintain a separate model configuration, Session format, or Agent Runtime.
-
-It can coexist with other DSH surfaces using the same runtime data:
-
-```sh
-dsh --profile web
-dsh --profile headless
-dsh --profile pi-tui
-```
-
-## Extension API
-
-In addition to being used as a TUI, `dsh-pi-tui` exposes versioned Extension APIs for other Cordis / DSH plugins that need to extend terminal interaction.
-
-Three public entries are currently available:
-
-| Entry                                     | Use                             | Stability |
-| ----------------------------------------- | ------------------------------- | --------- |
-| `@xmoon76/dsh-pi-tui/extensions`          | General extensions              | Stable    |
-| `@xmoon76/dsh-pi-tui/extensions/advanced` | Deeper interaction capabilities | Advanced  |
-| `@xmoon76/dsh-pi-tui/extensions/unstable` | Low-level capabilities          | Unstable  |
-
-Extension points include:
-
-* Header / Footer
-* Input Widget
-* Slash Command
-* Theme
-* Setting
-* Autocomplete
-* Keybinding
-* Message Renderer
-* Tool Renderer
-* Overlay
-* Interactive UI
-* Editor Control
-* Replacement Editor
-
-Plugins depend only on public entries and do not need to import internal types such as `TuiApp` or `TuiMainScreen`.
-
-Minimal example:
-
-```ts
-import {
-  PI_TUI_EXTENSIONS_SERVICE,
-  type PiTuiExtensionService,
-} from '@xmoon76/dsh-pi-tui/extensions'
-
-export const name = 'my-plugin'
-export const inject = ['tuiStartup', PI_TUI_EXTENSIONS_SERVICE]
-
-export function apply(ctx: Context): void {
-  const service = ctx.get(
-    PI_TUI_EXTENSIONS_SERVICE,
-  ) as PiTuiExtensionService
-
-  if (!service.api().capabilities.has('slot.chrome.header.badge')) {
-    return
-  }
-
-  service.register(
-    'chrome.header.badge',
-    {
-      id: 'my-badge',
-      order: 100,
-    },
-    {
-      text: 'my-plugin',
-      tone: 'info',
-    },
-  )
-}
-```
-
-Documentation:
-
-* [Extension API](docs/extensions/stable.md)
-* [Extension tiers](docs/extensions/tiers.md)
-* [Advanced API](docs/extensions/advanced.md)
-* [Unstable API](docs/extensions/unstable.md)
-* [Plugin authoring](docs/extensions/authoring.md)
-
-## Development
-
-```sh
-pnpm install
-pnpm build
-pnpm typecheck
-pnpm test
-```
-
-The test suite covers the Pi TUI fork, host / surface behavior, and Extension API fixtures and smoke tests.
-
-Terminal rendering and input routing are tested extensively with `@xterm/headless`, so most UI tests do not require a real TTY or a live model connection.
-
-Performance baseline:
-
-```sh
-node --expose-gc scripts/bench.mts
-```
-
-The project is also developed against a dedicated `pi-tui-dev` profile:
-
-```sh
-dsh plugin --profile pi-tui-dev -- add @xmoon76/dsh-pi-tui@link:$PWD
-dsh --profile pi-tui-dev
-```
-
-## DSH compatibility and validation
-
-This section contains DSH compatibility and CI validation details only; ordinary users do not need them to install the TUI.
-
-### npm mode (current `next`)
-
-The current compatibility-train line is npm mode: it targets the published
-`dsh-v0.2.0-rc.2` family declared by this checkout's `package.json` and
-resolved by its lockfile (the runtime peer floor is also `>=0.2.0-rc.2`). The
-isolated npm driver installs that exact
-family from the public registry and exercises the TUI build/test/package path:
-
-```sh
-pnpm compat:dsh:npm
-```
-
-### Source Mode (validation only)
-
-Source Mode is the validation-only distribution for an unpublished DSH
-checkout, available for local compatibility checks and explicit
-source-boundary work. It reads the full commit pin in
-`test/compat/dsh-source.json`, builds the official DSH tarball family, installs
-it through temporary pnpm overrides, and removes the temporary state afterward.
-Do not write DSH source paths, `file:` dependencies, or workspace symlinks into
-a published package.
-
-The published package already contains the Pi TUI fork required at runtime. No separate internal TUI package needs to be installed.
-
-### CI validation policy
-
-CI follows the tracked `test/compat/dsh-mode.json` policy for pushes to `next` and pull requests targeting `next`; `main` and every tag use npm Mode. Source Mode reads the source target from `test/compat/dsh-source.json` and validates the complete official DSH tarball family, TUI presets, and the old-runtime boundary; npm Mode uses the DSH version declared by the checkout's `package.json` and frozen lockfile to run the registry lane. The published `pi2dsh` ecosystem check is independent of the selected mode and always targets the published ecosystem (every run resolves `pi2dsh@latest` and the highest published DSH intersection from the registry); it does not accept a source pack and refuses `--distribution` with a non-zero error rather than reporting a pass. See [`docs/guides/dsh-compatibility.md`](docs/guides/dsh-compatibility.md) for the compatibility method.
-
-## Repository layout
-
-The repository root is the npm package published as `@xmoon76/dsh-pi-tui`.
-
-The Pi TUI fork lives under:
-
-```text
-packages/pi-tui/
-```
-
-It is an internal build dependency bundled with the root package and does not need to be installed separately by users.
-
-Upstream provenance, version information, and local divergence are tracked in:
-
-```text
-packages/pi-tui/package.json
-packages/pi-tui/AGENTS.md
-```
-
-Contributor-oriented repository structure and development rules are documented in [AGENTS.md](AGENTS.md).
-
-## Documentation
-
-| Document                                               | Content                           |
-| ------------------------------------------------------ | --------------------------------- |
-| [docs/README.md](docs/README.md)                             | Documentation policy and index |
-| [docs/architecture/overview.md](docs/architecture/overview.md) | Architecture, layers and dependency direction |
-| [docs/architecture/host-client.md](docs/architecture/host-client.md) | Host/Client boundary and currentness contracts |
-| [docs/architecture/surface-behavior.md](docs/architecture/surface-behavior.md) | Workspace/task/plugin surface behavior |
-| [docs/guides/development.md](docs/guides/development.md)     | Local development, worktrees and benchmark reruns |
-| [docs/extensions/stable.md](docs/extensions/stable.md)       | Extension API                     |
-| [docs/guides/code-review.md](docs/guides/code-review.md)     | Repository review checkpoints     |
-| [AGENTS.md](AGENTS.md)                                 | Contributor operating manual      |
-
-## Changelog
-
-简体中文:
-
-[CHANGELOG.md](CHANGELOG.md)
-
-English:
-
-[CHANGELOG.en.md](CHANGELOG.en.md)
-
-## License
-
-[MIT](LICENSE)
+- [中文 CHANGELOG](CHANGELOG.md) / [English CHANGELOG](CHANGELOG.en.md)
+- [MIT License](LICENSE)

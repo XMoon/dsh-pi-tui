@@ -13,7 +13,7 @@ before editing. Read subsystem docs only when the task touches that subsystem.
 - **Do not hide contradictions.** Prefer fast failure over silent defaults, broad catches, speculative fallbacks, or validation for states guaranteed by internal contracts. Validate at real system boundaries.
 - **Run the local pre-push gate.** Before requesting a push or opening a PR, run `mise run check` after the relevant targeted tests. Fix failing gates before reporting the change as ready. If a check cannot run because of an environment dependency, report it as `NOT_VERIFIED` with the concrete blocker. `mise run check` does not replace release qualification or subsystem-specific integration tests.
 - **Isolate all test and review probes.** Prefer repository-owned test
-  runners (`pnpm test:product`, `pnpm test:tooling`, etc.). When running
+  runners (`mise run test:product`, `mise run test:tooling`, etc.). When running
   `node --test` directly, use `scripts/run-with-temp-root.mjs` with a
   private, worktree-owned temporary base. Never run test fixtures or
   delegated review probes against the shared `/tmp` root. Do not create
@@ -269,7 +269,7 @@ Do not copy their evolving commands, test rosters or CI job inventory here.
 - The sole static-gate registry is `scripts/run-quality-gates.mjs`.
   `pnpm check:gates` owns local-preflight execution; never maintain a
   second gate list in prose or invoke its gates independently in routine CI.
-- `pnpm verify:release` is the full release pipeline and includes many
+- `mise run verify:release` is the full release pipeline and includes many
   other lanes. Do not repeat successful suites against the same inputs.
   Run mode-dependent, runtime, packed-candidate and Source compatibility
   checks only when the applicable contract requires them. A skipped CI

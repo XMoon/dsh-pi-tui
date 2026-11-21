@@ -46,7 +46,6 @@ export const QUALITY_GATES = Object.freeze([
   { id: 'gate:architecture', classification: 'local-preflight', runner: 'pnpm', script: 'gate:architecture' },
   { id: 'gate:production-reads', classification: 'local-preflight', runner: 'pnpm', script: 'gate:production-reads' },
   { id: 'gate:keybindings', classification: 'local-preflight', runner: 'pnpm', script: 'gate:keybindings' },
-  { id: 'gate:installation-doc', classification: 'local-preflight', runner: 'pnpm', script: 'gate:installation-doc' },
   { id: 'scripts/docs-gate.mjs', classification: 'local-preflight', runner: 'node', script: 'scripts/docs-gate.mjs' },
   { id: 'gate:pi-surface-compat', classification: 'local-preflight', runner: 'pnpm', script: 'gate:pi-surface-compat' },
   { id: 'scripts/naming-gate.mjs', classification: 'local-preflight', runner: 'node', script: 'scripts/naming-gate.mjs' },

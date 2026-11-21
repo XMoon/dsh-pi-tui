@@ -126,8 +126,8 @@ legacy bootstrap state and Source Mode diagnosis; it is not the status writer
 for `mise run setup`:
 
 ```bash
-pnpm dev:doctor
-pnpm dev:bootstrap
+mise exec -- pnpm dev:doctor
+mise exec -- pnpm dev:bootstrap
 ```
 
 ### Source mode
@@ -322,6 +322,11 @@ not copy commits independently into both branches.
 
 ## Build order
 
+Prefer named `mise run` tasks for daily development. For specialized
+`package.json` scripts without a mise task, use `mise exec -- pnpm <script>`
+with the pinned toolchain. `pnpm` remains the underlying package manager.
+
+
 The root bundle embeds `@xmoon76/pi-tui`, so build the fork first:
 
 ```text
@@ -329,9 +334,8 @@ fork typecheck -> root typecheck -> fork tsdown -> root tsdown
 ```
 
 ```bash
-pnpm typecheck:fork
-pnpm typecheck
-pnpm build
+mise run typecheck
+mise run build
 ```
 
 Building only the root can embed a stale fork `dist`. Never test a stale fork
@@ -365,7 +369,7 @@ source distribution.
 
 `check` is a pre-push signal, not a release qualification. It does not replace
 targeted subsystem tests, dedicated runtime/wire/UI smokes, the full product
-suite, or `pnpm verify:release` (which reuses the same gate preflight for its
+suite, or `mise run verify:release` (which reuses the same gate preflight for its
 static-gate portion — skipping the one gate whose exact test the release
 product suite runs again — but still runs the release-specific tests, audit and
 packed artifacts). Source Mode's exact-SHA remote closure smokes remain explicit
@@ -429,19 +433,19 @@ from the public registry, so it requires online access and never uses a source
 pack (`--distribution` is refused non-zero). No candidate pack means no
 compatibility claim, and the check is an optional, non-blocking signal — its own
 `ecosystem-compat` job, log and debug artifact are the authority. For local use:
-`pnpm smoke:pi2dsh -- <tgz>`; the selection method is owned by
+`mise exec -- pnpm smoke:pi2dsh -- <tgz>`; the selection method is owned by
 [dsh-compatibility.md](./dsh-compatibility.md).
 
 ## Benchmarks and profilers
 
 Benchmark entry points:
 
-- `pnpm bench` — full sweep;
-- `pnpm bench:fast` — short sweep;
-- `pnpm bench:smoke` — reduced sweep, exercised by `test/tooling/bench-smoke.test.mjs`.
+- `mise exec -- pnpm bench` — full sweep;
+- `mise exec -- pnpm bench:fast` — short sweep;
+- `mise exec -- pnpm bench:smoke` — reduced sweep, exercised by `test/tooling/bench-smoke.test.mjs`.
 
 They are observational, manual and non-default. Compare on the same machine and
-Node version after `pnpm build`; `bench:smoke` asserts no timing threshold. Never
+Node version after `mise run build`; `bench:smoke` asserts no timing threshold. Never
 turn a wall-clock number into a CI gate, and never compare numbers across
 machines or Node versions.
 

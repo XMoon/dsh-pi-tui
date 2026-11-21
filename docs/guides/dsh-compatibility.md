@@ -88,7 +88,7 @@ failure or runtime failure is a real failure — never a SKIP, never a forced
 install. A PASS proves only the exact pair resolved for that run; it does not
 claim the whole semver range was runtime-verified.
 
-`pnpm smoke:pi2dsh -- <candidate.tgz>` is the local entry. It always validates
+`mise exec -- pnpm smoke:pi2dsh -- <candidate.tgz>` is the local entry. It always validates
 the published npm ecosystem and requires online registry access; `--distribution`
 (Source Mode) is refused with a non-zero error. `--force-peers` is an
 INVESTIGATIVE manual run that ignores only the bridge's DSH peers; it is never
@@ -191,9 +191,9 @@ removed with the temporary validation workspace and must never be committed to
 - The optional `ecosystem-compat` job resolves the current published
   `pi2dsh@latest` / DSH intersection and runs the real PTY smoke; it is visible
   but not part of release qualification.
-- `test/tooling/dsh-peer-window.test.mjs`, `test/tooling/release-notes.test.mjs` and
-  `scripts/installation-doc-gate.mjs` prove the manifest/matrix-derived install
-  facts and the two root READMEs; a stale matrix fails the release-notes gate
+- `test/tooling/dsh-peer-window.test.mjs` and `test/tooling/release-notes.test.mjs`
+  prove the manifest/matrix-derived compatibility and release guidance; a stale
+  matrix fails the release-notes gate
   instead of publishing a mixed install.
 - A local TUI-only change does not need the full Source compatibility run. Run
   it when the DSH source/distribution boundary changes or when explicitly

@@ -48,6 +48,7 @@ MANDATORY or BLOCKING.
 |---|---|---|
 | `README.md` | everyone | This policy and the complete documentation index |
 | `dsh-pi-tui.png` | readers of the root README | The published screenshot asset; not a contract document |
+| `dsh-pi-tui-shared-session.svg` | readers of the root README | An illustrative Direct vs multi-client Daemon diagram; not an architecture contract |
 
 ### `architecture/` — long-lived product and application contracts
 
@@ -126,7 +127,7 @@ MANDATORY or BLOCKING.
 - **Stage/task progress:** GitHub Issues and PRs own open obligations, review
   rounds, qualification records and handoffs. Documentation does not track them.
 - **Generated inventories:** regeneration commands (for example
-  `pnpm generate:pi-divergences`) and their JSON ledgers own generated reports;
+  `mise exec -- pnpm generate:pi-divergences`) and their JSON ledgers own generated reports;
   commit only the generated artifact the owning gate requires.
 
 ## How these documents evolve
@@ -149,7 +150,7 @@ For a documentation-only change or a new product behavior:
    the old top-level section. Update this canonical index and all references
    to moved nested anchors; check any source/test comments that point at it.
 4. Run the repository documentation gate with `node scripts/docs-gate.mjs`
-   (also part of `pnpm check:gates`), and review links, source-path claims and
+   (also part of `mise run check`), and review links, source-path claims and
    formatting. A green path/index check cannot prove the written semantics.
 5. Keep implementation plans, decisions requiring approval, run evidence and
    historical comparison snapshots in the owning PR/Issue or external plan,

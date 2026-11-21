@@ -33,8 +33,8 @@ test('the recommended upgrade command installs the exact matrix target', () => {
   )
   assert.equal(matrixUpgradeCommandError(), null, 'the real matrix must satisfy the gate cross-check')
 
-  // Negative controls: the same check the installation gate applies must
-  // reject a different target or an ambiguous command.
+  // Negative controls: the same matrix consistency check must reject a
+  // different target or an ambiguous command.
   const wrongTarget = {
     current: { upgradeDsh: COMPAT_MATRIX.current.upgradeDsh, upgradeCommand: 'npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty @deepseek-ai/dsh@0.2.0-rc.2' },
   }

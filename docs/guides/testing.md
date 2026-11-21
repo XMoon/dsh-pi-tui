@@ -308,21 +308,26 @@ manifest that has to be kept in sync with the tree.
 
 ## 2. Running the tests
 
+Use the named `mise run` tasks from `mise.toml` for routine test lanes.
+For specialized scripts without a mise task, use `mise exec -- pnpm ...`
+to keep the repository's pinned Node/pnpm toolchain.
+
+
 | Command | What it runs |
 |---|---|
-| `pnpm test:product` | the product behaviour suite (the packaging safety gate) |
-| `pnpm test:tooling` | the development and release tooling suite |
-| `pnpm test:tmux` | the tmux terminal-tooling suite |
-| `pnpm test:fork` | the vendored `packages/pi-tui` suite |
-| `pnpm test` | all of the above |
-| `pnpm verify:release` | the full explicit release pipeline |
+| `mise run test:product` | the product behaviour suite (the packaging safety gate) |
+| `mise run test:tooling` | the development and release tooling suite |
+| `mise run test:tmux` | the tmux terminal-tooling suite |
+| `mise run test:fork` | the vendored `packages/pi-tui` suite |
+| `mise run test` | all of the above |
+| `mise run verify:release` | the full explicit release pipeline |
 
-`pnpm test:product` is run explicitly by `pack:release` (and therefore by
-`verify:release`). `pnpm test:tooling` is deliberately OUTSIDE the packed
+`mise run test:product` is run explicitly by `pack:release` (and therefore by
+`verify:release`). `mise run test:tooling` is deliberately OUTSIDE the packed
 artifact path: the artifact must never depend on the developer git/CI
 environment.
 
-`pnpm smoke:split-process` is a real two-process distribution proof, not part
+`mise exec -- pnpm smoke:split-process` is a real two-process distribution proof, not part
 of `verify:release`. The no-selector DEFAULT form (the complete qualification
 lane) is Linux-only: on any other OS it is refused
 (`INPUT_PLATFORM_FULL_UNSUPPORTED`) before the candidate is inspected. The
@@ -361,15 +366,15 @@ on hosts with no isolated test environment. Run those cases explicitly with
 `--case` / `--suite`:
 
 ```sh
-pnpm smoke:split-process -- <candidate.tgz>               # complete lane (Linux only)
-pnpm smoke:split-process -- --list                        # the selectable registry (Linux + macOS)
-pnpm smoke:split-process -- <candidate.tgz> --suite <suite>
-pnpm smoke:split-process -- <candidate.tgz> --case <id>
-pnpm smoke:macos-split -- --list                          # macOS: the SAME registry, no legacy scene
-pnpm smoke:macos-split -- <candidate.tgz> --case <id>     # macOS: the shared selected runner
-pnpm smoke:macos-split -- <candidate.tgz> --suite <suite>
-pnpm smoke:macos-split -- <candidate.tgz>                 # macOS: the legacy A/P/M/L parity scene (no selector)
-pnpm smoke:split-upgrade -- --old <old.tgz> --new <new.tgz> [--evidence <file>]
+mise exec -- pnpm smoke:split-process -- <candidate.tgz>               # complete lane (Linux only)
+mise exec -- pnpm smoke:split-process -- --list                        # the selectable registry (Linux + macOS)
+mise exec -- pnpm smoke:split-process -- <candidate.tgz> --suite <suite>
+mise exec -- pnpm smoke:split-process -- <candidate.tgz> --case <id>
+mise exec -- pnpm smoke:macos-split -- --list                          # macOS: the SAME registry, no legacy scene
+mise exec -- pnpm smoke:macos-split -- <candidate.tgz> --case <id>     # macOS: the shared selected runner
+mise exec -- pnpm smoke:macos-split -- <candidate.tgz> --suite <suite>
+mise exec -- pnpm smoke:macos-split -- <candidate.tgz>                 # macOS: the legacy A/P/M/L parity scene (no selector)
+mise exec -- pnpm smoke:split-upgrade -- --old <old.tgz> --new <new.tgz> [--evidence <file>]
 ```
 
 The GitHub Actions `CI` workflow also accepts an optional
@@ -439,10 +444,10 @@ packaged builds pinned to the same exact DSH runtime (internal qualification
 samples, not a supported historical user release):
 
 ```sh
-pnpm smoke:split-upgrade -- --old <old.tgz> --new <new.tgz>   # complete U01-U09
-pnpm smoke:split-upgrade -- --list
-pnpm smoke:split-upgrade -- --old <old.tgz> --new <new.tgz> --suite client-reload
-pnpm smoke:split-upgrade -- --old <old.tgz> --new <new.tgz> --case upgrade.cross-build-compatibility
+mise exec -- pnpm smoke:split-upgrade -- --old <old.tgz> --new <new.tgz>   # complete U01-U09
+mise exec -- pnpm smoke:split-upgrade -- --list
+mise exec -- pnpm smoke:split-upgrade -- --old <old.tgz> --new <new.tgz> --suite client-reload
+mise exec -- pnpm smoke:split-upgrade -- --old <old.tgz> --new <new.tgz> --case upgrade.cross-build-compatibility
 ```
 
 The DEFAULT form is the complete U01-U09 qualification: it runs every
@@ -453,9 +458,9 @@ systemd user manager, and `launchd-managed-daemon.cross-build-upgrade` requires
 a real macOS `gui/<uid>` LaunchAgent. Run either explicitly:
 
 ```sh
-pnpm smoke:split-upgrade -- --old <old.tgz> --new <new.tgz> \
+mise exec -- pnpm smoke:split-upgrade -- --old <old.tgz> --new <new.tgz> \
   --case managed-daemon.cross-build-upgrade-rollback
-pnpm smoke:split-upgrade -- --old <old.tgz> --new <new.tgz> \
+mise exec -- pnpm smoke:split-upgrade -- --old <old.tgz> --new <new.tgz> \
   --case launchd-managed-daemon.cross-build-upgrade
 ```
 
@@ -558,7 +563,7 @@ package SHA256 values, the exact DSH pin, the command, and the per-lane
 PASS/FAIL with the checkpoint a failure reached. Synthetic manifest-only
 tarballs are input-preflight fixtures; they never qualify a pairing.
 
-`pnpm smoke:direct-empty-retirement -- <candidate.tgz>` is a Linux/PTY-only
+`mise exec -- pnpm smoke:direct-empty-retirement -- <candidate.tgz>` is a Linux/PTY-only
 real-DSH smoke for the Direct session-retirement contract: it boots the
 candidate tarball in a fully isolated `DSH_HOME` (official dsh + dsh-base +
 candidate only, no model calls) and drives `/new`/`/exit` transitions,
@@ -571,7 +576,7 @@ no `--patch` overlay), an isolated tmux socket, and the DSH process exit
 status. The candidate tarball argument is required (no published-package
 fallback); it is a manual qualification lane, not part of `verify:release`.
 
-`pnpm smoke:macos-cua -- <candidate.tgz>` is an explicitly selected,
+`mise exec -- pnpm smoke:macos-cua -- <candidate.tgz>` is an explicitly selected,
 operator-assisted macOS native qualification for the official Computer use
 bundle. It installs the candidate into ONE isolated `pi-tui` profile, starts
 the real TUI in a private tmux server, and drives the MAC-09 matrix: the real
@@ -590,7 +595,7 @@ non-zero; unrun cases stay `NOT_VERIFIED`. The private JSON report (candidate
 and runtime identities, anonymized Session/tool/Question/attachment digests,
 image dimensions and cleanup facts, never screenshot bytes or credentials) is
 written `0600` under `MACOS_CUA_EVIDENCE_DIR` or a fresh private directory.
-The lane is never part of `pnpm test`, `pack:release`, the Split smoke or a
+The lane is never part of `mise run test`, `pack:release`, the Split smoke or a
 Linux CI lane. Its L0 input/opt-in guard is
 `test/tooling/macos-cua-parity.test.mjs`.
 
@@ -600,7 +605,7 @@ Prefer a repository-owned lane; it already owns and removes its disposable
 temp root:
 
 ```sh
-pnpm test:product -- --test-concurrency=4
+mise exec -- pnpm test:product -- --test-concurrency=4
 ```
 
 A single file, or a probe outside any lane, runs through the containment
@@ -656,7 +661,7 @@ test worthiness and assertion quality remain review judgements:
 | 5 — Deterministic async | a file outside the recorded floor cannot introduce an unreasoned fixed wait, and a floor file's wait count cannot grow | `test/tooling/new-test-policy.test.mjs` |
 | 6 — Discoverability (placement) | a new Domain, Integration or Tooling test lands in the right lane and reaches the right verification entry point | `test/tooling/new-test-policy.test.mjs` |
 | 6 — Discoverability (execution) | the lane runner resolves the file list in its child and passes it in memory to Node's native test API, never on the process command line; Node still owns sharding, and the child runs from the repository root | `test/tooling/test-lane-runner.test.mjs` |
-| 1 — Ownership First (the read side) | every production file a test reads by path EXISTS: a renamed or moved production module can never leave a source lock silently pointing at a different file | `pnpm gate:production-reads` |
+| 1 — Ownership First (the read side) | every production file a test reads by path EXISTS: a renamed or moved production module can never leave a source lock silently pointing at a different file | `mise exec -- pnpm gate:production-reads` |
 
 The remaining rules (1, 2, 3 and 4) are review judgements, and they
 stay that way on purpose: a mechanical gate for "is this test valuable"
@@ -675,10 +680,10 @@ each has a package-script entry point:
 
 | Command | What it reports |
 |---|---|
-| `pnpm report:execution-topology` | the script → leaf → CI job mapping, and the leaves driven by more than one script |
-| `pnpm report:zero-consumer-exports` | the shared-helper exports that no consumer reads |
-| `pnpm bench:parallel` | the product lane at several concurrency levels, with every run verified |
-| `pnpm baseline:fixed-waits` | regenerates the fixed-wait floor the policy guard compares against |
+| `mise exec -- pnpm report:execution-topology` | the script → leaf → CI job mapping, and the leaves driven by more than one script |
+| `mise exec -- pnpm report:zero-consumer-exports` | the shared-helper exports that no consumer reads |
+| `mise exec -- pnpm bench:parallel` | the product lane at several concurrency levels, with every run verified |
+| `mise exec -- pnpm baseline:fixed-waits` | regenerates the fixed-wait floor the policy guard compares against |
 
 The benchmark is the qualification tool for the parallel policy: it
 verifies every run (exit code, signal, a complete report, `fail === 0`)
