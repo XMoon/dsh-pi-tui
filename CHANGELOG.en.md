@@ -7,9 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Installation and pairing
+### Added
 
-0.5.7 is an unpublished candidate requiring **Node.js >=24.9.0** and **DSH >=0.2.2-rc.3**; the exact qualification target is **DSH 0.2.2-rc.5**. DSH rc.2 and older are unsupported. After publication, install the matched pair:
+- **Daemon mode (Linux / macOS).** Direct remains the default. An independent Host keeps Agent work running after a TUI disconnects; multiple TUIs, the official Web frontend and ACP clients can access and work with the same Host Session.
+- **Web and ACP frontends.** Enable or disable the official Web UI on a running Daemon Host using the `dsh --profile pi-tui web` commands. Enable local ACP v1 with `/acp` to connect external clients to existing sessions.
+- **Agent Team and Task Center.** Switch Agent Team in `/model`. `/tasks` now shows Work / Team views, nested Subagents and expandable Job history, with improved Plan Review and Goal display.
+- **Plugins and MCP settings.** Manage MCP servers in Settings; third-party plugins gain client-local `./tui` loading and per-plugin saved configuration.
+- **Sessions and files.** Improved Workspace / Session browsing and recovery, plus file completion, uploads, Host Shell and slash commands from Daemon clients.
+
+### Changed
+
+- **Exit and updates.** In Daemon mode, `/exit` / `/quit` detach only the current TUI, with explicit choices when work is active. Update the TUI under the same DSH runtime, then use `daemon restart` to adopt the new Host build.
+- **Terminal experience.** Improved prompt submission and queueing, session search, mouse and wheel interactions, image/SVG previews and TSP transcript reading.
+
+### Fixed
+
+- Resolved Direct / Remote differences involving Session creation, model and reasoning-effort persistence, Provider login and settings status.
+- Fixed `Ctrl+R` Session history recall across working directories, Host command completion, and focus/layout glitches from dialogs and transient notices.
+
+### Install and upgrade
+
+Version 0.5.7 requires **Node.js ≥24.9.0** and **DSH ≥0.2.2-rc.3**; the recommended pairing is **DSH 0.2.2-rc.5**:
 
 ~~~sh
 npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty @deepseek-ai/dsh@0.2.2-rc.5
@@ -17,38 +35,7 @@ dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.5.7
 dsh --profile pi-tui
 ~~~
 
-Previous stable pairs: **0.5.6** uses `@deepseek-ai/dsh@0.2.2-rc.1` / `@xmoon76/dsh-pi-tui@0.5.6`; **0.5.5** uses `@deepseek-ai/dsh@0.2.1-rc.5` / `@xmoon76/dsh-pi-tui@0.5.5`. See the [compatibility guide](https://github.com/XMoon/dsh-pi-tui/blob/main/docs/guides/dsh-compatibility.md) for the full history.
-
-### Added
-
-- **Local Daemon debut (Linux/macOS).** Direct remains the default. The optional independent Host allows detachable TUI Clients; multiple TUIs, official Web, and local ACP can access the same Host Session/Agent. Clients share business sessions, not terminal screens; Host permissions/concurrent-write rules still apply. This is **not public TCP remote access**. (#683, #728, #729, #740)
-- **Daemon control and optional supervision.** Profile-scoped `daemon status|start|stop|restart|logs|install|uninstall`; Linux systemd user units and macOS LaunchAgents are opt-in, not required for basic Daemon operation. Identity-based management, log provenance, and cross-PiTui-build handling are strengthened. (#697, #749, #786, #787)
-- **Official Web on the shared Host.** Toggle Web at runtime, or use the headless `web status|enable|disable|url|open` CLI against an already running Host without starting it or creating a Session. The rc.5 official Web service graph is composed; authenticated URLs contain sensitive tokens. (#798, #807)
-- **Local ACP v1 entry point.** A default-off same-user Unix socket, the `/acp` live listener control, independent startup preference, and bounded `initialize`, `session/new|resume|prompt|cancel|close` with text/resource links/negotiated images. One Session allows at most one ACP View at a time, without restricting TUI Views. (#682, #685, #691, #695, #701, #707, #710, #715, #766)
-- **Agent Team and Task Center.** Root Agent Team selection, Work/Team pages, expanded nested Subagents, active-first Jobs and optional history disclosure; improved Plan Review, Goal Dock and status hints. (#686, #690, #708, #719, #801, #803, #806)
-- **MCP and extension management.** Host MCP server browsing/probing/restarting/configuration, Client-local `./tui` plugin loading, per-package configuration and persisted Settings, with separate Host package and current Client activation facts. Forge and Plugin Marketplace are **not** shipped. (#696, #700, #785, #789, #796, #799)
-- **Sessions, workspaces and attachments.** Workspace-first Session Browser, `--session [id-or-query]`, `-c|--continue`, Host directory browsing/completion, sessionless `@file`, Split uploads and Host Shell/command attachment receipts. (#625, #630, #636, #641, #644, #647, #657, #662)
-- **Transcript and images.** Full/Focus/Compact presentation, View/Full search, TSP native cards/Work Hub/Workflow and message copy; SVG static stroke styling, narrow-width thumbnails, explicit retry and Direct iTerm2 image/SVG previews. (#612, #622, #629, #645, #678, #699, #745)
-
-### Changed
-
-- **Client exit is not Host shutdown.** In Daemon mode `/exit` / `/quit` detach by default and offer state-aware choices while busy; `Ctrl+C` cancels busy work and retains guarded idle exit. Stopping the entire Host is a deliberate action. (#775, #780)
-- **Submission and history.** Drafts are consumed only after Host acceptance; legitimate queued input survives compact. Current Session prompt history can be recalled across working directories without overwriting the active draft/cursor. (#720, #732, #812)
-- **One Host authority across frontends.** Direct/Split share Profile TUI preferences; Remote Provider login, credentials, approvals, tool cards and Host command catalog use authoritative Host facts. Per-Turn TUI guidance applies to actual live TUI Session viewers, not Web/ACP turns. (#659, #663, #667, #776, #781, #783, #810)
-- **Official Web/plugin configuration behavior.** Web Search/Fetch Automatic, deployment/user-layer provider selections, Web Settings saves and extension persisted settings no longer treat Client-local cache as Host persistence. (#767, #769, #772, #799)
-
-### Fixed
-
-- **Daemon/macOS.** Host/Client identity, startup/transport races, managed same-Profile cross-build upgrades, Herdr Session recovery and true installed DSH Runtime version reporting. (#746, #771, #786, #787, #793, #794, #795, #800)
-- **Session/Command.** `/new` command settlement, sessionless Model/Effort defaults, Remote effective cwd/Resume, Host slash completion and cross-directory prompt recall. (#632, #664, #680, #692, #788, #810, #812)
-- **Interaction/output.** Search anchors, file completion, Shell output containing NUL, pointer/wheel/back controls, Question header and transient Footer notices that previously shifted the Composer. (#604, #609, #716, #742, #784, #802, #805, #809)
-
-### Upgrade and boundaries
-
-- **Changing DSH Runtime is not a hot upgrade.** Finish Turns/Jobs, stop the old Host, back up Profile/Sessions/resources, then cold-start a supported pair. In-place schema downgrade is not promised.
-- **Updating PiTui within one DSH Runtime does not replace the running Host.** Explicit `daemon restart` is required to adopt new Host code and interrupts in-flight work. User-customized service launch definitions are not silently rewritten.
-- **ACP is a bounded API.** No `session/list`, `session/load`, `session/set_config_option`, ACP-side MCP registration or dedicated file/artifact transfer. Shared sessions do not imply unrestricted simultaneous writes.
-- **These Draft notes summarize merged functionality only.** They do not claim final Linux Split, macOS or packed release qualification; the date and version heading are set at the actual release freeze.
+Upgrading from 0.5.6 also changes the DSH runtime: finish in-flight work, stop the previous Host and back up Session data before installing the new pair. Previous pairings: `@deepseek-ai/dsh@0.2.2-rc.1` + `@xmoon76/dsh-pi-tui@0.5.6`; `@deepseek-ai/dsh@0.2.1-rc.5` + `@xmoon76/dsh-pi-tui@0.5.5`.
 
 ## [0.5.6] - 2026-11-08
 

@@ -7,9 +7,27 @@
 
 ## [Unreleased]
 
-### 安装与版本配对
+### 新增
 
-0.5.7 是尚未发布的候选，要求 **Node.js >=24.9.0**、**DSH >=0.2.2-rc.3**；精确验证目标为 **DSH 0.2.2-rc.5**，不支持 rc.2 及更早版本。正式发布后应成对安装：
+- **Daemon 模式（Linux / macOS）**：除默认 Direct 模式外，现可使用独立 Host。TUI 退出后，Agent 任务仍可继续运行；多个 TUI、官方 Web 和 ACP 客户端可连接同一个 Host，访问并操作同一会话。
+- **Web 与 ACP 多入口**：在运行中的 Daemon Host 上启停官方 Web，支持 `dsh --profile pi-tui web` 命令；本地 ACP v1 可通过 `/acp` 开启，供外部客户端连接已有会话。
+- **Agent Team 与任务中心**：在 `/model` 中切换 Agent Team；`/tasks` 增加 Work / Team 视图、Subagent 层级和可展开的 Job 历史，改善 Plan Review 与 Goal 展示。
+- **插件与 MCP 设置**：可在设置中管理 MCP Server；第三方插件支持客户端 `./tui` 加载和按插件保存配置。
+- **会话与文件操作**：改进 Workspace / Session 浏览和恢复；增强 Daemon 客户端的文件补全、附件上传、Host Shell 与斜杠命令支持。
+
+### 改进
+
+- **退出与升级体验**：Daemon 下 `/exit` / `/quit` 只断开当前 TUI；进行中的任务有明确的退出选择。同一 DSH 运行时下可更新 TUI，再通过 `daemon restart` 切换 Host 到新版本。
+- **终端交互**：改进输入提交与队列、会话搜索、鼠标和滚轮操作、图像/SVG 预览，以及 TSP 转录阅读体验。
+
+### 修复
+
+- 修复部分 Remote / Direct 不一致问题，包括 Session 创建、模型与 Reasoning Effort 保存、Provider 登录及设置状态。
+- 修复跨工作目录的 `Ctrl+R` 会话历史召回、Host 命令补全，以及部分弹窗、提示引起的焦点与界面抖动问题。
+
+### 安装与升级
+
+0.5.7 需要 **Node.js ≥24.9.0**、**DSH ≥0.2.2-rc.3**，推荐配对 **DSH 0.2.2-rc.5**：
 
 ~~~sh
 npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty @deepseek-ai/dsh@0.2.2-rc.5
@@ -17,38 +35,7 @@ dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.5.7
 dsh --profile pi-tui
 ~~~
 
-历史稳定配对：**0.5.6** 使用 `@deepseek-ai/dsh@0.2.2-rc.1` / `@xmoon76/dsh-pi-tui@0.5.6`；**0.5.5** 使用 `@deepseek-ai/dsh@0.2.1-rc.5` / `@xmoon76/dsh-pi-tui@0.5.5`。完整配对参见[兼容性指南](https://github.com/XMoon/dsh-pi-tui/blob/main/docs/guides/dsh-compatibility.md)。
-
-### 新增
-
-- **本地 Daemon 首次开放（Linux/macOS）**：默认 Direct 保持不变，可选独立 Host + 可断开的 TUI Client；多个 TUI、官方 Web 和本地 ACP 可以访问同一 Host 的 Session/Agent。共享的是业务会话而非终端画面；权限和并发写入仍由 Host 管理，**并非公网 TCP 远程服务**。（#683、#728、#729、#740）
-- **Daemon 管理与可选服务托管**：`daemon status|start|stop|restart|logs|install|uninstall`，按 Profile 管理；Linux systemd user unit / macOS LaunchAgent 均需显式安装，普通 Daemon 启动不需要系统服务。认证 Host 身份、日志来源与跨 TUI 构建管理更加严格。（#697、#749、#786、#787）
-- **共享 Host 的官方 Web**：支持运行时开启/关闭 Web；新增无 TUI 的 `web status|enable|disable|url|open` 命令，操作已运行 Host，不创建 Session 或另启 Host。适配 rc.5 官方 Web 服务组合；认证 URL 包含敏感 Token。（#798、#807）
-- **本地 ACP v1 入口**：默认关闭的同用户 Unix socket；`/acp` 查看/切换实时监听，启动偏好独立保存；提供受限的 `initialize`、`session/new|resume|prompt|cancel|close` 和文本/资源链接/协商图片。一个 ACP 连接只持有一个 Session View，同一 Session 最多一个 ACP View，不限制 TUI View。（#682、#685、#691、#695、#701、#707、#710、#715、#766）
-- **Agent Team 与 Task Center**：Root Agent Team 选择、Work/Team 页、Subagent 层级展开、活跃 Job 优先与历史折叠；Plan Review、Goal Dock 与相关状态提示改进。（#686、#690、#708、#719、#801、#803、#806）
-- **MCP 与扩展插件管理**：Host MCP Servers 查看/探测/重启/配置、Client-local `./tui` 插件装载、每包独立配置及持久化 Settings，明确区分 Host 包与当前 Client 激活状态；Forge / Plugin Marketplace 仍未交付。（#696、#700、#785、#789、#796、#799）
-- **会话、工作区和附件**：Workspace-first Session Browser、`--session [id-or-query]`、`-c|--continue`、Host 目录浏览/补全、sessionless `@file`、Split 文件上传、Host Shell/命令附件收据。（#625、#630、#636、#641、#644、#647、#657、#662）
-- **转录与图像**：Full/Focus/Compact 展示、View/Full 搜索、TSP 原生卡片/Work Hub/Workflow、消息复制；SVG 静态描边、窄屏缩略图、显式重试与 Direct iTerm2 图片/SVG 预览。（#612、#622、#629、#645、#678、#699、#745）
-
-### 变更
-
-- **Client 退出不等于停止 Host**：Daemon 下 `/exit` / `/quit` 默认断开，忙碌时给出真实状态对应的选择；`Ctrl+C` 忙时取消，空闲遵循退出保护；停整个 Host 需要显式动作。（#775、#780）
-- **输入与历史**：草稿在 Host 接受提交后才被消费；compact 期间的合法 Queue 不再丢失。Current Session 输入历史可跨工作目录检索同一 Session，并保留正在编辑的草稿/光标。（#720、#732、#812）
-- **Host 权威统一**：Direct/Split 共享 TUI Profile 偏好，Remote Provider 登录、凭据、审批、工具卡和 Host 命令候选使用真实 Host 事实；TUI 每回合指导只对实际在线查看 Session 的 TUI 生效，不污染 Web/ACP 回合。（#659、#663、#667、#776、#781、#783、#810）
-- **Web/插件设置行为**：Web Search/Fetch 的 Automatic 与部署/用户层选择、官方 Web 设置保存和扩展持久设置沿用官方配置权威，不以 Client 局部缓存冒充已保存状态。（#767、#769、#772、#799）
-
-### 修复
-
-- **Daemon/macOS**：修正 Host/Client 身份、启动和传输竞态；同 Profile 新旧构建升级管理、Herdr Session 恢复、正确展示真实 DSH Runtime 版本。（#746、#771、#786、#787、#793、#794、#795、#800）
-- **Session/Command**：修正 `/new` 命令结算、sessionless 默认 Model/Effort、Remote cwd/Resume、Host 命令补全、跨工作目录历史。（#632、#664、#680、#692、#788、#810、#812）
-- **交互与输出**：修复搜索定位、文件补全、含 NUL 的 Shell 输出、多处鼠标/滚轮/返回操作、Question header 和临时 Footer 提示引起的 Composer 抖动。（#604、#609、#716、#742、#784、#802、#805、#809）
-
-### 升级和边界
-
-- **更换 DSH Runtime 不是热升级**：先结束 Turn/Job、停止旧 Host、备份 Profile/Session 与资源，再使用支持的配对冷启动；不保证跨数据 Schema 原地降级。
-- **同 Runtime 更新 TUI 不自动更换 Host**：旧 Host 可继续运行；要采用新代码须显式 `daemon restart`，会中断在途工作。不会擅自重写用户定制的服务启动内容。
-- **ACP 不是全功能通用 API**：不提供 `session/list`、`session/load`、`session/set_config_option`、ACP 端 MCP 注册或专用文件/产物传输；共享会话不意味着无限制同时写入。
-- **本 Draft 仅整理合并功能**，不代表最终 Linux Split、macOS 或打包发布验证已经通过；日期和正式版本小节留待实际发版冻结时确定。
+从 0.5.6 升级涉及 DSH 运行时更换：先完成正在运行的任务、停止旧 Host 并备份会话数据，再安装新配对。旧版配对：`@deepseek-ai/dsh@0.2.2-rc.1` + `@xmoon76/dsh-pi-tui@0.5.6`；`@deepseek-ai/dsh@0.2.1-rc.5` + `@xmoon76/dsh-pi-tui@0.5.5`。
 
 ## [0.5.6] - 2026-11-08
 
