@@ -460,38 +460,6 @@ async function composerUploading(page) {
   return page.evaluate(() => /Uploading/u.test(document.body.innerText ?? ''))
 }
 
-/**
- * Submit the live composer DRAFT with an explicit send gesture and prove the
- * Host prompt request really started. The quote-only draft is sent with Enter
- * in the focused composer, so a stale/hidden Send control cannot silently
- * swallow the submission.
- */
-async function sendDraft(page) {
-  const composer = page.locator('[role=textbox]').last()
-  await composer.click()
-  await page.waitForTimeout(200)
-  const promptRequest = timeout => page.waitForRequest(
-    candidate => new URL(candidate.url()).pathname === '/api/session/prompt' && candidate.method() === 'POST',
-    { timeout },
-  )
-  try {
-    // The composer's own Enter send; a quote-only draft never relies on a
-    // possibly stale Send control from a previous Session.
-    const sent = promptRequest(2_500)
-    await page.keyboard.press('Enter')
-    await sent
-  } catch {
-    // Fallback for a composer that does not submit on Enter: click the Send
-    // control with the same request barrier.
-    const point = await controlCentre(page, { aria: 'Send message' })
-    if (point === null) throw new Error('the composer has no Send control for the quote draft')
-    const sent = promptRequest(30_000)
-    await clickCentre(page, point)
-    await sent
-  }
-  result.browserClientActions.push('send-draft')
-}
-
 /** The official question card (one pending question batch). */
 async function questionCard(page) {
   return page.evaluate(() => {
@@ -733,11 +701,7 @@ async function nextCommand(offset, timeoutMs) {
   throw new Error('browser timed out waiting for the next runner command')
 }
 
-/**
- * The command-loop cases (WP-06/07/08): the runner appends one command per TUI
- * lifecycle step and reads the matching `browser-step-<seq>.json`. Every
- * command is a real UI action; this loop holds no business state.
- */
+/** The pending-write command loop: one real UI action per runner command. */
 async function commandLoop(startPage, context) {
   let page = startPage
   let offset = 0
@@ -750,15 +714,7 @@ async function commandLoop(startPage, context) {
     if (typeof seq !== 'number') throw new Error('browser command carries no sequence')
     let fact
     try {
-      if (command.kind === 'open-session') {
-        await openSession(page, command.sessionId)
-        fact = { opened: true, sessionId: command.sessionId }
-      } else if (command.kind === 'prompt') {
-        const before = await conversationCount(page, command.marker, 'long-turn answer')
-        await promptAndWait(page, command.prompt, command.answerNeedle ?? 'long-turn answer')
-        const after = await conversationCount(page, command.marker, 'long-turn answer')
-        fact = { answerSeen: true, prompt: command.prompt, answerCountBefore: before, answerCountAfter: after }
-      } else if (command.kind === 'send') {
+      if (command.kind === 'send') {
         // WP-07 pending/unknown: submit the real prompt but do NOT wait for an
         // answer. The runner kills the Host after the Host has accepted it.
         await sendPrompt(page, command.prompt)
@@ -781,13 +737,6 @@ async function commandLoop(startPage, context) {
         page = fresh
         if (typeof command.sessionId === 'string') await openSession(page, command.sessionId)
         fact = { reconnected: true, sessionId: command.sessionId ?? null }
-      } else if (command.kind === 'reload-page') {
-        await page.reload({ waitUntil: 'load', timeout: 120_000 })
-        await waitShell(page)
-        if (typeof command.sessionId === 'string') await openSession(page, command.sessionId)
-        fact = { reloaded: true }
-      } else if (command.kind === 'screenshot') {
-        fact = { screenshot: await screenshot(page, command.name ?? `step-${seq}`) }
       } else if (command.kind === 'finish') {
         driverFact(`step-${seq}`, { seq, ok: true, kind: 'finish' })
         return page
@@ -1236,6 +1185,7 @@ const cases = {
     await waitSignal('first-write-verified', 300_000)
     const noChangeMarker = `w5-nochange-${changesNonce}`
     await sendPrompt(page, noChangeMarker)
+    await waitConversation(page, noChangeMarker, ['w5-nochange answer'], 240_000, 'the no-change answer')
     driverFact('nochange-sent', { marker: noChangeMarker })
     await waitSignal('nochange-verified', 300_000)
     await waitSignal('toggle-reenabled', 300_000)

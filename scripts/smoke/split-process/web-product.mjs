@@ -219,11 +219,7 @@ function createProductEvidence() {
     settingsPersistence(result) {
       write('web-settings-persistence.json', result)
     },
-    passedCaseIds() {
-      return state.ledger.filter(entry => entry.status === 'PASS').map(entry => entry.case)
-    },
-    finish(extra = {}) {
-      write('run-ledger.json', { schema: 1, startedAt: state.startedAt, endedAt: new Date().toISOString(), cases: state.ledger, ...extra })
+    finish(extra = {}) {      write('run-ledger.json', { schema: 1, startedAt: state.startedAt, endedAt: new Date().toISOString(), cases: state.ledger, ...extra })
       write('manifest.json', manifest(extra))
       writeText('README-qualification.md', [
         '# Browser × Split Host/TUI differential qualification evidence',
@@ -618,6 +614,7 @@ export const runWebProductQualification = async context => {
     assert(notActive.length === 0, `the Web rows are not active: ${notActive.map(([id, state]) => `${id}:${state ?? 'missing'}`).join(',')}`)
   }
   let browserRun = 0
+  const verifiedCaseIds = []
   let webScopeId
   let webScopeSuffix
   const browserCase = async (caseId, config, body) => {
@@ -725,6 +722,7 @@ export const runWebProductQualification = async context => {
         chromium: report.runtimeVersion?.chromium,
       })
       evidence.caseEnd(caseId, 'PASS')
+      verifiedCaseIds.push(caseId)
       passed = true
       return report
     } catch (error) {
@@ -1827,11 +1825,17 @@ export const runWebProductQualification = async context => {
             const anonymous = await fetchStatus(summaryUrl)
             assert(anonymous.status === 401,
               `WP-11 the unauthenticated summary route was not refused (HTTP ${String(anonymous.status)})`)
+            // The first write turn must be fully settled before the driver is
+            // allowed to send the no-change prompt. Otherwise the first turn's
+            // own `turn/end` can satisfy a later nochange barrier.
+            const firstTurnEnd = await waitForHostSessionEventAfter(dshHome, wp11Session, changesEvent.seq,
+              event => event.type === 'turn/end' && event.seq > changesEvent.seq,
+              'WP-11 first-write turn/end', 180_000)
             handle.signal('first-write-verified')
 
             await handle.waitFact('nochange-sent', 'WP-11 no-change prompt sent', 300_000)
-            await waitForHostSessionEventAfter(dshHome, wp11Session, changesEvent.seq,
-              event => event.type === 'turn/end' && event.seq > changesEvent.seq,
+            await waitForHostSessionEventAfter(dshHome, wp11Session, firstTurnEnd.seq,
+              event => event.type === 'turn/end' && event.seq > firstTurnEnd.seq,
               'WP-11 no-change turn/end', 180_000)
             assert(durableOf(wp11Session).filter(event => event.type === 'workspace/changes').length === 1,
               'WP-11 a no-change Turn appended a workspace/changes event')
@@ -1994,7 +1998,6 @@ export const runWebProductQualification = async context => {
       }
     }
 
-    const verifiedCaseIds = evidence.passedCaseIds()
     assert(verifiedCaseIds.length > 0,
       'the product Browser qualification recorded no successful case')
     evidence.finish({
