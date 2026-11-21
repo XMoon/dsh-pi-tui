@@ -59,7 +59,11 @@ specialist-page contract below).
   pending state keeps the root region-key semantics, and a single group paints
   its name and `[1/1]` but keeps the root Tab. The header states
   `Extensions [i/N]` BEFORE the display label, so a narrow frame truncates the
-  name and never the position; the Rows pane header degrades
+  name and never the position. Owner-group switching is intentionally
+  keyboard-only: the existing `Tab`/`Shift+Tab` contract is the documented
+  pointer-coverage exception, and pointer coverage is scoped to the currently
+  painted owner group's rows, Detail and actions; no pointer target is added
+  for switching owners. The Rows pane header degrades
   `Rows (m) · <label>` → `Rows (m) · i/N` → `Rows (m)` inside its own width.
   When the selected row disappears the SAME owner group keeps the page and
   selects its first surviving row; when the whole group unloads the first live

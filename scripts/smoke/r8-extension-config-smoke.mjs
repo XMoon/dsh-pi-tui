@@ -653,7 +653,10 @@ async function runDirectTuiQualification({ env, runRoot, stampDir, sentinel }) {
           if (afterStale.a?.label !== 'omega') throw new Error(`P4-08 stale resize dispatched a write: ${JSON.stringify(afterStale)}`)
           tmux(['resize-window', '-t', session, '-x', '140', '-y', '42'])
           await new Promise(resolve => setTimeout(resolve, 300))
-          send('Escape') // cancel the stale gesture's Choice
+          const staleFrame = captureLines().join('\n')
+          if (staleFrame.includes('Cancel')) await clickText('Cancel', 'P4-08 stale Cancel')
+          else if (staleFrame.includes('Back [Esc]')) await clickText('Back [Esc]', 'P4-08 stale Back')
+          else throw new Error(`P4-08 stale: no painted Cancel/Back; frame=${JSON.stringify(staleFrame.slice(-800))}`)
           await waitForSettled('P4-08 stale cancel settle')
           // Finish with a successful pointer Reset so the keyboard P4-10 path
           // starts from alpha again.
@@ -663,19 +666,27 @@ async function runDirectTuiQualification({ env, runRoot, stampDir, sentinel }) {
           await clickText('Confirm', 'P4-08 final Confirm')
           await waitForPatch(patch => patch.a === undefined || patch.a.label === 'alpha', 'P4-08 final reset')
           await waitForSettled('P4-08 final settle')
-          // Pointer exit through the painted Back affordance, then close any
-          // remaining Settings levels with Esc (inert on the composer).
-          if (captureLines().some(line => line.includes('Back [Esc]'))) {
-            await clickText('Back [Esc]', 'P4-08 pointer Back')
-          }
+          // Pointer-only exit: walk the painted Back/Close bar-escape target on
+          // every Settings level until the real composer/footer is showing.
+          let pointerExited = false
           for (let attempt = 0; attempt < 10; attempt += 1) {
-            const frame = (tmux(['capture-pane', '-t', session, '-p']).stdout ?? '')
-            if (!frame.includes('Settings ·')) break
-            tmux(['send-keys', '-t', session, 'Escape'])
-            await new Promise(resolve => setTimeout(resolve, 200))
+            const lines = captureLines()
+            const frame = lines.join('\n')
+            if (!frame.includes('Settings ·')) {
+              pointerExited = true
+              break
+            }
+            const back = frame.includes('Close [Esc]') ? 'Close [Esc]' : 'Back [Esc]'
+            if (!lines.some(line => line.includes(back))) {
+              throw new Error(`P4-08 exit: no painted ${back}; frame=${JSON.stringify(frame.slice(-800))}`)
+            }
+            await clickText(back, `P4-08 pointer ${back} ${String(attempt)}`)
+            await new Promise(resolve => setTimeout(resolve, 250))
           }
-          check('P4-08', true, 'real PTY SGR pointer journey enters Settings, selects A, confirms Reset/set and refuses a stale resize gesture',
-            JSON.stringify({ reset: 'alpha', set: 'omega', finalReset: 'alpha', stalePatch: afterStale.a }))
+          if (!pointerExited) throw new Error('P4-08 exit: Settings never closed through painted targets')
+          await waitForText(['R8-A-LIVE'])
+          check('P4-08', true, 'real PTY SGR pointer journey enters Settings, selects A, confirms Reset/set, cancels/backs/exits by pointer and refuses a stale resize gesture',
+            JSON.stringify({ reset: 'alpha', set: 'omega', finalReset: 'alpha', stalePatch: afterStale.a, cancel: 'pointer', exit: 'pointer' }))
         } catch (error) {
           gate('P4-08', 'FAIL', 'real PTY SGR pointer journey enters Settings, selects A, confirms Reset/set and refuses a stale resize gesture',
             error instanceof Error ? error.message : String(error))
