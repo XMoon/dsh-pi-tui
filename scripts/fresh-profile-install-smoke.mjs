@@ -474,6 +474,8 @@ async function quiesceDaemon({ dsh, profile, daemon }) {
   for (const entry of [...facts.host, ...facts.client]) {
     try { process.kill(entry.pid, 'SIGKILL') } catch { /* already gone */ }
   }
+  await sleep(250)
+  await waitFor(gone, 'fresh-profile Daemon cleanup after SIGKILL', 5_000)
 }
 
 function daemonStatus(dsh, profileDir, env) {

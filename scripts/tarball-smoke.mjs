@@ -370,6 +370,10 @@ function main() {
     const files = walkFiles(extracted)
     const has = (path) => files.includes(path)
     check('exports entry dist/extension/advanced.mjs', has('dist/extension/advanced.mjs'))
+    const publishedBundle = Array.isArray(pkg.dsh?.bundle?.patch) && pkg.dsh.bundle.patch.length > 0
+    check('published bundle carries the internal Host/Client process entries',
+      !publishedBundle || (has('dist/local-client.mjs') && has('dist/local-host.mjs')),
+      `local-client=${String(has('dist/local-client.mjs'))} local-host=${String(has('dist/local-host.mjs'))}`)
     if (files.includes('dist/local-client.mjs')) {
       // The Client platform Store closure must be REAL build output, not a
       // manifest promise: one reachable Client chunk carries the official Store
