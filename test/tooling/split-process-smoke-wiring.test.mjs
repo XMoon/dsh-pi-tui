@@ -505,6 +505,10 @@ test('every registry entry declares a conservative platform list and the ten sha
     // loopback HTTP contract; its opener seam selects `open`/`xdg-open` by the
     // real platform, with no Linux-only process primitive.
     'web.headless-cli',
+    // G-ACP1B/B0 drives the shared Split harness and one real packaged ACP UDS
+    // over the platform-specific scope endpoint (Linux fd alias / Darwin short
+    // physical path); its packed-candidate Darwin selected run passed.
+    'acp.scoped-mcp-b0',
   ]
   const cases = listSelectableCases()
   for (const entry of cases) {
