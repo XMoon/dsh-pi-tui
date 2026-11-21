@@ -629,7 +629,7 @@ export async function runAcpScopedMcpB0(context) {
     // ── Q10b: deterministic initial handshake failure -> official rollback.
     const failing = await control('mount-failing-A', { sessionId: sessionA })
     assert(failing.ok === true && failing.rejected === true && failing.childExited === true
-      && failing.closure?.closeConfirmed === true && failing.closure?.cleanupError === undefined,
+      && failing.retireClosure?.closeConfirmed === true && failing.retireClosure?.cleanupError === undefined,
       `Q10b: the failed MCP handshake must be rejected with confirmed cleanup: ${JSON.stringify(failing)}`)
 
     // ── Q10c: a connected MCP child is killed by its exact Host-owned pid;
@@ -640,7 +640,7 @@ export async function runAcpScopedMcpB0(context) {
     serverPids.add(crashMounted.serverPid)
     const crashed = await control('crash-failing-A', { sessionId: sessionA })
     assert(crashed.ok === true && crashed.connectionState === 'failed' && crashed.serverExited === true
-      && crashed.closure?.closeConfirmed === true && crashed.closure?.cleanupError === undefined,
+      && crashed.retireClosure?.closeConfirmed === true && crashed.retireClosure?.cleanupError === undefined,
     `Q10c: a killed MCP child must settle as a real failed connection with confirmed cleanup: ${JSON.stringify(crashed)}`)
     await assertSameHost(hostIdentity, 'Q10c Host after MCP crash')
     const postCrashProbe = await control('probe-B', { sessionId: sessionA, sessionIdB: sessionB })

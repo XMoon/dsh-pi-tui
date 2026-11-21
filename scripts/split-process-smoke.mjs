@@ -127,6 +127,15 @@ export {
   runSelectedCases,
 }
 
+/**
+ * Select the evidence JSON of exactly one named case. A suite can contain
+ * several cases that already carry `evidence`; returning the first one would
+ * write another case's artifact to the B0 evidence path.
+ */
+export function selectedEvidenceFor(verdictReport, caseId) {
+  return verdictReport?.find(entry => entry.id === caseId && entry.evidence !== undefined)?.evidence
+}
+
 
 const TRACE_PATH = process.env.SPLIT_PROCESS_TRACE
 const KEEP = process.env.SPLIT_PROCESS_SMOKE_KEEP === '1'
@@ -1114,7 +1123,7 @@ async function runSelectedCases(selection) {
     if (verdictReport !== undefined) {
       await assertSelectedQuiesced(verdictReport)
       const evidencePath = process.env.SPLIT_PROCESS_B0_EVIDENCE
-      const evidence = verdictReport.find(entry => entry.evidence !== undefined)?.evidence
+      const evidence = selectedEvidenceFor(verdictReport, 'acp.scoped-mcp-b0')
       if (typeof evidencePath === 'string' && evidencePath !== '' && evidence !== undefined) {
         mkdirSync(dirname(evidencePath), { recursive: true, mode: 0o700 })
         writeFileSync(evidencePath, `${JSON.stringify(evidence, null, 2)}\n`, { mode: 0o600 })

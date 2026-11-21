@@ -24,6 +24,7 @@
 
 import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
+import { spawnSync } from 'node:child_process'
 import { isAbsolute, join } from 'node:path'
 import { credentialKey } from '@deepseek-ai/dsh-credentials'
 import { LlmAdapter } from '@deepseek-ai/dsh-llm'
@@ -370,6 +371,40 @@ function b0Alive(pid) {
 }
 
 /**
+ * The live process identity used as the terminal-signal fence:
+ * `pid + kernel start time + current parent`. Linux reads procfs; Darwin uses
+ * `ps lstart`; any unreadable shape fails closed.
+ */
+function b0ProcessIdentity(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return undefined
+  if (process.platform === 'linux') {
+    try {
+      const stat = readFileSync(`/proc/${String(pid)}/stat`, 'utf8')
+      const fields = stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\s+/)
+      return { pid, ppid: Number(fields[1]), started: fields[19] }
+    } catch {
+      return undefined
+    }
+  }
+  if (process.platform === 'darwin') {
+    const result = spawnSync('ps', ['-axo', 'pid=,ppid=,lstart=,command='], {
+      encoding: 'utf8',
+      timeout: 15_000,
+      env: { ...process.env, LC_ALL: 'C' },
+    })
+    if (result.error !== undefined || result.status !== 0) return undefined
+    for (const line of result.stdout.split('\n')) {
+      const match = /^\s*(\d+)\s+(\d+)\s+(\w{3}\s+\w{3}\s+\d+\s+\d{2}:\d{2}:\d{2}\s+\d{4})\s+(.*)$/u.exec(line)
+      if (match !== null && Number(match[1]) === pid) {
+        return { pid, ppid: Number(match[2]), started: match[3].replace(/\s+/gu, ' ') }
+      }
+    }
+    return undefined
+  }
+  return undefined
+}
+
+/**
  * G-ACP1B/B0 test-owned Host workload.
  *
  * The workload owns exactly one run/one Agent A handle. It never creates an
@@ -392,6 +427,7 @@ function createScopedMcpB0Workload(ctx, { root, record }) {
     fiberA: undefined,
     fiberCrash: undefined,
     crashStatusDispose: undefined,
+    crashIdentity: undefined,
     globalDispose: undefined,
     stopped: false,
     pinnedAgentA: undefined,
@@ -824,18 +860,21 @@ function createScopedMcpB0Workload(ctx, { root, record }) {
     const bootFail = proofOf('server-boot-fail', 'b0fail')
     const childExited = bootFail === undefined ? false : await waitForProcessGone(bootFail.pid)
     assertPinned('A')
-    const closure = handle === undefined ? undefined : McpClient.connectionStatusOf(handle)?.closure()
+    const connectionLostClosure = handle === undefined ? undefined : McpClient.connectionStatusOf(handle)?.closure()
     if (handle !== undefined) {
       try { await handle.dispose() } catch { /* failed activation already rolled back */ }
     }
+    const retireClosure = handle === undefined ? undefined : McpClient.connectionStatusOf(handle)?.closure()
     fact(request.actionId, 'mount-failing-A', {
-      ok: rejected && bootFail !== undefined && childExited,
+      ok: rejected && bootFail !== undefined && childExited
+        && retireClosure?.closeConfirmed === true && retireClosure?.cleanupError === undefined,
       rejected,
       error: message,
       childPid: bootFail?.pid,
       childPpid: bootFail?.ppid,
       childExited,
-      closure,
+      connectionLostClosure,
+      retireClosure,
       sessionId: String(agent.id),
       agentId: String(agent.id),
     })
@@ -852,13 +891,20 @@ function createScopedMcpB0Workload(ctx, { root, record }) {
       record('b0-crash-status', { tag: 'b0crash', state: next.state, reason: next.reason, lastError: next.lastError })
     })
     const server = serverStartOf('b0crash')
+    const liveIdentity = server === undefined ? undefined : b0ProcessIdentity(server.pid)
+    if (liveIdentity === undefined || liveIdentity.ppid !== process.pid) {
+      throw new Error('m4-c1-host-work: mount-crash-A cannot prove the live MCP child parent identity')
+    }
+    state.crashIdentity = liveIdentity
     fact(request.actionId, 'mount-crash-A', {
-      ok: status?.current().state === 'connected' && server !== undefined,
+      ok: status?.current().state === 'connected' && server !== undefined
+        && liveIdentity.started !== undefined && liveIdentity.ppid === process.pid,
       sessionId: String(agent.id),
       agentId: String(agent.id),
       connectionState: status?.current().state,
       serverPid: server?.pid,
-      serverPpid: server?.ppid,
+      serverPpid: liveIdentity.ppid,
+      serverStarttime: liveIdentity.started,
     })
   }
 
@@ -866,10 +912,26 @@ function createScopedMcpB0Workload(ctx, { root, record }) {
     const agent = pinAgent(request.sessionId, 'A')
     const McpClient = await import('@deepseek-ai/dsh-mcp-client')
     const server = serverStartOf('b0crash')
-    if (server === undefined || server.ppid !== process.pid) {
-      throw new Error('m4-c1-host-work: B0 crash-failing-A has no Host-owned child identity')
+    const recorded = state.crashIdentity
+    if (server === undefined || recorded === undefined || recorded.pid !== server.pid) {
+      throw new Error('m4-c1-host-work: B0 crash-failing-A has no recorded live child identity')
     }
-    process.kill(server.pid, 'SIGKILL')
+    const live = b0ProcessIdentity(recorded.pid)
+    if (live === undefined || live.pid !== recorded.pid || live.started !== recorded.started || live.ppid !== process.pid) {
+      fact(request.actionId, 'crash-failing-A', {
+        ok: false,
+        reason: 'B0_MCP_PID_REUSED',
+        sessionId: String(agent.id),
+        agentId: String(agent.id),
+        serverPid: recorded.pid,
+        recordedStarttime: recorded.started,
+        observedStarttime: live?.started,
+        recordedPpid: recorded.ppid,
+        observedPpid: live?.ppid,
+      })
+      return
+    }
+    process.kill(recorded.pid, 'SIGKILL')
     const deadline = Date.now() + 10_000
     let status
     while (Date.now() < deadline) {
@@ -879,23 +941,27 @@ function createScopedMcpB0Workload(ctx, { root, record }) {
     }
     const handle = state.fiberCrash
     state.fiberCrash = undefined
-    const closure = handle === undefined ? undefined : McpClient.connectionStatusOf(handle)?.closure()
+    const connectionLostClosure = handle === undefined ? undefined : McpClient.connectionStatusOf(handle)?.closure()
     if (handle !== undefined) await handle.dispose()
+    const retireClosure = handle === undefined ? undefined : McpClient.connectionStatusOf(handle)?.closure()
     if (state.crashStatusDispose !== undefined) {
       state.crashStatusDispose()
       state.crashStatusDispose = undefined
     }
     assertPinned('A')
-    const serverExited = await waitForProcessGone(server.pid)
+    const serverExited = await waitForProcessGone(recorded.pid)
+    state.crashIdentity = undefined
     fact(request.actionId, 'crash-failing-A', {
-      ok: status?.state === 'failed' && closure?.closeConfirmed === true && closure?.cleanupError === undefined
+      ok: status?.state === 'failed' && retireClosure?.closeConfirmed === true && retireClosure?.cleanupError === undefined
         && serverExited && !schemaNames(agent).includes('mcp__b0crash__echo'),
       sessionId: String(agent.id),
       agentId: String(agent.id),
       connectionState: status?.state,
       failureReason: status?.reason,
-      closure,
-      serverPid: server.pid,
+      connectionLostClosure,
+      retireClosure,
+      serverPid: recorded.pid,
+      serverStarttime: recorded.started,
       serverExited,
     })
   }

@@ -25,7 +25,7 @@ import { dirname, join, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { parse as parseYaml } from 'yaml'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
-import { assertSelectedVerdict, runSelectedCase, waitForCondition } from '../../scripts/split-process-smoke.mjs'
+import { assertSelectedVerdict, runSelectedCase, selectedEvidenceFor, waitForCondition } from '../../scripts/split-process-smoke.mjs'
 import { readDeclaredWebRows, raceWithAbortableDeadline, redactWebQualificationText } from '../../scripts/smoke/split-process/web-helpers.mjs'
 import { PI_TUI_WEB_ACCESS_ROWS } from '../../src/app/host/features/web-roster.ts'
 import { createSmokeDiagnostics, failureCategoryOf, redactErrorForStep, SplitSmokeAssertionError } from '../../scripts/lib/split-smoke-diagnostics.mjs'
@@ -468,6 +468,17 @@ test('listing selectable split cases does not install a profile or claim complet
   }
   assert.deepEqual(workRootsIn(dir), [], 'a listing must not create a work root')
   assert.deepEqual(readdirSync(dir), [], 'a listing must not install or write a report')
+})
+
+test('the B0 evidence path selects only the B0 case, never an earlier ACP case', () => {
+  const po2 = { id: 'acp.po2-session-view', evidence: { case_id: 'acp.po2-session-view' } }
+  const b0 = { id: 'acp.scoped-mcp-b0', evidence: { case_id: 'acp.scoped-mcp-b0' } }
+  assert.equal(selectedEvidenceFor([po2], 'acp.scoped-mcp-b0'), undefined,
+    'a suite that did not run B0 may not write the B0 evidence path')
+  assert.deepEqual(selectedEvidenceFor([po2, b0], 'acp.scoped-mcp-b0'), b0.evidence,
+    'the B0 evidence path must select the exact B0 case')
+  assert.equal(selectedEvidenceFor([{ id: 'acp.scoped-mcp-b0', status: 'PASS' }], 'acp.scoped-mcp-b0'), undefined,
+    'a case without evidence is not a B0 artifact')
 })
 
 test('every registry entry declares a conservative platform list and the ten shared cases are dual-platform', () => {
