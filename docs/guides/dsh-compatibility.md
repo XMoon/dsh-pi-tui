@@ -88,7 +88,7 @@ failure or runtime failure is a real failure — never a SKIP, never a forced
 install. A PASS proves only the exact pair resolved for that run; it does not
 claim the whole semver range was runtime-verified.
 
-`pnpm smoke:pi2dsh -- <candidate.tgz>` is the local entry. It always validates
+`mise exec -- pnpm smoke:pi2dsh -- <candidate.tgz>` is the local entry. It always validates
 the published npm ecosystem and requires online registry access; `--distribution`
 (Source Mode) is refused with a non-zero error. `--force-peers` is an
 INVESTIGATIVE manual run that ignores only the bridge's DSH peers; it is never

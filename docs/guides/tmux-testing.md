@@ -25,7 +25,7 @@ do not create a weaker proxy test just to satisfy a test-count requirement.
 ## Environment prep
 
 - tmux is required; `dsh --profile pi-tui-dev` (link dependency on this
-  repo — `pnpm build` takes effect immediately). **In a WORKTREE that profile
+  repo — `mise run build` takes effect immediately). **In a WORKTREE that profile
   still points at the main checkout**, so it paints the main checkout's build,
   not the worktree's: for worktree verification create a throwaway profile that
   LINKS the worktree instead — `DSH_HOME=<worktree>/temp/dsh-wt` with
@@ -35,7 +35,7 @@ do not create a weaker proxy test just to satisfy a test-count requirement.
   `dsh.profile.bundles` list that includes `@deepseek-ai/dsh-base` (without it
   the TUI never mounts and the pane only shows the loader warnings), then
   `env -u NO_COLOR DSH_HOME=<worktree>/temp/dsh-wt dsh --profile <name>`. No
-  `pnpm pack` is needed for this.
+  package tarball is needed for this.
 - **This machine's shell exports `NO_COLOR=1`**: the theme autodetect's
   opt-out guard skips detection, so wrap launches with `env -u NO_COLOR`.
 - Model end-to-end needs credentials available in the disposable `DSH_HOME`.
