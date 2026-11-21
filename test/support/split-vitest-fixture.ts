@@ -325,11 +325,19 @@ class Scene implements SplitS0Scene {
     } catch (error) {
       this.#killOwnedHost(host)
       await waitForChildExit(child, 5_000).catch(() => undefined)
+      if (!host.exited) {
+        this.#killOwnedHost(host, 'SIGKILL')
+        await waitForChildExit(child, 2_000).catch(() => undefined)
+      }
       throw error
     }
     if (ready.m4a0 === 'failure') {
       this.#killOwnedHost(host)
       await waitForChildExit(child, 5_000).catch(() => undefined)
+      if (!host.exited) {
+        this.#killOwnedHost(host, 'SIGKILL')
+        await waitForChildExit(child, 2_000).catch(() => undefined)
+      }
       throw new Error(`${scenario} Host boot failed: ${JSON.stringify({
         code: ready.code,
         error: ready.error,
@@ -354,6 +362,9 @@ class Scene implements SplitS0Scene {
         host.exitResult = result
       } catch (error) {
         this.#killOwnedHost(host)
+        await waitForChildExit(host.child, 2_000).catch(() => undefined)
+        if (!host.exited) this.#killOwnedHost(host, 'SIGKILL')
+        await waitForChildExit(host.child, 2_000).catch(() => undefined)
         throw new Error(`Host ${String(host.child.pid)} did not settle its official shutdown: ${asError(error).message}`)
       }
     }
@@ -417,7 +428,7 @@ class Scene implements SplitS0Scene {
       waitForVisibleTextGone: async (text: string, waitLabel: string, timeoutMs = 120_000) => {
         const started = Date.now()
         while (Date.now() - started < timeoutMs) {
-          const frame = await terminal.text().catch(() => '')
+          const frame = await terminal.text()
           if (!frame.includes(text)) return
           await sleep(50)
         }
@@ -441,7 +452,6 @@ class Scene implements SplitS0Scene {
       await this.#waitForPaintedFrame(terminal, `${label} painted its first frame`, 30_000)
     } catch (error) {
       await terminal.closeQuiet()
-      client.closed = true
       throw error
     }
     return client
@@ -533,9 +543,12 @@ class Scene implements SplitS0Scene {
       errors.push(new Error(`resource diagnostics could not be written: ${asError(error).message}`))
     }
     for (const client of [...this.#clients].reverse()) {
-      if (client.closed) continue
       try {
         const state = await client.terminal.state().catch(() => undefined)
+        if (state !== undefined && state.exited !== null && state.exited !== 0) {
+          errors.push(new Error(`${client.label} exited with code ${String(state.exited)}`))
+        }
+        if (client.closed) continue
         if (state !== undefined && state.exited === null) {
           await client.terminal.submit('/exit').catch(() => undefined)
           await sleep(500)
@@ -560,7 +573,13 @@ class Scene implements SplitS0Scene {
       }
     }
     for (const host of [...this.#hosts].reverse()) {
-      if (host.exited) continue
+      if (host.exited) {
+        const result = host.exitResult
+        if (result !== undefined && (result.code !== 0 || result.signal !== null)) {
+          errors.push(new Error(`Host ${String(host.child.pid)} exited unexpectedly: ${JSON.stringify(result)}`))
+        }
+        continue
+      }
       try {
         await this.shutdownHost(host)
       } catch (error) {
@@ -624,11 +643,11 @@ class Scene implements SplitS0Scene {
     throw new Error(`${label}: the terminal never showed ${JSON.stringify(text)} within ${String(timeoutMs)}ms; last frame=${JSON.stringify(lastFrame.slice(-2000))}`)
   }
 
-  #killOwnedHost(host: HostHandle): void {
+  #killOwnedHost(host: HostHandle, signal: NodeJS.Signals = 'SIGTERM'): void {
     try {
-      process.kill(-host.child.pid!, 'SIGTERM')
+      process.kill(-host.child.pid!, signal)
     } catch {
-      try { host.child.kill('SIGTERM') } catch { /* already gone */ }
+      try { host.child.kill(signal) } catch { /* already gone */ }
     }
   }
 
